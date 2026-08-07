@@ -4236,7 +4236,9 @@ async function main() {
   const cloudflareTokenFile = resolveConfigPath(root, optionValue(args, profile, 'cloudflareTokenFile', ['CLOUDFLARE_TUNNEL_TOKEN_FILE', 'CODEXPRO_CLOUDFLARE_TUNNEL_TOKEN_FILE'], ''));
   const cloudflareToken = optionValue(args, profile, 'cloudflareToken', ['CLOUDFLARE_TUNNEL_TOKEN', 'CODEXPRO_CLOUDFLARE_TUNNEL_TOKEN'], '');
 
+  const cloudflaredProtocol = String(process.env.CODEXPRO_CLOUDFLARED_PROTOCOL ?? 'http2').trim();
   const cloudflaredArgs = ['tunnel'];
+  if (cloudflaredProtocol) cloudflaredArgs.push('--protocol', cloudflaredProtocol);
   if (cloudflareConfig) {
     cloudflaredArgs.push('--config', cloudflareConfig, 'run');
     if (tunnelName) cloudflaredArgs.push(tunnelName);
