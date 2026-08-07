@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added cross-platform safe Git writes: explicit-file staging, hook-disabled unsigned commits, and option-free pushes of verified local branches to HTTPS `origin` remotes, while continuing to block broad staging, force, deleting, tag, and alternate-remote pushes.
 - Added saved additional projects with `codexpro settings set --project <path>`, session-local workspace selection through the existing `open_workspace` tool, and `--clear-projects` for removing the saved allowlist.
 - Isolated workspace selection between HTTP MCP sessions while preserving explicit workspace-id access for configured roots, with stdio, HTTP, profile, and regression coverage.
 - Added native workspace image inspection for PNG, JPEG, GIF, and WebP files through `view_image`.

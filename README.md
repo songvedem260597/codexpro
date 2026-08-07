@@ -204,6 +204,7 @@ no-store/no-referrer headers. Never share or commit the connector URL.
 - HTTP tokens shorter than 24 bytes are rejected and failed guesses are rate-limited per client address.
 - Generic writes are hidden unless `CODEXPRO_WRITE_MODE=workspace`.
 - Safe bash blocks broad shell patterns and secret/build/cache paths.
+- Safe mode permits explicit-file `git add`, hook-disabled unsigned `git commit -m`, and option-free `git push origin <branch>` for verified local branches and HTTPS origins; broad staging, force, deleting, tag, and alternate-remote pushes remain blocked.
 - `apply_patch` is workspace-scoped and rejects blocked paths, symlink patches, and secret-looking patch content.
 - `show_changes` keeps a review checkpoint so repeated unchanged reviews collapse.
 - Tool-card metadata is off unless `CODEXPRO_TOOL_CARDS=1`.

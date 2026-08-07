@@ -1956,9 +1956,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     server,
     "bash",
     {
-      title: "Bash",
+      title: process.platform === "win32" ? "Safe PowerShell" : "Bash",
       description:
-        "Run one allowlisted verification command in the workspace, such as tests, build, lint, typecheck, or a project script. Do not use for git status/diff or file inspection; use show_changes, tree, search, and read instead. Do not chain commands with &&, pipes, redirects, or shell file readers.",
+        "Run one deny-by-default command in the workspace. Safe mode allows verification commands plus explicit-file git add, hook-disabled unsigned git commit -m, and option-free git push origin <branch> for verified local branches and HTTPS origins. Broad staging, force/deleting/tag/alternate-remote pushes, and destructive Git operations remain blocked. Do not chain commands with &&, pipes, redirects, or shell file readers.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
         command: z.string().describe("Command to run."),

@@ -53,7 +53,7 @@ const dryRun = run([
   '--dry-run'
 ]);
 requireSuccess(dryRun, 'execute-handoff dry-run');
-if (!dryRun.stdout.includes('opencode run') || !dryRun.stdout.includes('provider/model')) {
+if (!/opencode(?:\.(?:cmd|exe))?['"]?\s+run/i.test(dryRun.stdout) || !dryRun.stdout.includes('provider/model')) {
   throw new Error(`dry-run output did not show adapter command\n${dryRun.stdout}`);
 }
 
@@ -415,7 +415,7 @@ const watchCommand = [
   '--agent',
   'custom',
   '--command',
-  `${process.execPath} watch-agent.mjs --task-file {{plan_file}}`,
+  `${quoteArg(process.execPath)} watch-agent.mjs --task-file {{plan_file}}`,
   '--once',
   '--yes',
   '--debounce-ms',

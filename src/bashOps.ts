@@ -1,6 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
@@ -16,6 +18,17 @@ export interface BashResult {
   stderr: string;
   truncated: boolean;
   bashSessionId?: string;
+}
+
+type SafeGitWrite =
+  | { kind: "add"; args: string[] }
+  | { kind: "commit"; message: string }
+  | { kind: "push"; branch: string };
+
+interface DirectInvocation {
+  executable: string;
+  args: string[];
+  cleanupDir?: string;
 }
 
 const SAFE_ALLOWED_PREFIXES = [
@@ -113,8 +126,165 @@ const SAFE_BLOCKED_PATTERNS = [
   /[\r\n]/
 ];
 
+const WINDOWS_SAFE_ALLOWED_PATTERNS = [
+  /^(?:Get-Location|pwd)$/i,
+  /^(?:Get-ChildItem|Get-Content|Get-Item|Test-Path|Select-String|Measure-Object|Sort-Object)(?:\s+.+)?$/i,
+  /^git\s+(?:status|diff|log|show|branch|rev-parse|ls-files)(?:\s+.+)?$/i,
+  /^(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9._-]+)*)(?:\s+--\s+[A-Za-z0-9._:= -]+)?$/i,
+  /^(?:pytest|python\s+-m\s+pytest|py\s+-m\s+pytest)(?:\s+[A-Za-z0-9._=\\\/-]+)*$/i,
+  /^(?:python|py)\s+--version$/i,
+  /^(?:node|npm|pnpm|yarn|bun)\s+(?:--version|-v)$/i,
+  /^nvidia-smi(?:\s+.+)?$/i
+];
+
 function compact(command: string): string {
   return command.trim().replace(/\s+/g, " ");
+}
+
+function simpleCommandTokens(command: string): string[] | undefined {
+  const tokens: string[] = [];
+  const tokenPattern = /\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s"';&|<>`\r\n]+))/y;
+  let offset = 0;
+  while (offset < command.length) {
+    tokenPattern.lastIndex = offset;
+    const match = tokenPattern.exec(command);
+    if (!match) return undefined;
+    tokens.push(match[1] ?? match[2] ?? match[3]);
+    offset = tokenPattern.lastIndex;
+  }
+  return tokens;
+}
+
+function isSensitiveGitPath(value: string): boolean {
+  const normalized = value.replace(/\\/g, "/");
+  if (!normalized || normalized === "." || /[*?\[\]]/.test(normalized) || normalized.startsWith(":") || path.isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value) || normalized.startsWith("//")) return true;
+  const segments = normalized.split("/");
+  if (segments.some((segment) => segment === ".." || segment === ".git" || segment === "node_modules" || segment === ".ssh" || segment === ".env" || segment.startsWith(".env."))) return true;
+  return /\.(?:pem|key)$/i.test(segments.at(-1) ?? "");
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function parseSafeGitWrite(command: string): SafeGitWrite | undefined {
+  const tokens = simpleCommandTokens(command.trim());
+  if (!tokens || tokens[0]?.toLowerCase() !== "git") return undefined;
+  const operation = tokens[1]?.toLowerCase();
+
+  if (operation === "add") {
+    const args = tokens.slice(2);
+    if (!args.length) return undefined;
+    for (const arg of args) {
+      if (arg.startsWith("-") || isSensitiveGitPath(arg)) return undefined;
+    }
+    return { kind: "add", args };
+  }
+
+  if (operation === "commit" && tokens.length === 4 && tokens[2] === "-m") {
+    const message = tokens[3];
+    if (message.length >= 1 && message.length <= 200 && !/[\r\n]/.test(message)) return { kind: "commit", message };
+    return undefined;
+  }
+
+  if (operation === "push" && tokens.length === 4 && tokens[2].toLowerCase() === "origin") {
+    const branch = tokens[3];
+    const validShape = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,127}$/.test(branch);
+    if (validShape && !branch.includes("..") && !branch.includes("@{") && !branch.endsWith(".") && !branch.endsWith("/") && !branch.includes("//") && !branch.includes("\\")) {
+      return { kind: "push", branch };
+    }
+  }
+
+  return undefined;
+}
+
+function emptyGitHooksDir(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-empty-git-hooks-"));
+}
+
+function assertExplicitGitFiles(args: string[], cwd: string, workspaceRoot: string): void {
+  const realWorkspace = fs.realpathSync(workspaceRoot);
+  for (const arg of args) {
+    const candidate = path.resolve(cwd, arg);
+    let stat: fs.Stats;
+    let realCandidate: string;
+    try {
+      stat = fs.lstatSync(candidate);
+      realCandidate = fs.realpathSync(candidate);
+    } catch {
+      throw new CodexProError(`Safe git add requires an existing explicit file: ${arg}`);
+    }
+    if (!stat.isFile() || stat.isSymbolicLink() || !isPathInside(realWorkspace, realCandidate)) {
+      throw new CodexProError(`Safe git add is restricted to explicit non-symlink files inside the workspace: ${arg}`);
+    }
+  }
+}
+
+function safeLocalRemoteUrl(remoteUrl: string, workspaceRoot: string): boolean {
+  let candidate: string;
+  try {
+    candidate = remoteUrl.startsWith("file://") ? fileURLToPath(remoteUrl) : path.resolve(workspaceRoot, remoteUrl);
+  } catch {
+    return false;
+  }
+  try {
+    return isPathInside(fs.realpathSync(workspaceRoot), fs.realpathSync(candidate));
+  } catch {
+    return false;
+  }
+}
+
+function assertSafePushTarget(executable: string, branch: string, cwd: string, workspaceRoot: string): void {
+  const branchCheck = spawnSync(executable, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd, windowsHide: true });
+  if (branchCheck.status !== 0) throw new CodexProError(`Safe git push requires an existing local branch: ${branch}`);
+
+  const remoteCheck = spawnSync(executable, ["remote", "get-url", "--all", "--push", "origin"], { cwd, encoding: "utf8", windowsHide: true });
+  const remoteUrls = String(remoteCheck.stdout ?? "").split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  if (remoteCheck.status !== 0 || !remoteUrls.length || remoteUrls.some((remoteUrl) => !/^https:\/\//i.test(remoteUrl) && !safeLocalRemoteUrl(remoteUrl, workspaceRoot))) {
+    throw new CodexProError("Safe git push requires origin to use HTTPS or a local remote contained inside the workspace.");
+  }
+}
+
+function directGitInvocation(command: SafeGitWrite, cwd: string, workspaceRoot: string): DirectInvocation {
+  const executable = process.platform === "win32" ? "git.exe" : "git";
+  if (command.kind === "add") {
+    assertExplicitGitFiles(command.args, cwd, workspaceRoot);
+    return { executable, args: ["add", ...command.args] };
+  }
+  if (command.kind === "push") {
+    assertSafePushTarget(executable, command.branch, cwd, workspaceRoot);
+    const hooksDir = emptyGitHooksDir();
+    return { executable, args: ["-c", `core.hooksPath=${hooksDir}`, "push", "origin", command.branch], cleanupDir: hooksDir };
+  }
+
+  const hooksDir = emptyGitHooksDir();
+  return {
+    executable,
+    args: ["-c", `core.hooksPath=${hooksDir}`, "commit", "--no-gpg-sign", "--no-verify", "-m", command.message],
+    cleanupDir: hooksDir
+  };
+}
+
+function directPackageInvocation(command: string): DirectInvocation | undefined {
+  const tokens = simpleCommandTokens(command.trim());
+  if (!tokens || !/^(?:npm|pnpm|yarn|bun)$/.test(tokens[0])) return undefined;
+  const manager = tokens[0];
+  const args = tokens.slice(1);
+  const isTest = args.length === 1 && args[0] === "test";
+  const isAllowedRun =
+    args[0] === "run" &&
+    /^(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9._-]+)*$/.test(args[1] ?? "") &&
+    (args.length === 2 || (args[2] === "--" && args.slice(3).every((arg) => /^[A-Za-z0-9._:=/-]+$/.test(arg))));
+  if (!isTest && !isAllowedRun) return undefined;
+
+  if (process.platform === "win32") {
+    return {
+      executable: process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/s", "/c", [`${manager}.cmd`, ...args].join(" ")]
+    };
+  }
+  return { executable: manager, args };
 }
 
 function startsWithAllowedPrefix(command: string): boolean {
@@ -128,6 +298,27 @@ function isAllowedPackageScript(command: string): boolean {
   return packageScriptPattern.test(command);
 }
 
+function assertSafePowerShellCommand(command: string): void {
+  const raw = command.trim();
+  const normalized = compact(command);
+  const blockedSyntax = /[\r\n;&|<>`$]/;
+  const outsideWorkspacePath = /(?:^|\s|['"])(?:[A-Za-z]:[\\/]|\\\\|\.\.(?:[\\/]|\s|$)|~(?:[\\/]|\s|$))/;
+  const windowsProvider = /(?:Registry::|Cert:|Env:|Variable:|Function:|Alias:|HKLM:|HKCU:|HKCR:|HKU:|HKCC:)/i;
+  const sensitivePath = /(?:^|[\s:])(?:\.env(?:[.\\/\s:]|$)|\.git(?:[\\/\s:]|$)|node_modules(?:[\\/\s:]|$)|\.ssh(?:[\\/\s:]|$)|id_rsa(?:[.\s:]|$)|id_ed25519(?:[.\s:]|$)|[^\s:]*\.(?:pem|key)(?:[\s:]|$))/i;
+  if (blockedSyntax.test(raw) || outsideWorkspacePath.test(raw) || windowsProvider.test(raw) || sensitivePath.test(normalized)) {
+    throw new CodexProError(
+      `Command is blocked by the Windows-safe PowerShell policy: ${normalized}\n` +
+        "Use one simple command at a time, use a workspace-relative path, and do not use pipelines, redirects, variables, providers, or command chaining."
+    );
+  }
+  if (!WINDOWS_SAFE_ALLOWED_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    throw new CodexProError(
+      `Command is blocked because it is not in the Windows-safe PowerShell allowlist: ${normalized}\n` +
+        "Allowed categories: workspace inspection, safe Git reads/writes, tests/build/lint, and version or GPU checks."
+    );
+  }
+}
+
 function assertSafeCommand(config: CodexProConfig, command: string): void {
   if (config.bashMode === "off") {
     throw new CodexProError("bash tool is disabled. Start with CODEXPRO_BASH_MODE=safe or CODEXPRO_BASH_MODE=full to enable it.");
@@ -136,6 +327,11 @@ function assertSafeCommand(config: CodexProConfig, command: string): void {
 
   const raw = command.trim();
   const normalized = compact(command);
+  if (parseSafeGitWrite(normalized)) return;
+  if (process.platform === "win32") {
+    assertSafePowerShellCommand(command);
+    return;
+  }
   for (const pattern of SAFE_BLOCKED_PATTERNS) {
     if (pattern.test(raw) || pattern.test(normalized)) {
       throw new CodexProError(
@@ -147,7 +343,7 @@ function assertSafeCommand(config: CodexProConfig, command: string): void {
   if (!startsWithAllowedPrefix(normalized)) {
     throw new CodexProError(
       `Command is not in the safe bash allowlist: ${normalized}\n` +
-        "Allowed examples: ls, find, git status, git diff, npm test, npm run typecheck, npm run build:clients, pytest, go test, cargo test. Use read/search tools for file contents. " +
+        "Allowed examples: ls, find, git status, git diff, git add, git commit -m, git push origin <branch>, npm test, npm run typecheck, npm run build:clients, pytest, go test, cargo test. Use read/search tools for file contents. " +
         "Use CODEXPRO_BASH_MODE=full for trusted local automation."
     );
   }
@@ -189,8 +385,16 @@ function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
   };
 }
 
-function bashExecutable(): string {
+function shellExecutable(): string {
+  if (process.platform === "win32") return "powershell.exe";
   return fs.existsSync("/bin/bash") ? "/bin/bash" : "bash";
+}
+
+function shellArgs(command: string): string[] {
+  if (process.platform === "win32") {
+    return ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", command];
+  }
+  return ["-lc", command];
 }
 
 function trimOutput(value: string, maxBytes: number): { value: string; truncated: boolean } {
@@ -234,7 +438,9 @@ export async function runBash(
   const start = Date.now();
 
   return new Promise((resolve, reject) => {
-    const child = spawn(bashExecutable(), ["-lc", command], {
+    const safeGitWrite = parseSafeGitWrite(command);
+    const directInvocation = safeGitWrite ? directGitInvocation(safeGitWrite, cwd, workspace.root) : directPackageInvocation(command);
+    const child = spawn(directInvocation?.executable ?? shellExecutable(), directInvocation?.args ?? shellArgs(command), {
       cwd,
       env: makeEnv(config),
       stdio: ["ignore", "pipe", "pipe"],
@@ -250,6 +456,13 @@ export async function runBash(
     let killTimer: NodeJS.Timeout | undefined;
     let observedOutputBytes = 0;
     const retainedOutputBytes = config.maxOutputBytes + 1;
+    let cleanupComplete = false;
+
+    const cleanup = () => {
+      if (cleanupComplete) return;
+      cleanupComplete = true;
+      if (directInvocation?.cleanupDir) fs.rmSync(directInvocation.cleanupDir, { recursive: true, force: true });
+    };
 
     const terminate = (signal: NodeJS.Signals) => {
       if (closed) return;
@@ -284,11 +497,15 @@ export async function runBash(
       stderr = appendBounded(stderr, chunk);
       if (observedOutputBytes > config.maxOutputBytes) terminateWithEscalation();
     });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      cleanup();
+      reject(error);
+    });
     child.on("close", (exitCode, signal) => {
       closed = true;
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      cleanup();
       if (killedByTimeout) {
         stderr += `\n[codexpro] Command timed out after ${timeoutMs} ms.`;
       }
