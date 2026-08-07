@@ -658,7 +658,7 @@ async function runBashOutputTerminationStress() {
     assert(retainedBytes < 9000, `output-limited bash retained too much output: ${retainedBytes} bytes`);
   } finally {
     await client.close();
-    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 15, retryDelay: 250 });
   }
 }
 
