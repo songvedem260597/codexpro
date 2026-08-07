@@ -529,7 +529,8 @@ function sensitiveGitPath(value: string): boolean {
   const normalized = value.replace(/\\/g, "/").toLowerCase();
   const base = normalized.split("/").at(-1) ?? "";
   if (/^\.env(?:\.|$)/.test(base) && !/\.(?:example|sample|template)$/.test(base)) return true;
-  if (/\.(?:pem|key|p12|pfx|kdbx|sqlite|sqlite3|db)$/.test(base)) return true;
+  const declaredPublicKey = /(?:^|[-_.])public[-_.]?key\.(?:pem|key)$/.test(base) || /\.pub$/.test(base);
+  if (/\.(?:pem|key|p12|pfx|kdbx|sqlite|sqlite3|db)$/.test(base) && !declaredPublicKey) return true;
   if (/^(?:id_rsa|id_ed25519|\.npmrc|\.pypirc)$/.test(base)) return true;
   return normalized.split("/").some((segment) => /^(?:\.ssh|secrets?|credentials?)$/.test(segment));
 }
