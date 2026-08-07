@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-const MCP_REQUEST_TIMEOUT_MS = process.platform === 'win32' ? 30000 : 15000;
+const MCP_REQUEST_TIMEOUT_MS = process.platform === 'win32' ? 60000 : 15000;
 
 function encode(message) {
   return `${JSON.stringify(message)}\n`;
@@ -46,7 +46,8 @@ class McpStdioClient {
     const msg = { jsonrpc: '2.0', id, method, params };
     this.child.stdin.write(encode(msg));
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`timeout waiting for ${method}`)), MCP_REQUEST_TIMEOUT_MS);
+      const operation = method === 'tools/call' && params?.name ? `${method}:${params.name}` : method;
+      const timer = setTimeout(() => reject(new Error(`timeout waiting for ${operation}`)), MCP_REQUEST_TIMEOUT_MS);
       timer.unref();
       this.pending.set(id, { resolve, reject, timer });
     });
