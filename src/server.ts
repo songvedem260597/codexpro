@@ -1038,6 +1038,12 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         widgetDomain: config.widgetDomain,
         authEnabled: Boolean(config.authToken),
         bashMode: config.bashMode,
+        safeGitWrites: {
+          enabled: config.bashMode !== "off",
+          add: "git add <relative files>",
+          commit: "git commit -m <message> (hooks and GPG signing disabled)",
+          push: "git push origin <branch> (no options; force/delete/tag/alternate remote blocked)"
+        },
         bashTranscript: config.bashTranscript,
         bashSessionId: config.bashSessionId ?? null,
         requireBashSession: config.requireBashSession,
