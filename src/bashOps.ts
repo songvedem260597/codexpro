@@ -75,6 +75,7 @@ const SAFE_ALLOWED_PREFIXES = [
   "cargo clippy",
   "tsc",
   "npx tsc",
+  "npx vite build",
   "eslint",
   "npx eslint",
   "biome check",
@@ -131,6 +132,7 @@ const WINDOWS_SAFE_ALLOWED_PATTERNS = [
   /^(?:Get-ChildItem|Get-Content|Get-Item|Test-Path|Select-String|Measure-Object|Sort-Object)(?:\s+.+)?$/i,
   /^git\s+(?:status|diff|log|show|branch|rev-parse|ls-files)(?:\s+.+)?$/i,
   /^(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9._-]+)*)(?:\s+--\s+[A-Za-z0-9._:= -]+)?$/i,
+  /^npx\s+vite\s+build$/i,
   /^(?:pytest|python\s+-m\s+pytest|py\s+-m\s+pytest)(?:\s+[A-Za-z0-9._=\\\/-]+)*$/i,
   /^(?:python|py)\s+--version$/i,
   /^(?:node|npm|pnpm|yarn|bun)\s+(?:--version|-v)$/i,
@@ -268,6 +270,15 @@ function directGitInvocation(command: SafeGitWrite, cwd: string, workspaceRoot: 
 
 function directPackageInvocation(command: string): DirectInvocation | undefined {
   const tokens = simpleCommandTokens(command.trim());
+  if (tokens?.length === 3 && tokens[0] === "npx" && tokens[1] === "vite" && tokens[2] === "build") {
+    if (process.platform === "win32") {
+      return {
+        executable: process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
+        args: ["/d", "/s", "/c", "npx.cmd --no-install vite build"]
+      };
+    }
+    return { executable: "npx", args: ["--no-install", "vite", "build"] };
+  }
   if (!tokens || !/^(?:npm|pnpm|yarn|bun)$/.test(tokens[0])) return undefined;
   const manager = tokens[0];
   const args = tokens.slice(1);
