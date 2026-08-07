@@ -525,6 +525,60 @@ function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void
   }
 }
 
+function sensitiveGitPath(value: string): boolean {
+  const normalized = value.replace(/\\/g, "/").toLowerCase();
+  const base = normalized.split("/").at(-1) ?? "";
+  if (/^\.env(?:\.|$)/.test(base) && !/\.(?:example|sample|template)$/.test(base)) return true;
+  if (/\.(?:pem|key|p12|pfx|kdbx|sqlite|sqlite3|db)$/.test(base)) return true;
+  if (/^(?:id_rsa|id_ed25519|\.npmrc|\.pypirc)$/.test(base)) return true;
+  return normalized.split("/").some((segment) => /^(?:\.ssh|secrets?|credentials?)$/.test(segment));
+}
+
+function secretLabels(text: string): string[] {
+  const checks: Array<[string, RegExp]> = [
+    ["private key", /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/],
+    ["AWS access key", /\bAKIA[A-Z0-9]{16}\b/],
+    ["GitHub token", /\bgh[pousr]_[A-Za-z0-9]{20,}\b/],
+    ["OpenAI-style key", /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/],
+    ["Google API key", /\bAIza[A-Za-z0-9_-]{30,}\b/],
+    ["Stripe live key", /\bsk_live_[A-Za-z0-9]{16,}\b/],
+    ["assigned secret", /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password)\s*[:=]\s*["'][^"'\r\n]{12,}["']/i]
+  ];
+  return checks.filter(([, pattern]) => pattern.test(text)).map(([label]) => label);
+}
+
+function gitText(args: string[], cwd: string): string {
+  const executable = process.platform === "win32" ? "git.exe" : "git";
+  const result = spawnSync(executable, args, { cwd, encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+  return result.status === 0 || result.status === 1 ? String(result.stdout ?? "") : "";
+}
+
+function assertSensitiveGitProtection(command: string, cwd: string): void {
+  const write = command.match(/git(?:\.exe)?["']?\s+(add|commit|push)\b/i);
+  if (!write) return;
+  if (/[;&|`\r\n]/.test(command)) {
+    throw new CodexProError("Git write commands must run one at a time so CodexPro can scan for secrets before commit or push.");
+  }
+  const operation = write[1].toLowerCase();
+  if (operation === "add") {
+    const suspicious = command.split(/\s+/).slice(2).find((item) => sensitiveGitPath(item.replace(/^["']|["']$/g, "")));
+    if (suspicious) throw new CodexProError(`Sensitive path is blocked from git add: ${suspicious}`);
+    return;
+  }
+  const names = operation === "commit"
+    ? gitText(["diff", "--cached", "--name-only", "-z"], cwd)
+    : gitText(["ls-tree", "-r", "--name-only", "-z", "HEAD"], cwd);
+  const sensitiveNames = names.split("\0").filter(Boolean).filter(sensitiveGitPath);
+  const content = operation === "commit"
+    ? gitText(["diff", "--cached", "--no-ext-diff", "--unified=0", "--"], cwd).split(/\r?\n/).filter((line) => line.startsWith("+") && !line.startsWith("+++")).join("\n")
+    : gitText(["grep", "-I", "-n", "-e", "BEGIN", "-e", "AKIA", "-e", "ghp_", "-e", "gho_", "-e", "sk-", "-e", "sk_live_", "-e", "AIza", "HEAD", "--"], cwd);
+  const labels = secretLabels(content);
+  if (sensitiveNames.length || labels.length) {
+    const details = [...sensitiveNames.slice(0, 10), ...labels].join(", ");
+    throw new CodexProError(`Git ${operation} blocked because staged/tracked content appears sensitive: ${details}. Remove the secret, use a sanitized example file, then retry.`);
+  }
+}
+
 export async function runBash(
   config: CodexProConfig,
   guard: PathGuard,
@@ -537,6 +591,7 @@ export async function runBash(
   assertSafeCommand(config, command);
   const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
   const cwd = cwdResolved.absPath;
+  assertSensitiveGitProtection(command, cwd);
   const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 30_000, 180_000));
   const start = Date.now();
 
