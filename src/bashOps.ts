@@ -374,7 +374,7 @@ function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
   if (config.inheritEnv) {
     return { ...process.env, NO_COLOR: "1", CI: process.env.CI ?? "1" };
   }
-  return {
+  const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     HOME: process.env.HOME ?? "",
     USER: process.env.USER ?? "",
@@ -384,6 +384,30 @@ function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
     NO_COLOR: "1",
     CI: "1"
   };
+  if (process.platform === "win32") {
+    const requiredWindowsKeys = [
+      "SystemRoot",
+      "WINDIR",
+      "ComSpec",
+      "PATHEXT",
+      "TEMP",
+      "TMP",
+      "USERPROFILE",
+      "HOMEDRIVE",
+      "HOMEPATH",
+      "LOCALAPPDATA",
+      "APPDATA",
+      "ProgramData",
+      "ProgramFiles",
+      "ProgramFiles(x86)",
+      "ProgramW6432",
+      "PSModulePath"
+    ];
+    for (const key of requiredWindowsKeys) {
+      if (process.env[key]) env[key] = process.env[key];
+    }
+  }
+  return env;
 }
 
 function shellExecutable(): string {
