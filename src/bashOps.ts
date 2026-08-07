@@ -305,7 +305,8 @@ function assertSafePowerShellCommand(command: string): void {
   const outsideWorkspacePath = /(?:^|\s|['"])(?:[A-Za-z]:[\\/]|\\\\|\.\.(?:[\\/]|\s|$)|~(?:[\\/]|\s|$))/;
   const windowsProvider = /(?:Registry::|Cert:|Env:|Variable:|Function:|Alias:|HKLM:|HKCU:|HKCR:|HKU:|HKCC:)/i;
   const sensitivePath = /(?:^|[\s:])(?:\.env(?:[.\\/\s:]|$)|\.git(?:[\\/\s:]|$)|node_modules(?:[\\/\s:]|$)|\.ssh(?:[\\/\s:]|$)|id_rsa(?:[.\s:]|$)|id_ed25519(?:[.\s:]|$)|[^\s:]*\.(?:pem|key)(?:[\s:]|$))/i;
-  if (blockedSyntax.test(raw) || outsideWorkspacePath.test(raw) || windowsProvider.test(raw) || sensitivePath.test(normalized)) {
+  const outputOption = /(?:^|\s)["']?--output(?:=|["']|\s|$)/i;
+  if (blockedSyntax.test(raw) || outsideWorkspacePath.test(raw) || windowsProvider.test(raw) || sensitivePath.test(normalized) || outputOption.test(normalized)) {
     throw new CodexProError(
       `Command is blocked by the Windows-safe PowerShell policy: ${normalized}\n` +
         "Use one simple command at a time, use a workspace-relative path, and do not use pipelines, redirects, variables, providers, or command chaining."
@@ -392,7 +393,8 @@ function shellExecutable(): string {
 
 function shellArgs(command: string): string[] {
   if (process.platform === "win32") {
-    return ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", command];
+    const windowsCommand = /^\s*["'][^"'\r\n]+["'](?:\s|$)/.test(command) ? `& ${command}` : command;
+    return ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", windowsCommand];
   }
   return ["-lc", command];
 }

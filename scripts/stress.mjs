@@ -84,8 +84,30 @@ class McpStdioClient {
     this.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`);
   }
 
-  close() {
-    this.child.kill('SIGTERM');
+  async close() {
+    if (this.child.exitCode !== null || this.child.signalCode !== null) return;
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(forceTimer);
+        clearTimeout(settleTimer);
+        resolve();
+      };
+      const forceTimer = setTimeout(() => {
+        if (process.platform === 'win32' && this.child.pid) {
+          spawnSync('taskkill', ['/pid', String(this.child.pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true });
+        } else {
+          this.child.kill('SIGKILL');
+        }
+      }, 1500);
+      const settleTimer = setTimeout(finish, 5000);
+      forceTimer.unref();
+      settleTimer.unref();
+      this.child.once('close', finish);
+      this.child.kill('SIGTERM');
+    });
   }
 }
 
@@ -385,7 +407,7 @@ async function runFullModeStress(root) {
     const selfTest = await client.request('tools/call', { name: 'codexpro_self_test', arguments: { workspace_id: ws } });
     assert(selfTest.structuredContent.status !== 'fail', `codexpro_self_test failed: ${JSON.stringify(selfTest.structuredContent.checks)}`);
   } finally {
-    client.close();
+    await client.close();
   }
 }
 
@@ -447,7 +469,7 @@ async function runRedactionStress() {
       assert(payload.includes(tokenFile), 'redaction hid non-secret token-file path');
     }
   } finally {
-    client.close();
+    await client.close();
   }
 }
 
@@ -487,7 +509,7 @@ async function runMcpInventoryStress() {
       assert(!payload.includes(leaked), `MCP inventory leaked ${leaked}`);
     }
   } finally {
-    client.close();
+    await client.close();
   }
 }
 
@@ -544,7 +566,7 @@ async function runSupertoolModeStress(root) {
     });
     assert(blockedBash.isError === true && String(blockedBash.structuredContent.error).includes('not available'), 'supertool allowed disabled bash action');
   } finally {
-    client.close();
+    await client.close();
   }
 }
 
@@ -578,7 +600,7 @@ async function runMaxReadSearchStress() {
     assert(search.structuredContent.matches.some((match) => match.path === 'large.txt'), `search skipped slightly large file: ${JSON.stringify(search.structuredContent.matches)}`);
     assert(!search.structuredContent.matches.some((match) => match.path === 'huge.txt'), `search scanned file beyond text scan cap: ${JSON.stringify(search.structuredContent.matches)}`);
   } finally {
-    client.close();
+    await client.close();
   }
 }
 
@@ -608,7 +630,7 @@ async function runNodeFallbackSearchLimitStress() {
     });
     assert(String(regex.structuredContent.error).toLowerCase().includes('regex search requires ripgrep'), `node fallback accepted regex search: ${JSON.stringify(regex.structuredContent)}`);
   } finally {
-    client.close();
+    await client.close();
   }
 }
 
@@ -635,7 +657,7 @@ async function runBashOutputTerminationStress() {
     assert(result.structuredContent.truncated === true, `output-limited bash did not report truncation: ${JSON.stringify(result.structuredContent)}`);
     assert(retainedBytes < 9000, `output-limited bash retained too much output: ${retainedBytes} bytes`);
   } finally {
-    client.close();
+    await client.close();
     await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
@@ -699,7 +721,7 @@ async function runGuardEdgeStress() {
       assert(!(await pathExists(path.join(root, '.env', 'created.txt'))), 'absolute alias write created a blocked file');
     }
   } finally {
-    client.close();
+    await client.close();
   }
 }
 
@@ -776,7 +798,7 @@ async function runShowChangesStatsStress() {
     });
     assert(changedUntrackedChanges.structuredContent.changed && changedUntrackedChanges.structuredContent.review_checkpoint_hit !== true, `show_changes checkpoint hid changed untracked file content: ${JSON.stringify(changedUntrackedChanges.structuredContent)}`);
   } finally {
-    client.close();
+    await client.close();
   }
 }
 
@@ -805,7 +827,7 @@ async function runMinimalHandoffStress(root) {
     });
     assert(blockedWrite.isError === true && String(blockedWrite.structuredContent.error).includes('not available'), 'minimal handoff supertool allowed disabled write');
   } finally {
-    client.close();
+    await client.close();
   }
 }
 
@@ -828,7 +850,7 @@ async function runCardStress(root) {
     const inspected = await client.request('tools/call', { name: 'inspect_workspace', arguments: { workspace_id: opened.structuredContent.workspace_id } });
     assert(inspected.structuredContent.files.length <= 120, `workspace card file inventory was not compacted: ${inspected.structuredContent.files.length}`);
   } finally {
-    client.close();
+    await client.close();
   }
 }
 
@@ -859,7 +881,7 @@ async function runAnalysisBudgetStress() {
     assert(limitedOutput.structuredContent.output_limited === true, 'inspect output limit was not exposed in structured content');
     assert(limitedOutput.structuredContent.warnings.some((warning) => warning.includes('Structured output was limited')), 'inspect output limit did not report a warning');
   } finally {
-    client.close();
+    await client.close();
     await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
