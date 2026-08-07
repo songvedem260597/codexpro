@@ -394,7 +394,7 @@ function shellExecutable(): string {
 function shellArgs(command: string): string[] {
   if (process.platform === "win32") {
     const windowsCommand = /^\s*["'][^"'\r\n]+["'](?:\s|$)/.test(command) ? `& ${command}` : command;
-    return ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", windowsCommand];
+    return ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", windowsCommand];
   }
   return ["-lc", command];
 }
