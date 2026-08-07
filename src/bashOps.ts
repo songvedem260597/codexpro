@@ -31,6 +31,24 @@ interface DirectInvocation {
   cleanupDir?: string;
 }
 
+const SAFE_NPX_INVOCATIONS = new Map<string, string[]>([
+  ["npx vite build", ["vite", "build"]],
+  ["npx tsc --noEmit", ["tsc", "--noEmit"]],
+  ["npx vitest run", ["vitest", "run"]],
+  ["npx jest --runInBand", ["jest", "--runInBand"]],
+  ["npx eslint .", ["eslint", "."]],
+  ["npx prettier --check .", ["prettier", "--check", "."]],
+  ["npx biome check .", ["biome", "check", "."]],
+  ["npx next build", ["next", "build"]],
+  ["npx astro build", ["astro", "build"]],
+  ["npx webpack --mode production", ["webpack", "--mode", "production"]],
+  ["npx electron-builder --version", ["electron-builder", "--version"]],
+  ["npx electron-builder", ["electron-builder"]],
+  ["npx electron-builder --dir", ["electron-builder", "--dir"]],
+  ["npx electron-builder --win", ["electron-builder", "--win"]],
+  ["npx electron-builder --win nsis", ["electron-builder", "--win", "nsis"]]
+]);
+
 const SAFE_ALLOWED_PREFIXES = [
   "pwd",
   "ls",
@@ -42,6 +60,13 @@ const SAFE_ALLOWED_PREFIXES = [
   "git branch",
   "git rev-parse",
   "git ls-files",
+  "git blame",
+  "git grep",
+  "git describe",
+  "git remote -v",
+  "git tag --list",
+  "git worktree list",
+  "git submodule status",
   "npm test",
   "npm run test",
   "npm run typecheck",
@@ -70,9 +95,31 @@ const SAFE_ALLOWED_PREFIXES = [
   "python3 -m pytest",
   "uv run pytest",
   "go test",
+  "go build",
+  "go vet",
   "cargo test",
   "cargo check",
   "cargo clippy",
+  "cargo build",
+  "cargo fmt --check",
+  "python -m compileall",
+  "python3 -m compileall",
+  "ruff check",
+  "mypy",
+  "black --check",
+  "dotnet build",
+  "dotnet test",
+  "dotnet format --verify-no-changes",
+  "cmake --build",
+  "ninja -C build",
+  "mvn test",
+  "mvn package",
+  "mvn verify",
+  "./mvnw test",
+  "./mvnw package",
+  "./mvnw verify",
+  "./gradlew test",
+  "./gradlew build",
   "tsc",
   "npx tsc",
   "npx vite build",
@@ -129,13 +176,25 @@ const SAFE_BLOCKED_PATTERNS = [
 
 const WINDOWS_SAFE_ALLOWED_PATTERNS = [
   /^(?:Get-Location|pwd)$/i,
-  /^(?:Get-ChildItem|Get-Content|Get-Item|Test-Path|Select-String|Measure-Object|Sort-Object)(?:\s+.+)?$/i,
-  /^git\s+(?:status|diff|log|show|branch|rev-parse|ls-files)(?:\s+.+)?$/i,
-  /^(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9._-]+)*)(?:\s+--\s+[A-Za-z0-9._:= -]+)?$/i,
-  /^npx\s+vite\s+build$/i,
+  /^(?:Get-ChildItem|Get-Content|Get-Item|Test-Path|Resolve-Path|Get-FileHash|Select-String|Measure-Object|Sort-Object)(?:\s+.+)?$/i,
+  /^git\s+(?:status|diff|log|show|branch|rev-parse|ls-files|blame|grep|describe)(?:\s+.+)?$/i,
+  /^git\s+(?:remote\s+-v|tag\s+--list|worktree\s+list|submodule\s+status)$/i,
+  /^(?:npm|pnpm|yarn|bun)(?:\.cmd)?\s+(?:test|run\s+(?:test|typecheck|lint|build|check|format|coverage)(?::[A-Za-z0-9._-]+)*)(?:\s+--\s+[A-Za-z0-9._:= -]+)?$/i,
+  /^(?:npm(?:\.cmd)?\s+(?:ci|install)\s+--ignore-scripts(?:\s+--no-audit)?(?:\s+--no-fund)?|pnpm(?:\.cmd)?\s+install\s+--ignore-scripts\s+--frozen-lockfile|yarn(?:\.cmd)?\s+install\s+--ignore-scripts\s+--frozen-lockfile|bun(?:\.exe)?\s+install\s+--ignore-scripts\s+--frozen-lockfile)$/i,
+  /^(?:npx\s+(?:vite\s+build|tsc\s+--noEmit|vitest\s+run|jest\s+--runInBand|eslint\s+\.|prettier\s+--check\s+\.|biome\s+check\s+\.|next\s+build|astro\s+build|webpack\s+--mode\s+production|electron-builder(?:\s+(?:--version|--dir|--win(?:\s+nsis)?))?))$/i,
   /^(?:pytest|python\s+-m\s+pytest|py\s+-m\s+pytest)(?:\s+[A-Za-z0-9._=\\\/-]+)*$/i,
-  /^(?:python|py)\s+--version$/i,
-  /^(?:node|npm|pnpm|yarn|bun)\s+(?:--version|-v)$/i,
+  /^(?:python|py)\s+-m\s+(?:venv\s+\.venv|compileall\s+\.)$/i,
+  /^(?:ruff\s+check\s+\.|mypy\s+\.|black\s+--check\s+\.)$/i,
+  /^go\s+(?:test|build|vet)\s+\.\/\.\.\.$/i,
+  /^cargo\s+(?:test|check|clippy|build)(?:\s+--(?:release|all-targets|all-features))*$/i,
+  /^cargo\s+fmt\s+--check$/i,
+  /^dotnet\s+(?:build|test)(?:\s+--no-restore)?$/i,
+  /^dotnet\s+format\s+--verify-no-changes$/i,
+  /^cmake\s+--build\s+(?:build|\.)$/i,
+  /^ninja\s+-C\s+build$/i,
+  /^(?:mvn|\.\\mvnw\.cmd)\s+(?:test|package|verify)$/i,
+  /^\.\\gradlew\.bat\s+(?:test|build)$/i,
+  /^(?:python|py|node|npm|pnpm|yarn|bun|pip|go|rustc|cargo|java|dotnet|cmake|ninja)\s+(?:--version|-v|version|--info)$/i,
   /^nvidia-smi(?:\s+.+)?$/i
 ];
 
@@ -270,24 +329,27 @@ function directGitInvocation(command: SafeGitWrite, cwd: string, workspaceRoot: 
 
 function directPackageInvocation(command: string): DirectInvocation | undefined {
   const tokens = simpleCommandTokens(command.trim());
-  if (tokens?.length === 3 && tokens[0] === "npx" && tokens[1] === "vite" && tokens[2] === "build") {
+  const normalized = compact(command);
+  const safeNpxArgs = SAFE_NPX_INVOCATIONS.get(normalized);
+  if (safeNpxArgs) {
     if (process.platform === "win32") {
       return {
         executable: process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
-        args: ["/d", "/s", "/c", "npx.cmd --no-install vite build"]
+        args: ["/d", "/s", "/c", ["npx.cmd", "--no-install", ...safeNpxArgs].join(" ")]
       };
     }
-    return { executable: "npx", args: ["--no-install", "vite", "build"] };
+    return { executable: "npx", args: ["--no-install", ...safeNpxArgs] };
   }
-  if (!tokens || !/^(?:npm|pnpm|yarn|bun)$/.test(tokens[0])) return undefined;
-  const manager = tokens[0];
+  if (!tokens || !/^(?:npm|pnpm|yarn|bun)(?:\.cmd|\.exe)?$/.test(tokens[0])) return undefined;
+  const manager = tokens[0].replace(/\.(?:cmd|exe)$/i, "");
   const args = tokens.slice(1);
   const isTest = args.length === 1 && args[0] === "test";
   const isAllowedRun =
     args[0] === "run" &&
-    /^(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9._-]+)*$/.test(args[1] ?? "") &&
+    /^(?:test|typecheck|lint|build|check|format|coverage)(?::[A-Za-z0-9._-]+)*$/.test(args[1] ?? "") &&
     (args.length === 2 || (args[2] === "--" && args.slice(3).every((arg) => /^[A-Za-z0-9._:=/-]+$/.test(arg))));
-  if (!isTest && !isAllowedRun) return undefined;
+  const isSafeInstall = isAllowedPackageInstall(normalized);
+  if (!isTest && !isAllowedRun && !isSafeInstall) return undefined;
 
   if (process.platform === "win32") {
     return {
@@ -300,13 +362,17 @@ function directPackageInvocation(command: string): DirectInvocation | undefined 
 
 function startsWithAllowedPrefix(command: string): boolean {
   const normalized = compact(command);
-  return isAllowedPackageScript(normalized) || SAFE_ALLOWED_PREFIXES.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix} `));
+  return SAFE_NPX_INVOCATIONS.has(normalized) || isAllowedPackageInstall(normalized) || isAllowedPackageScript(normalized) || SAFE_ALLOWED_PREFIXES.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix} `));
 }
 
 function isAllowedPackageScript(command: string): boolean {
   const packageScriptPattern =
-    /^(?:npm|pnpm|yarn|bun)\s+run\s+(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9._-]+)*(?:\s+--\s+[A-Za-z0-9._:= -]+)?$/;
+    /^(?:npm|pnpm|yarn|bun)(?:\.cmd|\.exe)?\s+run\s+(?:test|typecheck|lint|build|check|format|coverage)(?::[A-Za-z0-9._-]+)*(?:\s+--\s+[A-Za-z0-9._:= -]+)?$/;
   return packageScriptPattern.test(command);
+}
+
+function isAllowedPackageInstall(command: string): boolean {
+  return /^(?:npm(?:\.cmd)?\s+(?:ci|install)\s+--ignore-scripts(?:\s+--no-audit)?(?:\s+--no-fund)?|pnpm(?:\.cmd)?\s+install\s+--ignore-scripts\s+--frozen-lockfile|yarn(?:\.cmd)?\s+install\s+--ignore-scripts\s+--frozen-lockfile|bun(?:\.exe)?\s+install\s+--ignore-scripts\s+--frozen-lockfile)$/.test(command);
 }
 
 function assertSafePowerShellCommand(command: string): void {
@@ -422,14 +488,14 @@ function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
 }
 
 function shellExecutable(): string {
-  if (process.platform === "win32") return "powershell.exe";
+  if (process.platform === "win32") return process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe";
   return fs.existsSync("/bin/bash") ? "/bin/bash" : "bash";
 }
 
 function shellArgs(command: string): string[] {
   if (process.platform === "win32") {
-    const windowsCommand = /^\s*["'][^"'\r\n]+["'](?:\s|$)/.test(command) ? `& ${command}` : command;
-    return ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", windowsCommand];
+    const encoded = Buffer.from(command, "utf16le").toString("base64");
+    return ["/d", "/s", "/c", `powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ${encoded}`];
   }
   return ["-lc", command];
 }
