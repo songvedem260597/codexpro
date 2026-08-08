@@ -17,7 +17,7 @@ import { buildProContext, exportProContext } from "./proContext.js";
 import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
 import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
-import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
+import { redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
@@ -690,9 +690,6 @@ async function applyWorkspacePatch(
   if (!patch.trim()) throw new CodexProError("patch is required.");
   if (Buffer.byteLength(patch, "utf8") > config.maxWriteBytes) {
     throw new CodexProError(`Patch is too large. Limit: ${config.maxWriteBytes} bytes.`);
-  }
-  if (hasSecretValue(patch)) {
-    throw new CodexProError("Secret-looking content is blocked from apply_patch. Use placeholders such as [REDACTED_SECRET].");
   }
   if (patchHasSymlinkMode(patch)) {
     throw new CodexProError("Symlink patches are blocked from apply_patch.");

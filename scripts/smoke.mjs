@@ -541,9 +541,46 @@ for (const leaked of ['ghp_abcdefghijklmnopqrstuvwxyz123456', 'verysecretcodexpr
 if (!tokenPayload.includes('/Users/rebel/.codexpro/cloudflare-tunnel-token')) {
   throw new Error('redaction hid a non-secret Cloudflare token-file path');
 }
-await expectToolError('write', { workspace_id: ws, path: 'notes.md', content: 'OPENAI_API_KEY=sk-realSecretValue123\n' }, /Secret-looking content is blocked/);
-await expectToolError('write', { workspace_id: ws, path: 'token.txt', content: 'codexpro_token=shorttok\n' }, /Secret-looking content is blocked/);
-await expectToolError('write', { workspace_id: ws, path: 'notes.yaml', content: 'api_key: yamlsecretvalueabcdefghijklmnop\n' }, /Secret-looking content is blocked/);
+const secretLikeWrites = [
+  ['notes.md', 'OPENAI_API_KEY=sk-realSecretValue123\n'],
+  ['token.txt', 'codexpro_token=shorttok\n'],
+  ['notes.yaml', 'api_key: yamlsecretvalueabcdefghijklmnop\n']
+];
+for (const [file, content] of secretLikeWrites) {
+  await client.request('tools/call', { name: 'write', arguments: { workspace_id: ws, path: file, content } });
+  if (await fs.readFile(path.join(tmp, file), 'utf8') !== content) {
+    throw new Error(`write changed secret-like source content in ${file}`);
+  }
+}
+await client.request('tools/call', {
+  name: 'edit',
+  arguments: {
+    workspace_id: ws,
+    path: 'notes.md',
+    old_text: 'sk-realSecretValue123',
+    new_text: 'sk-updatedSecretValue456'
+  }
+});
+if (!((await fs.readFile(path.join(tmp, 'notes.md'), 'utf8')).includes('sk-updatedSecretValue456'))) {
+  throw new Error('edit blocked or changed secret-like source content');
+}
+await client.request('tools/call', {
+  name: 'apply_patch',
+  arguments: {
+    workspace_id: ws,
+    patch: [
+      'diff --git a/token.txt b/token.txt',
+      '--- a/token.txt',
+      '+++ b/token.txt',
+      '@@ -1 +1 @@',
+      '-codexpro_token=shorttok',
+      '+codexpro_token=updatedshorttok'
+    ].join('\n') + '\n'
+  }
+});
+if (!((await fs.readFile(path.join(tmp, 'token.txt'), 'utf8')).includes('updatedshorttok'))) {
+  throw new Error('apply_patch blocked or changed secret-like source content');
+}
 await client.request('tools/call', {
   name: 'write',
   arguments: {
