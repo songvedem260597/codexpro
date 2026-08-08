@@ -28,6 +28,7 @@ CodexPro can expose:
 - git status and diffs
 - `.ai-bridge` planning files
 - optional shell command execution through the `bash` tool, hidden when bash mode is off
+- server-side Playwright navigation and interaction in standard/full tool modes
 - optional write/edit/apply_patch capability depending on `CODEXPRO_WRITE_MODE`, advertised only in workspace write mode
 - optional local handoff execution through `codexpro execute-handoff`, run from the user's terminal only
 - optional local execute/review looping through `codexpro loop-handoff`, run from the user's terminal only with a user-provided reviewer command and iteration limit
@@ -42,6 +43,9 @@ Review changes against these failure modes before release:
 | Raw CodexPro or Cloudflare token appears in UI, logs, docs, or package output | Tokens are redacted in profile/status output and tunnel tokens use local files for persistence. |
 | ChatGPT can edit outside the intended repo | Allowed roots are explicit; path resolution rejects escapes, blocked globs, and symlink traversal. |
 | ChatGPT can run arbitrary shell by default | Bash defaults to safe mode, can be disabled, and full mode is a trusted-local-only choice. Safe mode can still run repo package scripts, so use `--no-bash` for untrusted repos. |
+| Browser automation reaches internal services | Playwright allows public HTTP(S) and explicit loopback localhost, but rejects file URLs, URL credentials, metadata/internal hostnames, private IP literals, and public hostnames that resolve to private addresses. The same guard applies to page subrequests and redirects. |
+| Browser processes survive abandoned MCP sessions | Chromium state is shared across transport reconnects within one CodexPro process, `browser_close` tears it down explicitly, idle instances close after ten minutes, and service shutdown terminates remaining children. All clients holding the same endpoint token can control that shared page; use separate processes/endpoints for isolation. |
+| A page injects instructions into the model | Browser text, DOM labels, console messages, and screenshots are untrusted external content. Review consequential clicks, form submissions, credentials, uploads, purchases, permission changes, and deletion actions before allowing them. |
 | Handoff mode still exposes generic writes | Handoff/pro modes do not advertise generic `write`/`edit`/`apply_patch`; bounded handoff tools write `.ai-bridge` files only. |
 | Local Codex history is treated as ChatGPT memory | Codex session access is opt-in metadata/read mode and never attaches to a live Codex app session. |
 | Browser admin mutates live runtime unexpectedly | Admin profile changes apply on restart; active runtime policy stays stable for the current session. |
@@ -59,6 +63,7 @@ The main risks are:
 - exposing the server through a public tunnel without auth
 - running with `CODEXPRO_BASH_MODE=full`
 - running with `CODEXPRO_WRITE_MODE=workspace` on an important repo
+- allowing Playwright to interact with an untrusted or authenticated website
 - executing an untrusted `.ai-bridge/current-plan.md` or custom `execute-handoff --command`
 - running `loop-handoff` with an untrusted reviewer command or without a small `--max-iters`
 - adding overly broad allowed roots

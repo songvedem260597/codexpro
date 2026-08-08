@@ -73,6 +73,7 @@
     "stress": "npm run build && node scripts/stress.mjs",
     "analysis:smoke": "npm run build && node scripts/analysis-smoke.mjs",
     "analysis:cli-smoke": "npm run build && node scripts/analysis-cli-smoke.mjs",
+    "browser:smoke": "npm run build && node scripts/browser-smoke.mjs",
     "doctor": "node scripts/codexpro.mjs doctor",
     "connect": "node scripts/codexpro.mjs",
     "connect:setup": "node scripts/codexpro.mjs setup",
@@ -94,6 +95,7 @@
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "minimatch": "^10.0.1",
+    "playwright": "^1.62.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {

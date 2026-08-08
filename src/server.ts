@@ -10,6 +10,7 @@ import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge, wi
 import { viewWorkspaceImage } from "./imageOps.js";
 import { searchWorkspace } from "./searchOps.js";
 import { runBash } from "./bashOps.js";
+import { getSharedBrowserAutomation, type BrowserSnapshot } from "./browserOps.js";
 import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { buildProContext, exportProContext } from "./proContext.js";
@@ -73,6 +74,38 @@ function bashTextResult(config: CodexProConfig, result: Awaited<ReturnType<typeo
     `Output: stdout ${stdoutLines} line${stdoutLines === 1 ? "" : "s"}, stderr ${stderrLines} line${stderrLines === 1 ? "" : "s"}.`,
     "",
     "Raw stdout/stderr are in the structured CodexPro card. Start with `--bash-transcript full` to print raw output in chat."
+  ].join("\n");
+}
+
+function browserSnapshotText(title: string, snapshot: BrowserSnapshot): string {
+  const elements = snapshot.elements.length
+    ? snapshot.elements.map((element) => {
+        const label = element.name || element.text || element.placeholder || element.href || "(unlabeled)";
+        const details = [element.type ? `type=${element.type}` : "", element.disabled ? "disabled" : ""].filter(Boolean).join(" ");
+        return `- [${element.ref}] <${element.tag}> ${label}${details ? ` (${details})` : ""}`;
+      }).join("\n")
+    : "- No visible interactive elements.";
+  const consoleEntries = snapshot.console.length
+    ? snapshot.console.map((entry) => `- ${entry.level}: ${entry.text}`).join("\n")
+    : "- No captured console messages.";
+  return [
+    `# ${title}`,
+    "",
+    `Title: ${snapshot.title || "(untitled)"}`,
+    `URL: ${snapshot.url}`,
+    `Truncated: ${snapshot.truncated ? "yes" : "no"}`,
+    "",
+    "## Page text",
+    "",
+    snapshot.text || "(no visible text)",
+    "",
+    "## Interactive elements",
+    "",
+    elements,
+    "",
+    "## Console",
+    "",
+    consoleEntries
   ].join("\n");
 }
 
@@ -328,6 +361,16 @@ const MINIMAL_TOOL_NAMES = [
   "show_changes"
 ] as const;
 
+const BROWSER_TOOL_NAMES = [
+  "browser_open",
+  "browser_snapshot",
+  "browser_click",
+  "browser_type",
+  "browser_select",
+  "browser_screenshot",
+  "browser_close"
+] as const;
+
 const STANDARD_TOOL_NAMES = [
   ...MINIMAL_TOOL_NAMES,
   "inspect_workspace",
@@ -338,7 +381,8 @@ const STANDARD_TOOL_NAMES = [
   "read_handoff",
   "wait_for_handoff",
   "export_pro_context",
-  "handoff_to_agent"
+  "handoff_to_agent",
+  ...BROWSER_TOOL_NAMES
 ] as const;
 
 const FULL_TOOL_NAMES = [
@@ -368,7 +412,8 @@ const FULL_TOOL_NAMES = [
   "codex_context",
   "export_pro_context",
   "handoff_to_agent",
-  "handoff_to_codex"
+  "handoff_to_codex",
+  ...BROWSER_TOOL_NAMES
 ] as const;
 
 const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
@@ -378,6 +423,7 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   "edit",
   "apply_patch",
   "bash",
+  ...BROWSER_TOOL_NAMES,
   "export_pro_context",
   "handoff_to_agent",
   "handoff_to_codex"
@@ -489,14 +535,15 @@ function serverInstructions(config: CodexProConfig): string {
     "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
     editInstruction,
     bashInstruction,
-    "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
+    "6. For rendered web UI verification, call browser_open, use refs from browser_snapshot with browser_click/browser_type/browser_select, and close the browser when finished.",
+    "7. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
-      ? `7. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
+      ? `8. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
       : "",
     config.requireBashSession && config.bashSessionId
-      ? `8. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
+      ? `9. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
       : config.bashSessionId
-        ? `8. Bash session label for this server is "${config.bashSessionId}".`
+        ? `9. Bash session label for this server is "${config.bashSessionId}".`
         : "",
     "",
     `Current modes: tool=${config.toolMode}, bash=${config.bashMode}, write=${config.writeMode}.`
@@ -920,12 +967,15 @@ const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destru
 const SESSION_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false };
 const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
+const BROWSER_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true, destructiveHint: false, idempotentHint: false };
+const BROWSER_ACTION_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 
 export function createCodexProServer(config: CodexProConfig): McpServer {
   const workspaces = new WorkspaceManager(config);
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
+  const browser = getSharedBrowserAutomation();
   const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
@@ -1055,6 +1105,13 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         connectionTest: config.connectionTest,
         analysisEnabled: config.analysisEnabled,
         analysisLimits: config.analysisLimits,
+        browserAutomation: {
+          enabled: true,
+          engine: "playwright-chromium",
+          headless: process.env.CODEXPRO_BROWSER_HEADLESS !== "0",
+          sessionScope: "shared across MCP transport reconnects within this CodexPro process",
+          networkPolicy: "public web plus localhost; private LAN and metadata endpoints blocked"
+        },
         inheritEnv: config.inheritEnv,
         contextDir: config.contextDir,
         maxReadBytes: config.maxReadBytes,
@@ -1990,6 +2047,170 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       });
       const text = bashTextResult(config, result);
       return textResult(text, { workspace_id: workspace.id, root: workspace.root, ...result, bash_session_id: result.bashSessionId ?? null });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "browser_open",
+    {
+      title: "Open Browser Page",
+      description:
+        "Open a public website or localhost URL in server-side Playwright Chromium and return visible text, interactive element refs, and recent console messages. Private LAN and cloud metadata destinations are blocked.",
+      inputSchema: {
+        url: z.string().min(1).max(4_000).describe("HTTP(S) URL to open. Public websites and localhost are allowed."),
+        wait_until: z.enum(["load", "domcontentloaded", "networkidle", "commit"]).optional().describe("Navigation readiness event. Default: domcontentloaded."),
+        timeout_ms: z.number().int().min(1_000).max(180_000).optional().describe("Navigation timeout. Default: 30000."),
+        max_text_chars: z.number().int().min(1_000).max(50_000).optional().describe("Maximum visible page text. Default: 12000."),
+        max_elements: z.number().int().min(1).max(300).optional().describe("Maximum interactive elements. Default: 120.")
+      },
+      annotations: BROWSER_READ_ANNOTATIONS
+    },
+    async (args) => {
+      const result = await browser.open(String(args.url ?? ""), {
+        waitUntil: args.wait_until,
+        timeoutMs: args.timeout_ms,
+        maxTextChars: args.max_text_chars,
+        maxElements: args.max_elements
+      });
+      return textResult(browserSnapshotText("Browser Open", result), { ...result });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "browser_snapshot",
+    {
+      title: "Browser Snapshot",
+      description: "Inspect the currently open Playwright page and refresh stable element refs for later click, type, or select calls.",
+      inputSchema: {
+        max_text_chars: z.number().int().min(1_000).max(50_000).optional().describe("Maximum visible page text. Default: 12000."),
+        max_elements: z.number().int().min(1).max(300).optional().describe("Maximum interactive elements. Default: 120.")
+      },
+      annotations: BROWSER_READ_ANNOTATIONS
+    },
+    async (args) => {
+      const result = await browser.snapshot({ maxTextChars: args.max_text_chars, maxElements: args.max_elements });
+      return textResult(browserSnapshotText("Browser Snapshot", result), { ...result });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "browser_click",
+    {
+      title: "Browser Click",
+      description: "Click exactly one element using a ref from browser_snapshot or a precise CSS selector, then return the updated page snapshot.",
+      inputSchema: {
+        ref: z.string().optional().describe("Element ref such as e1 from the latest browser snapshot."),
+        selector: z.string().max(2_000).optional().describe("Precise CSS selector. Prefer ref when available."),
+        timeout_ms: z.number().int().min(1_000).max(180_000).optional().describe("Action timeout. Default: 30000.")
+      },
+      annotations: BROWSER_ACTION_ANNOTATIONS
+    },
+    async (args) => {
+      const result = await browser.click({ ref: args.ref, selector: args.selector, timeoutMs: args.timeout_ms });
+      return textResult(browserSnapshotText("Browser Click", result), { ...result });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "browser_type",
+    {
+      title: "Browser Type",
+      description: "Fill or type into exactly one input using a browser ref or CSS selector. Optionally press Enter, then return the updated snapshot.",
+      inputSchema: {
+        ref: z.string().optional().describe("Element ref such as e1 from the latest browser snapshot."),
+        selector: z.string().max(2_000).optional().describe("Precise CSS selector. Prefer ref when available."),
+        value: z.string().max(100_000).describe("Text to enter."),
+        clear: z.boolean().optional().describe("Replace existing input value. Default: true."),
+        press_enter: z.boolean().optional().describe("Press Enter after typing. Default: false."),
+        timeout_ms: z.number().int().min(1_000).max(180_000).optional().describe("Action timeout. Default: 30000.")
+      },
+      annotations: BROWSER_ACTION_ANNOTATIONS
+    },
+    async (args) => {
+      const result = await browser.type({
+        ref: args.ref,
+        selector: args.selector,
+        value: String(args.value ?? ""),
+        clear: args.clear,
+        pressEnter: args.press_enter,
+        timeoutMs: args.timeout_ms
+      });
+      return textResult(browserSnapshotText("Browser Type", result), { ...result });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "browser_select",
+    {
+      title: "Browser Select",
+      description: "Select an option in exactly one native select element using its value, then return the updated page snapshot.",
+      inputSchema: {
+        ref: z.string().optional().describe("Element ref such as e1 from the latest browser snapshot."),
+        selector: z.string().max(2_000).optional().describe("Precise CSS selector. Prefer ref when available."),
+        value: z.string().max(10_000).describe("Option value to select."),
+        timeout_ms: z.number().int().min(1_000).max(180_000).optional().describe("Action timeout. Default: 30000.")
+      },
+      annotations: BROWSER_ACTION_ANNOTATIONS
+    },
+    async (args) => {
+      const result = await browser.select({
+        ref: args.ref,
+        selector: args.selector,
+        value: String(args.value ?? ""),
+        timeoutMs: args.timeout_ms
+      });
+      return textResult(browserSnapshotText("Browser Select", result), { ...result });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "browser_screenshot",
+    {
+      title: "Browser Screenshot",
+      description: "Capture the current Playwright page as a PNG image for visual UI verification.",
+      inputSchema: {
+        full_page: z.boolean().optional().describe("Capture the full document instead of the viewport. Default: false."),
+        timeout_ms: z.number().int().min(1_000).max(180_000).optional().describe("Screenshot timeout. Default: 30000.")
+      },
+      annotations: BROWSER_READ_ANNOTATIONS
+    },
+    async (args) => {
+      const result = await browser.screenshot({ fullPage: args.full_page, timeoutMs: args.timeout_ms });
+      return {
+        content: [
+          { type: "text", text: redactSensitiveText(`Browser screenshot\nTitle: ${result.title || "(untitled)"}\nURL: ${result.url}\nFormat: image/png\nBytes: ${result.data.length}`) },
+          { type: "image", data: result.data.toString("base64"), mimeType: "image/png" }
+        ],
+        structuredContent: redactStructured({ title: result.title, url: result.url, mime_type: "image/png", bytes: result.data.length })
+      };
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "browser_close",
+    {
+      title: "Close Browser",
+      description: "Close the Playwright page, context, and Chromium process for this MCP session.",
+      inputSchema: {},
+      annotations: { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true }
+    },
+    async () => {
+      const result = await browser.close();
+      return textResult(result.closed ? "Playwright browser closed." : "No Playwright browser was open.", result);
     }
   );
 

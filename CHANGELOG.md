@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added server-side Playwright Chromium tools for opening public/localhost pages, bounded DOM snapshots, click/type/select actions, PNG screenshots, console capture, explicit close, and idle cleanup. Browser page state survives MCP transport reconnects within one CodexPro process. Browser networking blocks file URLs, URL credentials, cloud metadata, and private networks outside loopback. Playwright signal handlers stay disabled so the CodexPro launcher remains responsible for clean service shutdown and restart.
 - Added cross-platform safe Git writes: explicit-file staging, hook-disabled unsigned commits, and option-free pushes of verified local branches to HTTPS `origin` remotes, while continuing to block broad staging, force, deleting, tag, and alternate-remote pushes.
 - Added saved additional projects with `codexpro settings set --project <path>`, session-local workspace selection through the existing `open_workspace` tool, and `--clear-projects` for removing the saved allowlist.
 - Isolated workspace selection between HTTP MCP sessions while preserving explicit workspace-id access for configured roots, with stdio, HTTP, profile, and regression coverage.

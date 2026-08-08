@@ -22,6 +22,7 @@ Requirements:
 - Node.js 20+
 - A ChatGPT account with Apps / Developer Mode access
 - One HTTPS route to your local machine when connecting ChatGPT from the web
+- Playwright Chromium when using browser automation (`npx playwright install chromium`)
 
 Install the CLI:
 
@@ -65,6 +66,7 @@ CodexPro starts a local MCP server for the current workspace. ChatGPT can then:
 - search code
 - make scoped edits with `write`, `edit`, or guarded `apply_patch`
 - run safe verification commands through `bash`
+- open public sites or localhost, inspect rendered UI, interact with forms, and capture screenshots through Playwright
 - review changed files with `show_changes`
 - write handoff plans under `.ai-bridge`
 - export a selected context bundle for model surfaces that cannot call tools
@@ -97,6 +99,26 @@ codexpro settings set --clear-projects
 - `read` returns a SHA-256. Pass it as `expected_sha256` to `write` or `edit` when multiple sessions may touch the same file. A stale edit fails instead of silently overwriting newer work.
 - New files use same-directory atomic replacement. Existing files are updated in place so ownership, ACLs, extended attributes, and hard links remain attached; a machine or process crash during that write can leave partial content.
 - `codexpro start --headless` runs without prompts, clipboard access, browser opening, or terminal controls. It prints one `CODEXPRO_READY` line, publishes the supervised runtime PID in local status, cleans up on signals, and exits nonzero if the HTTP runtime dies unexpectedly.
+
+## Browser Automation
+
+CodexPro standard and full tool modes expose server-side Playwright tools for rendered UI testing:
+
+- `browser_open` opens a public HTTP(S) URL or localhost page.
+- `browser_snapshot` returns bounded visible text, console messages, and stable refs for interactive elements.
+- `browser_click`, `browser_type`, and `browser_select` interact with exactly one ref or CSS selector.
+- `browser_screenshot` returns a native PNG image to the MCP client.
+- `browser_close` closes Chromium; idle browser sessions also close automatically after ten minutes.
+
+Browser page state is shared across MCP transport reconnects within one CodexPro process, so a later `browser_click` or `browser_type` continues the page opened by `browser_open` even when the client creates a fresh transport session. One CodexPro process has one active browser page; use separate CodexPro processes/endpoints when multiple clients need isolated browser sessions.
+
+Install the matching Chromium runtime once on the CodexPro host:
+
+```bash
+npx playwright install chromium
+```
+
+Chromium runs headless by default. Set `CODEXPRO_BROWSER_HEADLESS=0` before starting CodexPro when a visible browser window is useful. Browser automation allows the public web and loopback localhost destinations, while blocking file URLs, embedded URL credentials, cloud metadata, and non-loopback private-network destinations.
 
 ## Repository Analysis
 
