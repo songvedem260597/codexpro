@@ -13,6 +13,12 @@ export interface Workspace {
   openedAt: string;
 }
 
+// Workspace ids are stable for a root and may be returned by one MCP session
+// before a reconnect sends the next tool call through another session. Keep a
+// process-wide catalog for id resolution while each WorkspaceManager continues
+// to own its selected workspace and session-visible list.
+const sharedWorkspaceCatalog = new Map<string, Workspace>();
+
 export class CodexProError extends Error {
   constructor(message: string) {
     super(message);
@@ -100,7 +106,12 @@ export class WorkspaceManager {
     }
 
     const id = workspaceIdForRoot(realRoot);
-    const workspace = { id, root: realRoot, openedAt: new Date().toISOString() };
+    const catalogWorkspace = sharedWorkspaceCatalog.get(id);
+    if (catalogWorkspace && catalogWorkspace.root !== realRoot) {
+      throw new CodexProError(`Workspace id collision for root: ${realRoot}`);
+    }
+    const workspace = catalogWorkspace ?? { id, root: realRoot, openedAt: new Date().toISOString() };
+    sharedWorkspaceCatalog.set(id, workspace);
     this.workspaces.set(id, workspace);
     if (options.select !== false) this.selectedWorkspaceId = id;
     return workspace;
@@ -116,6 +127,10 @@ export class WorkspaceManager {
     }
     const workspace = this.workspaces.get(id);
     if (!workspace) {
+      const catalogWorkspace = sharedWorkspaceCatalog.get(id);
+      if (catalogWorkspace && this.config.allowedRoots.some((allowedRoot) => isSubpath(catalogWorkspace.root, allowedRoot))) {
+        return this.openWorkspace(catalogWorkspace.root, { select: false });
+      }
       const configuredRoot = this.config.allowedRoots.find((allowedRoot) => workspaceIdForRoot(allowedRoot) === id);
       if (configuredRoot) return this.openWorkspace(configuredRoot, { select: false });
     }

@@ -207,6 +207,9 @@ function postToolsListWithSession(baseUrl, token, sessionId) {
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-smoke-'));
 const alternateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-alternate-'));
 await fs.writeFile(path.join(alternateRoot, 'selected.txt'), 'http alternate workspace\n', 'utf8');
+const nestedRoot = path.join(root, 'nested-project');
+await fs.mkdir(nestedRoot, { recursive: true });
+await fs.writeFile(path.join(nestedRoot, 'nested.txt'), 'http nested workspace\n', 'utf8');
 const profileHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-profile-home-'));
 await fs.mkdir(path.join(root, '.codex', 'skills', 'http-smoke-skill'), { recursive: true });
 await fs.writeFile(path.join(root, '.codex', 'skills', 'http-smoke-skill', 'SKILL.md'), [
@@ -638,6 +641,29 @@ try {
     });
     if (!withSkills.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'http-smoke-skill')) {
       throw new Error('HTTP open_workspace did not discover workspace skill inventory when requested');
+    }
+  });
+
+  const nestedWorkspaceId = await withClient(mcpUrl, async (client) => {
+    const nested = await callTool(client, 'open_workspace', {
+      root: nestedRoot,
+      include_tree: false
+    });
+    return nested.structuredContent.workspace_id;
+  });
+
+  await withClient(mcpUrl, async (reconnectedClient) => {
+    const nestedRead = await callTool(reconnectedClient, 'read', {
+      workspace_id: nestedWorkspaceId,
+      path: 'nested.txt'
+    });
+    const nestedText = nestedRead.content?.find?.((part) => part.type === 'text')?.text ?? '';
+    if (!nestedText.includes('http nested workspace')) {
+      throw new Error(`new HTTP session could not reuse nested workspace id: ${nestedText}`);
+    }
+    const list = await callTool(reconnectedClient, 'list_workspaces');
+    if (list.structuredContent.selected_workspace_id === nestedWorkspaceId) {
+      throw new Error('resolving a shared workspace id changed the new HTTP session selection');
     }
   });
 
