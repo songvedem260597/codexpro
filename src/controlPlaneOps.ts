@@ -477,6 +477,9 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
         title: "P0 Create Scoped Task",
         description: "Coordinator creates a role-scoped READY task with bounded acceptance and write paths.",
         inputSchema: {
+          id: z.string().min(1).max(160).optional(),
+          parentTaskId: z.string().min(1).max(160).optional(),
+          dependencyIds: z.array(z.string().min(1).max(160)).max(50).optional(),
           title: z.string().min(1).max(240), description: z.string().max(8_000).optional(),
           requiredRole: z.enum(["coordinator", "backend", "frontend", "reviewer_qa", "product_observer"]),
           priority: z.number().int().min(0).max(100).optional(), acceptanceCriteria: z.array(z.string()).max(20).optional(), allowedPaths: z.array(z.string()).max(50).optional()
