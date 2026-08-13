@@ -33,12 +33,16 @@ export interface CodexProConfig {
   maxSearchResults: number;
   maxHttpSessions: number;
   httpSessionTtlMs: number;
+  maxUnattributedHttpSessions: number;
+  unattributedHttpSessionTtlMs: number;
   blockedGlobs: string[];
   contextDir: string;
   toolCards: boolean;
   connectionTest: boolean;
   analysisEnabled: boolean;
   analysisLimits: AnalysisLimits;
+  controlPlaneUrl?: string;
+  controlPlaneToken?: string;
 }
 
 const DEFAULT_BLOCKED_GLOBS = [
@@ -204,6 +208,33 @@ function widgetDomainFrom(value: string | undefined): string {
   return parsed.origin;
 }
 
+function controlPlaneUrlFrom(value: string | undefined): string | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`CODEXPRO_CONTROL_PLANE_URL must be a valid URL, got: ${raw}`);
+  }
+  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "[::1]";
+  if (parsed.protocol !== "http:" || !loopback || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("CODEXPRO_CONTROL_PLANE_URL must be a loopback http URL without embedded credentials");
+  }
+  parsed.pathname = parsed.pathname.replace(/\/?$/, "/");
+  return parsed.toString();
+}
+
+function controlPlaneTokenFrom(value: string | undefined, tokenFile: string | undefined): string | undefined {
+  const direct = value?.trim();
+  if (direct) return direct;
+  const configuredFile = tokenFile?.trim();
+  if (!configuredFile) return undefined;
+  const token = fs.readFileSync(path.resolve(expandHome(configuredFile)), "utf8").trim();
+  if (!token) throw new Error("CODEXPRO_CONTROL_PLANE_TOKEN_FILE is empty");
+  return token;
+}
+
 function contextDirFrom(value: string | undefined): string {
   const raw = (value?.trim() || ".ai-bridge").replaceAll("\\", "/");
   if (path.isAbsolute(raw) || path.win32.isAbsolute(raw)) {
@@ -275,6 +306,7 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
         : undefined;
   const writeArg = typeof args.write === "string" ? args.write : undefined;
   const toolModeArg = typeof args["tool-mode"] === "string" ? args["tool-mode"] : undefined;
+  const controlPlaneUrlArg = typeof args["control-plane-url"] === "string" ? args["control-plane-url"] : undefined;
   const widgetDomainArg = typeof args["widget-domain"] === "string" ? args["widget-domain"] : undefined;
   const toolCardsArg =
     args["tool-cards"] === true
@@ -303,6 +335,11 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     throw new Error("CODEXPRO_REQUIRE_BASH_SESSION requires CODEXPRO_BASH_SESSION_ID or --bash-session.");
   }
 
+  const controlPlaneUrl = controlPlaneUrlFrom(controlPlaneUrlArg ?? process.env.CODEXPRO_CONTROL_PLANE_URL);
+  const controlPlaneToken = controlPlaneTokenFrom(process.env.CODEXPRO_CONTROL_PLANE_TOKEN, process.env.CODEXPRO_CONTROL_PLANE_TOKEN_FILE);
+  if (controlPlaneUrl && !controlPlaneToken) {
+    throw new Error("CODEXPRO_CONTROL_PLANE_URL requires CODEXPRO_CONTROL_PLANE_TOKEN or CODEXPRO_CONTROL_PLANE_TOKEN_FILE");
+  }
   return {
     defaultRoot,
     allowedRoots,
@@ -324,8 +361,13 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     maxWriteBytes: numberFrom(process.env.CODEXPRO_MAX_WRITE_BYTES, 1_000_000, 1_000, 10_000_000),
     maxOutputBytes: numberFrom(process.env.CODEXPRO_MAX_OUTPUT_BYTES, 120_000, 4_000, 2_000_000),
     maxSearchResults: numberFrom(process.env.CODEXPRO_MAX_SEARCH_RESULTS, 200, 5, 2_000),
-    maxHttpSessions: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS, 64, 1, 512),
-    httpSessionTtlMs: numberFrom(process.env.CODEXPRO_HTTP_SESSION_TTL_MS, 30 * 60_000, 60_000, 24 * 60 * 60_000),
+    // ChatGPT/Codex tasks can stay idle for hours before making their next MCP
+    // call. Expiring the transport after 30 minutes leaves the client holding a
+    // stale session id, and some clients disable the connector after the 404.
+    maxHttpSessions: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS, 128, 1, 512),
+    httpSessionTtlMs: numberFrom(process.env.CODEXPRO_HTTP_SESSION_TTL_MS, 24 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000),
+    maxUnattributedHttpSessions: numberFrom(process.env.CODEXPRO_MAX_UNATTRIBUTED_HTTP_SESSIONS, 32, 1, 128),
+    unattributedHttpSessionTtlMs: numberFrom(process.env.CODEXPRO_UNATTRIBUTED_HTTP_SESSION_TTL_MS, 30 * 60_000, 60_000, 24 * 60 * 60_000),
     blockedGlobs: [...DEFAULT_BLOCKED_GLOBS, ...extraBlockedGlobs],
     contextDir: contextDirFrom(process.env.CODEXPRO_CONTEXT_DIR),
     toolCards: boolFrom(toolCardsArg ?? process.env.CODEXPRO_TOOL_CARDS, false),
@@ -337,6 +379,8 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
       maxScannedBytes: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_SCANNED_BYTES, DEFAULT_ANALYSIS_LIMITS.maxScannedBytes, 1_000_000, 512 * 1024 * 1024),
       maxSymbols: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_SYMBOLS, DEFAULT_ANALYSIS_LIMITS.maxSymbols, 100, 1_000_000),
       maxRelationships: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_RELATIONSHIPS, DEFAULT_ANALYSIS_LIMITS.maxRelationships, 100, 2_000_000)
-    }
+    },
+    controlPlaneUrl,
+    controlPlaneToken
   };
 }

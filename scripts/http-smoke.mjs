@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
+import { createServer } from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -233,6 +234,7 @@ for (const args of [
 await fs.writeFile(path.join(root, 'session-checkpoint.txt'), 'checkpoint changed\n', 'utf8');
 const port = await getFreePort();
 const genericPort = await getFreePort();
+const controlPlanePort = await getFreePort();
 const token = 'codexpro-http-smoke-token';
 const runtimeQuerySecret = 'runtimequerysecret1234567890';
 const runtimeAccessSecret = 'runtimeaccesssecret1234567890';
@@ -240,6 +242,112 @@ const runtimeCloudflareSecret = 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJodHRwLXNtb2
 const staleCloudflareToken = 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJzdGFsZS1odHRwLXNtb2tlIn0.signature1234567890';
 const runtimeId = createHash('sha256').update(root).digest('hex').slice(0, 24);
 const realAlternateRoot = await fs.realpath(alternateRoot);
+const controlPlaneMutations = [];
+let controlPlaneRulesetAcked = false;
+const fakeControlPlane = createServer((request, response) => {
+  response.setHeader('content-type', 'application/json');
+  if (request.method === 'GET' && request.url === '/api/overview') {
+    response.end(JSON.stringify({
+      project: { state: 'RUNNING' },
+      preflight: { ready: true },
+      p0Gates: { gateA: { passed: false }, gateC: { readyForDeveloperSignoff: false } },
+      governance: {
+        activeRulesetHash: 'sha256:http-smoke',
+        workerAcks: controlPlaneRulesetAcked
+          ? [{ workerId: 'backend-http-smoke', rulesetHash: 'sha256:http-smoke', source: 'CODEXPRO_WORKER_CONNECTOR' }]
+          : []
+      },
+      pendingInstructions: [{
+        id: 9,
+        taskId: 'CONTROL-SMOKE',
+        revision: 2,
+        instruction: 'Run the current verification command and ACK this revision.',
+        status: 'PENDING'
+      }],
+      schedules: [{
+        workerId: 'backend-http-smoke',
+        status: 'UNVERIFIED',
+        cadence: 'every 30 minutes',
+        timezone: 'Asia/Ho_Chi_Minh',
+        nextRunAt: new Date(Date.now() + 30 * 60_000).toISOString()
+      }],
+      workers: [{ id: 'backend-http-smoke', role: 'backend', sessionEpoch: 7, scheduleId: 'schedule-backend-http-smoke', worktreePath: root }]
+    }));
+    return;
+  }
+  if (request.method === 'GET' && request.url === '/api/tasks') {
+    response.end(JSON.stringify({ tasks: [{ id: 'CONTROL-SMOKE', requiredRole: 'backend', status: 'READY', priority: 100, assignedWorkerId: null }] }));
+    return;
+  }
+  if (request.method === 'POST' && request.url === '/api/workers/backend-http-smoke/ruleset-ack') {
+    let rawBody = '';
+    request.on('data', (chunk) => { rawBody += String(chunk); });
+    request.on('end', () => {
+      controlPlaneRulesetAcked = true;
+      controlPlaneMutations.push({
+        kind: 'ruleset_ack',
+        body: JSON.parse(rawBody),
+        signed: Boolean(request.headers['x-codexpro-signature']),
+        workerId: request.headers['x-codexpro-worker-id']
+      });
+      response.end(JSON.stringify({ ack: { rulesetHash: 'sha256:http-smoke' }, eventId: 41 }));
+    });
+    return;
+  }
+  if (request.method === 'POST' && request.url === '/api/workers/backend-http-smoke/receipts') {
+    let rawBody = '';
+    request.on('data', (chunk) => { rawBody += String(chunk); });
+    request.on('end', () => {
+      controlPlaneMutations.push({
+        kind: 'receipt',
+        body: JSON.parse(rawBody),
+        signed: Boolean(request.headers['x-codexpro-signature']),
+        workerId: request.headers['x-codexpro-worker-id']
+      });
+      response.statusCode = 202;
+      response.end(JSON.stringify({ accepted: true, eventId: controlPlaneMutations.length }));
+    });
+    return;
+  }
+  if (request.method === 'POST' && request.url === '/api/tasks/CONTROL-SMOKE/claim') {
+    let rawBody = '';
+    request.on('data', (chunk) => { rawBody += String(chunk); });
+    request.on('end', () => {
+      const body = JSON.parse(rawBody);
+      controlPlaneMutations.push({
+        kind: 'claim',
+        body,
+        signed: Boolean(request.headers['x-codexpro-signature']),
+        workerId: request.headers['x-codexpro-worker-id']
+      });
+      response.end(JSON.stringify({
+        claim: {
+          task: { id: 'CONTROL-SMOKE', status: 'RUNNING', requiredRole: 'backend', attempt: 1, allowedPaths: ['README.md'] },
+          lease: { taskId: 'CONTROL-SMOKE', workerId: 'backend-http-smoke', leaseEpoch: 1, sessionEpoch: 7, allowedPaths: ['README.md'] },
+          eventId: 44
+        }
+      }));
+    });
+    return;
+  }
+  if (request.method === 'POST' && request.url === '/api/tasks/CONTROL-SMOKE/capsule') {
+    controlPlaneMutations.push({
+      kind: 'capsule',
+      body: {},
+      signed: Boolean(request.headers['x-codexpro-signature']),
+      workerId: request.headers['x-codexpro-worker-id']
+    });
+    response.statusCode = 201;
+    response.end(JSON.stringify({ capsule: { taskId: 'CONTROL-SMOKE', allowedPaths: ['README.md'] }, eventId: 45 }));
+    return;
+  }
+  response.statusCode = 404;
+  response.end(JSON.stringify({ error: { code: 'NOT_FOUND', message: 'not found' } }));
+});
+await new Promise((resolve, reject) => {
+  fakeControlPlane.once('error', reject);
+  fakeControlPlane.listen(controlPlanePort, '127.0.0.1', resolve);
+});
 await fs.mkdir(path.join(profileHome, 'runtime'), { recursive: true });
 await fs.writeFile(path.join(profileHome, 'runtime', `${runtimeId}.json`), JSON.stringify({
   version: 1,
@@ -262,6 +370,11 @@ const child = spawn('node', ['dist/http.js'], {
     CODEXPRO_BASH_MODE: 'safe',
     CODEXPRO_WRITE_MODE: 'handoff',
     CODEXPRO_TOOL_MODE: 'full',
+    CODEXPRO_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlanePort}`,
+    CODEXPRO_CONTROL_PLANE_TOKEN: 'codexpro-control-plane-smoke-signing-token',
+    CODEXPRO_MAX_HTTP_SESSIONS: '16',
+    CODEXPRO_MAX_UNATTRIBUTED_HTTP_SESSIONS: '4',
+    CODEXPRO_UNATTRIBUTED_HTTP_SESSION_TTL_MS: '60000',
     CODEXPRO_TOOL_CARDS: '0',
     CODEXPRO_WIDGET_DOMAIN: 'https://widgets.codexpro.test',
     CODEXPRO_HOME: profileHome
@@ -301,6 +414,16 @@ try {
   const queryAuthorized = await fetch(`${baseUrl}/healthz?codexpro_token=${encodeURIComponent(token)}`);
   if (queryAuthorized.status !== 200) {
     throw new Error(`expected URL-token healthz to return 200, got ${queryAuthorized.status}`);
+  }
+  const initialHealth = await queryAuthorized.json();
+  if (
+    initialHealth.mcpSessions?.activeSessions !== 0 ||
+    !Array.isArray(initialHealth.mcpSessions?.workerConnections) ||
+    initialHealth.mcpSessions?.capacity?.maxSessions !== 16 ||
+    initialHealth.mcpSessions?.capacity?.maxUnattributedSessions !== 4 ||
+    initialHealth.mcpSessions?.capacity?.unattributedTtlMs !== 60000
+  ) {
+    throw new Error(`expected healthz to expose an empty MCP session snapshot, got ${JSON.stringify(initialHealth.mcpSessions)}`);
   }
 
   let throttled;
@@ -513,6 +636,87 @@ try {
     if (queryToolNames.includes(hidden)) {
       throw new Error(`HTTP handoff mode should not advertise ${hidden}; got ${queryToolNames.join(', ')}`);
     }
+  }
+
+  const trackedWorkerId = 'backend-http-smoke';
+  const trackedMcpUrl = `${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}&codexpro_worker_id=${trackedWorkerId}`;
+  await withClient(trackedMcpUrl, async (client) => {
+    const trackedTools = await client.listTools();
+    for (const expected of ['worker_cycle_start', 'control_overview', 'worker_run_receipt', 'task_claim_or_resume']) {
+      if (!trackedTools.tools.some((tool) => tool.name === expected)) {
+        throw new Error(`control bridge did not expose ${expected}`);
+      }
+    }
+    const controlOverview = await callTool(client, 'control_overview');
+    if (controlOverview.structuredContent?.workerBinding?.workerId !== trackedWorkerId) {
+      throw new Error(`control bridge did not bind marker ${trackedWorkerId}: ${JSON.stringify(controlOverview.structuredContent)}`);
+    }
+    const automaticCycle = await callTool(client, 'worker_cycle_start');
+    if (
+      automaticCycle.structuredContent?.state !== 'TASK_CLAIMED' ||
+      automaticCycle.structuredContent?.workerBinding?.workerId !== trackedWorkerId ||
+      automaticCycle.structuredContent?.claim?.task?.id !== 'CONTROL-SMOKE' ||
+      automaticCycle.structuredContent?.pendingInstructions?.[0]?.revision !== 2 ||
+      !String(automaticCycle.structuredContent?.nextAction ?? '').includes('ackInstructionRevision')
+    ) {
+      throw new Error(`automatic worker cycle did not claim the bound task: ${JSON.stringify(automaticCycle.structuredContent)}`);
+    }
+    const automaticKinds = controlPlaneMutations.map((mutation) => mutation.kind);
+    const receiptMutations = controlPlaneMutations.filter((mutation) => mutation.kind === 'receipt');
+    if (
+      JSON.stringify(automaticKinds) !== JSON.stringify(['ruleset_ack', 'receipt', 'receipt', 'claim', 'capsule']) ||
+      controlPlaneMutations.some((mutation) => !mutation.signed || mutation.workerId !== trackedWorkerId) ||
+      receiptMutations.length !== 2 ||
+      receiptMutations.some((mutation) => mutation.body.taskId !== 'CONTROL-SMOKE') ||
+      receiptMutations[0]?.body.state !== 'STARTED' ||
+      receiptMutations[1]?.body.state !== 'ACKED'
+    ) {
+      throw new Error(`automatic worker cycle did not sign and order bootstrap/claim operations: ${JSON.stringify(controlPlaneMutations)}`);
+    }
+    const mismatch = await client.callTool({
+      name: 'worker_run_receipt',
+      arguments: { workerId: 'coordinator-01', scheduleRunId: 'marker-mismatch', taskId: 'CONTROL-SMOKE', state: 'STARTED' }
+    });
+    if (!mismatch.isError) throw new Error('control bridge allowed a worker marker mismatch');
+    const trackedHealth = await fetch(`${baseUrl}/healthz?codexpro_token=${encodeURIComponent(token)}`).then((response) => response.json());
+    const tracked = trackedHealth.mcpSessions?.workerConnections?.find((connection) => connection.workerId === trackedWorkerId);
+    if (!tracked || tracked.sessionCount !== 1 || !tracked.lastSeenAt) {
+      throw new Error(`healthz did not attribute the active MCP session to ${trackedWorkerId}: ${JSON.stringify(trackedHealth.mcpSessions)}`);
+    }
+  });
+
+  const invalidWorker = await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}&codexpro_worker_id=bad%20worker`, {
+    method: 'POST',
+    headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'invalid-worker-test', version: '1.0.0' } } })
+  });
+  const invalidWorkerBody = await invalidWorker.json();
+  if (invalidWorker.status !== 400 || invalidWorkerBody.error?.code !== -32602) {
+    throw new Error(`expected invalid worker marker to return JSON-RPC -32602, got ${invalidWorker.status} ${JSON.stringify(invalidWorkerBody)}`);
+  }
+  for (let index = 0; index < 7; index += 1) {
+    const genericSession = await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: `generic-${index}`,
+        method: 'initialize',
+        params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'generic-capacity-test', version: '1.0.0' } }
+      })
+    });
+    if (genericSession.status !== 200 || !genericSession.headers.get('mcp-session-id')) {
+      throw new Error(`generic capacity fixture failed to initialize session ${index}: HTTP ${genericSession.status}`);
+    }
+  }
+  const boundedHealth = await fetch(`${baseUrl}/healthz?codexpro_token=${encodeURIComponent(token)}`).then((response) => response.json());
+  const attributedSessions = (boundedHealth.mcpSessions?.workerConnections ?? [])
+    .reduce((total, connection) => total + Number(connection.sessionCount ?? 0), 0);
+  if (
+    boundedHealth.mcpSessions?.unattributedSessions !== 4 ||
+    boundedHealth.mcpSessions?.activeSessions !== 4 + attributedSessions
+  ) {
+    throw new Error(`unattributed sessions exceeded their dedicated capacity: ${JSON.stringify(boundedHealth.mcpSessions)}`);
   }
   const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
   for (const visualTool of queryToolNames) {
@@ -763,6 +967,7 @@ try {
 } finally {
   child.kill('SIGTERM');
   await waitForExit(child).catch(() => {});
+  await new Promise((resolve) => fakeControlPlane.close(resolve));
 }
 
 const disabledRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-disabled-tools-'));

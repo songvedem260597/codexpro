@@ -1559,14 +1559,26 @@ async function main(): Promise<void> {
     transport: StreamableHTTPServerTransport;
     createdAt: number;
     lastSeenAt: number;
+    workerId: string | null;
   };
 
   const transports = new Map<string, TransportRecord>();
+  const workerActivity = new Map<string, { connectedAt: number; lastSeenAt: number; totalSessions: number }>();
   const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const workerIdPattern = /^[a-z0-9][a-z0-9_-]{0,79}$/i;
 
   function requestSessionId(req: Request): string | undefined {
     const value = req.headers["mcp-session-id"];
     return Array.isArray(value) ? value[0] : value;
+  }
+
+  function requestWorkerId(req: Request): string | null {
+    const value = req.query.codexpro_worker_id;
+    if (value === undefined) return null;
+    if (typeof value !== "string" || !workerIdPattern.test(value)) {
+      throw new Error("codexpro_worker_id must be 1-80 letters, numbers, underscores, or hyphens");
+    }
+    return value;
   }
 
   function sendSessionError(res: Response, sessionId: string | undefined): void {
@@ -1587,20 +1599,49 @@ async function main(): Promise<void> {
     void record.transport.close?.();
   }
 
+  function evictOldestTransport(predicate: (record: TransportRecord) => boolean): boolean {
+    const oldest = [...transports.entries()]
+      .filter(([, record]) => predicate(record))
+      .sort((left, right) => left[1].lastSeenAt - right[1].lastSeenAt)[0];
+    if (!oldest) return false;
+    transports.delete(oldest[0]);
+    closeTransport(oldest[1]);
+    return true;
+  }
+
   function pruneTransports(): void {
     const now = Date.now();
     for (const [sessionId, record] of transports) {
-      if (now - record.lastSeenAt > config.httpSessionTtlMs) {
+      const ttlMs = record.workerId ? config.httpSessionTtlMs : config.unattributedHttpSessionTtlMs;
+      if (now - record.lastSeenAt > ttlMs) {
         transports.delete(sessionId);
         closeTransport(record);
       }
     }
-    while (transports.size > config.maxHttpSessions) {
-      const oldest = [...transports.entries()].sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt)[0];
-      if (!oldest) break;
-      transports.delete(oldest[0]);
-      closeTransport(oldest[1]);
+    while ([...transports.values()].filter((record) => !record.workerId).length > config.maxUnattributedHttpSessions) {
+      if (!evictOldestTransport((record) => !record.workerId)) break;
     }
+    while (transports.size > config.maxHttpSessions) {
+      if (evictOldestTransport((record) => !record.workerId)) continue;
+      if (!evictOldestTransport(() => true)) break;
+    }
+    for (const [workerId, activity] of workerActivity) {
+      if (now - activity.lastSeenAt > config.httpSessionTtlMs) workerActivity.delete(workerId);
+    }
+  }
+
+  function recordWorkerActivity(workerId: string | null, timestamp: number, newSession = false): void {
+    if (!workerId) return;
+    const current = workerActivity.get(workerId);
+    workerActivity.set(workerId, current ? {
+      connectedAt: current.connectedAt,
+      lastSeenAt: Math.max(current.lastSeenAt, timestamp),
+      totalSessions: current.totalSessions + (newSession ? 1 : 0)
+    } : {
+      connectedAt: timestamp,
+      lastSeenAt: timestamp,
+      totalSessions: 1
+    });
   }
 
   function getTransport(sessionId: string | undefined): StreamableHTTPServerTransport | undefined {
@@ -1609,7 +1650,43 @@ async function main(): Promise<void> {
     const record = transports.get(sessionId);
     if (!record) return undefined;
     record.lastSeenAt = Date.now();
+    recordWorkerActivity(record.workerId, record.lastSeenAt);
     return record.transport;
+  }
+
+  function mcpSessionStatus(): {
+    activeSessions: number;
+    unattributedSessions: number;
+    capacity: { maxSessions: number; maxUnattributedSessions: number; workerTtlMs: number; unattributedTtlMs: number };
+    workerConnections: Array<{ workerId: string; sessionCount: number; totalSessions: number; connectedAt: string; lastSeenAt: string }>;
+  } {
+    pruneTransports();
+    const activeSessions = new Map<string, number>();
+    let unattributedSessions = 0;
+    for (const record of transports.values()) {
+      if (!record.workerId) {
+        unattributedSessions += 1;
+        continue;
+      }
+      activeSessions.set(record.workerId, (activeSessions.get(record.workerId) ?? 0) + 1);
+    }
+    return {
+      activeSessions: transports.size,
+      unattributedSessions,
+      capacity: {
+        maxSessions: config.maxHttpSessions,
+        maxUnattributedSessions: config.maxUnattributedHttpSessions,
+        workerTtlMs: config.httpSessionTtlMs,
+        unattributedTtlMs: config.unattributedHttpSessionTtlMs
+      },
+      workerConnections: [...workerActivity.entries()].map(([workerId, record]) => ({
+        workerId,
+        sessionCount: activeSessions.get(workerId) ?? 0,
+        totalSessions: record.totalSessions,
+        connectedAt: new Date(record.connectedAt).toISOString(),
+        lastSeenAt: new Date(record.lastSeenAt).toISOString()
+      })).sort((left, right) => left.workerId.localeCompare(right.workerId))
+    };
   }
 
   const pruneTimer = setInterval(pruneTransports, Math.min(config.httpSessionTtlMs, 60_000));
@@ -1639,7 +1716,8 @@ async function main(): Promise<void> {
       widgetDomain: config.widgetDomain,
       contextDir: config.contextDir,
       authEnabled: Boolean(config.authToken),
-      authRequired: Boolean(config.authToken)
+      authRequired: Boolean(config.authToken),
+      mcpSessions: mcpSessionStatus()
     });
   });
 
@@ -1675,6 +1753,7 @@ async function main(): Promise<void> {
   app.post("/mcp", express.json({ limit: "20mb" }), async (req, res) => {
     try {
       const sessionId = requestSessionId(req);
+      const workerId = requestWorkerId(req);
       let transport: StreamableHTTPServerTransport;
 
       const existingTransport = getTransport(sessionId);
@@ -1685,11 +1764,14 @@ async function main(): Promise<void> {
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
             pruneTransports();
+            const timestamp = Date.now();
             transports.set(newSessionId, {
               transport,
-              createdAt: Date.now(),
-              lastSeenAt: Date.now()
+              createdAt: timestamp,
+              lastSeenAt: timestamp,
+              workerId
             });
+            recordWorkerActivity(workerId, timestamp, true);
             pruneTransports();
           }
         } as any);
@@ -1699,7 +1781,7 @@ async function main(): Promise<void> {
           if (closedSessionId) transports.delete(closedSessionId);
         };
 
-        const server = createCodexProServer(config);
+        const server = createCodexProServer(config, { workerId });
         await server.connect(transport);
       } else {
         sendSessionError(res, sessionId);
@@ -1708,6 +1790,14 @@ async function main(): Promise<void> {
 
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
+      if (error instanceof Error && error.message.startsWith("codexpro_worker_id must")) {
+        res.status(400).json({
+          jsonrpc: "2.0",
+          error: { code: -32602, message: error.message },
+          id: null
+        });
+        return;
+      }
       console.error(error instanceof Error ? error.stack ?? error.message : String(error));
       if (!res.headersSent) {
         res.status(500).json({

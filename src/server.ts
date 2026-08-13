@@ -19,6 +19,7 @@ import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
+import { CONTROL_PLANE_TOOL_NAMES, controlPlaneToolDefinitions } from "./controlPlaneOps.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -382,6 +383,7 @@ const STANDARD_TOOL_NAMES = [
   "wait_for_handoff",
   "export_pro_context",
   "handoff_to_agent",
+  ...CONTROL_PLANE_TOOL_NAMES,
   ...BROWSER_TOOL_NAMES
 ] as const;
 
@@ -413,6 +415,7 @@ const FULL_TOOL_NAMES = [
   "export_pro_context",
   "handoff_to_agent",
   "handoff_to_codex",
+  ...CONTROL_PLANE_TOOL_NAMES,
   ...BROWSER_TOOL_NAMES
 ] as const;
 
@@ -466,6 +469,12 @@ function toolNamesForMode(config: CodexProConfig): string[] {
   }
   for (const name of codexSessionToolNames(config)) {
     if (!names.includes(name)) names.push(name);
+  }
+  if (!config.controlPlaneUrl || !config.controlPlaneToken) {
+    for (const name of CONTROL_PLANE_TOOL_NAMES) {
+      const toolIndex = names.indexOf(name);
+      if (toolIndex !== -1) names.splice(toolIndex, 1);
+    }
   }
   return names;
 }
@@ -530,7 +539,9 @@ function serverInstructions(config: CodexProConfig): string {
     "CodexPro connects ChatGPT to explicitly allowed local development workspaces.",
     "",
     "Preferred workflow:",
-    "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
+    config.controlPlaneUrl && config.toolMode !== "minimal"
+      ? "1. In a role-bound CodexPro Worker Chat, call worker_cycle_start exactly once for each Control Plane wake job. It automatically ACKs governance and claims the next role-compatible task without a schedule. If it returns TASK_CLAIMED, open_workspace with the returned workerBinding.worktreePath and continue tool calls until its nextAction and pendingInstructions are completed or a real blocker is recorded; do not stop after narrating what you will do. If it returns IDLE, stop cleanly. In an ordinary session, start with open_current_workspace."
+      : "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
     "2. Follow any AGENTS.md-style instructions returned by the workspace open call before editing files.",
     "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
     editInstruction,
@@ -968,7 +979,11 @@ const BROWSER_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true, dest
 const BROWSER_ACTION_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 
-export function createCodexProServer(config: CodexProConfig): McpServer {
+export interface CodexProServerContext {
+  workerId?: string | null;
+}
+
+export function createCodexProServer(config: CodexProConfig, context: CodexProServerContext = {}): McpServer {
   const workspaces = new WorkspaceManager(config);
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
@@ -1061,6 +1076,16 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
+  if (config.controlPlaneUrl && config.controlPlaneToken) {
+    for (const definition of controlPlaneToolDefinitions({
+      baseUrl: config.controlPlaneUrl,
+      workerId: context.workerId ?? null,
+      token: config.controlPlaneToken
+    })) {
+      registerCodexTool(config, server, definition.name, definition.options, definition.handler);
+    }
+  }
+
   registerCodexTool(
     config,
     server,
@@ -1098,6 +1123,12 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         codexDir: config.codexDir,
         writeMode: config.writeMode,
         toolMode: config.toolMode,
+        controlPlane: {
+          enabled: Boolean(config.controlPlaneUrl),
+          url: config.controlPlaneUrl ?? null,
+          signedBridgeAuth: Boolean(config.controlPlaneToken),
+          boundWorkerId: context.workerId ?? null
+        },
         toolCards: config.toolCards,
         connectionTest: config.connectionTest,
         analysisEnabled: config.analysisEnabled,

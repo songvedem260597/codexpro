@@ -46,6 +46,14 @@ Settings -> Plugins -> Plugins tab -> + (beside Search plugins)
 
 This opens **New Plugin**. Give it a name such as `CodexPro`, paste the Server URL in the **Server URL** connection option, then choose `Authentication: No Authentication / None`. The form may initially show OAuth; change it before creating the plugin. CodexPro uses its own URL token.
 
+Optional multi-worker tracking can append `codexpro_worker_id=<stable-worker-id>` to the Server URL. Authenticated `/healthz` responses then include `mcpSessions.workerConnections` with recent and active sessions grouped by that marker. The marker is an identity label, not an authentication credential; keep `codexpro_token` enabled.
+
+Role-bound sessions retain the long `CODEXPRO_HTTP_SESSION_TTL_MS`. Sessions without a worker marker use the separate `CODEXPRO_MAX_UNATTRIBUTED_HTTP_SESSIONS` pool and the shorter `CODEXPRO_UNATTRIBUTED_HTTP_SESSION_TTL_MS`, so repeated generic connection probes cannot fill the transport table or displace Worker sessions.
+
+For the CodexPro Multi-Agent P0 bridge, configure both `CODEXPRO_CONTROL_PLANE_URL` and `CODEXPRO_CONTROL_PLANE_TOKEN_FILE`. The connector HMAC-signs worker mutations with the marker-bound worker ID, route, exact body, timestamp, and one-time nonce. Control tools are not exposed if the signing token is absent.
+
+All role-bound ChatGPT profiles may name the plugin `CodexPro`. A native Scheduled Task can contain only `@CodexPro`: the server instructions direct the model to call `worker_cycle_start` once. That single entrypoint automatically acknowledges the current governance hash, records signed `STARTED` and `ACKED` receipts, atomically claims the next role-compatible task, and returns the exact worktree and Task Capsule. An idle cycle omits `taskId` and stops cleanly; it verifies schedule health without creating fake work or Gate A evidence. `COMPLETED` remains task-bound and requires delivery, lease, attempt, checkpoint, and review correlation.
+
 ### Current Plugins UI
 
 | Open Plugins and click `+` | Complete the New Plugin form |
