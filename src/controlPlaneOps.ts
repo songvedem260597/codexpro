@@ -1,5 +1,11 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { realpath, stat } from "node:fs/promises";
+import { relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import { z } from "zod";
+
+const execFileAsync = promisify(execFile);
 
 export const CONTROL_PLANE_TOOL_NAMES = [
   "worker_cycle_start",
@@ -9,7 +15,9 @@ export const CONTROL_PLANE_TOOL_NAMES = [
   "task_claim_or_resume",
   "task_checkpoint",
   "task_submit_for_review",
+  "review_ci_check_record",
   "task_block",
+  "task_unblock_transient",
   "task_approve",
   "task_create",
   "codebase_map_get",
@@ -28,6 +36,7 @@ export interface ControlPlaneBridgeContext {
   baseUrl: string;
   workerId: string | null;
   token: string;
+  allowedRoots: string[];
 }
 
 export interface ControlPlaneToolDefinition {
@@ -38,6 +47,7 @@ export interface ControlPlaneToolDefinition {
 
 const READ_ONLY = { readOnlyHint: true, openWorldHint: false, destructiveHint: false };
 const MUTATION = { readOnlyHint: false, openWorldHint: false, destructiveHint: false };
+const CHANGE_SUBMISSION_CONTRACT_VERSION = "2";
 
 function result(name: string, payload: unknown): any {
   const structured = payload && typeof payload === "object" && !Array.isArray(payload)
@@ -90,6 +100,94 @@ function requireBoundWorker(context: ControlPlaneBridgeContext, supplied?: unkno
   return context.workerId;
 }
 
+function isInside(root: string, candidate: string): boolean {
+  const path = relative(resolve(root), resolve(candidate));
+  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !path.startsWith(sep));
+}
+
+function isChangeSubmissionContractBlocker(reason: string): boolean {
+  const mentionsSubmissionTool = reason.includes("task_submit_for_review");
+  const mentionsEvidenceContract = reason.includes("evidence artifact schema")
+    || reason.includes("evidence schema")
+    || reason.includes("artifact schema")
+    || (reason.includes("read_only_submission_schema_conflict") && reason.includes("touchedpaths"))
+    || (reason.includes("read-only") && reason.includes("touchedpaths") && reason.includes("allowedpaths=[]"));
+  return mentionsSubmissionTool && mentionsEvidenceContract;
+}
+
+async function resumeVerifiedTransientBlocker(
+  context: ControlPlaneBridgeContext,
+  overview: any,
+  task: any,
+  note?: string
+): Promise<any> {
+  const workerId = requireBoundWorker(context);
+  const role = String(overview.workers?.find((candidate: any) => candidate.id === workerId)?.role ?? "");
+  if (role !== "coordinator") throw new Error("COORDINATOR_REQUIRED: only Coordinator may resume a transient blocker");
+  if (task?.status !== "BLOCKED" || task?.checkpoint?.blockerKind !== "TRANSIENT") {
+    throw new Error(`TRANSIENT_BLOCKER_REQUIRED: ${String(task?.id ?? "task")} is not a transient blocked task`);
+  }
+  const reason = String(task?.checkpoint?.blockedReason ?? "").toLowerCase();
+  const isWorktreeAccess = reason.includes("worktree")
+    && (reason.includes("outside allowed roots") || reason.includes("workspace access rejects"));
+  const isCorrelatedConnectorFailure = reason.includes("openai safety gateway")
+    || reason.includes("safety gateway during codexpro")
+    || reason.includes("safety mechanism blocked")
+    || reason.includes("upstream or external service errors")
+    || reason.includes("upstream service error")
+    || reason.includes("external service error");
+  const isSubmissionContractFailure = isChangeSubmissionContractBlocker(reason);
+  let evidence: Record<string, unknown>;
+  if (isWorktreeAccess) {
+    const implementationWorker = overview.workers?.find((candidate: any) => candidate.role === task.requiredRole);
+    if (!implementationWorker?.worktreePath) throw new Error("WORKTREE_BINDING_MISSING: no worktree is bound to the blocked role");
+    const worktreePath = await realpath(String(implementationWorker.worktreePath));
+    const worktreeStat = await stat(worktreePath);
+    if (!worktreeStat.isDirectory()) throw new Error(`WORKTREE_NOT_DIRECTORY: ${worktreePath}`);
+    const allowedRoot = context.allowedRoots.find((root) => isInside(root, worktreePath));
+    if (!allowedRoot) throw new Error(`WORKTREE_OUTSIDE_ALLOWED_ROOTS: ${worktreePath}`);
+    evidence = {
+      kind: "CODEXPRO_WORKTREE_ACCESS_VERIFIED",
+      taskId: String(task.id),
+      worktreePath,
+      allowedRoot,
+      verifiedAt: new Date().toISOString()
+    };
+  } else if (isSubmissionContractFailure) {
+    evidence = {
+      kind: "CODEXPRO_CHANGE_SUBMISSION_CONTRACT_VERIFIED",
+      taskId: String(task.id),
+      contractVersion: CHANGE_SUBMISSION_CONTRACT_VERSION,
+      acceptedArtifactKinds: ["FILE", "URL", "REPORT", "SCREENSHOT", "LOG"],
+      reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
+      verifiedAt: new Date().toISOString()
+    };
+  } else if (isCorrelatedConnectorFailure && task?.checkpoint?.blockedByRunReceipt) {
+    evidence = {
+      kind: "CODEXPRO_CORRELATED_CONNECTOR_RETRY",
+      taskId: String(task.id),
+      blockedByRunReceipt: String(task.checkpoint.blockedByRunReceipt),
+      reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
+      verifiedAt: new Date().toISOString()
+    };
+  } else {
+    throw new Error("TRANSIENT_EVIDENCE_UNAVAILABLE: this blocker needs a different objective health check");
+  }
+  const evidenceHash = `sha256:${createHash("sha256").update(JSON.stringify(evidence)).digest("hex")}`;
+  return request(context, `/api/tasks/${encodeURIComponent(String(task.id))}/unblock-transient`, {
+    method: "POST",
+    body: JSON.stringify({
+      coordinatorWorkerId: workerId,
+      evidenceHash,
+      note: note?.trim() || (evidence.kind === "CODEXPRO_WORKTREE_ACCESS_VERIFIED"
+        ? `CodexPro MCP verified worktree access at ${String(evidence.worktreePath)}.`
+        : evidence.kind === "CODEXPRO_CHANGE_SUBMISSION_CONTRACT_VERIFIED"
+          ? `CodexPro MCP verified Change Submission contract v${CHANGE_SUBMISSION_CONTRACT_VERSION} and scheduled a clean retry.`
+          : `CodexPro MCP verified a correlated transient connector failure from receipt ${String(evidence.blockedByRunReceipt)} and scheduled a clean retry.`)
+    })
+  });
+}
+
 async function boundRole(context: ControlPlaneBridgeContext): Promise<string> {
   const workerId = requireBoundWorker(context);
   const overview = await request(context, "/api/overview");
@@ -111,6 +209,131 @@ async function requireTaskAccess(context: ControlPlaneBridgeContext, taskId: str
   const task = tasks.tasks?.find((candidate: any) => candidate.id === taskId);
   if (!task) throw new Error(`TASK_NOT_FOUND: ${taskId}`);
   if (task.requiredRole !== role) throw new Error(`ROLE_PERMISSION_DENIED: task ${taskId} belongs to ${task.requiredRole}`);
+}
+
+export function boundedReviewCommand(command: string): { executable: string; args: string[] } | null {
+  const parts = command.trim().split(/\s+/u);
+  const [executable, ...args] = parts;
+  if (!executable) return null;
+  if (["npm", "pnpm"].includes(executable)) {
+    if (args.length === 1 && args[0] === "test") return { executable, args };
+    if (args.length === 2 && args[0] === "run" && /^[A-Za-z0-9:_-]{1,80}$/u.test(args[1] ?? "")) {
+      return { executable, args };
+    }
+  }
+  if (executable === "yarn" && args.length === 1 && /^(?:test|[A-Za-z0-9:_-]{1,80})$/u.test(args[0] ?? "")) {
+    return { executable, args };
+  }
+  if (
+    executable === "npx"
+    && args.length >= 2
+    && args.length <= 22
+    && args[0] === "vitest"
+    && args[1] === "run"
+    && args.slice(2).every((argument) => isBoundedTestTarget(argument))
+  ) {
+    return { executable, args };
+  }
+  if (executable === "node" && args.length === 1 && args[0] === "--test") return { executable, args };
+  return null;
+}
+
+function isBoundedTestTarget(argument: string): boolean {
+  if (!argument || argument.startsWith("-") || argument.startsWith("/") || argument.includes("..")) return false;
+  return /^[A-Za-z0-9_./*{}@-]{1,240}$/u.test(argument);
+}
+
+async function reviewCommandCwd(worktreePath: string, touchedPaths: unknown): Promise<string> {
+  if (!Array.isArray(touchedPaths)) return worktreePath;
+  const topLevels = [...new Set(touchedPaths
+    .map((entry) => String(entry).replace(/\\/gu, "/").split("/")[0]?.trim() ?? "")
+    .filter((entry) => entry && !entry.includes("*") && entry !== "."))];
+  if (topLevels.length !== 1) return worktreePath;
+  const candidate = resolve(worktreePath, topLevels[0]!);
+  if (!isInside(worktreePath, candidate)) return worktreePath;
+  const packageJson = resolve(candidate, "package.json");
+  const packageStat = await stat(packageJson).catch(() => null);
+  return packageStat?.isFile() ? candidate : worktreePath;
+}
+
+async function runIndependentReviewCi(
+  context: ControlPlaneBridgeContext,
+  overview: any,
+  task: any
+): Promise<Record<string, unknown>> {
+  const reviewerWorkerId = requireBoundWorker(context);
+  const implementationWorker = overview.workers?.find((candidate: any) => candidate.id === task.assignedWorkerId);
+  if (!implementationWorker?.worktreePath) {
+    return { taskId: String(task.id), status: "SKIPPED", reason: "IMPLEMENTATION_WORKTREE_MISSING" };
+  }
+  const reviewPayload = await request(context, `/api/tasks/${encodeURIComponent(String(task.id))}/review`);
+  const review = reviewPayload?.review;
+  const commitSha = String(review?.submission?.commitSha ?? task?.checkpoint?.commitSha ?? "");
+  if (!/^[a-fA-F0-9]{7,64}$/u.test(commitSha)) {
+    return { taskId: String(task.id), status: "SKIPPED", reason: "SUBMISSION_COMMIT_MISSING" };
+  }
+  const currentRequiredPass = Array.isArray(review?.ciChecks)
+    && review.ciChecks.some((check: any) => check.required === true && check.status === "PASSED" && check.headSha === commitSha);
+  if (review?.requiredCiPassed === true && currentRequiredPass) {
+    return { taskId: String(task.id), status: "PASSED", commitSha, reused: true };
+  }
+  const declaredTest = Array.isArray(review?.submission?.tests)
+    ? review.submission.tests.find((test: any) => String(test?.status).toUpperCase() === "PASS")
+    : null;
+  const command = String(declaredTest?.command ?? "");
+  const boundedCommand = boundedReviewCommand(command);
+  if (!boundedCommand) {
+    return { taskId: String(task.id), status: "SKIPPED", reason: "SAFE_TEST_COMMAND_UNAVAILABLE", command };
+  }
+  const worktreePath = await realpath(String(implementationWorker.worktreePath));
+  const worktreeStat = await stat(worktreePath);
+  if (!worktreeStat.isDirectory()) throw new Error(`WORKTREE_NOT_DIRECTORY: ${worktreePath}`);
+  const allowedRoot = context.allowedRoots.find((root) => isInside(root, worktreePath));
+  if (!allowedRoot) throw new Error(`WORKTREE_OUTSIDE_ALLOWED_ROOTS: ${worktreePath}`);
+  const { stdout: headOutput } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+    cwd: worktreePath,
+    timeout: 15_000,
+    maxBuffer: 256_000
+  });
+  const actualHead = String(headOutput).trim();
+  if (actualHead !== commitSha) {
+    return { taskId: String(task.id), status: "SKIPPED", reason: "WORKTREE_HEAD_MISMATCH", commitSha, actualHead };
+  }
+  const cwd = await reviewCommandCwd(worktreePath, review?.submission?.touchedPaths);
+  const observedAt = new Date().toISOString();
+  let status: "PASSED" | "FAILED" = "PASSED";
+  let output = "";
+  try {
+    const execution = await execFileAsync(boundedCommand.executable, boundedCommand.args, {
+      cwd,
+      timeout: 120_000,
+      maxBuffer: 512_000,
+      env: { ...process.env, CI: "1", NO_COLOR: "1" }
+    });
+    output = `${String(execution.stdout ?? "")}\n${String(execution.stderr ?? "")}`.trim();
+  } catch (error: any) {
+    status = "FAILED";
+    output = `${String(error?.stdout ?? "")}\n${String(error?.stderr ?? error?.message ?? error)}`.trim();
+  }
+  const summary = [
+    `CodexPro independently ran ${command} in ${relative(worktreePath, cwd) || "."}.`,
+    output.slice(-3_200)
+  ].filter(Boolean).join("\n").slice(0, 4_000);
+  const recorded = await request(context, `/api/tasks/${encodeURIComponent(String(task.id))}/ci-checks`, {
+    method: "POST",
+    body: JSON.stringify({
+      provider: "codexpro-reviewer-runner",
+      externalRunId: `review-${String(task.id)}-${commitSha.slice(0, 12)}`,
+      name: command,
+      headSha: commitSha,
+      status,
+      required: true,
+      summary,
+      observedAt,
+      actorId: reviewerWorkerId
+    })
+  });
+  return { taskId: String(task.id), status, commitSha, command, cwd, recorded };
 }
 
 async function acknowledgeCurrentRuleset(
@@ -153,9 +376,13 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
         if (!worker) throw new Error(`WORKER_NOT_FOUND: ${workerId}`);
         const governance = await acknowledgeCurrentRuleset(context, overview, workerId);
         const tasks = Array.isArray(taskPayload.tasks) ? taskPayload.tasks : [];
+        const transientBlocker = String(worker.role) === "coordinator"
+          ? tasks.find((task: any) => task.status === "BLOCKED" && task?.checkpoint?.blockerKind === "TRANSIENT") ?? null
+          : null;
         const claimable = tasks
           .filter((task: any) => task.requiredRole === worker.role && (
-            task.status === "READY" || (task.status === "RUNNING" && task.assignedWorkerId === workerId)
+            (task.status === "READY" && task.readyForClaim === true)
+            || (task.status === "RUNNING" && task.assignedWorkerId === workerId)
           ))
           .sort((left: any, right: any) => Number(right.priority ?? 0) - Number(left.priority ?? 0));
         const selectedTask = claimable[0] ?? null;
@@ -180,11 +407,31 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
           body: JSON.stringify({
             ...receiptBase,
             state: "ACKED",
-            detail: selectedTask ? `Claiming ${selectedTask.id}` : "Queue idle"
+            detail: selectedTask ? `Claiming ${selectedTask.id}` : transientBlocker ? `Checking ${transientBlocker.id}` : "Queue idle"
           })
         });
 
         if (!selectedTask) {
+          if (transientBlocker) {
+            const resumed = await resumeVerifiedTransientBlocker(context, overview, transientBlocker);
+            return result("worker_cycle_start", {
+              state: "BLOCKER_RESUMED",
+              workerBinding: {
+                workerId,
+                role: worker.role,
+                sessionEpoch: worker.sessionEpoch,
+                scheduleId: worker.scheduleId,
+                worktreePath: worker.worktreePath ?? null
+              },
+              scheduleRunId,
+              deliveryId: null,
+              governance,
+              receiptEventIds: { started: started.eventId ?? null, acked: acked.eventId ?? null },
+              task: resumed.task ?? transientBlocker,
+              eventId: resumed.eventId ?? null,
+              nextAction: "The verified temporary blocker is cleared. Stop this Coordinator run; the assigned implementation Worker will receive the task automatically."
+            });
+          }
           const reviewTasks = tasks
             .filter((task: any) => ["IN_REVIEW", "WAITING_APPROVAL"].includes(task.status))
             .map((task: any) => {
@@ -200,10 +447,17 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
                   checkpoint: task.checkpoint ?? null,
                   allowedPaths: Array.isArray(task.allowedPaths) ? task.allowedPaths : [],
                   acceptanceCriteria: Array.isArray(task.acceptanceCriteria) ? task.acceptanceCriteria : []
-                }
+                },
+                requiresIndependentCi: ["backend", "frontend"].includes(String(task.requiredRole))
               };
             });
           const pendingReviewTasks = reviewTasks.filter((task: any) => task.status === "IN_REVIEW");
+          const independentCi = [];
+          if (pendingReviewTasks.length && ["reviewer_qa", "coordinator"].includes(String(worker.role))) {
+            for (const reviewTask of pendingReviewTasks.filter((task: any) => task.requiresIndependentCi).slice(0, 3)) {
+              independentCi.push(await runIndependentReviewCi(context, overview, reviewTask));
+            }
+          }
           return result("worker_cycle_start", {
             state: pendingReviewTasks.length && ["reviewer_qa", "coordinator"].includes(String(worker.role)) ? "REVIEW_READY" : "IDLE",
             workerBinding: {
@@ -218,8 +472,9 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
             governance,
             receiptEventIds: { started: started.eventId ?? null, acked: acked.eventId ?? null },
             reviewTasks,
+            independentCi,
             nextAction: pendingReviewTasks.length && ["reviewer_qa", "coordinator"].includes(String(worker.role))
-              ? "For every returned IN_REVIEW task, open implementationWorkerBinding.worktreePath, read the files listed in reviewEvidence.allowedPaths, and compare their contents with checkpoint.commitSha, checkpoint.tests, and the acceptance criteria. If the evidence is valid and paths are in scope, call task_approve now with that taskId. Do not edit the implementation, do not claim it, and do not call task_merge; the Developer records the merge after your independent approval. Do not stop after saying that you will review."
+              ? "For every returned IN_REVIEW task, inspect its checkpoint, evidence and acceptance criteria. When requiresIndependentCi is true, CodexPro already reran the bounded test and persisted the exact result in independentCi; inspect the implementation worktree and approve only when that result is PASSED. When requiresIndependentCi is false, this is a read-only Coordinator/Reviewer task: verify its checkpoint evidence and call task_approve without requiring CI. Never approve a task executed by this same worker. Do not edit the implementation, claim the review target, call task_merge, or stop after saying that you will review."
               : "Stop this run cleanly; there is no READY task for the bound role."
           });
         }
@@ -257,6 +512,30 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
             ? "Open workerBinding.worktreePath and execute the pendingInstructions now. Complete only the claimed task inside its allowed paths, checkpoint with ackInstructionRevision for every applied revision, submit for review, then record COMPLETED with this scheduleRunId/deliveryId and the returned lease/task attempt. Do not stop after describing what you will do."
             : "Open workerBinding.worktreePath, complete only the claimed task inside its allowed paths, checkpoint, submit for review, then record COMPLETED with this scheduleRunId/deliveryId and the returned lease/task attempt. Do not stop after describing what you will do."
         });
+      }
+    },
+    {
+      name: "task_unblock_transient",
+      options: {
+        title: "Resume Verified Temporary Blocker",
+        description: "Coordinator-only recovery. CodexPro objectively verifies a known local worktree-access or Change Submission contract blocker, records a SHA-256 evidence receipt, and resumes the task. It refuses blockers that need another health check or a Developer decision.",
+        inputSchema: {
+          taskId: z.string().min(1),
+          note: z.string().min(1).max(2000).optional()
+        },
+        annotations: MUTATION
+      },
+      handler: async ({ taskId, note }) => {
+        const workerId = requireBoundWorker(context);
+        await requireRole(context, ["coordinator"]);
+        const [overview, taskPayload] = await Promise.all([
+          request(context, "/api/overview"),
+          request(context, "/api/tasks")
+        ]);
+        const task = taskPayload.tasks?.find((candidate: any) => candidate.id === taskId);
+        if (!task) throw new Error(`TASK_NOT_FOUND: ${taskId}`);
+        const resumed = await resumeVerifiedTransientBlocker(context, overview, task, note);
+        return result("task_unblock_transient", { workerId, ...resumed });
       }
     },
     {
@@ -328,7 +607,7 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
       name: "worker_run_receipt",
       options: {
         title: "P0 Worker Run Receipt",
-        description: "Record a signed scheduled-run receipt. STARTED/ACKED may omit taskId for an idle schedule health check; COMPLETED always requires a bound task and full correlation.",
+        description: "Record a signed scheduled-run receipt. STARTED/ACKED may omit taskId for an idle schedule health check; COMPLETED and task-bound ERROR receipts require full task correlation. A correlated ERROR blocks the active task instead of leaving false RUNNING state.",
         inputSchema: {
           workerId: z.string().optional(),
           scheduleRunId: z.string().min(1).max(240),
@@ -347,8 +626,11 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
       },
       handler: async (args) => {
         const workerId = requireBoundWorker(context, args.workerId);
-        if (args.state === "COMPLETED" && (!args.taskId || !args.deliveryId || !args.leaseEpoch || !args.taskAttempt)) {
-          throw new Error("RUN_CORRELATION_REQUIRED: COMPLETED requires taskId, deliveryId, leaseEpoch, and taskAttempt");
+        if (
+          (args.state === "COMPLETED" || (args.state === "ERROR" && args.taskId))
+          && (!args.taskId || !args.deliveryId || !args.leaseEpoch || !args.taskAttempt)
+        ) {
+          throw new Error(`RUN_CORRELATION_REQUIRED: ${args.state} requires taskId, deliveryId, leaseEpoch, and taskAttempt`);
         }
         if (!args.taskId && (args.deliveryId || args.leaseEpoch || args.taskAttempt)) {
           throw new Error("TASKLESS_RUN_CORRELATION_FORBIDDEN: idle schedule receipts cannot carry task correlation fields");
@@ -423,17 +705,67 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
         description: "Release the fenced lease and submit structured evidence for Reviewer/QA.",
         inputSchema: {
           workerId: z.string().optional(), taskId: z.string().min(1), leaseEpoch: z.number().int().positive(), sessionEpoch: z.number().int().positive(), scheduleRunId: z.string().min(1).max(240),
-          evidence: z.record(z.any()), touchedPaths: z.array(z.string()).max(200).optional()
+          evidence: z.object({
+            commitSha: z.string().regex(/^[a-fA-F0-9]{7,64}$/).describe("Exact committed Worker HEAD being submitted."),
+            baseCommitSha: z.string().regex(/^[a-fA-F0-9]{7,64}$/).optional().describe("Optional Git base; Control Plane derives and verifies the durable merge base."),
+            diffSummary: z.string().min(1).max(8_000),
+            tests: z.array(z.object({
+              command: z.string().min(1).max(500),
+              status: z.enum(["PASS", "FAIL", "SKIPPED"]),
+              summary: z.string().min(1).max(2_000),
+              durationMs: z.number().nonnegative().max(86_400_000).nullable().optional()
+            })).min(1).max(20).describe("Include at least one PASS and no FAIL results."),
+            artifacts: z.array(z.object({
+              kind: z.enum(["FILE", "URL", "REPORT", "SCREENSHOT", "LOG"]),
+              reference: z.string().min(1).max(1_000),
+              summary: z.string().min(1).max(2_000),
+              digest: z.string().regex(/^sha256:[a-fA-F0-9]{64}$/).nullable().optional()
+            })).min(1).max(30),
+            addressedFindingIds: z.array(z.string().min(1).max(160)).max(100).optional()
+          }).describe("Structured Change Submission evidence. Field names and enum values are exact."),
+          touchedPaths: z.array(z.string()).max(200).describe("Every path in the full Git diff from the durable merge base to commitSha. Backend/Frontend submissions require at least one path; read-only Coordinator/Reviewer tasks use an empty array.")
         },
         annotations: MUTATION
       },
       handler: async (args) => {
         const workerId = requireBoundWorker(context, args.workerId);
+        const role = await boundRole(context);
+        if (["backend", "frontend"].includes(role) && (!Array.isArray(args.touchedPaths) || args.touchedPaths.length === 0)) {
+          throw new Error("WRITER_TOUCHED_PATHS_REQUIRED: Backend/Frontend Change Submissions must enumerate the full Git diff");
+        }
         const payload = await request(context, `/api/tasks/${encodeURIComponent(args.taskId)}/complete`, {
           method: "POST",
           body: JSON.stringify({ ...args, workerId, touchedPaths: args.touchedPaths ?? [] })
         });
         return result("task_submit_for_review", payload);
+      }
+    },
+    {
+      name: "review_ci_check_record",
+      options: {
+        title: "Record Independent Review CI",
+        description: "Reviewer/QA records the result of a test it independently reran for the exact current Change Submission commit. This does not approve or merge the task.",
+        inputSchema: {
+          taskId: z.string().min(1),
+          provider: z.string().min(1).max(120).default("reviewer-local"),
+          externalRunId: z.string().min(1).max(240),
+          name: z.string().min(1).max(240),
+          headSha: z.string().regex(/^[a-fA-F0-9]{7,64}$/),
+          status: z.enum(["PENDING", "RUNNING", "PASSED", "FAILED", "CANCELLED"]),
+          required: z.boolean().default(true),
+          summary: z.string().max(4_000).default(""),
+          observedAt: z.string().datetime().optional()
+        },
+        annotations: { ...MUTATION, idempotentHint: true }
+      },
+      handler: async (args) => {
+        const reviewerWorkerId = requireBoundWorker(context);
+        await requireRole(context, ["reviewer_qa", "coordinator"]);
+        const payload = await request(context, `/api/tasks/${encodeURIComponent(args.taskId)}/ci-checks`, {
+          method: "POST",
+          body: JSON.stringify({ ...args, actorId: reviewerWorkerId })
+        });
+        return result("review_ci_check_record", { reviewerWorkerId, ...payload });
       }
     },
     {
@@ -482,7 +814,7 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
           dependencyIds: z.array(z.string().min(1).max(160)).max(50).optional(),
           title: z.string().min(1).max(240), description: z.string().max(8_000).optional(),
           requiredRole: z.enum(["coordinator", "backend", "frontend", "reviewer_qa", "product_observer"]),
-          priority: z.number().int().min(0).max(100).optional(), acceptanceCriteria: z.array(z.string()).max(20).optional(), allowedPaths: z.array(z.string()).max(50).optional()
+          priority: z.number().int().min(0).max(100).optional(), acceptanceCriteria: z.array(z.string()).max(20).optional(), allowedPaths: z.array(z.string()).max(50).describe("Use path/** for a directory tree (for example src/**); use an exact path only for one specific file.").optional()
         },
         annotations: MUTATION
       },

@@ -355,6 +355,7 @@ const MINIMAL_TOOL_NAMES = [
   "open_current_workspace",
   "open_workspace",
   "read",
+  "create",
   "write",
   "edit",
   "apply_patch",
@@ -402,6 +403,7 @@ const FULL_TOOL_NAMES = [
   "search",
   "read",
   "view_image",
+  "create",
   "write",
   "edit",
   "apply_patch",
@@ -422,6 +424,7 @@ const FULL_TOOL_NAMES = [
 const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   SUPERTOOL_NAME,
   "codexpro_self_test",
+  "create",
   "write",
   "edit",
   "apply_patch",
@@ -451,7 +454,7 @@ function toolNamesForMode(config: CodexProConfig): string[] {
     if (bashIndex !== -1) names.splice(bashIndex, 1);
   }
   if (config.writeMode !== "workspace") {
-    for (const writeTool of ["write", "edit", "apply_patch"]) {
+    for (const writeTool of ["create", "write", "edit", "apply_patch"]) {
       const toolIndex = names.indexOf(writeTool);
       if (toolIndex !== -1) names.splice(toolIndex, 1);
     }
@@ -497,7 +500,7 @@ function registeredToolNames(server: McpServer): string[] {
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (config.connectionTest && CONNECTION_TEST_HIDDEN_TOOLS.has(name)) return false;
   if (name === "bash" && config.bashMode === "off") return false;
-  if ((name === "write" || name === "edit" || name === "apply_patch") && config.writeMode !== "workspace") return false;
+  if ((name === "create" || name === "write" || name === "edit" || name === "apply_patch") && config.writeMode !== "workspace") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
   if (name === "inspect_workspace" && !config.analysisEnabled) return false;
@@ -526,7 +529,7 @@ function serverInstructions(config: CodexProConfig): string {
     config.connectionTest
       ? "4. Connection test mode is read-only. Write, patch, export, and handoff-writing tools are unavailable."
       : config.writeMode === "workspace"
-      ? "4. Edit source files with write/edit/apply_patch. After edits, call show_changes once for git status, diff stats, and review diff."
+      ? "4. Create new source files with create; edit existing files with write/edit/apply_patch. After edits, call show_changes once for git status, diff stats, and review diff."
       : config.writeMode === "handoff"
         ? "4. Source writes are disabled and generic write/edit/apply_patch tools are unavailable. Use handoff_to_agent/handoff_to_codex for plans."
         : "4. Write/edit/apply_patch tools are disabled. Do not attempt direct file writes; use handoff or context export workflows instead.";
@@ -974,6 +977,7 @@ async function writeAgentHandoff(
 const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destructiveHint: false };
 const SESSION_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false };
+const CREATE_FILE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const BROWSER_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true, destructiveHint: false, idempotentHint: false };
 const BROWSER_ACTION_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
@@ -1080,7 +1084,8 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
     for (const definition of controlPlaneToolDefinitions({
       baseUrl: config.controlPlaneUrl,
       workerId: context.workerId ?? null,
-      token: config.controlPlaneToken
+      token: config.controlPlaneToken,
+      allowedRoots: config.allowedRoots
     })) {
       registerCodexTool(config, server, definition.name, definition.options, definition.handler);
     }
@@ -1899,6 +1904,49 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           sha256: result.sha256
         })
       };
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "create",
+    {
+      title: "Create New File",
+      description: "Create one new meaningful text file inside the workspace. This tool never overwrites an existing path, uses an atomic rename, and returns a unified diff.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        path: z.string().describe("New file path relative to workspace root."),
+        content: z.string().describe("Complete file contents to create."),
+        create_dirs: z.boolean().optional().describe("Create parent directories if missing. Default: true.")
+      },
+      annotations: CREATE_FILE_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Creating file...",
+        "openai/toolInvocation/invoked": "File created"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const resolved = guard.resolve(workspace, args.path, { forWrite: true });
+      assertWriteToolAllowed(config, resolved.relPath);
+      const result = await writeTextFile(config, guard, workspace, args.path, String(args.content ?? ""), {
+        createDirs: args.create_dirs !== false,
+        overwrite: false
+      });
+      if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
+      const text = `# Create New File\n\nPath: ${result.path}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
+      return textResult(text, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        path: result.path,
+        bytes: result.bytes,
+        sha256: result.sha256,
+        additions: result.diff.additions,
+        deletions: result.diff.deletions,
+        diff: result.diff.diff
+      });
     }
   );
 

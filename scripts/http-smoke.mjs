@@ -276,7 +276,7 @@ const fakeControlPlane = createServer((request, response) => {
     return;
   }
   if (request.method === 'GET' && request.url === '/api/tasks') {
-    response.end(JSON.stringify({ tasks: [{ id: 'CONTROL-SMOKE', requiredRole: 'backend', status: 'READY', priority: 100, assignedWorkerId: null }] }));
+    response.end(JSON.stringify({ tasks: [{ id: 'CONTROL-SMOKE', requiredRole: 'backend', status: 'READY', readyForClaim: true, priority: 100, assignedWorkerId: null }] }));
     return;
   }
   if (request.method === 'POST' && request.url === '/api/workers/backend-http-smoke/ruleset-ack') {
@@ -373,6 +373,7 @@ const child = spawn('node', ['dist/http.js'], {
     CODEXPRO_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlanePort}`,
     CODEXPRO_CONTROL_PLANE_TOKEN: 'codexpro-control-plane-smoke-signing-token',
     CODEXPRO_MAX_HTTP_SESSIONS: '16',
+    CODEXPRO_MAX_HTTP_SESSIONS_PER_WORKER: '3',
     CODEXPRO_MAX_UNATTRIBUTED_HTTP_SESSIONS: '4',
     CODEXPRO_UNATTRIBUTED_HTTP_SESSION_TTL_MS: '60000',
     CODEXPRO_TOOL_CARDS: '0',
@@ -420,6 +421,7 @@ try {
     initialHealth.mcpSessions?.activeSessions !== 0 ||
     !Array.isArray(initialHealth.mcpSessions?.workerConnections) ||
     initialHealth.mcpSessions?.capacity?.maxSessions !== 16 ||
+    initialHealth.mcpSessions?.capacity?.maxSessionsPerWorker !== 3 ||
     initialHealth.mcpSessions?.capacity?.maxUnattributedSessions !== 4 ||
     initialHealth.mcpSessions?.capacity?.unattributedTtlMs !== 60000
   ) {
@@ -693,6 +695,26 @@ try {
   const invalidWorkerBody = await invalidWorker.json();
   if (invalidWorker.status !== 400 || invalidWorkerBody.error?.code !== -32602) {
     throw new Error(`expected invalid worker marker to return JSON-RPC -32602, got ${invalidWorker.status} ${JSON.stringify(invalidWorkerBody)}`);
+  }
+  for (let index = 0; index < 5; index += 1) {
+    const workerSession = await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}&codexpro_worker_id=frontend-capacity-test`, {
+      method: 'POST',
+      headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: `worker-${index}`,
+        method: 'initialize',
+        params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'worker-capacity-test', version: '1.0.0' } }
+      })
+    });
+    if (workerSession.status !== 200 || !workerSession.headers.get('mcp-session-id')) {
+      throw new Error(`worker capacity fixture failed to initialize session ${index}: HTTP ${workerSession.status}`);
+    }
+  }
+  const workerBoundedHealth = await fetch(`${baseUrl}/healthz?codexpro_token=${encodeURIComponent(token)}`).then((response) => response.json());
+  const capacityWorker = workerBoundedHealth.mcpSessions?.workerConnections?.find((connection) => connection.workerId === 'frontend-capacity-test');
+  if (capacityWorker?.sessionCount !== 3 || capacityWorker?.totalSessions !== 5) {
+    throw new Error(`worker sessions exceeded their per-worker capacity: ${JSON.stringify(workerBoundedHealth.mcpSessions)}`);
   }
   for (let index = 0; index < 7; index += 1) {
     const genericSession = await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {

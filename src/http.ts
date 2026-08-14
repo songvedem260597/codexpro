@@ -1621,6 +1621,14 @@ async function main(): Promise<void> {
     while ([...transports.values()].filter((record) => !record.workerId).length > config.maxUnattributedHttpSessions) {
       if (!evictOldestTransport((record) => !record.workerId)) break;
     }
+    const attributedWorkerIds = new Set(
+      [...transports.values()].map((record) => record.workerId).filter((workerId): workerId is string => Boolean(workerId))
+    );
+    for (const workerId of attributedWorkerIds) {
+      while ([...transports.values()].filter((record) => record.workerId === workerId).length > config.maxHttpSessionsPerWorker) {
+        if (!evictOldestTransport((record) => record.workerId === workerId)) break;
+      }
+    }
     while (transports.size > config.maxHttpSessions) {
       if (evictOldestTransport((record) => !record.workerId)) continue;
       if (!evictOldestTransport(() => true)) break;
@@ -1657,7 +1665,7 @@ async function main(): Promise<void> {
   function mcpSessionStatus(): {
     activeSessions: number;
     unattributedSessions: number;
-    capacity: { maxSessions: number; maxUnattributedSessions: number; workerTtlMs: number; unattributedTtlMs: number };
+    capacity: { maxSessions: number; maxSessionsPerWorker: number; maxUnattributedSessions: number; workerTtlMs: number; unattributedTtlMs: number };
     workerConnections: Array<{ workerId: string; sessionCount: number; totalSessions: number; connectedAt: string; lastSeenAt: string }>;
   } {
     pruneTransports();
@@ -1675,6 +1683,7 @@ async function main(): Promise<void> {
       unattributedSessions,
       capacity: {
         maxSessions: config.maxHttpSessions,
+        maxSessionsPerWorker: config.maxHttpSessionsPerWorker,
         maxUnattributedSessions: config.maxUnattributedHttpSessions,
         workerTtlMs: config.httpSessionTtlMs,
         unattributedTtlMs: config.unattributedHttpSessionTtlMs
