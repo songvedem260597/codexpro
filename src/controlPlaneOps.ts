@@ -4,6 +4,7 @@ import { realpath, stat } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { CODEX_PATCH_ENVELOPE_CONTRACT_VERSION } from "./patchOps.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,6 +17,9 @@ export const CONTROL_PLANE_TOOL_NAMES = [
   "task_checkpoint",
   "task_submit_for_review",
   "review_ci_check_record",
+  "review_finding_create",
+  "review_finding_update",
+  "review_changes_request",
   "task_block",
   "task_unblock_transient",
   "task_approve",
@@ -115,6 +119,11 @@ function isChangeSubmissionContractBlocker(reason: string): boolean {
   return mentionsSubmissionTool && mentionsEvidenceContract;
 }
 
+function isSourceMutationContractBlocker(reason: string): boolean {
+  return (reason.includes("apply_patch") || reason.includes("source mutation"))
+    && (reason.includes("rejected") || reason.includes("patch must include") || reason.includes("tool failed"));
+}
+
 async function resumeVerifiedTransientBlocker(
   context: ControlPlaneBridgeContext,
   overview: any,
@@ -131,12 +140,17 @@ async function resumeVerifiedTransientBlocker(
   const isWorktreeAccess = reason.includes("worktree")
     && (reason.includes("outside allowed roots") || reason.includes("workspace access rejects"));
   const isCorrelatedConnectorFailure = reason.includes("openai safety gateway")
+    || reason.includes("openai safety layer")
     || reason.includes("safety gateway during codexpro")
     || reason.includes("safety mechanism blocked")
+    || reason.includes("safety layer blocked")
     || reason.includes("upstream or external service errors")
     || reason.includes("upstream service error")
     || reason.includes("external service error");
+  const isDurableImplementationToolSafetyFailure = isCorrelatedConnectorFailure
+    && (reason.includes("task_submit_for_review") || reason.includes("task_checkpoint"));
   const isSubmissionContractFailure = isChangeSubmissionContractBlocker(reason);
+  const isSourceMutationContractFailure = isSourceMutationContractBlocker(reason);
   let evidence: Record<string, unknown>;
   if (isWorktreeAccess) {
     const implementationWorker = overview.workers?.find((candidate: any) => candidate.role === task.requiredRole);
@@ -162,6 +176,45 @@ async function resumeVerifiedTransientBlocker(
       reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
       verifiedAt: new Date().toISOString()
     };
+  } else if (isSourceMutationContractFailure) {
+    evidence = {
+      kind: "CODEXPRO_PATCH_ENVELOPE_CONTRACT_VERIFIED",
+      taskId: String(task.id),
+      contractVersion: CODEX_PATCH_ENVELOPE_CONTRACT_VERSION,
+      supportedFormats: ["unified-diff", "codex-begin-patch-envelope"],
+      reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
+      verifiedAt: new Date().toISOString()
+    };
+  } else if (isDurableImplementationToolSafetyFailure) {
+    const implementationWorker = overview.workers?.find((candidate: any) => candidate.role === task.requiredRole);
+    if (!implementationWorker?.worktreePath) throw new Error("WORKTREE_BINDING_MISSING: no worktree is bound to the blocked role");
+    const worktreePath = await realpath(String(implementationWorker.worktreePath));
+    const allowedRoot = context.allowedRoots.find((root) => isInside(root, worktreePath));
+    if (!allowedRoot) throw new Error(`WORKTREE_OUTSIDE_ALLOWED_ROOTS: ${worktreePath}`);
+    const { stdout: headOutput } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+      cwd: worktreePath,
+      timeout: 15_000,
+      maxBuffer: 256_000
+    });
+    const { stdout: statusOutput } = await execFileAsync("git", ["status", "--porcelain"], {
+      cwd: worktreePath,
+      timeout: 15_000,
+      maxBuffer: 256_000
+    });
+    const headSha = String(headOutput).trim();
+    if (!/^[a-f0-9]{40}$/u.test(headSha) || String(statusOutput).trim()) {
+      throw new Error("SUBMISSION_RETRY_EVIDENCE_INVALID: implementation worktree must have a clean committed HEAD");
+    }
+    evidence = {
+      kind: "CODEXPRO_DURABLE_TOOL_RETRY_VERIFIED",
+      taskId: String(task.id),
+      blockedTool: reason.includes("task_checkpoint") ? "task_checkpoint" : "task_submit_for_review",
+      worktreePath,
+      allowedRoot,
+      headSha,
+      reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
+      verifiedAt: new Date().toISOString()
+    };
   } else if (isCorrelatedConnectorFailure && task?.checkpoint?.blockedByRunReceipt) {
     evidence = {
       kind: "CODEXPRO_CORRELATED_CONNECTOR_RETRY",
@@ -183,6 +236,10 @@ async function resumeVerifiedTransientBlocker(
         ? `CodexPro MCP verified worktree access at ${String(evidence.worktreePath)}.`
         : evidence.kind === "CODEXPRO_CHANGE_SUBMISSION_CONTRACT_VERIFIED"
           ? `CodexPro MCP verified Change Submission contract v${CHANGE_SUBMISSION_CONTRACT_VERSION} and scheduled a clean retry.`
+          : evidence.kind === "CODEXPRO_PATCH_ENVELOPE_CONTRACT_VERIFIED"
+            ? `CodexPro MCP verified patch envelope contract v${CODEX_PATCH_ENVELOPE_CONTRACT_VERSION} and scheduled a clean retry.`
+          : evidence.kind === "CODEXPRO_DURABLE_TOOL_RETRY_VERIFIED"
+            ? `CodexPro MCP verified clean committed HEAD ${String(evidence.headSha)} after safety blocked ${String(evidence.blockedTool)} and scheduled a clean retry.`
           : `CodexPro MCP verified a correlated transient connector failure from receipt ${String(evidence.blockedByRunReceipt)} and scheduled a clean retry.`)
     })
   });
@@ -211,7 +268,15 @@ async function requireTaskAccess(context: ControlPlaneBridgeContext, taskId: str
   if (task.requiredRole !== role) throw new Error(`ROLE_PERMISSION_DENIED: task ${taskId} belongs to ${task.requiredRole}`);
 }
 
-export function boundedReviewCommand(command: string): { executable: string; args: string[] } | null {
+export function boundedReviewCommand(command: string): { executable: string; args: string[]; relativeCwd?: string } | null {
+  const scoped = command.trim().match(/^cd\s+([^\s;&|]+)\s*&&\s*(.+)$/u);
+  if (scoped) {
+    const relativeCwd = String(scoped[1] ?? "");
+    if (!isBoundedReviewDirectory(relativeCwd)) return null;
+    const nested = boundedReviewCommand(String(scoped[2] ?? ""));
+    if (!nested || nested.relativeCwd) return null;
+    return { ...nested, relativeCwd };
+  }
   const parts = command.trim().split(/\s+/u);
   const [executable, ...args] = parts;
   if (!executable) return null;
@@ -236,6 +301,11 @@ export function boundedReviewCommand(command: string): { executable: string; arg
   }
   if (executable === "node" && args.length === 1 && args[0] === "--test") return { executable, args };
   return null;
+}
+
+function isBoundedReviewDirectory(value: string): boolean {
+  if (!value || value === "." || value.startsWith("/") || value.includes("..") || value.includes("\\")) return false;
+  return /^[A-Za-z0-9_./@-]{1,240}$/u.test(value);
 }
 
 function isBoundedTestTarget(argument: string): boolean {
@@ -299,7 +369,9 @@ async function runIndependentReviewCi(
   if (actualHead !== commitSha) {
     return { taskId: String(task.id), status: "SKIPPED", reason: "WORKTREE_HEAD_MISMATCH", commitSha, actualHead };
   }
-  const cwd = await reviewCommandCwd(worktreePath, review?.submission?.touchedPaths);
+  const cwd = boundedCommand.relativeCwd
+    ? await reviewCommandCwdFromDeclaration(worktreePath, boundedCommand.relativeCwd)
+    : await reviewCommandCwd(worktreePath, review?.submission?.touchedPaths);
   const observedAt = new Date().toISOString();
   let status: "PASSED" | "FAILED" = "PASSED";
   let output = "";
@@ -334,6 +406,18 @@ async function runIndependentReviewCi(
     })
   });
   return { taskId: String(task.id), status, commitSha, command, cwd, recorded };
+}
+
+async function reviewCommandCwdFromDeclaration(worktreePath: string, relativeCwd: string): Promise<string> {
+  const candidate = resolve(worktreePath, relativeCwd);
+  if (!isInside(worktreePath, candidate)) throw new Error(`REVIEW_CWD_OUTSIDE_WORKTREE: ${relativeCwd}`);
+  const realCandidate = await realpath(candidate);
+  if (!isInside(worktreePath, realCandidate)) throw new Error(`REVIEW_CWD_SYMLINK_ESCAPE: ${relativeCwd}`);
+  const candidateStat = await stat(realCandidate);
+  if (!candidateStat.isDirectory()) throw new Error(`REVIEW_CWD_NOT_DIRECTORY: ${relativeCwd}`);
+  const packageStat = await stat(resolve(realCandidate, "package.json")).catch(() => null);
+  if (!packageStat?.isFile()) throw new Error(`REVIEW_PACKAGE_MISSING: ${relativeCwd}/package.json`);
+  return realCandidate;
 }
 
 async function acknowledgeCurrentRuleset(
@@ -474,7 +558,7 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
             reviewTasks,
             independentCi,
             nextAction: pendingReviewTasks.length && ["reviewer_qa", "coordinator"].includes(String(worker.role))
-              ? "For every returned IN_REVIEW task, inspect its checkpoint, evidence and acceptance criteria. When requiresIndependentCi is true, CodexPro already reran the bounded test and persisted the exact result in independentCi; inspect the implementation worktree and approve only when that result is PASSED. When requiresIndependentCi is false, this is a read-only Coordinator/Reviewer task: verify its checkpoint evidence and call task_approve without requiring CI. Never approve a task executed by this same worker. Do not edit the implementation, claim the review target, call task_merge, or stop after saying that you will review."
+              ? "For every returned IN_REVIEW task, inspect its checkpoint, evidence and acceptance criteria. When requiresIndependentCi is true, CodexPro already reran the bounded test and persisted the exact result in independentCi; inspect the implementation worktree. If product code or evidence fails, create a durable review finding and request changes; approve only when CI and evidence pass. An MCP, connector, network, or worker_cycle_start failure is runtime evidence, never a source-code finding: leave the task IN_REVIEW so automation can retry. When requiresIndependentCi is false, this is a read-only Coordinator/Reviewer audit task: if the audit passes, approve it; if it identifies actionable product defects, Coordinator must create bounded Backend/Frontend remediation child tasks before approving the audit as complete. Never checkpoint another worker's review target, never edit the implementation during review, and never stop after only narrating the review."
               : "Stop this run cleanly; there is no READY task for the bound role."
           });
         }
@@ -766,6 +850,76 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
           body: JSON.stringify({ ...args, actorId: reviewerWorkerId })
         });
         return result("review_ci_check_record", { reviewerWorkerId, ...payload });
+      }
+    },
+    {
+      name: "review_finding_create",
+      options: {
+        title: "Create Durable Review Finding",
+        description: "Reviewer/QA or Coordinator records one evidence-backed finding against the current immutable Change Submission.",
+        inputSchema: {
+          taskId: z.string().min(1),
+          severity: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]),
+          category: z.string().min(1).max(120),
+          title: z.string().min(1).max(240),
+          detail: z.string().min(1).max(8_000),
+          filePath: z.string().min(1).max(4_096).optional(),
+          lineStart: z.number().int().positive().optional(),
+          lineEnd: z.number().int().positive().optional()
+        },
+        annotations: MUTATION
+      },
+      handler: async (args) => {
+        await requireRole(context, ["reviewer_qa", "coordinator"]);
+        const reviewerWorkerId = requireBoundWorker(context);
+        const payload = await request(context, `/api/tasks/${encodeURIComponent(args.taskId)}/review/findings`, {
+          method: "POST",
+          body: JSON.stringify({ ...args, reviewerWorkerId })
+        });
+        return result("review_finding_create", { reviewerWorkerId, ...payload });
+      }
+    },
+    {
+      name: "review_finding_update",
+      options: {
+        title: "Update Durable Review Finding",
+        description: "Reviewer/QA or Coordinator reopens, resolves, or dismisses a durable review finding after checking current evidence.",
+        inputSchema: {
+          findingId: z.string().min(1),
+          status: z.enum(["OPEN", "RESOLVED", "DISMISSED"]),
+          resolutionNote: z.string().min(1).max(4_000)
+        },
+        annotations: MUTATION
+      },
+      handler: async (args) => {
+        await requireRole(context, ["reviewer_qa", "coordinator"]);
+        const reviewerWorkerId = requireBoundWorker(context);
+        const payload = await request(context, `/api/review-findings/${encodeURIComponent(args.findingId)}`, {
+          method: "POST",
+          body: JSON.stringify({ ...args, reviewerWorkerId })
+        });
+        return result("review_finding_update", { reviewerWorkerId, ...payload });
+      }
+    },
+    {
+      name: "review_changes_request",
+      options: {
+        title: "Return Reviewed Work for Changes",
+        description: "Reviewer/QA or Coordinator closes the current review round with its OPEN findings and returns the implementation task to READY for a fresh fenced attempt.",
+        inputSchema: {
+          taskId: z.string().min(1),
+          note: z.string().min(1).max(4_000)
+        },
+        annotations: MUTATION
+      },
+      handler: async (args) => {
+        await requireRole(context, ["reviewer_qa", "coordinator"]);
+        const reviewerWorkerId = requireBoundWorker(context);
+        const payload = await request(context, `/api/tasks/${encodeURIComponent(args.taskId)}/review/request-changes`, {
+          method: "POST",
+          body: JSON.stringify({ ...args, reviewerWorkerId })
+        });
+        return result("review_changes_request", { reviewerWorkerId, ...payload });
       }
     },
     {

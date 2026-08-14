@@ -829,6 +829,51 @@ const patchedRead = await client.request('tools/call', { name: 'read', arguments
 if (!patchedRead.content?.[0]?.text?.includes('omega patched')) {
   throw new Error(`apply_patch did not update demo.txt: ${patchedRead.content?.[0]?.text}`);
 }
+const envelopeResult = await client.request('tools/call', {
+  name: 'apply_patch',
+  arguments: {
+    workspace_id: ws,
+    patch: [
+      '*** Begin Patch',
+      '*** Add File: envelope-one.txt',
+      '+first file',
+      '*** Add File: envelope-two.txt',
+      '+second file',
+      '*** End Patch'
+    ].join('\n') + '\n'
+  }
+});
+if (!envelopeResult.structuredContent.changed || !envelopeResult.structuredContent.paths?.includes?.('envelope-one.txt') || !envelopeResult.structuredContent.paths?.includes?.('envelope-two.txt')) {
+  throw new Error(`apply_patch did not accept a multi-file Codex patch envelope: ${JSON.stringify(envelopeResult.structuredContent)}`);
+}
+const envelopeRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'envelope-one.txt' } });
+if (!envelopeRead.content?.[0]?.text?.includes('first file')) {
+  throw new Error(`apply_patch did not apply the Codex add envelope: ${envelopeRead.content?.[0]?.text}`);
+}
+const envelopeMutation = await client.request('tools/call', {
+  name: 'apply_patch',
+  arguments: {
+    workspace_id: ws,
+    patch: [
+      '*** Begin Patch',
+      '*** Update File: envelope-one.txt',
+      '@@',
+      '-first file',
+      '+first file updated',
+      '*** End of File',
+      '*** Delete File: envelope-two.txt',
+      '*** End Patch'
+    ].join('\n') + '\n'
+  }
+});
+if (!envelopeMutation.structuredContent.paths?.includes?.('envelope-one.txt') || !envelopeMutation.structuredContent.paths?.includes?.('envelope-two.txt')) {
+  throw new Error(`apply_patch did not report Codex update/delete paths: ${JSON.stringify(envelopeMutation.structuredContent)}`);
+}
+const envelopeUpdatedRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'envelope-one.txt' } });
+if (!envelopeUpdatedRead.content?.[0]?.text?.includes('first file updated')) {
+  throw new Error(`apply_patch did not apply the Codex update envelope: ${envelopeUpdatedRead.content?.[0]?.text}`);
+}
+await expectToolError('read', { workspace_id: ws, path: 'envelope-two.txt' }, /not found|no such file/i);
 await expectToolError('apply_patch', {
   workspace_id: ws,
   patch: [

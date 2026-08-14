@@ -20,6 +20,7 @@ import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidg
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { CONTROL_PLANE_TOOL_NAMES, controlPlaneToolDefinitions } from "./controlPlaneOps.js";
+import { codexPatchToUnifiedDiff, codexPatchTouchedPaths, isCodexPatchEnvelope } from "./patchOps.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -709,7 +710,8 @@ async function applyWorkspacePatch(
     throw new CodexProError("Symlink patches are blocked from apply_patch.");
   }
 
-  const paths = patchTouchedPaths(patch);
+  const codexEnvelope = isCodexPatchEnvelope(patch);
+  const paths = codexEnvelope ? codexPatchTouchedPaths(patch) : patchTouchedPaths(patch);
   if (!paths.length) throw new CodexProError("Patch must include at least one file path.");
   const absPaths: string[] = [];
   for (const touchedPath of paths) {
@@ -717,15 +719,25 @@ async function applyWorkspacePatch(
     assertWriteToolAllowed(config, touchedPath);
   }
 
-  return withFileWriteLocks(absPaths, () => {
+  return withFileWriteLocks(absPaths, async () => {
     for (const touchedPath of paths) {
       guard.resolve(workspace, touchedPath, { forWrite: true });
       assertWriteToolAllowed(config, touchedPath);
     }
 
+    const normalizedPatch = codexEnvelope
+      ? await codexPatchToUnifiedDiff(patch, workspace.root, fsp.readFile)
+      : patch;
+    if (Buffer.byteLength(normalizedPatch, "utf8") > config.maxWriteBytes) {
+      throw new CodexProError(`Normalized patch is too large. Limit: ${config.maxWriteBytes} bytes.`);
+    }
+    if (patchHasSymlinkMode(normalizedPatch)) {
+      throw new CodexProError("Symlink patches are blocked from apply_patch.");
+    }
+
     const check = spawnSync("git", ["apply", "--check", "--whitespace=nowarn"], {
       cwd: workspace.root,
-      input: patch,
+      input: normalizedPatch,
       encoding: "utf8",
       maxBuffer: config.maxOutputBytes,
       env: { ...process.env, NO_COLOR: "1" }
@@ -736,7 +748,7 @@ async function applyWorkspacePatch(
 
     const applied = spawnSync("git", ["apply", "--whitespace=nowarn"], {
       cwd: workspace.root,
-      input: patch,
+      input: normalizedPatch,
       encoding: "utf8",
       maxBuffer: config.maxOutputBytes,
       env: { ...process.env, NO_COLOR: "1" }
@@ -745,7 +757,7 @@ async function applyWorkspacePatch(
       throw new CodexProError(redactSensitiveText(applied.stderr?.trim() || applied.stdout?.trim() || applied.error?.message || "git apply failed"));
     }
 
-    const diff = redactSensitiveText(patch.trimEnd());
+    const diff = redactSensitiveText(normalizedPatch.trimEnd());
     const stats = diffStats(diff);
     return {
       paths,
@@ -2052,10 +2064,10 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
     {
       title: "Apply Patch",
       description:
-        "Apply one unified diff patch inside the workspace. Paths are validated before applying. Prefer edit for tiny replacements and apply_patch for multi-file diffs.",
+        "Apply one unified diff or *** Begin Patch envelope inside the workspace. Paths are validated before applying. Prefer edit for tiny replacements and apply_patch for multi-file changes.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
-        patch: z.string().describe("Unified diff patch to apply. File paths must stay inside the workspace and avoid blocked paths.")
+        patch: z.string().describe("Unified diff or *** Begin Patch envelope to apply. File paths must stay inside the workspace and avoid blocked paths.")
       },
       annotations: LOCAL_WRITE_ANNOTATIONS,
       _meta: {

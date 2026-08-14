@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { boundedReviewCommand, controlPlaneToolDefinitions } from '../dist/controlPlaneOps.js';
 
 assert.deepEqual(
@@ -6,16 +10,32 @@ assert.deepEqual(
   { executable: 'npx', args: ['vitest', 'run', 'src'] },
   'review runner must accept a bounded Vitest target'
 );
+assert.deepEqual(
+  boundedReviewCommand('cd client && npm test'),
+  { executable: 'npm', args: ['test'], relativeCwd: 'client' },
+  'review runner must safely normalize a declared package-directory test'
+);
 for (const unsafeCommand of [
   'npx vitest run --config ../../tmp/evil.ts',
   'npx vitest run ../outside',
   'npx eslint .',
-  'npx vitest run src && touch owned'
+  'npx vitest run src && touch owned',
+  'cd ../outside && npm test',
+  'cd client; touch owned && npm test',
+  'cd client && cd nested && npm test'
 ]) {
   assert.equal(boundedReviewCommand(unsafeCommand), null, `review runner must reject ${unsafeCommand}`);
 }
 
 const requests = [];
+const safetySubmissionWorktree = realpathSync(mkdtempSync(join(tmpdir(), 'codexpro-submission-safety-')));
+writeFileSync(join(safetySubmissionWorktree, 'server.js'), 'console.log("ready");\n');
+execFileSync('git', ['init', '-b', 'main'], { cwd: safetySubmissionWorktree, stdio: 'ignore' });
+execFileSync('git', ['add', 'server.js'], { cwd: safetySubmissionWorktree });
+execFileSync('git', ['-c', 'user.name=CodexPro Contract', '-c', 'user.email=contract@codexpro.local', 'commit', '-m', 'fixture'], {
+  cwd: safetySubmissionWorktree,
+  stdio: 'ignore'
+});
 let overviewPayload = { workers: [{ id: 'coordinator-contract', role: 'coordinator' }] };
 let tasksPayload = { tasks: [] };
 const originalFetch = globalThis.fetch;
@@ -34,8 +54,26 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname === '/api/tasks' && init.method === 'POST') {
     return Response.json({ task: { id: 'TASK-CHILD' }, eventId: 1 }, { status: 201 });
   }
+  if (url.pathname === '/api/tasks/TASK-BACKEND-IN-REVIEW/review/findings' && init.method === 'POST') {
+    return Response.json({ finding: { id: 'FINDING-CONTRACT', status: 'OPEN' }, eventId: 3 }, { status: 201 });
+  }
+  if (url.pathname === '/api/review-findings/FINDING-CONTRACT' && init.method === 'POST') {
+    return Response.json({ finding: { id: 'FINDING-CONTRACT', status: 'RESOLVED' }, eventId: 4 });
+  }
+  if (url.pathname === '/api/tasks/TASK-BACKEND-IN-REVIEW/review/request-changes' && init.method === 'POST') {
+    return Response.json({ task: { id: 'TASK-BACKEND-IN-REVIEW', status: 'READY' }, eventId: 5 });
+  }
   if (url.pathname === '/api/tasks/TASK-SCHEMA-BLOCKER/unblock-transient' && init.method === 'POST') {
     return Response.json({ task: { id: 'TASK-SCHEMA-BLOCKER', status: 'READY' }, eventId: 2 });
+  }
+  if (url.pathname === '/api/tasks/TASK-PATCH-BLOCKER/unblock-transient' && init.method === 'POST') {
+    return Response.json({ task: { id: 'TASK-PATCH-BLOCKER', status: 'READY' }, eventId: 6 });
+  }
+  if (url.pathname === '/api/tasks/TASK-SUBMISSION-SAFETY/unblock-transient' && init.method === 'POST') {
+    return Response.json({ task: { id: 'TASK-SUBMISSION-SAFETY', status: 'READY' }, eventId: 7 });
+  }
+  if (url.pathname === '/api/tasks/TASK-CHECKPOINT-SAFETY/unblock-transient' && init.method === 'POST') {
+    return Response.json({ task: { id: 'TASK-CHECKPOINT-SAFETY', status: 'READY' }, eventId: 8 });
   }
   return Response.json({ error: { code: 'NOT_FOUND', message: 'not found' } }, { status: 404 });
 };
@@ -44,7 +82,8 @@ try {
   const definitions = controlPlaneToolDefinitions({
     baseUrl: 'http://127.0.0.1:4317',
     workerId: 'coordinator-contract',
-    token: 'control-plane-contract-smoke-token'
+    token: 'control-plane-contract-smoke-token',
+    allowedRoots: [safetySubmissionWorktree]
   });
   const taskCreate = definitions.find((definition) => definition.name === 'task_create');
   const taskSubmitForReview = definitions.find((definition) => definition.name === 'task_submit_for_review');
@@ -99,6 +138,69 @@ try {
   assert.ok(unblockMutation, 'typed Change Submission contract failure must be resumed automatically');
   assert.match(JSON.parse(String(unblockMutation.body)).evidenceHash, /^sha256:[a-f0-9]{64}$/u);
 
+  tasksPayload = {
+    tasks: [{
+      id: 'TASK-PATCH-BLOCKER',
+      status: 'BLOCKED',
+      requiredRole: 'frontend',
+      checkpoint: {
+        blockerKind: 'TRANSIENT',
+        blockedReason: 'CodexPro source mutation blocker: apply_patch rejected a bounded patch with Patch must include at least one file path.'
+      }
+    }]
+  };
+  const patchResumed = await unblockTransient.handler({ taskId: 'TASK-PATCH-BLOCKER' });
+  assert.equal(patchResumed.structuredContent.task.status, 'READY');
+  const patchUnblockMutation = requests.find((request) => request.pathname === '/api/tasks/TASK-PATCH-BLOCKER/unblock-transient');
+  assert.ok(patchUnblockMutation, 'the installed patch envelope contract must resume a source-mutation tool blocker');
+  const patchUnblockBody = JSON.parse(String(patchUnblockMutation.body));
+  assert.match(patchUnblockBody.evidenceHash, /^sha256:[a-f0-9]{64}$/u);
+  assert.match(patchUnblockBody.note, /patch envelope contract v1/u);
+
+  overviewPayload = {
+    workers: [
+      { id: 'coordinator-contract', role: 'coordinator' },
+      { id: 'backend-contract', role: 'backend', worktreePath: safetySubmissionWorktree }
+    ]
+  };
+  tasksPayload = {
+    tasks: [{
+      id: 'TASK-SUBMISSION-SAFETY',
+      status: 'BLOCKED',
+      requiredRole: 'backend',
+      checkpoint: {
+        blockerKind: 'TRANSIENT',
+        blockedReason: 'OpenAI safety layer blocked the task_submit_for_review tool call after implementation, tests, checkpoint, and commit completed successfully.'
+      }
+    }]
+  };
+  const safetySubmissionResumed = await unblockTransient.handler({ taskId: 'TASK-SUBMISSION-SAFETY' });
+  assert.equal(safetySubmissionResumed.structuredContent.task.status, 'READY');
+  const safetySubmissionMutation = requests.find((request) => request.pathname === '/api/tasks/TASK-SUBMISSION-SAFETY/unblock-transient');
+  assert.ok(safetySubmissionMutation, 'a committed safety-layer-blocked submission must be resumed automatically');
+  const safetySubmissionBody = JSON.parse(String(safetySubmissionMutation.body));
+  assert.match(safetySubmissionBody.evidenceHash, /^sha256:[a-f0-9]{64}$/u);
+  assert.match(safetySubmissionBody.note, /verified clean committed HEAD [a-f0-9]{40}/u);
+
+  tasksPayload = {
+    tasks: [{
+      id: 'TASK-CHECKPOINT-SAFETY',
+      status: 'BLOCKED',
+      requiredRole: 'backend',
+      checkpoint: {
+        blockerKind: 'TRANSIENT',
+        blockedReason: 'CodexPro task_checkpoint calls were blocked by the OpenAI safety layer after implementation, tests, and commit completed successfully.'
+      }
+    }]
+  };
+  const safetyCheckpointResumed = await unblockTransient.handler({ taskId: 'TASK-CHECKPOINT-SAFETY' });
+  assert.equal(safetyCheckpointResumed.structuredContent.task.status, 'READY');
+  const safetyCheckpointMutation = requests.find((request) => request.pathname === '/api/tasks/TASK-CHECKPOINT-SAFETY/unblock-transient');
+  assert.ok(safetyCheckpointMutation, 'a committed safety-layer-blocked checkpoint must be resumed automatically');
+  const safetyCheckpointBody = JSON.parse(String(safetyCheckpointMutation.body));
+  assert.match(safetyCheckpointBody.evidenceHash, /^sha256:[a-f0-9]{64}$/u);
+  assert.match(safetyCheckpointBody.note, /safety blocked task_checkpoint/u);
+
   overviewPayload = {
     workers: [{ id: 'reviewer-contract', role: 'reviewer_qa', sessionEpoch: 1 }],
     governance: {
@@ -136,11 +238,38 @@ try {
   });
   const workerCycleStart = reviewerDefinitions.find((definition) => definition.name === 'worker_cycle_start');
   const reviewCiCheckRecord = reviewerDefinitions.find((definition) => definition.name === 'review_ci_check_record');
+  const reviewFindingCreate = reviewerDefinitions.find((definition) => definition.name === 'review_finding_create');
+  const reviewFindingUpdate = reviewerDefinitions.find((definition) => definition.name === 'review_finding_update');
+  const reviewChangesRequest = reviewerDefinitions.find((definition) => definition.name === 'review_changes_request');
   assert.ok(workerCycleStart, 'worker_cycle_start must be exposed');
   assert.ok(reviewCiCheckRecord, 'review_ci_check_record must be exposed');
+  assert.ok(reviewFindingCreate, 'review_finding_create must be exposed');
+  assert.ok(reviewFindingUpdate, 'review_finding_update must be exposed');
+  assert.ok(reviewChangesRequest, 'review_changes_request must be exposed');
   const reviewCycle = await workerCycleStart.handler({});
   assert.equal(reviewCycle.structuredContent.state, 'REVIEW_READY');
   assert.equal(reviewCycle.structuredContent.reviewTasks[0].id, 'TASK-BACKEND-IN-REVIEW');
+  assert.match(reviewCycle.structuredContent.nextAction, /create a durable review finding and request changes/u);
+  assert.match(reviewCycle.structuredContent.nextAction, /remediation child tasks/u);
+  const createdFinding = await reviewFindingCreate.handler({
+    taskId: 'TASK-BACKEND-IN-REVIEW',
+    severity: 'HIGH',
+    category: 'contract',
+    title: 'Contract finding',
+    detail: 'The connector must preserve a durable review finding.'
+  });
+  assert.equal(createdFinding.structuredContent.finding.id, 'FINDING-CONTRACT');
+  const requestedChanges = await reviewChangesRequest.handler({
+    taskId: 'TASK-BACKEND-IN-REVIEW',
+    note: 'Address FINDING-CONTRACT in a fresh fenced attempt.'
+  });
+  assert.equal(requestedChanges.structuredContent.task.status, 'READY');
+  const updatedFinding = await reviewFindingUpdate.handler({
+    findingId: 'FINDING-CONTRACT',
+    status: 'RESOLVED',
+    resolutionNote: 'Verified by the contract smoke.'
+  });
+  assert.equal(updatedFinding.structuredContent.finding.status, 'RESOLVED');
   assert.equal(
     requests.some((request) => request.pathname === '/api/tasks/TASK-REVIEW-INTEGRATION/claim'),
     false,
@@ -149,4 +278,5 @@ try {
   console.log('control plane contract smoke passed');
 } finally {
   globalThis.fetch = originalFetch;
+  rmSync(safetySubmissionWorktree, { recursive: true, force: true });
 }
