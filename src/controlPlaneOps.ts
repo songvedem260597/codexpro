@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
+import { createServer } from "node:net";
 import { relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -109,6 +110,132 @@ function isInside(root: string, candidate: string): boolean {
   return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !path.startsWith(sep));
 }
 
+function stableBlockerEvidenceValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableBlockerEvidenceValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => [key, stableBlockerEvidenceValue(nested)]));
+  }
+  return value;
+}
+
+function blockerEvidenceHash(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(stableBlockerEvidenceValue(value))).digest("hex")}`;
+}
+
+function runtimeSmokeCommandFromReason(reason: string): { command: string; relativeCwd: string } | null {
+  const candidates = [...reason.matchAll(/`([^`]+)`/gu)].map((match) => String(match[1] ?? "").trim());
+  for (const command of candidates) {
+    const match = command.match(/^cd\s+([^\s;&|]+)\s*&&\s*node\s+scripts\/dev-server\.mjs$/u);
+    if (!match) continue;
+    const relativeCwd = String(match[1] ?? "");
+    if (!isBoundedReviewDirectory(relativeCwd)) continue;
+    return { command, relativeCwd };
+  }
+  return null;
+}
+
+async function reserveLoopbackPort(): Promise<number> {
+  return new Promise((resolvePort, reject) => {
+    const server = createServer();
+    server.unref();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = address && typeof address === "object" ? Number(address.port) : 0;
+      server.close((error) => {
+        if (error) reject(error);
+        else if (!Number.isInteger(port) || port <= 0) reject(new Error("RUNTIME_SMOKE_PORT_UNAVAILABLE"));
+        else resolvePort(port);
+      });
+    });
+  });
+}
+
+async function runBoundedRuntimeSmoke(
+  worktreePath: string,
+  taskId: string,
+  headSha: string,
+  reason: string,
+): Promise<Record<string, unknown>> {
+  const declaration = runtimeSmokeCommandFromReason(reason);
+  if (!declaration) {
+    throw new Error("RUNTIME_SMOKE_COMMAND_UNSUPPORTED: expected a bounded `cd <package> && node scripts/dev-server.mjs` command");
+  }
+  const cwd = resolve(worktreePath, declaration.relativeCwd);
+  if (!isInside(worktreePath, cwd)) throw new Error(`RUNTIME_SMOKE_CWD_OUTSIDE_WORKTREE: ${cwd}`);
+  const scriptPath = resolve(cwd, "scripts/dev-server.mjs");
+  if (!isInside(cwd, scriptPath)) throw new Error(`RUNTIME_SMOKE_SCRIPT_OUTSIDE_PACKAGE: ${scriptPath}`);
+  const scriptStat = await stat(scriptPath).catch(() => null);
+  if (!scriptStat?.isFile()) throw new Error(`RUNTIME_SMOKE_SCRIPT_MISSING: ${scriptPath}`);
+
+  const port = await reserveLoopbackPort();
+  const startedAt = Date.now();
+  const child = spawn(process.execPath, ["scripts/dev-server.mjs"], {
+    cwd,
+    env: { ...process.env, PORT: String(port), CI: "1", NO_COLOR: "1" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let exited = false;
+  let exitCode: number | null = null;
+  let spawnError = "";
+  let output = "";
+  const appendOutput = (chunk: unknown) => {
+    output = `${output}${String(chunk ?? "")}`.slice(-4_000);
+  };
+  child.stdout.on("data", appendOutput);
+  child.stderr.on("data", appendOutput);
+  child.once("error", (error) => { spawnError = String(error?.message ?? error); });
+  child.once("exit", (code) => {
+    exited = true;
+    exitCode = code;
+  });
+
+  let httpStatus = 0;
+  let contentType = "";
+  try {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      if (spawnError) throw new Error(`RUNTIME_SMOKE_PROCESS_ERROR: ${spawnError}`);
+      if (exited) throw new Error(`RUNTIME_SMOKE_PROCESS_EXITED: code=${String(exitCode)} ${output}`.trim());
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1_000) });
+        httpStatus = response.status;
+        contentType = response.headers.get("content-type") ?? "";
+        await response.arrayBuffer();
+        if (httpStatus >= 200 && httpStatus < 400) break;
+      } catch {
+        // The bounded server may need a short startup window before the first successful probe.
+      }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
+    }
+    if (httpStatus < 200 || httpStatus >= 400) {
+      throw new Error(`RUNTIME_SMOKE_HTTP_FAILED: no successful loopback response within 10s. ${output}`.trim());
+    }
+    const durationMs = Date.now() - startedAt;
+    return {
+      kind: "CODEXPRO_RUNTIME_SMOKE_VERIFIED",
+      taskId,
+      command: declaration.command,
+      status: "PASS",
+      summary: `CodexPro independently started the committed application on an isolated loopback port and received HTTP ${httpStatus}${contentType ? ` (${contentType})` : ""} from /.`,
+      durationMs,
+      httpStatus,
+      headSha,
+      observedAt: new Date().toISOString(),
+    };
+  } finally {
+    if (!exited) child.kill("SIGTERM");
+    const waitForExit = async () => {
+      const deadline = Date.now() + 1_500;
+      while (!exited && Date.now() < deadline) await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    };
+    await waitForExit();
+    if (!exited) child.kill("SIGKILL");
+  }
+}
+
 function isChangeSubmissionContractBlocker(reason: string): boolean {
   const mentionsSubmissionTool = reason.includes("task_submit_for_review");
   const mentionsEvidenceContract = reason.includes("evidence artifact schema")
@@ -209,16 +336,24 @@ async function resumeVerifiedTransientBlocker(
     if (!/^[a-f0-9]{40}$/u.test(headSha) || String(statusOutput).trim()) {
       throw new Error("SUBMISSION_RETRY_EVIDENCE_INVALID: implementation worktree must have a clean committed HEAD");
     }
-    evidence = {
-      kind: isRuntimeSmokeSafetyFailure ? "CODEXPRO_RUNTIME_SMOKE_RETRY_VERIFIED" : "CODEXPRO_DURABLE_TOOL_RETRY_VERIFIED",
-      taskId: String(task.id),
-      blockedTool: isRuntimeSmokeSafetyFailure ? "runtime_smoke" : (reason.includes("task_checkpoint") ? "task_checkpoint" : "task_submit_for_review"),
-      worktreePath,
-      allowedRoot,
-      headSha,
-      reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
-      verifiedAt: new Date().toISOString()
-    };
+    const checkpointCommit = String(task?.checkpoint?.commitSha ?? "").trim().toLowerCase();
+    if (checkpointCommit && checkpointCommit !== headSha) {
+      throw new Error(`RUNTIME_EVIDENCE_HEAD_MISMATCH: checkpoint=${checkpointCommit} worktree=${headSha}`);
+    }
+    if (isRuntimeSmokeSafetyFailure) {
+      evidence = await runBoundedRuntimeSmoke(worktreePath, String(task.id), headSha, reason);
+    } else {
+      evidence = {
+        kind: "CODEXPRO_DURABLE_TOOL_RETRY_VERIFIED",
+        taskId: String(task.id),
+        blockedTool: reason.includes("task_checkpoint") ? "task_checkpoint" : "task_submit_for_review",
+        worktreePath,
+        allowedRoot,
+        headSha,
+        reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
+        verifiedAt: new Date().toISOString()
+      };
+    }
   } else if (isCorrelatedConnectorFailure && task?.checkpoint?.blockedByRunReceipt) {
     evidence = {
       kind: "CODEXPRO_CORRELATED_CONNECTOR_RETRY",
@@ -230,12 +365,14 @@ async function resumeVerifiedTransientBlocker(
   } else {
     throw new Error("TRANSIENT_EVIDENCE_UNAVAILABLE: this blocker needs a different objective health check");
   }
-  const evidenceHash = `sha256:${createHash("sha256").update(JSON.stringify(evidence)).digest("hex")}`;
+  const evidenceHash = blockerEvidenceHash(evidence);
+  const isVerifiedRuntimeSmoke = evidence.kind === "CODEXPRO_RUNTIME_SMOKE_VERIFIED";
   return request(context, `/api/tasks/${encodeURIComponent(String(task.id))}/unblock-transient`, {
     method: "POST",
     body: JSON.stringify({
       coordinatorWorkerId: workerId,
       evidenceHash,
+      ...(isVerifiedRuntimeSmoke ? { verifiedEvidence: evidence } : {}),
       note: note?.trim() || (evidence.kind === "CODEXPRO_WORKTREE_ACCESS_VERIFIED"
         ? `CodexPro MCP verified worktree access at ${String(evidence.worktreePath)}.`
         : evidence.kind === "CODEXPRO_CHANGE_SUBMISSION_CONTRACT_VERIFIED"
@@ -244,8 +381,8 @@ async function resumeVerifiedTransientBlocker(
             ? `CodexPro MCP verified patch envelope contract v${CODEX_PATCH_ENVELOPE_CONTRACT_VERSION} and scheduled a clean retry.`
           : evidence.kind === "CODEXPRO_DURABLE_TOOL_RETRY_VERIFIED"
             ? `CodexPro MCP verified clean committed HEAD ${String(evidence.headSha)} after safety blocked ${String(evidence.blockedTool)} and scheduled a clean retry.`
-          : evidence.kind === "CODEXPRO_RUNTIME_SMOKE_RETRY_VERIFIED"
-            ? `CodexPro MCP verified clean committed HEAD ${String(evidence.headSha)} after the required runtime smoke was blocked before execution; smoke remains required and the Worker must retry it.`
+          : isVerifiedRuntimeSmoke
+            ? `CodexPro MCP independently ran ${String(evidence.command)} at clean committed HEAD ${String(evidence.headSha)} and verified HTTP ${String(evidence.httpStatus)}; the required runtime smoke now has objective PASS evidence.`
           : `CodexPro MCP verified a correlated transient connector failure from receipt ${String(evidence.blockedByRunReceipt)} and scheduled a clean retry.`)
     })
   });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boundedReviewCommand, controlPlaneToolDefinitions } from '../dist/controlPlaneOps.js';
@@ -30,17 +30,27 @@ for (const unsafeCommand of [
 const requests = [];
 const safetySubmissionWorktree = realpathSync(mkdtempSync(join(tmpdir(), 'codexpro-submission-safety-')));
 writeFileSync(join(safetySubmissionWorktree, 'server.js'), 'console.log("ready");\n');
+mkdirSync(join(safetySubmissionWorktree, 'client', 'scripts'), { recursive: true });
+writeFileSync(join(safetySubmissionWorktree, 'client', 'index.html'), '<!doctype html><title>runtime smoke fixture</title>\n');
+writeFileSync(
+  join(safetySubmissionWorktree, 'client', 'scripts', 'dev-server.mjs'),
+  'import http from "node:http"; const port=Number(process.env.PORT); http.createServer((_req,res)=>{res.writeHead(200,{"content-type":"text/html; charset=utf-8"});res.end("fixture");}).listen(port,"127.0.0.1");\n'
+);
 execFileSync('git', ['init', '-b', 'main'], { cwd: safetySubmissionWorktree, stdio: 'ignore' });
-execFileSync('git', ['add', 'server.js'], { cwd: safetySubmissionWorktree });
+execFileSync('git', ['add', '.'], { cwd: safetySubmissionWorktree });
 execFileSync('git', ['-c', 'user.name=CodexPro Contract', '-c', 'user.email=contract@codexpro.local', 'commit', '-m', 'fixture'], {
   cwd: safetySubmissionWorktree,
   stdio: 'ignore'
 });
+const safetySubmissionHead = String(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: safetySubmissionWorktree })).trim();
 let overviewPayload = { workers: [{ id: 'coordinator-contract', role: 'coordinator' }] };
 let tasksPayload = { tasks: [] };
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input));
+  if (url.hostname === '127.0.0.1' && url.port && url.port !== '4317') {
+    return originalFetch(input, init);
+  }
   requests.push({ pathname: url.pathname, method: init.method ?? 'GET', body: init.body ?? '' });
   if (url.pathname === '/api/overview') {
     return Response.json(overviewPayload);
@@ -212,6 +222,11 @@ try {
       requiredRole: 'frontend',
       checkpoint: {
         blockerKind: 'TRANSIENT',
+        commitSha: safetySubmissionHead,
+        tests: [
+          { command: 'cd client && npm test', status: 'PASS', summary: 'Client tests passed.' },
+          { command: 'cd client && node scripts/dev-server.mjs', status: 'BLOCKED', summary: 'OpenAI safety checker blocked the smoke before execution.' }
+        ],
         blockedReason: 'Implementation and regression tests are complete and committed. Required HTTP/runtime smoke could not be executed because the tool invocation `cd client && node scripts/dev-server.mjs` was blocked by the OpenAI safety checker before execution.'
       }
     }]
@@ -219,10 +234,17 @@ try {
   const runtimeSmokeResumed = await unblockTransient.handler({ taskId: 'TASK-RUNTIME-SMOKE-SAFETY' });
   assert.equal(runtimeSmokeResumed.structuredContent.task.status, 'READY');
   const runtimeSmokeMutation = requests.find((request) => request.pathname === '/api/tasks/TASK-RUNTIME-SMOKE-SAFETY/unblock-transient');
-  assert.ok(runtimeSmokeMutation, 'a committed safety-checker-blocked runtime smoke must be resumed for a real smoke retry');
+  assert.ok(runtimeSmokeMutation, 'a committed safety-checker-blocked runtime smoke must be resumed only after an objective smoke probe');
   const runtimeSmokeBody = JSON.parse(String(runtimeSmokeMutation.body));
   assert.match(runtimeSmokeBody.evidenceHash, /^sha256:[a-f0-9]{64}$/u);
-  assert.match(runtimeSmokeBody.note, /smoke remains required and the Worker must retry it/u);
+  assert.equal(runtimeSmokeBody.verifiedEvidence.kind, 'CODEXPRO_RUNTIME_SMOKE_VERIFIED');
+  assert.equal(runtimeSmokeBody.verifiedEvidence.taskId, 'TASK-RUNTIME-SMOKE-SAFETY');
+  assert.equal(runtimeSmokeBody.verifiedEvidence.command, 'cd client && node scripts/dev-server.mjs');
+  assert.equal(runtimeSmokeBody.verifiedEvidence.status, 'PASS');
+  assert.equal(runtimeSmokeBody.verifiedEvidence.httpStatus, 200);
+  assert.equal(runtimeSmokeBody.verifiedEvidence.headSha, safetySubmissionHead);
+  assert.match(runtimeSmokeBody.verifiedEvidence.summary, /received HTTP 200/u);
+  assert.match(runtimeSmokeBody.note, /required runtime smoke now has objective PASS evidence/u);
 
   overviewPayload = {
     workers: [{ id: 'reviewer-contract', role: 'reviewer_qa', sessionEpoch: 1 }],
