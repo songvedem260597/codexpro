@@ -75,6 +75,9 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname === '/api/tasks/TASK-CHECKPOINT-SAFETY/unblock-transient' && init.method === 'POST') {
     return Response.json({ task: { id: 'TASK-CHECKPOINT-SAFETY', status: 'READY' }, eventId: 8 });
   }
+  if (url.pathname === '/api/tasks/TASK-RUNTIME-SMOKE-SAFETY/unblock-transient' && init.method === 'POST') {
+    return Response.json({ task: { id: 'TASK-RUNTIME-SMOKE-SAFETY', status: 'READY' }, eventId: 9 });
+  }
   return Response.json({ error: { code: 'NOT_FOUND', message: 'not found' } }, { status: 404 });
 };
 
@@ -160,7 +163,8 @@ try {
   overviewPayload = {
     workers: [
       { id: 'coordinator-contract', role: 'coordinator' },
-      { id: 'backend-contract', role: 'backend', worktreePath: safetySubmissionWorktree }
+      { id: 'backend-contract', role: 'backend', worktreePath: safetySubmissionWorktree },
+      { id: 'frontend-contract', role: 'frontend', worktreePath: safetySubmissionWorktree }
     ]
   };
   tasksPayload = {
@@ -200,6 +204,25 @@ try {
   const safetyCheckpointBody = JSON.parse(String(safetyCheckpointMutation.body));
   assert.match(safetyCheckpointBody.evidenceHash, /^sha256:[a-f0-9]{64}$/u);
   assert.match(safetyCheckpointBody.note, /safety blocked task_checkpoint/u);
+
+  tasksPayload = {
+    tasks: [{
+      id: 'TASK-RUNTIME-SMOKE-SAFETY',
+      status: 'BLOCKED',
+      requiredRole: 'frontend',
+      checkpoint: {
+        blockerKind: 'TRANSIENT',
+        blockedReason: 'Implementation and regression tests are complete and committed. Required HTTP/runtime smoke could not be executed because the tool invocation `cd client && node scripts/dev-server.mjs` was blocked by the OpenAI safety checker before execution.'
+      }
+    }]
+  };
+  const runtimeSmokeResumed = await unblockTransient.handler({ taskId: 'TASK-RUNTIME-SMOKE-SAFETY' });
+  assert.equal(runtimeSmokeResumed.structuredContent.task.status, 'READY');
+  const runtimeSmokeMutation = requests.find((request) => request.pathname === '/api/tasks/TASK-RUNTIME-SMOKE-SAFETY/unblock-transient');
+  assert.ok(runtimeSmokeMutation, 'a committed safety-checker-blocked runtime smoke must be resumed for a real smoke retry');
+  const runtimeSmokeBody = JSON.parse(String(runtimeSmokeMutation.body));
+  assert.match(runtimeSmokeBody.evidenceHash, /^sha256:[a-f0-9]{64}$/u);
+  assert.match(runtimeSmokeBody.note, /smoke remains required and the Worker must retry it/u);
 
   overviewPayload = {
     workers: [{ id: 'reviewer-contract', role: 'reviewer_qa', sessionEpoch: 1 }],

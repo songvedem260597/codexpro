@@ -141,6 +141,7 @@ async function resumeVerifiedTransientBlocker(
     && (reason.includes("outside allowed roots") || reason.includes("workspace access rejects"));
   const isCorrelatedConnectorFailure = reason.includes("openai safety gateway")
     || reason.includes("openai safety layer")
+    || reason.includes("openai safety checker")
     || reason.includes("safety gateway during codexpro")
     || reason.includes("safety mechanism blocked")
     || reason.includes("safety layer blocked")
@@ -149,6 +150,9 @@ async function resumeVerifiedTransientBlocker(
     || reason.includes("external service error");
   const isDurableImplementationToolSafetyFailure = isCorrelatedConnectorFailure
     && (reason.includes("task_submit_for_review") || reason.includes("task_checkpoint"));
+  const isRuntimeSmokeSafetyFailure = isCorrelatedConnectorFailure
+    && (reason.includes("runtime smoke") || reason.includes("http/runtime smoke") || reason.includes("api/runtime smoke"))
+    && (reason.includes("blocked") || reason.includes("could not be executed") || reason.includes("could not be run"));
   const isSubmissionContractFailure = isChangeSubmissionContractBlocker(reason);
   const isSourceMutationContractFailure = isSourceMutationContractBlocker(reason);
   let evidence: Record<string, unknown>;
@@ -185,7 +189,7 @@ async function resumeVerifiedTransientBlocker(
       reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
       verifiedAt: new Date().toISOString()
     };
-  } else if (isDurableImplementationToolSafetyFailure) {
+  } else if (isDurableImplementationToolSafetyFailure || isRuntimeSmokeSafetyFailure) {
     const implementationWorker = overview.workers?.find((candidate: any) => candidate.role === task.requiredRole);
     if (!implementationWorker?.worktreePath) throw new Error("WORKTREE_BINDING_MISSING: no worktree is bound to the blocked role");
     const worktreePath = await realpath(String(implementationWorker.worktreePath));
@@ -206,9 +210,9 @@ async function resumeVerifiedTransientBlocker(
       throw new Error("SUBMISSION_RETRY_EVIDENCE_INVALID: implementation worktree must have a clean committed HEAD");
     }
     evidence = {
-      kind: "CODEXPRO_DURABLE_TOOL_RETRY_VERIFIED",
+      kind: isRuntimeSmokeSafetyFailure ? "CODEXPRO_RUNTIME_SMOKE_RETRY_VERIFIED" : "CODEXPRO_DURABLE_TOOL_RETRY_VERIFIED",
       taskId: String(task.id),
-      blockedTool: reason.includes("task_checkpoint") ? "task_checkpoint" : "task_submit_for_review",
+      blockedTool: isRuntimeSmokeSafetyFailure ? "runtime_smoke" : (reason.includes("task_checkpoint") ? "task_checkpoint" : "task_submit_for_review"),
       worktreePath,
       allowedRoot,
       headSha,
@@ -240,6 +244,8 @@ async function resumeVerifiedTransientBlocker(
             ? `CodexPro MCP verified patch envelope contract v${CODEX_PATCH_ENVELOPE_CONTRACT_VERSION} and scheduled a clean retry.`
           : evidence.kind === "CODEXPRO_DURABLE_TOOL_RETRY_VERIFIED"
             ? `CodexPro MCP verified clean committed HEAD ${String(evidence.headSha)} after safety blocked ${String(evidence.blockedTool)} and scheduled a clean retry.`
+          : evidence.kind === "CODEXPRO_RUNTIME_SMOKE_RETRY_VERIFIED"
+            ? `CodexPro MCP verified clean committed HEAD ${String(evidence.headSha)} after the required runtime smoke was blocked before execution; smoke remains required and the Worker must retry it.`
           : `CodexPro MCP verified a correlated transient connector failure from receipt ${String(evidence.blockedByRunReceipt)} and scheduled a clean retry.`)
     })
   });
