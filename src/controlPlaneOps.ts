@@ -395,7 +395,7 @@ async function runIndependentReviewCi(
     method: "POST",
     body: JSON.stringify({
       provider: "codexpro-reviewer-runner",
-      externalRunId: `review-${String(task.id)}-${commitSha.slice(0, 12)}`,
+      externalRunId: `review-${String(task.id)}-${commitSha.slice(0, 12)}-${randomUUID()}`,
       name: command,
       headSha: commitSha,
       status,

@@ -1567,6 +1567,28 @@ async function main(): Promise<void> {
   const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const workerIdPattern = /^[a-z0-9][a-z0-9_-]{0,79}$/i;
 
+  function logMcpLifecycle(event: string, fields: Record<string, unknown> = {}): void {
+    console.error(`[CodexProMCP] ${JSON.stringify({
+      at: new Date().toISOString(),
+      event,
+      ...fields
+    })}`);
+  }
+
+  function requestClientInfo(req: Request): { clientName?: string; clientVersion?: string } {
+    const params = req.body && typeof req.body === "object" ? (req.body as { params?: unknown }).params : undefined;
+    const clientInfo = params && typeof params === "object"
+      ? (params as { clientInfo?: unknown }).clientInfo
+      : undefined;
+    if (!clientInfo || typeof clientInfo !== "object") return {};
+    const rawName = (clientInfo as { name?: unknown }).name;
+    const rawVersion = (clientInfo as { version?: unknown }).version;
+    return {
+      ...(typeof rawName === "string" ? { clientName: rawName.slice(0, 120) } : {}),
+      ...(typeof rawVersion === "string" ? { clientVersion: rawVersion.slice(0, 80) } : {})
+    };
+  }
+
   function requestSessionId(req: Request): string | undefined {
     const value = req.headers["mcp-session-id"];
     return Array.isArray(value) ? value[0] : value;
@@ -1581,9 +1603,15 @@ async function main(): Promise<void> {
     return value;
   }
 
-  function sendSessionError(res: Response, sessionId: string | undefined): void {
+  function sendSessionError(res: Response, sessionId: string | undefined, workerId: string | null): void {
     const missing = !sessionId;
     const malformed = Boolean(sessionId && !sessionIdPattern.test(sessionId));
+    logMcpLifecycle("session_error", {
+      reason: missing ? "missing_session_id" : malformed ? "malformed_session_id" : "session_not_found",
+      workerId,
+      sessionId: sessionId?.slice(0, 128) ?? null,
+      activeSessions: transports.size
+    });
     res.status(missing || malformed ? 400 : 404).json({
       jsonrpc: "2.0",
       error: missing
@@ -1595,17 +1623,25 @@ async function main(): Promise<void> {
     });
   }
 
-  function closeTransport(record: TransportRecord): void {
+  function closeTransport(sessionId: string, record: TransportRecord, reason: string): void {
+    logMcpLifecycle("session_evicted", {
+      reason,
+      workerId: record.workerId,
+      sessionId,
+      idleMs: Math.max(0, Date.now() - record.lastSeenAt),
+      lifetimeMs: Math.max(0, Date.now() - record.createdAt),
+      activeSessions: transports.size
+    });
     void record.transport.close?.();
   }
 
-  function evictOldestTransport(predicate: (record: TransportRecord) => boolean): boolean {
+  function evictOldestTransport(predicate: (record: TransportRecord) => boolean, reason: string): boolean {
     const oldest = [...transports.entries()]
       .filter(([, record]) => predicate(record))
       .sort((left, right) => left[1].lastSeenAt - right[1].lastSeenAt)[0];
     if (!oldest) return false;
     transports.delete(oldest[0]);
-    closeTransport(oldest[1]);
+    closeTransport(oldest[0], oldest[1], reason);
     return true;
   }
 
@@ -1615,23 +1651,23 @@ async function main(): Promise<void> {
       const ttlMs = record.workerId ? config.httpSessionTtlMs : config.unattributedHttpSessionTtlMs;
       if (now - record.lastSeenAt > ttlMs) {
         transports.delete(sessionId);
-        closeTransport(record);
+        closeTransport(sessionId, record, "ttl_expired");
       }
     }
     while ([...transports.values()].filter((record) => !record.workerId).length > config.maxUnattributedHttpSessions) {
-      if (!evictOldestTransport((record) => !record.workerId)) break;
+      if (!evictOldestTransport((record) => !record.workerId, "unattributed_capacity")) break;
     }
     const attributedWorkerIds = new Set(
       [...transports.values()].map((record) => record.workerId).filter((workerId): workerId is string => Boolean(workerId))
     );
     for (const workerId of attributedWorkerIds) {
       while ([...transports.values()].filter((record) => record.workerId === workerId).length > config.maxHttpSessionsPerWorker) {
-        if (!evictOldestTransport((record) => record.workerId === workerId)) break;
+        if (!evictOldestTransport((record) => record.workerId === workerId, "worker_capacity")) break;
       }
     }
     while (transports.size > config.maxHttpSessions) {
-      if (evictOldestTransport((record) => !record.workerId)) continue;
-      if (!evictOldestTransport(() => true)) break;
+      if (evictOldestTransport((record) => !record.workerId, "global_capacity_unattributed_first")) continue;
+      if (!evictOldestTransport(() => true, "global_capacity")) break;
     }
     for (const [workerId, activity] of workerActivity) {
       if (now - activity.lastSeenAt > config.httpSessionTtlMs) workerActivity.delete(workerId);
@@ -1769,6 +1805,11 @@ async function main(): Promise<void> {
       if (existingTransport) {
         transport = existingTransport;
       } else if (!sessionId && isInitializeRequest(req.body)) {
+        logMcpLifecycle("initialize_received", {
+          workerId,
+          ...requestClientInfo(req),
+          activeSessions: transports.size
+        });
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
@@ -1782,24 +1823,43 @@ async function main(): Promise<void> {
             });
             recordWorkerActivity(workerId, timestamp, true);
             pruneTransports();
+            logMcpLifecycle("session_initialized", {
+              workerId,
+              sessionId: newSessionId,
+              retained: transports.has(newSessionId),
+              activeSessions: transports.size
+            });
           }
         } as any);
 
         (transport as any).onclose = () => {
           const closedSessionId = (transport as any).sessionId;
-          if (closedSessionId) transports.delete(closedSessionId);
+          if (!closedSessionId) return;
+          const record = transports.get(closedSessionId);
+          if (!record) return;
+          transports.delete(closedSessionId);
+          logMcpLifecycle("session_closed", {
+            reason: "transport_closed",
+            workerId: record.workerId,
+            sessionId: closedSessionId,
+            lifetimeMs: Math.max(0, Date.now() - record.createdAt),
+            activeSessions: transports.size
+          });
         };
 
         const server = createCodexProServer(config, { workerId });
         await server.connect(transport);
       } else {
-        sendSessionError(res, sessionId);
+        sendSessionError(res, sessionId, workerId);
         return;
       }
 
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("codexpro_worker_id must")) {
+        logMcpLifecycle("worker_marker_error", {
+          workerId: typeof req.query.codexpro_worker_id === "string" ? req.query.codexpro_worker_id.slice(0, 128) : null
+        });
         res.status(400).json({
           jsonrpc: "2.0",
           error: { code: -32602, message: error.message },
@@ -1822,7 +1882,7 @@ async function main(): Promise<void> {
     const sessionId = requestSessionId(req);
     const transport = getTransport(sessionId);
     if (!transport) {
-      sendSessionError(res, sessionId);
+      sendSessionError(res, sessionId, null);
       return;
     }
     await transport.handleRequest(req, res);

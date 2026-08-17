@@ -382,6 +382,10 @@ const child = spawn('node', ['dist/http.js'], {
   },
   stdio: ['ignore', 'pipe', 'pipe']
 });
+let serverStderr = '';
+child.stderr.on('data', (chunk) => {
+  serverStderr += String(chunk);
+});
 
 try {
   await waitForListening(child);
@@ -740,6 +744,38 @@ try {
   ) {
     throw new Error(`unattributed sessions exceeded their dedicated capacity: ${JSON.stringify(boundedHealth.mcpSessions)}`);
   }
+
+  const missingSessionId = '00000000-0000-4000-8000-000000000000';
+  const missingSession = await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+      'mcp-session-id': missingSessionId
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 'missing-session', method: 'ping' })
+  });
+  const missingSessionBody = await missingSession.json();
+  if (missingSession.status !== 404 || missingSessionBody.error?.code !== -32001) {
+    throw new Error(`expected unknown MCP session to return -32001, got ${missingSession.status} ${JSON.stringify(missingSessionBody)}`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  for (const expectedLog of [
+    '"event":"initialize_received"',
+    '"event":"session_initialized"',
+    '"event":"session_evicted"',
+    '"reason":"worker_capacity"',
+    '"event":"session_error"',
+    '"reason":"session_not_found"'
+  ]) {
+    if (!serverStderr.includes(expectedLog)) {
+      throw new Error(`MCP lifecycle log missing ${expectedLog}:\n${serverStderr}`);
+    }
+  }
+  if (serverStderr.includes(token)) {
+    throw new Error('MCP lifecycle log leaked the HTTP token');
+  }
+
   const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
   for (const visualTool of queryToolNames) {
     if (hasWidgetMeta(queryTools, visualTool, toolCardUri) || hasToolCardStatusMeta(queryTools, visualTool)) {
