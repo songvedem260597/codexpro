@@ -1,0 +1,48 @@
+{
+  "name": "chatgpt-api",
+  "description": "CodexPro HTTP REST and MCP service",
+  "billing": {
+    "deploymentPlan": "nf-compute-10"
+  },
+  "deployment": {
+    "instances": 1,
+    "buildpack": {
+      "configType": "customCommand",
+      "customCommand": "npm run start:http"
+    },
+    "storage": {
+      "ephemeralStorage": {
+        "storageSize": 1024
+      }
+    }
+  },
+  "ports": [
+    {
+      "name": "api",
+      "internalPort": 8787,
+      "public": true,
+      "protocol": "HTTP"
+    }
+  ],
+  "buildSource": "git",
+  "vcsData": {
+    "projectUrl": "https://github.com/songvedem260597/codexpro",
+    "projectType": "github",
+    "projectBranch": "feat/local-api-server"
+  },
+  "buildSettings": {
+    "buildpack": {
+      "builder": "HEROKU_24",
+      "buildContext": "/",
+      "useCache": false
+    }
+  },
+  "runtimeEnvironment": {
+    "HOST": "0.0.0.0",
+    "PORT": "8787",
+    "CODEXPRO_HTTP_TOKEN": "${fn.randomSecret(32)}",
+    "CODEXPRO_BASH_MODE": "safe",
+    "CODEXPRO_WRITE_MODE": "workspace",
+    "CODEXPRO_TOOL_MODE": "standard"
+  }
+}
