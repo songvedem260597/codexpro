@@ -124,6 +124,9 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname === '/api/tasks/TASK-PRECLAIM-SAFETY/unblock-transient' && init.method === 'POST') {
     return Response.json({ task: { id: 'TASK-PRECLAIM-SAFETY', status: 'READY' }, eventId: 10 });
   }
+  if (url.pathname === '/api/tasks/TASK-SCOPED-MUTATION-SAFETY/unblock-transient' && init.method === 'POST') {
+    return Response.json({ task: { id: 'TASK-SCOPED-MUTATION-SAFETY', status: 'READY' }, eventId: 11 });
+  }
   if (url.pathname === '/api/tasks/TASK-RUNTIME-SMOKE-SAFETY/unblock-transient' && init.method === 'POST') {
     return Response.json({ task: { id: 'TASK-RUNTIME-SMOKE-SAFETY', status: 'READY' }, eventId: 9 });
   }
@@ -279,6 +282,29 @@ try {
   assert.match(safetyPreclaimBody.evidenceHash, /^sha256:[a-f0-9]{64}$/u);
   assert.match(safetyPreclaimBody.note, /worktree is still clean at HEAD [a-f0-9]{40}/u);
   assert.match(safetyPreclaimBody.note, /fresh fenced retry/u);
+
+  writeFileSync(join(safetySubmissionWorktree, 'server.js'), 'console.log("partially updated");\n');
+  tasksPayload = {
+    tasks: [{
+      id: 'TASK-SCOPED-MUTATION-SAFETY',
+      status: 'BLOCKED',
+      requiredRole: 'frontend',
+      allowedPaths: ['server.js', 'test/control-plane.test.ts'],
+      checkpoint: {
+        blockerKind: 'TRANSIENT',
+        blockedReason: 'Required regression coverage in test/control-plane.test.ts was blocked by the OpenAI safety mechanism before mutation after a bounded source edit.'
+      }
+    }]
+  };
+  const scopedMutationResumed = await unblockTransient.handler({ taskId: 'TASK-SCOPED-MUTATION-SAFETY' });
+  assert.equal(scopedMutationResumed.structuredContent.task.status, 'READY');
+  const scopedMutation = requests.find((request) => request.pathname === '/api/tasks/TASK-SCOPED-MUTATION-SAFETY/unblock-transient');
+  assert.ok(scopedMutation, 'a safety-blocked pre-mutation retry must preserve partial work only when every dirty path stays inside task.allowedPaths');
+  const scopedMutationBody = JSON.parse(String(scopedMutation.body));
+  assert.match(scopedMutationBody.evidenceHash, /^sha256:[a-f0-9]{64}$/u);
+  assert.match(scopedMutationBody.note, /all 1 dirty worktree path\(s\) remain inside task\.allowedPaths/u);
+  assert.match(scopedMutationBody.note, /same-task retry/u);
+  execFileSync('git', ['checkout', '--', 'server.js'], { cwd: safetySubmissionWorktree });
 
   tasksPayload = {
     tasks: [{

@@ -280,6 +280,9 @@ async function resumeVerifiedTransientBlocker(
     && (reason.includes("task_submit_for_review") || reason.includes("task_checkpoint"));
   const isPreclaimToolSafetyFailure = isCorrelatedConnectorFailure
     && reason.includes("task_claim_or_resume");
+  const isScopedPreMutationSafetyFailure = isCorrelatedConnectorFailure
+    && reason.includes("before mutation")
+    && (reason.includes("regression") || reason.includes("test/") || reason.includes("source"));
   const isRuntimeSmokeSafetyFailure = isCorrelatedConnectorFailure
     && (reason.includes("runtime smoke") || reason.includes("http/runtime smoke") || reason.includes("api/runtime smoke"))
     && (reason.includes("blocked") || reason.includes("could not be executed") || reason.includes("could not be run"));
@@ -316,6 +319,41 @@ async function resumeVerifiedTransientBlocker(
       taskId: String(task.id),
       contractVersion: CODEX_PATCH_ENVELOPE_CONTRACT_VERSION,
       supportedFormats: ["unified-diff", "codex-begin-patch-envelope"],
+      reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
+      verifiedAt: new Date().toISOString()
+    };
+  } else if (isScopedPreMutationSafetyFailure) {
+    const implementationWorker = overview.workers?.find((candidate: any) => candidate.role === task.requiredRole);
+    if (!implementationWorker?.worktreePath) throw new Error("WORKTREE_BINDING_MISSING: no worktree is bound to the blocked role");
+    const worktreePath = await realpath(String(implementationWorker.worktreePath));
+    const allowedRoot = context.allowedRoots.find((root) => isInside(root, worktreePath));
+    if (!allowedRoot) throw new Error(`WORKTREE_OUTSIDE_ALLOWED_ROOTS: ${worktreePath}`);
+    const { stdout: headOutput } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+      cwd: worktreePath,
+      timeout: 15_000,
+      maxBuffer: 256_000
+    });
+    const { stdout: statusOutput } = await execFileAsync("git", ["status", "--porcelain"], {
+      cwd: worktreePath,
+      timeout: 15_000,
+      maxBuffer: 256_000
+    });
+    const headSha = String(headOutput).trim();
+    const changedPaths = String(statusOutput).split(/\r?\n/u).filter(Boolean).map((line) => {
+      const rawPath = line.slice(3).trim();
+      return rawPath.includes(" -> ") ? String(rawPath.split(" -> ").at(-1)) : rawPath;
+    });
+    const allowedPaths = new Set((Array.isArray(task?.allowedPaths) ? task.allowedPaths : []).map((value: unknown) => String(value)));
+    if (!/^[a-f0-9]{40}$/u.test(headSha) || changedPaths.length === 0 || changedPaths.some((path) => !allowedPaths.has(path))) {
+      throw new Error("SCOPED_MUTATION_RETRY_EVIDENCE_INVALID: dirty paths must be non-empty and fully contained in task.allowedPaths");
+    }
+    evidence = {
+      kind: "CODEXPRO_SCOPED_DIRTY_RETRY_VERIFIED",
+      taskId: String(task.id),
+      worktreePath,
+      allowedRoot,
+      headSha,
+      changedPaths,
       reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
       verifiedAt: new Date().toISOString()
     };
@@ -397,6 +435,8 @@ async function resumeVerifiedTransientBlocker(
             ? `CodexPro MCP verified clean committed HEAD ${String(evidence.headSha)} after safety blocked ${String(evidence.blockedTool)} and scheduled a clean retry.`
           : evidence.kind === "CODEXPRO_CLEAN_PRECLAIM_RETRY_VERIFIED"
             ? `CodexPro MCP verified the assigned worktree is still clean at HEAD ${String(evidence.headSha)} after safety blocked task_claim_or_resume before source mutation, and scheduled a fresh fenced retry.`
+          : evidence.kind === "CODEXPRO_SCOPED_DIRTY_RETRY_VERIFIED"
+            ? `CodexPro MCP verified all ${Array.isArray(evidence.changedPaths) ? evidence.changedPaths.length : 0} dirty worktree path(s) remain inside task.allowedPaths at HEAD ${String(evidence.headSha)} after a safety-blocked pre-mutation tool call, and scheduled a same-task retry.`
           : isVerifiedRuntimeSmoke
             ? `CodexPro MCP independently ran ${String(evidence.command)} at clean committed HEAD ${String(evidence.headSha)} and verified HTTP ${String(evidence.httpStatus)}; the required runtime smoke now has objective PASS evidence.`
           : `CodexPro MCP verified a correlated transient connector failure from receipt ${String(evidence.blockedByRunReceipt)} and scheduled a clean retry.`)
