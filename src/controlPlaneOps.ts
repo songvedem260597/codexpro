@@ -412,7 +412,16 @@ async function requireTaskAccess(context: ControlPlaneBridgeContext, taskId: str
 }
 
 export function boundedReviewCommand(command: string): { executable: string; args: string[]; relativeCwd?: string } | null {
-  const scoped = command.trim().match(/^cd\s+([^\s;&|]+)\s*&&\s*(.+)$/u);
+  const trimmed = command.trim();
+  const annotatedCwd = trimmed.match(/^(.+?)\s+\(cwd\s+([^\s;&|()]+)\)$/u);
+  if (annotatedCwd) {
+    const relativeCwd = String(annotatedCwd[2] ?? "");
+    if (!isBoundedReviewDirectory(relativeCwd)) return null;
+    const nested = boundedReviewCommand(String(annotatedCwd[1] ?? ""));
+    if (!nested || nested.relativeCwd) return null;
+    return { ...nested, relativeCwd };
+  }
+  const scoped = trimmed.match(/^cd\s+([^\s;&|]+)\s*&&\s*(.+)$/u);
   if (scoped) {
     const relativeCwd = String(scoped[1] ?? "");
     if (!isBoundedReviewDirectory(relativeCwd)) return null;

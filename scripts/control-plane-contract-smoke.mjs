@@ -15,6 +15,16 @@ assert.deepEqual(
   { executable: 'npm', args: ['test'], relativeCwd: 'client' },
   'review runner must safely normalize a declared package-directory test'
 );
+assert.deepEqual(
+  boundedReviewCommand('npm test (cwd client)'),
+  { executable: 'npm', args: ['test'], relativeCwd: 'client' },
+  'review runner must safely normalize the Change Submission cwd annotation'
+);
+assert.deepEqual(
+  boundedReviewCommand('npm run build (cwd client)'),
+  { executable: 'npm', args: ['run', 'build'], relativeCwd: 'client' },
+  'review runner must preserve the existing command allowlist inside a cwd annotation'
+);
 for (const unsafeCommand of [
   'npx vitest run --config ../../tmp/evil.ts',
   'npx vitest run ../outside',
@@ -22,7 +32,10 @@ for (const unsafeCommand of [
   'npx vitest run src && touch owned',
   'cd ../outside && npm test',
   'cd client; touch owned && npm test',
-  'cd client && cd nested && npm test'
+  'cd client && cd nested && npm test',
+  'npm test (cwd ../outside)',
+  'npm test (cwd client;touch-owned)',
+  'cd client && npm test (cwd nested)'
 ]) {
   assert.equal(boundedReviewCommand(unsafeCommand), null, `review runner must reject ${unsafeCommand}`);
 }
