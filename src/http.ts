@@ -19,6 +19,7 @@ import {
   type WorkspaceProfile
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
+import { handleChatCompletions, loadOpenAiCompatConfig, modelsResponse, sendOpenAiError } from "./openaiCompat.js";
 import { createCodexProRuntime, createCodexProServer } from "./server.js";
 
 function escapeHtml(value: unknown): string {
@@ -1460,6 +1461,7 @@ async function main(): Promise<void> {
 
   const app = express();
   const apiRuntime = createCodexProRuntime(config);
+  const openAiCompat = loadOpenAiCompatConfig();
   const logRequests = process.env.CODEXPRO_LOG_REQUESTS === "1";
   const authFailureWindow = new Map<string, { count: number; resetAt: number }>();
   const authFailureLimit = 10;
@@ -1503,7 +1505,11 @@ async function main(): Promise<void> {
     current.count += 1;
     if (current.count > 120) {
       res.setHeader("Retry-After", String(Math.max(1, Math.ceil((current.resetAt - now) / 1000))));
-      jsonError(res, 429, "rate_limited", "Too many CodexPro API requests. Try again in a minute.");
+      if (req.path === "/v1/models" || req.path === "/v1/chat/completions") {
+        sendOpenAiError(res, 429, "Too many CodexPro API requests. Try again in a minute.", "rate_limit_exceeded");
+      } else {
+        jsonError(res, 429, "rate_limited", "Too many CodexPro API requests. Try again in a minute.");
+      }
       return;
     }
     next();
@@ -1554,6 +1560,7 @@ async function main(): Promise<void> {
         ? req.query.token
         : undefined;
     const restApiRequest = req.path === "/v1" || req.path.startsWith("/v1/");
+    const openAiRequest = req.path === "/v1/models" || req.path === "/v1/chat/completions";
     if (tokenMatches(bearer) || (!restApiRequest && tokenMatches(queryToken))) {
       next();
       return;
@@ -1564,7 +1571,8 @@ async function main(): Promise<void> {
     const current = authFailureWindow.get(key);
     if (!current || current.resetAt <= now) {
       authFailureWindow.set(key, { count: 1, resetAt: now + 60_000 });
-      res.status(401).send("Unauthorized");
+      if (openAiRequest) sendOpenAiError(res, 401, "Unauthorized", "invalid_api_key");
+      else res.status(401).send("Unauthorized");
       return;
     }
     current.count += 1;
@@ -1575,10 +1583,12 @@ async function main(): Promise<void> {
     }
     if (current.count > authFailureLimit) {
       res.setHeader("Retry-After", String(Math.max(1, Math.ceil((current.resetAt - now) / 1000))));
-      res.status(429).send("Too Many Authentication Attempts");
+      if (openAiRequest) sendOpenAiError(res, 429, "Too Many Authentication Attempts", "rate_limit_exceeded");
+      else res.status(429).send("Too Many Authentication Attempts");
       return;
     }
-    res.status(401).send("Unauthorized");
+    if (openAiRequest) sendOpenAiError(res, 401, "Unauthorized", "invalid_api_key");
+      else res.status(401).send("Unauthorized");
   });
 
   type TransportRecord = {
@@ -1682,6 +1692,14 @@ async function main(): Promise<void> {
       bashMode: config.bashMode,
       writeMode: config.writeMode
     }));
+  });
+
+  app.get("/v1/models", (_req, res) => {
+    res.json(modelsResponse());
+  });
+
+  app.post("/v1/chat/completions", apiRateLimit, express.json({ limit: "4mb" }), async (req, res) => {
+    await handleChatCompletions(req, res, openAiCompat);
   });
 
   app.get("/v1/tools", (_req, res) => {
@@ -1830,6 +1848,15 @@ async function main(): Promise<void> {
         },
         id: null
       });
+      return;
+    }
+    if (req.path === "/v1/chat/completions") {
+      sendOpenAiError(
+        res,
+        status,
+        type === "entity.too.large" ? "Request body is too large." : "Request body must be valid JSON.",
+        type === "entity.too.large" ? "payload_too_large" : "invalid_json"
+      );
       return;
     }
     if (req.path === "/admin/profile" || req.path === "/v1/invoke") {
