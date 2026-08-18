@@ -155,6 +155,53 @@ terminal results. Reads and searches stay in normal chat output. After updating
 the connector, refresh its ChatGPT plugin connection once so it loads the new
 widget resource.
 
+## OpenAI-Compatible Local Provider
+
+CodexPro can expose one OpenAI-compatible model surface for local clients such as OpenCode:
+
+```text
+GET  /v1/models
+POST /v1/chat/completions
+```
+
+The public model id is fixed to `gpt-5.6-sol`. Chat completions are proxied to a configured OpenAI-compatible upstream using:
+
+```bash
+CODEXPRO_OPENAI_UPSTREAM_BASE_URL=https://provider.example/v1
+CODEXPRO_OPENAI_UPSTREAM_API_KEY=your-upstream-key
+CODEXPRO_OPENAI_UPSTREAM_MODEL=gpt-5.6-sol
+```
+
+CodexPro itself still uses `CODEXPRO_HTTP_TOKEN` to authenticate local clients. For OpenCode, configure one local provider and three variants:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "codexpro": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "CodexPro (local)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8787/v1",
+        "apiKey": "YOUR_CODEXPRO_HTTP_TOKEN"
+      },
+      "models": {
+        "gpt-5.6-sol": {
+          "name": "GPT-5.6 Sol",
+          "variants": {
+            "light": { "headers": { "X-CodexPro-Variant": "light" } },
+            "medium": { "headers": { "X-CodexPro-Variant": "medium" } },
+            "high": { "headers": { "X-CodexPro-Variant": "high" } }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+`medium` is the CodexPro default when no variant is selected. `light`, `medium`, and `high` map to upstream `reasoning_effort` values `low`, `medium`, and `high` respectively. This provider surface does not obtain a model from ChatGPT Plus; it requires an upstream model endpoint.
+
 ## Public URL Options
 
 ChatGPT web needs a public HTTPS Server URL. CodexPro supports:
