@@ -218,6 +218,17 @@ function registerToolCardResource(server: McpServer, config: CodexProConfig): vo
 
 type CodexToolHandler = (args: any) => Promise<any> | any;
 
+export interface CodexProRuntimeInvocation {
+  tool: string;
+  output: any;
+}
+
+export interface CodexProRuntime {
+  server: McpServer;
+  listTools(): string[];
+  invoke(action: string, args?: Record<string, unknown>): Promise<CodexProRuntimeInvocation>;
+}
+
 const SUPERTOOL_NAME = "codexpro";
 const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
   actions: "list_actions",
@@ -240,6 +251,34 @@ function rememberRegisteredToolHandler(server: McpServer, name: string, handler:
   const handlers = registeredToolHandlersByServer.get(key) ?? new Map<string, CodexToolHandler>();
   if (!registeredToolHandlersByServer.has(key)) registeredToolHandlersByServer.set(key, handlers);
   handlers.set(name, handler);
+}
+
+export function createCodexProRuntime(config: CodexProConfig): CodexProRuntime {
+  const server = createCodexProServer(config);
+
+  return {
+    server,
+    listTools: () => registeredToolNames(server).filter((name) => name !== SUPERTOOL_NAME),
+    async invoke(action: string, args: Record<string, unknown> = {}) {
+      const normalized = normalizeSupertoolAction(action);
+      if (!normalized || normalized === "list_actions" || normalized === "help") {
+        throw new CodexProError("Use GET /v1/tools to inspect REST-invokable CodexPro tools.");
+      }
+      if (normalized === SUPERTOOL_NAME) {
+        throw new CodexProError("The REST API already uses action + args directly; invoking the codexpro supertool is not supported.");
+      }
+
+      const supertool = registeredToolHandler(server, SUPERTOOL_NAME);
+      if (!supertool) {
+        throw new CodexProError("CodexPro runtime supertool is unavailable in the current server mode.");
+      }
+
+      return {
+        tool: normalized,
+        output: await supertool({ action: normalized, args })
+      };
+    }
+  };
 }
 
 function registeredToolHandler(server: McpServer, name: string): CodexToolHandler | undefined {

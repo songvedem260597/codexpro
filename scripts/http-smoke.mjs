@@ -303,6 +303,118 @@ try {
     throw new Error(`expected URL-token healthz to return 200, got ${queryAuthorized.status}`);
   }
 
+  const restQueryToken = await fetch(`${baseUrl}/v1/health?codexpro_token=${encodeURIComponent(token)}`);
+  if (restQueryToken.status !== 401) {
+    throw new Error(`expected REST API query token auth to be rejected with 401, got ${restQueryToken.status}`);
+  }
+
+  const restHealth = await fetch(`${baseUrl}/v1/health`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const restHealthJson = await restHealth.json();
+  if (
+    restHealth.status !== 200 ||
+    restHealthJson.ok !== true ||
+    restHealthJson.transport !== 'rest' ||
+    restHealthJson.toolMode !== 'full' ||
+    restHealthJson.writeMode !== 'handoff'
+  ) {
+    throw new Error(`expected REST health endpoint to expose local API state, got ${restHealth.status} ${JSON.stringify(restHealthJson)}`);
+  }
+
+  const restTools = await fetch(`${baseUrl}/v1/tools`, {
+    headers: { Authorization: `Bearer ${token}` }
+  });
+  const restToolsJson = await restTools.json();
+  if (restTools.status !== 200 || !Array.isArray(restToolsJson.tools)) {
+    throw new Error(`expected REST tools endpoint to return tool list, got ${restTools.status} ${JSON.stringify(restToolsJson)}`);
+  }
+  for (const expected of ['open_current_workspace', 'read', 'show_changes', 'bash']) {
+    if (!restToolsJson.tools.includes(expected)) {
+      throw new Error(`REST tools endpoint missing ${expected}: ${JSON.stringify(restToolsJson.tools)}`);
+    }
+  }
+  for (const hidden of ['codexpro', 'write', 'edit', 'apply_patch']) {
+    if (restToolsJson.tools.includes(hidden)) {
+      throw new Error(`REST tools endpoint should not expose ${hidden} in handoff mode: ${JSON.stringify(restToolsJson.tools)}`);
+    }
+  }
+
+  const badRestJson = await fetch(`${baseUrl}/v1/invoke`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'content-type': 'application/json'
+    },
+    body: '{"action":'
+  });
+  const badRestJsonBody = await badRestJson.json();
+  if (badRestJson.status !== 400 || badRestJsonBody.error?.code !== 'invalid_json') {
+    throw new Error(`expected invalid REST JSON to return structured 400, got ${badRestJson.status} ${JSON.stringify(badRestJsonBody)}`);
+  }
+
+  const invalidRestRequest = await fetch(`${baseUrl}/v1/invoke`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({})
+  });
+  const invalidRestRequestJson = await invalidRestRequest.json();
+  if (invalidRestRequest.status !== 400 || invalidRestRequestJson.error?.code !== 'invalid_request') {
+    throw new Error(`expected invalid REST invocation to return structured 400, got ${invalidRestRequest.status} ${JSON.stringify(invalidRestRequestJson)}`);
+  }
+
+  const restOpen = await fetch(`${baseUrl}/v1/invoke`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({ action: 'open_current_workspace', args: { include_tree: false } })
+  });
+  const restOpenJson = await restOpen.json();
+  const restWorkspaceId = restOpenJson.result?.workspace_id;
+  if (restOpen.status !== 200 || restOpenJson.ok !== true || !restWorkspaceId) {
+    throw new Error(`expected REST open_current_workspace to pass, got ${restOpen.status} ${JSON.stringify(restOpenJson)}`);
+  }
+
+  const restRead = await fetch(`${baseUrl}/v1/invoke`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      action: 'read',
+      args: { workspace_id: restWorkspaceId, path: 'session-checkpoint.txt' }
+    })
+  });
+  const restReadJson = await restRead.json();
+  if (
+    restRead.status !== 200 ||
+    restReadJson.ok !== true ||
+    restReadJson.tool !== 'read' ||
+    restReadJson.result?.path !== 'session-checkpoint.txt' ||
+    !String(restReadJson.result?.text ?? '').includes('checkpoint changed')
+  ) {
+    throw new Error(`expected REST read invocation to return workspace file, got ${restRead.status} ${JSON.stringify(restReadJson)}`);
+  }
+
+  const restUnknown = await fetch(`${baseUrl}/v1/invoke`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({ action: 'definitely_not_a_tool', args: {} })
+  });
+  const restUnknownJson = await restUnknown.json();
+  if (restUnknown.status !== 400 || restUnknownJson.error?.code !== 'invoke_failed') {
+    throw new Error(`expected unknown REST tool to return invoke_failed, got ${restUnknown.status} ${JSON.stringify(restUnknownJson)}`);
+  }
+
   let throttled;
   for (let attempt = 0; attempt < 15; attempt += 1) {
     throttled = await fetch(`${baseUrl}/healthz?codexpro_token=wrong-token-${attempt}`);

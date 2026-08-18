@@ -19,7 +19,7 @@ import {
   type WorkspaceProfile
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
-import { createCodexProServer } from "./server.js";
+import { createCodexProRuntime, createCodexProServer } from "./server.js";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -81,6 +81,11 @@ const AdminProfilePatch = z.object({
   cloudflareConfig: textField(4096),
   cloudflareTokenFile: textField(4096),
   noInstallCloudflared: z.boolean().optional()
+}).strict();
+
+const ApiInvokeRequest = z.object({
+  action: z.string().trim().min(1).max(128),
+  args: z.record(z.any()).optional()
 }).strict();
 
 type AdminProfilePatch = z.infer<typeof AdminProfilePatch>;
@@ -1454,6 +1459,7 @@ async function main(): Promise<void> {
   }
 
   const app = express();
+  const apiRuntime = createCodexProRuntime(config);
   const logRequests = process.env.CODEXPRO_LOG_REQUESTS === "1";
   const authFailureWindow = new Map<string, { count: number; resetAt: number }>();
   const authFailureLimit = 10;
@@ -1466,6 +1472,7 @@ async function main(): Promise<void> {
   }
 
   const adminRateWindow = new Map<string, { count: number; resetAt: number }>();
+  const apiRateWindow = new Map<string, { count: number; resetAt: number }>();
 
   function adminRateLimit(req: Request, res: Response, next: NextFunction): void {
     const now = Date.now();
@@ -1479,6 +1486,24 @@ async function main(): Promise<void> {
     current.count += 1;
     if (current.count > 30) {
       jsonError(res, 429, "rate_limited", "Too many profile save attempts. Try again in a minute.");
+      return;
+    }
+    next();
+  }
+
+  function apiRateLimit(req: Request, res: Response, next: NextFunction): void {
+    const now = Date.now();
+    const key = req.ip || req.socket.remoteAddress || "local";
+    const current = apiRateWindow.get(key);
+    if (!current || current.resetAt <= now) {
+      apiRateWindow.set(key, { count: 1, resetAt: now + 60_000 });
+      next();
+      return;
+    }
+    current.count += 1;
+    if (current.count > 120) {
+      res.setHeader("Retry-After", String(Math.max(1, Math.ceil((current.resetAt - now) / 1000))));
+      jsonError(res, 429, "rate_limited", "Too many CodexPro API requests. Try again in a minute.");
       return;
     }
     next();
@@ -1528,7 +1553,8 @@ async function main(): Promise<void> {
       : typeof req.query.token === "string"
         ? req.query.token
         : undefined;
-    if (tokenMatches(bearer) || tokenMatches(queryToken)) {
+    const restApiRequest = req.path === "/v1" || req.path.startsWith("/v1/");
+    if (tokenMatches(bearer) || (!restApiRequest && tokenMatches(queryToken))) {
       next();
       return;
     }
@@ -1643,6 +1669,58 @@ async function main(): Promise<void> {
     });
   });
 
+  app.get("/v1/health", (_req, res) => {
+    res.json(redactStructured({
+      ok: true,
+      name: "CodexPro",
+      version: CODEXPRO_VERSION,
+      transport: "rest",
+      defaultRoot: config.defaultRoot,
+      allowedRoots: config.allowedRoots,
+      authRequired: Boolean(config.authToken),
+      toolMode: config.toolMode,
+      bashMode: config.bashMode,
+      writeMode: config.writeMode
+    }));
+  });
+
+  app.get("/v1/tools", (_req, res) => {
+    const tools = apiRuntime.listTools();
+    res.json({
+      ok: true,
+      tools,
+      count: tools.length,
+      toolMode: config.toolMode,
+      bashMode: config.bashMode,
+      writeMode: config.writeMode
+    });
+  });
+
+  app.post("/v1/invoke", apiRateLimit, express.json({ limit: "2mb" }), async (req, res) => {
+    const parsed = ApiInvokeRequest.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      jsonError(res, 400, "invalid_request", "Invalid CodexPro API invocation.", parsed.error.flatten());
+      return;
+    }
+
+    try {
+      const invocation = await apiRuntime.invoke(parsed.data.action, parsed.data.args ?? {});
+      const output = invocation.output && typeof invocation.output === "object" ? invocation.output : {};
+      res.status(output.isError ? 400 : 200).json(redactStructured({
+        ok: !output.isError,
+        tool: invocation.tool,
+        result:
+          output.structuredContent && typeof output.structuredContent === "object" && !Array.isArray(output.structuredContent)
+            ? output.structuredContent
+            : {},
+        content: Array.isArray(output.content) ? output.content : [],
+        isError: Boolean(output.isError)
+      }));
+    } catch (error) {
+      jsonError(res, 400, "invoke_failed", redactSensitiveText(error instanceof Error ? error.message : String(error)));
+    }
+  });
+
   app.get("/admin/profile", (_req, res) => {
     res.json(profileResponse(config));
   });
@@ -1754,7 +1832,7 @@ async function main(): Promise<void> {
       });
       return;
     }
-    if (req.path === "/admin/profile") {
+    if (req.path === "/admin/profile" || req.path === "/v1/invoke") {
       jsonError(
         res,
         status,
