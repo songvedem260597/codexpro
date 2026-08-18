@@ -365,11 +365,15 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     // ChatGPT/Codex tasks can stay idle for hours before making their next MCP
     // call. Expiring the transport after 30 minutes leaves the client holding a
     // stale session id, and some clients disable the connector after the 404.
-    maxHttpSessions: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS, 128, 1, 512),
+    // Keep the global ceiling comfortably above the bounded per-worker pool,
+    // but low enough that reconnect storms cannot leave ~100 live transports.
+    maxHttpSessions: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS, 64, 1, 512),
     // ChatGPT may initialize a fresh MCP session for each tool call without
-    // closing the earlier transport. Bound that accumulation per worker so one
-    // long turn cannot evict every other role-bound connector.
-    maxHttpSessionsPerWorker: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS_PER_WORKER, 24, 1, 128),
+    // closing the earlier transport. In production a 24-session worker pool
+    // accumulated to ~100 live transports across the role-bound chats and
+    // caused MCP tool timeouts/502s. Six recent transports is enough for
+    // concurrent/retry traffic while pruning superseded sessions eagerly.
+    maxHttpSessionsPerWorker: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS_PER_WORKER, 6, 1, 128),
     httpSessionTtlMs: numberFrom(process.env.CODEXPRO_HTTP_SESSION_TTL_MS, 24 * 60 * 60_000, 60_000, 7 * 24 * 60 * 60_000),
     maxUnattributedHttpSessions: numberFrom(process.env.CODEXPRO_MAX_UNATTRIBUTED_HTTP_SESSIONS, 32, 1, 128),
     unattributedHttpSessionTtlMs: numberFrom(process.env.CODEXPRO_UNATTRIBUTED_HTTP_SESSION_TTL_MS, 30 * 60_000, 60_000, 24 * 60 * 60_000),

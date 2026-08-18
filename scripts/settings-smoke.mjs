@@ -12,6 +12,14 @@ import {
   verifyCloudflaredAsset
 } from './cloudflared-release.mjs';
 
+const configSource = await fs.readFile(path.resolve('src/config.ts'), 'utf8');
+if (
+  !configSource.includes('maxHttpSessions: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS, 64, 1, 512)') ||
+  !configSource.includes('maxHttpSessionsPerWorker: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS_PER_WORKER, 6, 1, 128)')
+) {
+  throw new Error('MCP session defaults regressed above the bounded production-safe pool');
+}
+
 const pinnedCloudflared = cloudflaredReleaseAsset('darwin', 'arm64');
 if (
   CLOUDFLARED_VERSION !== '2026.7.2' ||
