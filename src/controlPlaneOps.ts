@@ -429,6 +429,8 @@ export function boundedReviewCommand(command: string): { executable: string; arg
     if (!nested || nested.relativeCwd) return null;
     return { ...nested, relativeCwd };
   }
+  const nodeTest = boundedNodeTestCommand(trimmed);
+  if (nodeTest) return nodeTest;
   const parts = command.trim().split(/\s+/u);
   const [executable, ...args] = parts;
   if (!executable) return null;
@@ -451,8 +453,33 @@ export function boundedReviewCommand(command: string): { executable: string; arg
   ) {
     return { executable, args };
   }
-  if (executable === "node" && args.length === 1 && args[0] === "--test") return { executable, args };
   return null;
+}
+
+function boundedNodeTestCommand(command: string): { executable: string; args: string[] } | null {
+  const match = command.match(/^node\s+--test(?:\s+(.+))?$/u);
+  if (!match) return null;
+  let remainder = String(match[1] ?? "").trim();
+  const args = ["--test"];
+  if (!remainder) return { executable: "node", args };
+
+  if (remainder.startsWith("--test-name-pattern")) {
+    const patternMatch = remainder.match(/^--test-name-pattern\s+(?:"([^"\r\n]{1,160})"|'([^'\r\n]{1,160})'|([^\s;&|]{1,160}))(?:\s+(.+))?$/u);
+    if (!patternMatch) return null;
+    const pattern = String(patternMatch[1] ?? patternMatch[2] ?? patternMatch[3] ?? "");
+    if (!isBoundedTestNamePattern(pattern)) return null;
+    args.push("--test-name-pattern", pattern);
+    remainder = String(patternMatch[4] ?? "").trim();
+    if (!remainder) return { executable: "node", args };
+  }
+
+  const targets = remainder.split(/\s+/u);
+  if (targets.length === 0 || targets.length > 20 || !targets.every((argument) => isBoundedTestTarget(argument))) return null;
+  return { executable: "node", args: [...args, ...targets] };
+}
+
+function isBoundedTestNamePattern(value: string): boolean {
+  return Boolean(value && value.length <= 160 && !/[\r\n;&|`$<>\\]/u.test(value));
 }
 
 function isBoundedReviewDirectory(value: string): boolean {

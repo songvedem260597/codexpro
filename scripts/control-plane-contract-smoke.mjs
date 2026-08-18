@@ -25,6 +25,16 @@ assert.deepEqual(
   { executable: 'npm', args: ['run', 'build'], relativeCwd: 'client' },
   'review runner must preserve the existing command allowlist inside a cwd annotation'
 );
+assert.deepEqual(
+  boundedReviewCommand('cd server && node --test test/api.test.js'),
+  { executable: 'node', args: ['--test', 'test/api.test.js'], relativeCwd: 'server' },
+  'review runner must accept the bounded Backend node test declared by Change Submission'
+);
+assert.deepEqual(
+  boundedReviewCommand('cd server && node --test --test-name-pattern "categories endpoint" test/api.test.js'),
+  { executable: 'node', args: ['--test', '--test-name-pattern', 'categories endpoint', 'test/api.test.js'], relativeCwd: 'server' },
+  'review runner must preserve one bounded node test-name pattern inside the package directory'
+);
 for (const unsafeCommand of [
   'npx vitest run --config ../../tmp/evil.ts',
   'npx vitest run ../outside',
@@ -35,7 +45,11 @@ for (const unsafeCommand of [
   'cd client && cd nested && npm test',
   'npm test (cwd ../outside)',
   'npm test (cwd client;touch-owned)',
-  'cd client && npm test (cwd nested)'
+  'cd client && npm test (cwd nested)',
+  'cd server && node --test ../outside',
+  'cd server && node --test --inspect test/api.test.js',
+  'cd server && node --test test/api.test.js && touch owned',
+  'cd server && node --test --test-name-pattern "categories; touch owned" test/api.test.js'
 ]) {
   assert.equal(boundedReviewCommand(unsafeCommand), null, `review runner must reject ${unsafeCommand}`);
 }
