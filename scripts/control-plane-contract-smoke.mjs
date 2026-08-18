@@ -121,6 +121,9 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname === '/api/tasks/TASK-CHECKPOINT-SAFETY/unblock-transient' && init.method === 'POST') {
     return Response.json({ task: { id: 'TASK-CHECKPOINT-SAFETY', status: 'READY' }, eventId: 8 });
   }
+  if (url.pathname === '/api/tasks/TASK-PRECLAIM-SAFETY/unblock-transient' && init.method === 'POST') {
+    return Response.json({ task: { id: 'TASK-PRECLAIM-SAFETY', status: 'READY' }, eventId: 10 });
+  }
   if (url.pathname === '/api/tasks/TASK-RUNTIME-SMOKE-SAFETY/unblock-transient' && init.method === 'POST') {
     return Response.json({ task: { id: 'TASK-RUNTIME-SMOKE-SAFETY', status: 'READY' }, eventId: 9 });
   }
@@ -136,8 +139,14 @@ try {
   });
   const taskCreate = definitions.find((definition) => definition.name === 'task_create');
   const taskSubmitForReview = definitions.find((definition) => definition.name === 'task_submit_for_review');
+  const controlOverview = definitions.find((definition) => definition.name === 'control_overview');
   assert.ok(taskCreate, 'task_create must be exposed');
   assert.ok(taskSubmitForReview, 'task_submit_for_review must be exposed');
+  assert.ok(controlOverview, 'control_overview must be exposed');
+  const protocolOverview = await controlOverview.handler({});
+  const protocolText = protocolOverview.structuredContent.protocol.join('\n');
+  assert.match(protocolText, /do not call task_claim_or_resume again for the same automatic cycle/u);
+  assert.doesNotMatch(protocolText, /then call task_claim_or_resume/u);
   const schemaKeys = Object.keys(taskCreate.options.inputSchema ?? {});
   for (const field of ['id', 'parentTaskId', 'dependencyIds']) {
     assert.ok(schemaKeys.includes(field), `task_create schema must expose ${field}`);
@@ -250,6 +259,26 @@ try {
   const safetyCheckpointBody = JSON.parse(String(safetyCheckpointMutation.body));
   assert.match(safetyCheckpointBody.evidenceHash, /^sha256:[a-f0-9]{64}$/u);
   assert.match(safetyCheckpointBody.note, /safety blocked task_checkpoint/u);
+
+  tasksPayload = {
+    tasks: [{
+      id: 'TASK-PRECLAIM-SAFETY',
+      status: 'BLOCKED',
+      requiredRole: 'frontend',
+      checkpoint: {
+        blockerKind: 'TRANSIENT',
+        blockedReason: 'The task_claim_or_resume call was blocked by OpenAI safety before any source mutation; the worktree is still clean.'
+      }
+    }]
+  };
+  const safetyPreclaimResumed = await unblockTransient.handler({ taskId: 'TASK-PRECLAIM-SAFETY' });
+  assert.equal(safetyPreclaimResumed.structuredContent.task.status, 'READY');
+  const safetyPreclaimMutation = requests.find((request) => request.pathname === '/api/tasks/TASK-PRECLAIM-SAFETY/unblock-transient');
+  assert.ok(safetyPreclaimMutation, 'a safety-blocked redundant preclaim must resume only after the assigned worktree is verified clean');
+  const safetyPreclaimBody = JSON.parse(String(safetyPreclaimMutation.body));
+  assert.match(safetyPreclaimBody.evidenceHash, /^sha256:[a-f0-9]{64}$/u);
+  assert.match(safetyPreclaimBody.note, /worktree is still clean at HEAD [a-f0-9]{40}/u);
+  assert.match(safetyPreclaimBody.note, /fresh fenced retry/u);
 
   tasksPayload = {
     tasks: [{

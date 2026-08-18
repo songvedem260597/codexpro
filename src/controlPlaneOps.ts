@@ -269,6 +269,7 @@ async function resumeVerifiedTransientBlocker(
   const isCorrelatedConnectorFailure = reason.includes("openai safety gateway")
     || reason.includes("openai safety layer")
     || reason.includes("openai safety checker")
+    || (reason.includes("openai safety") && reason.includes("blocked"))
     || reason.includes("safety gateway during codexpro")
     || reason.includes("safety mechanism blocked")
     || reason.includes("safety layer blocked")
@@ -277,6 +278,8 @@ async function resumeVerifiedTransientBlocker(
     || reason.includes("external service error");
   const isDurableImplementationToolSafetyFailure = isCorrelatedConnectorFailure
     && (reason.includes("task_submit_for_review") || reason.includes("task_checkpoint"));
+  const isPreclaimToolSafetyFailure = isCorrelatedConnectorFailure
+    && reason.includes("task_claim_or_resume");
   const isRuntimeSmokeSafetyFailure = isCorrelatedConnectorFailure
     && (reason.includes("runtime smoke") || reason.includes("http/runtime smoke") || reason.includes("api/runtime smoke"))
     && (reason.includes("blocked") || reason.includes("could not be executed") || reason.includes("could not be run"));
@@ -316,7 +319,7 @@ async function resumeVerifiedTransientBlocker(
       reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
       verifiedAt: new Date().toISOString()
     };
-  } else if (isDurableImplementationToolSafetyFailure || isRuntimeSmokeSafetyFailure) {
+  } else if (isDurableImplementationToolSafetyFailure || isPreclaimToolSafetyFailure || isRuntimeSmokeSafetyFailure) {
     const implementationWorker = overview.workers?.find((candidate: any) => candidate.role === task.requiredRole);
     if (!implementationWorker?.worktreePath) throw new Error("WORKTREE_BINDING_MISSING: no worktree is bound to the blocked role");
     const worktreePath = await realpath(String(implementationWorker.worktreePath));
@@ -342,6 +345,17 @@ async function resumeVerifiedTransientBlocker(
     }
     if (isRuntimeSmokeSafetyFailure) {
       evidence = await runBoundedRuntimeSmoke(worktreePath, String(task.id), headSha, reason);
+    } else if (isPreclaimToolSafetyFailure) {
+      evidence = {
+        kind: "CODEXPRO_CLEAN_PRECLAIM_RETRY_VERIFIED",
+        taskId: String(task.id),
+        blockedTool: "task_claim_or_resume",
+        worktreePath,
+        allowedRoot,
+        headSha,
+        reasonHash: `sha256:${createHash("sha256").update(reason).digest("hex")}`,
+        verifiedAt: new Date().toISOString()
+      };
     } else {
       evidence = {
         kind: "CODEXPRO_DURABLE_TOOL_RETRY_VERIFIED",
@@ -381,6 +395,8 @@ async function resumeVerifiedTransientBlocker(
             ? `CodexPro MCP verified patch envelope contract v${CODEX_PATCH_ENVELOPE_CONTRACT_VERSION} and scheduled a clean retry.`
           : evidence.kind === "CODEXPRO_DURABLE_TOOL_RETRY_VERIFIED"
             ? `CodexPro MCP verified clean committed HEAD ${String(evidence.headSha)} after safety blocked ${String(evidence.blockedTool)} and scheduled a clean retry.`
+          : evidence.kind === "CODEXPRO_CLEAN_PRECLAIM_RETRY_VERIFIED"
+            ? `CodexPro MCP verified the assigned worktree is still clean at HEAD ${String(evidence.headSha)} after safety blocked task_claim_or_resume before source mutation, and scheduled a fresh fenced retry.`
           : isVerifiedRuntimeSmoke
             ? `CodexPro MCP independently ran ${String(evidence.command)} at clean committed HEAD ${String(evidence.headSha)} and verified HTTP ${String(evidence.httpStatus)}; the required runtime smoke now has objective PASS evidence.`
           : `CodexPro MCP verified a correlated transient connector failure from receipt ${String(evidence.blockedByRunReceipt)} and scheduled a clean retry.`)
@@ -848,7 +864,7 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
             "For a scheduled run, call worker_cycle_start once; it automatically ACKs governance, records schedule STARTED/ACKED, and claims the next role-compatible task.",
             "Use the remaining steps below only after worker_cycle_start returns TASK_CLAIMED.",
             "Before source work, call open_workspace with workerBinding.worktreePath and keep every write inside that exact Git worktree.",
-            "Build/read the Task Capsule, then call task_claim_or_resume with sessionEpoch and a new UUID deliveryId.",
+            "Use the fenced claim and Task Capsule returned by worker_cycle_start; do not call task_claim_or_resume again for the same automatic cycle.",
             "Perform only bounded work in the returned worktree/scope; checkpoint with the exact lease/session epochs.",
             "Call task_submit_for_review, then worker_run_receipt COMPLETED. Do not approve your own implementation task.",
             "Reviewer/QA verifies evidence, calls task_approve, and records task_merge only after CI passes."
