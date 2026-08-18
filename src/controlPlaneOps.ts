@@ -453,6 +453,16 @@ export function boundedReviewCommand(command: string): { executable: string; arg
   ) {
     return { executable, args };
   }
+  if (
+    executable === "npx"
+    && args.length >= 3
+    && args.length <= 22
+    && args[0] === "tsx"
+    && args[1] === "--test"
+    && args.slice(2).every((argument) => isBoundedTestTarget(argument))
+  ) {
+    return { executable, args };
+  }
   return null;
 }
 

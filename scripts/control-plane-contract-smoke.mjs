@@ -11,6 +11,11 @@ assert.deepEqual(
   'review runner must accept a bounded Vitest target'
 );
 assert.deepEqual(
+  boundedReviewCommand('npx tsx --test test/control-plane.test.ts test/http-server.test.ts'),
+  { executable: 'npx', args: ['tsx', '--test', 'test/control-plane.test.ts', 'test/http-server.test.ts'] },
+  'review runner must accept bounded TSX node-test targets declared by Change Submission'
+);
+assert.deepEqual(
   boundedReviewCommand('cd client && npm test'),
   { executable: 'npm', args: ['test'], relativeCwd: 'client' },
   'review runner must safely normalize a declared package-directory test'
@@ -40,6 +45,10 @@ for (const unsafeCommand of [
   'npx vitest run ../outside',
   'npx eslint .',
   'npx vitest run src && touch owned',
+  'npx tsx --test ../outside',
+  'npx tsx --test --inspect test/control-plane.test.ts',
+  'npx tsx test/control-plane.test.ts',
+  'npx tsx --test test/control-plane.test.ts && touch owned',
   'cd ../outside && npm test',
   'cd client; touch owned && npm test',
   'cd client && cd nested && npm test',
