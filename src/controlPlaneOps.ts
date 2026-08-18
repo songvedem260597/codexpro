@@ -25,6 +25,7 @@ export const CONTROL_PLANE_TOOL_NAMES = [
   "task_unblock_transient",
   "task_approve",
   "task_create",
+  "task_instruction_issue",
   "codebase_map_get",
   "task_capsule_build",
   "task_capsule_get",
@@ -1223,6 +1224,28 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
           method: "POST", body: JSON.stringify({ ...args, acceptanceCriteria: args.acceptanceCriteria ?? [], allowedPaths: args.allowedPaths ?? [] })
         });
         return result("task_create", payload);
+      }
+    },
+    {
+      name: "task_instruction_issue",
+      options: {
+        title: "P0 Route Developer Update",
+        description: "Coordinator routes one durable Developer update request to the single RUNNING target task selected from its candidates.",
+        inputSchema: {
+          coordinatorWorkerId: z.string().optional(),
+          requestTaskId: z.string().min(1).max(160),
+          targetTaskId: z.string().min(1).max(160)
+        },
+        annotations: { ...MUTATION, idempotentHint: true }
+      },
+      handler: async (args) => {
+        await requireRole(context, ["coordinator"]);
+        requireBoundWorker(context, args.coordinatorWorkerId);
+        const payload = await request(context, `/api/tasks/${encodeURIComponent(args.targetTaskId)}/instructions`, {
+          method: "POST",
+          body: JSON.stringify({ requestTaskId: args.requestTaskId })
+        });
+        return result("task_instruction_issue", payload);
       }
     },
     {

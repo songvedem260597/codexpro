@@ -100,6 +100,9 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname === '/api/tasks' && init.method === 'POST') {
     return Response.json({ task: { id: 'TASK-CHILD' }, eventId: 1 }, { status: 201 });
   }
+  if (url.pathname === '/api/tasks/TASK-RUNNING/instructions' && init.method === 'POST') {
+    return Response.json({ instruction: { taskId: 'TASK-RUNNING', revision: 2, status: 'PENDING' }, eventId: 12 }, { status: 201 });
+  }
   if (url.pathname === '/api/tasks/TASK-BACKEND-IN-REVIEW/review/findings' && init.method === 'POST') {
     return Response.json({ finding: { id: 'FINDING-CONTRACT', status: 'OPEN' }, eventId: 3 }, { status: 201 });
   }
@@ -141,9 +144,11 @@ try {
     allowedRoots: [safetySubmissionWorktree]
   });
   const taskCreate = definitions.find((definition) => definition.name === 'task_create');
+  const taskInstructionIssue = definitions.find((definition) => definition.name === 'task_instruction_issue');
   const taskSubmitForReview = definitions.find((definition) => definition.name === 'task_submit_for_review');
   const controlOverview = definitions.find((definition) => definition.name === 'control_overview');
   assert.ok(taskCreate, 'task_create must be exposed');
+  assert.ok(taskInstructionIssue, 'task_instruction_issue must be exposed');
   assert.ok(taskSubmitForReview, 'task_submit_for_review must be exposed');
   assert.ok(controlOverview, 'control_overview must be exposed');
   const protocolOverview = await controlOverview.handler({});
@@ -179,6 +184,14 @@ try {
   assert.equal(body.id, 'TASK-CHILD');
   assert.equal(body.parentTaskId, 'TASK-PARENT');
   assert.deepEqual(body.dependencyIds, ['TASK-PREREQUISITE']);
+
+  await taskInstructionIssue.handler({
+    requestTaskId: 'TASK-UPDATE-REQUEST',
+    targetTaskId: 'TASK-RUNNING'
+  });
+  const instructionMutation = requests.find((request) => request.pathname === '/api/tasks/TASK-RUNNING/instructions' && request.method === 'POST');
+  assert.ok(instructionMutation, 'task_instruction_issue must call the running task instruction endpoint');
+  assert.deepEqual(JSON.parse(String(instructionMutation.body)), { requestTaskId: 'TASK-UPDATE-REQUEST' });
 
   tasksPayload = {
     tasks: [{
