@@ -79,7 +79,7 @@ execFileSync('git', ['-c', 'user.name=CodexPro Contract', '-c', 'user.email=cont
   stdio: 'ignore'
 });
 const safetySubmissionHead = String(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: safetySubmissionWorktree })).trim();
-let overviewPayload = { workers: [{ id: 'coordinator-contract', role: 'coordinator' }] };
+let overviewPayload = { workers: [{ id: 'coordinator-contract', role: 'coordinator' }], pendingInstructions: [] };
 let tasksPayload = { tasks: [] };
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (input, init = {}) => {
@@ -151,8 +151,14 @@ try {
   assert.ok(taskInstructionIssue, 'task_instruction_issue must be exposed');
   assert.ok(taskSubmitForReview, 'task_submit_for_review must be exposed');
   assert.ok(controlOverview, 'control_overview must be exposed');
+  overviewPayload.pendingInstructions = [{ taskId: 'TASK-RUNNING-UPDATE', revision: 2, status: 'PENDING', instruction: 'Apply the routed update.' }];
+  tasksPayload = { tasks: [{ id: 'TASK-RUNNING-UPDATE', requiredRole: 'coordinator', status: 'RUNNING' }] };
   const protocolOverview = await controlOverview.handler({});
   const protocolText = protocolOverview.structuredContent.protocol.join('\n');
+  assert.equal(protocolOverview.structuredContent.pendingInstructions[0].revision, 2, 'control_overview must expose pending instructions for the bound worker task');
+  assert.match(protocolText, /acknowledge the highest applied revision/u);
+  overviewPayload.pendingInstructions = [];
+  tasksPayload = { tasks: [] };
   assert.match(protocolText, /do not call task_claim_or_resume again for the same automatic cycle/u);
   assert.doesNotMatch(protocolText, /then call task_claim_or_resume/u);
   const schemaKeys = Object.keys(taskCreate.options.inputSchema ?? {});

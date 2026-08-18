@@ -887,6 +887,10 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
         const role = String(worker.role);
         const tasks = Array.isArray(taskPayload.tasks) ? taskPayload.tasks : [];
         const relevantTasks = tasks.filter((task: any) => task.requiredRole === role || (["coordinator", "reviewer_qa"].includes(role) && ["IN_REVIEW", "WAITING_APPROVAL"].includes(task.status)));
+        const relevantTaskIds = new Set(relevantTasks.map((task: any) => String(task.id)));
+        const pendingInstructions = Array.isArray(overview.pendingInstructions)
+          ? overview.pendingInstructions.filter((instruction: any) => instruction?.status === "PENDING" && relevantTaskIds.has(String(instruction?.taskId ?? "")))
+          : [];
         const workerRulesetAck = overview.governance?.workerAcks?.find((ack: any) => ack.workerId === workerId);
         const schedule = overview.schedules?.find((candidate: any) => candidate.workerId === workerId) ?? null;
         return result("control_overview", {
@@ -901,11 +905,13 @@ export function controlPlaneToolDefinitions(context: ControlPlaneBridgeContext):
           },
           schedule,
           relevantTasks,
+          pendingInstructions,
           protocol: [
             "For a scheduled run, call worker_cycle_start once; it automatically ACKs governance, records schedule STARTED/ACKED, and claims the next role-compatible task.",
             "Use the remaining steps below only after worker_cycle_start returns TASK_CLAIMED.",
             "Before source work, call open_workspace with workerBinding.worktreePath and keep every write inside that exact Git worktree.",
             "Use the fenced claim and Task Capsule returned by worker_cycle_start; do not call task_claim_or_resume again for the same automatic cycle.",
+            "If control_overview returns pendingInstructions for the RUNNING task, apply them before submission and acknowledge the highest applied revision in task_checkpoint.",
             "Perform only bounded work in the returned worktree/scope; checkpoint with the exact lease/session epochs.",
             "Call task_submit_for_review, then worker_run_receipt COMPLETED. Do not approve your own implementation task.",
             "Reviewer/QA verifies evidence, calls task_approve, and records task_merge only after CI passes."
