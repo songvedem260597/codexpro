@@ -41,6 +41,8 @@ export interface RuntimeConnection {
   version?: number;
   root?: string;
   pid?: number;
+  runtimePid?: number;
+  tunnelPid?: number;
   updatedAt?: string;
   endpoint?: string;
   localBase?: string;
@@ -148,7 +150,12 @@ export function readRuntimeConnection(root: string): RuntimeConnection {
   if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) return {};
   const typed = runtime as RuntimeConnection;
   if (typed.root && canonicalRootForIdentity(typed.root) !== canonicalRootForIdentity(root)) return {};
-  if (typeof typed.pid === "number" && !processIsAlive(typed.pid)) {
+  const launcherStopped = typeof typed.pid === "number" && !processIsAlive(typed.pid);
+  const runtimeStopped = typeof typed.runtimePid === "number" && !processIsAlive(typed.runtimePid);
+  const tunnelStopped = typed.tunnel !== "none"
+    && typeof typed.tunnelPid === "number"
+    && !processIsAlive(typed.tunnelPid);
+  if (launcherStopped || runtimeStopped || tunnelStopped) {
     try {
       fs.rmSync(runtimePath, { force: true });
     } catch {

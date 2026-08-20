@@ -718,6 +718,7 @@ function saveRuntimeConnection(root, details, options = {}) {
     root,
     pid: process.pid,
     runtimePid: options.runtimePid ?? null,
+    tunnelPid: options.tunnelPid ?? null,
     updatedAt: new Date().toISOString(),
     endpoint: details.endpoint,
     localBase: options.localBase ?? '',
@@ -3768,26 +3769,29 @@ function runControlPanel(details, cleanup = cleanupChildren) {
   });
 }
 
-function waitForUnexpectedRuntimeExit(server, cleanup = cleanupChildren) {
+function waitForUnexpectedChildExit(child, label, cleanup = cleanupChildren) {
   return new Promise((_, reject) => {
     const fail = (code, signal, error) => {
       cleanup();
       const detail = error
         ? error instanceof Error ? error.message : String(error)
         : `code=${code ?? 'null'} signal=${signal ?? 'null'}`;
-      reject(new Error(`CodexPro HTTP runtime exited unexpectedly (${detail}).`));
+      reject(new Error(`${label} exited unexpectedly (${detail}).`));
     };
-    if (server.exitCode !== null || server.signalCode !== null) {
-      fail(server.exitCode, server.signalCode);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      fail(child.exitCode, child.signalCode);
       return;
     }
-    server.once('error', (error) => fail(null, null, error));
-    server.once('exit', (code, signal) => fail(code, signal));
+    child.once('error', (error) => fail(null, null, error));
+    child.once('exit', (code, signal) => fail(code, signal));
   });
 }
 
-function holdRuntime(server, details, cleanup, headless) {
-  return headless ? waitForUnexpectedRuntimeExit(server, cleanup) : runControlPanel(details, cleanup);
+function holdRuntime(server, details, cleanup, headless, tunnelChild = null) {
+  const watchers = [waitForUnexpectedChildExit(server, 'CodexPro HTTP runtime', cleanup)];
+  if (tunnelChild) watchers.push(waitForUnexpectedChildExit(tunnelChild, 'CodexPro tunnel', cleanup));
+  if (!headless) watchers.push(runControlPanel(details, cleanup));
+  return Promise.race(watchers);
 }
 
 async function main() {
@@ -4109,8 +4113,9 @@ async function main() {
       requireBashSession,
       connectionTest
     });
+    runtimeOptions.tunnelPid = cloudflared.pid ?? null;
     saveRuntimeConnection(root, details, runtimeOptions);
-    await holdRuntime(server, details, cleanup, headless);
+    await holdRuntime(server, details, cleanup, headless, cloudflared);
     return;
   }
 
@@ -4155,8 +4160,9 @@ async function main() {
       requireBashSession,
       connectionTest
     });
+    runtimeOptions.tunnelPid = cloudflared.pid ?? null;
     saveRuntimeConnection(root, details, runtimeOptions);
-    await holdRuntime(server, details, cleanup, headless);
+    await holdRuntime(server, details, cleanup, headless, cloudflared);
     return;
   }
 
@@ -4225,8 +4231,9 @@ async function main() {
       requireBashSession,
       connectionTest
     });
+    runtimeOptions.tunnelPid = cloudflared.pid ?? null;
     saveRuntimeConnection(root, details, runtimeOptions);
-    await holdRuntime(server, details, cleanup, headless);
+    await holdRuntime(server, details, cleanup, headless, cloudflared);
     return;
   }
 
@@ -4297,8 +4304,9 @@ async function main() {
     requireBashSession,
     connectionTest
   });
+  runtimeOptions.tunnelPid = cloudflared.pid ?? null;
   saveRuntimeConnection(root, details, runtimeOptions);
-  await holdRuntime(server, details, cleanup, headless);
+  await holdRuntime(server, details, cleanup, headless, cloudflared);
 }
 
 main().catch((error) => {

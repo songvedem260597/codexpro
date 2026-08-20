@@ -622,12 +622,32 @@ await withStartedCodexPro([
   '--token',
   'codexpro-cloudflare-token',
   '--no-copy-url'
-], withoutProxyEnv({ ...env, CODEXPRO_FAKE_CLOUDFLARED_PID: fakeCloudflaredPidPath }), async () => {
+], withoutProxyEnv({ ...env, CODEXPRO_FAKE_CLOUDFLARED_PID: fakeCloudflaredPidPath }), async (child) => {
   const runtime = await waitForJson(cloudflarePath, (data) => data.endpoint?.includes('trycloudflare.com'), 'cloudflare runtime status');
   if (runtime.endpoint.includes('api.trycloudflare.com') || !runtime.endpoint.startsWith('https://real-codexpro.trycloudflare.com/mcp')) {
     throw new Error(`quick tunnel saved the wrong endpoint: ${JSON.stringify(runtime)}`);
   }
-});
+  if (!Number.isInteger(runtime.tunnelPid) || runtime.tunnelPid === child.pid) {
+    throw new Error(`quick tunnel runtime did not publish its supervised child pid: ${JSON.stringify(runtime)}`);
+  }
+  const tunnelProcessPid = process.platform === 'win32'
+    ? Number(await fs.readFile(fakeCloudflaredPidPath, 'utf8'))
+    : runtime.tunnelPid;
+  process.kill(tunnelProcessPid, 'SIGTERM');
+  const closed = await Promise.race([
+    new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal }))),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('launcher did not exit after tunnel child stopped')), 10_000))
+  ]);
+  if (closed.code === 0) {
+    throw new Error(`launcher exited successfully after unexpected tunnel loss: ${JSON.stringify(closed)}`);
+  }
+}, { forceKill: true });
+try {
+  await fs.access(cloudflarePath);
+  throw new Error('runtime status was not cleared after supervised tunnel exit');
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
 if (process.platform === 'win32') {
   const fakeCloudflaredPid = Number(await fs.readFile(fakeCloudflaredPidPath, 'utf8'));
   try {
