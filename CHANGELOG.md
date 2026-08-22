@@ -9,6 +9,8 @@
 - Added optional SHA-256 preconditions and canonical-path write serialization for `write` and `edit`, preventing stale multi-session edits from silently replacing newer file content. New files use atomic replacement; existing files retain inode-bound metadata and hard-link identity through in-place updates.
 - Added `codexpro start --headless` with non-interactive readiness output, supervised HTTP-runtime failure propagation, runtime PID status, and signal cleanup.
 - Supervised tunnel child processes as part of the CodexPro runtime, published their PID in local status, and removed stale runtime state when either the HTTP server or tunnel disappears instead of leaving a connector that only returns upstream errors.
+- Added opt-in loopback Chrome control through `browser_control`, with tab discovery, page snapshots, navigation, click/type/key actions, and screenshots against a dedicated DevTools-enabled browser profile.
+- Added an unpacked Chrome profile bridge with an explicit ACTIVE-profile selector, allowing one installed Chrome profile at a time to opt into CodexPro control without exposing other profiles.
 - Updated the MCP SDK and affected transitive HTTP, URI, and pattern-matching dependencies to patched releases; the release audit now reports zero known vulnerabilities.
 - Hardened public HTTP authentication with a 24-byte minimum token, per-client failed-attempt throttling, no-store/no-referrer browser responses, and immediate removal of onboarding token parameters from the visible URL.
 - Pinned automatic `cloudflared` installation to release `2026.7.2` and verify each supported platform asset against its published SHA-256 before writing or extracting it.

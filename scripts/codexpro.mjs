@@ -90,6 +90,8 @@ Options:
                              Tool surface exposed to ChatGPT. Default: standard.
                              minimal = config/self-test plus open/read/write/edit/apply_patch/bash/show_changes.
                              full = expose every compatibility and advanced tool.
+  --browser-control          Expose browser_control for the dedicated loopback Chrome instance.
+  --browser-debug-url <url>  Chrome DevTools origin. Default: http://127.0.0.1:9223.
   --widget-domain <origin>   Dedicated HTTPS origin for ChatGPT widget iframes.
                              Required for app submission. Default: https://rebel0789.github.io.
   --tool-cards <on|off>      Opt in to ChatGPT widget metadata on tool descriptors. Default: off.
@@ -323,6 +325,8 @@ function parseArgs(argv) {
     if (key === 'help') out.help = true;
     else if (key === 'allow-home') out.allowHome = true;
     else if (key === 'no-auth') out.noAuth = true;
+    else if (key === 'browser-control') out.browserControl = true;
+    else if (key === 'no-browser-control') out.browserControl = false;
     else if (key === 'no-bash') out.bash = 'off';
     else if (key === 'compact-bash-transcript') out.bashTranscript = 'compact';
     else if (key === 'full-bash-transcript') out.bashTranscript = 'full';
@@ -3944,6 +3948,8 @@ async function main() {
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], 'https://rebel0789.github.io');
   const toolCards = optionBool(args, profile, 'toolCards', ['CODEXPRO_TOOL_CARDS'], false);
+  const browserControl = optionBool(args, profile, 'browserControl', ['CODEXPRO_BROWSER_CONTROL'], false);
+  const browserDebugUrl = optionValue(args, profile, 'browserDebugUrl', ['CODEXPRO_BROWSER_DEBUG_URL'], 'http://127.0.0.1:9223');
   validateChoice('bash', bash, ['off', 'safe', 'full']);
   validateChoice('write', write, ['off', 'handoff', 'workspace']);
   validateChoice('tool-mode', toolMode, ['minimal', 'standard', 'full']);
@@ -3971,6 +3977,8 @@ async function main() {
     CODEXPRO_TOOL_MODE: toolMode,
     CODEXPRO_WIDGET_DOMAIN: widgetDomain,
     CODEXPRO_TOOL_CARDS: toolCards ? '1' : '0',
+    CODEXPRO_BROWSER_CONTROL: browserControl ? '1' : '0',
+    CODEXPRO_BROWSER_DEBUG_URL: browserDebugUrl,
     CODEXPRO_CONNECTION_TEST: connectionTest ? '1' : '0',
     CODEXPRO_MODE: mode,
     CODEXPRO_TUNNEL_MODE: tunnel === 'none' ? '0' : '1',
