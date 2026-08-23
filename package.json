@@ -75,6 +75,7 @@
     "analysis:smoke": "npm run build && node scripts/analysis-smoke.mjs",
     "analysis:cli-smoke": "npm run build && node scripts/analysis-cli-smoke.mjs",
     "doctor": "node scripts/codexpro.mjs doctor",
+    "windows:recover": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-recover.ps1 -StartNow",
     "connect": "node scripts/codexpro.mjs",
     "connect:setup": "node scripts/codexpro.mjs setup",
     "connect:local": "node scripts/codexpro.mjs --tunnel none",
