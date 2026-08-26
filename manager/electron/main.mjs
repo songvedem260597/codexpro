@@ -18,8 +18,8 @@ const managerProjectsFile = path.join(codexProHome, "manager-projects.json");
 function createWindow() {
   const smokeMode = process.env.CODEXPRO_MANAGER_SMOKE === "1";
   const win = new BrowserWindow({
-    width: 1240,
-    height: 820,
+    width: smokeMode ? 1900 : 1240,
+    height: smokeMode ? 1000 : 820,
     minWidth: 940,
     minHeight: 650,
     backgroundColor: "#090b10",
