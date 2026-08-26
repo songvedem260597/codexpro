@@ -290,6 +290,17 @@ npm run smoke
 npm run stress
 ```
 
+### Windows desktop manager
+
+The React + Electron manager shows Scheduled Task/MCP/tunnel health, copies or rotates the private MCP URL, and inspects saved or added repositories through CodexPro MCP. Build its installable Windows executable with:
+
+```powershell
+npm --prefix manager install
+npm run manager:dist
+```
+
+The installer is generated under `manager/release/`.
+
 Useful release checks:
 
 ```bash
