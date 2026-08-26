@@ -805,6 +805,16 @@ ipcMain.handle("codexpro:open-external", async (_event, url) => {
 });
 
 app.whenReady().then(() => {
+  if (isMac && app.isPackaged) {
+    try {
+      app.setLoginItemSettings({ openAtLogin: true });
+    } catch (error) {
+      console.warn("Không thể bật tự khởi động cùng macOS:", error instanceof Error ? error.message : String(error));
+    }
+    void controlServer("start").catch((error) => {
+      console.warn("Không thể tự khởi động CodexPro runtime:", error instanceof Error ? error.message : String(error));
+    });
+  }
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

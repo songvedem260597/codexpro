@@ -246,7 +246,6 @@ function App() {
     }
   }, [activePage, requestResponses]);
 
-  const onlineCount = useMemo(() => [status?.local?.ok, status?.tunnel?.ok, status?.task?.state === "Running"].filter(Boolean).length, [status]);
   const profileSummary = useMemo(() => {
     const allProfiles = status?.browserProfiles || [];
     const profiles = allProfiles.filter((profile) => profile.connected);
@@ -452,7 +451,6 @@ function App() {
           <button className={activePage === "requests" ? "active" : ""} onClick={() => setActivePage("requests")}><Icon>✎</Icon>Giao việc</button>
         </nav>
         <div className="sidebar-foot">
-          <span><Dot ok={onlineCount === 3} />{onlineCount === 3 ? "Hoạt động tốt" : "Cần kiểm tra"}</span>
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
           <small>CodexPro Manager 0.2.9</small>
         </div>
