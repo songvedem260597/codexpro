@@ -228,24 +228,36 @@ function readToken(tokenFile) {
   }
 }
 
-async function health(base, token) {
+async function health(base, token, attempts = 1) {
   if (!base) return { ok: false, status: 0, latency: 0, error: "Chưa có endpoint" };
-  const started = Date.now();
-  try {
-    const response = await fetch(`${base.replace(/\/$/, "")}/healthz`, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-      signal: AbortSignal.timeout(5500)
-    });
-    const body = await response.json().catch(() => ({}));
-    return {
-      ok: response.ok && body.ok === true,
-      status: response.status,
-      latency: Date.now() - started,
-      data: body
-    };
-  } catch (error) {
-    return { ok: false, status: 0, latency: Date.now() - started, error: error instanceof Error ? error.message : String(error) };
+  let lastResult = { ok: false, status: 0, latency: 0, error: "Không thể kết nối" };
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const started = Date.now();
+    try {
+      const response = await fetch(`${base.replace(/\/$/, "")}/healthz`, {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+        signal: AbortSignal.timeout(5500)
+      });
+      const body = await response.json().catch(() => ({}));
+      lastResult = {
+        ok: response.ok && body.ok === true,
+        status: response.status,
+        latency: Date.now() - started,
+        data: body,
+        ...(response.ok && body.ok === true ? {} : { error: `HTTP ${response.status}` })
+      };
+    } catch (error) {
+      lastResult = {
+        ok: false,
+        status: 0,
+        latency: Date.now() - started,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+    if (lastResult.ok || attempt === attempts) return lastResult;
+    await new Promise((resolve) => setTimeout(resolve, 350));
   }
+  return lastResult;
 }
 
 function connectorLink(config, token) {
@@ -350,7 +362,7 @@ async function runtimeStatus() {
     const publicBase = publicBaseFromEndpoint(endpoint) || (hostname ? (hostname.includes("://") ? hostname : `https://${hostname}`).replace(/\/mcp\/?$/, "") : "");
     const [local, tunnel] = await Promise.all([
       health(localBase, token),
-      publicBase ? health(publicBase, token) : Promise.resolve({ ok: false, status: 0, latency: 0, error: "Không dùng public tunnel" })
+      publicBase ? health(publicBase, token, 3) : Promise.resolve({ ok: false, status: 0, latency: 0, error: "Không dùng public tunnel" })
     ]);
     const processCandidates = [
       { pid: runtime?.pid, name: "codexpro" },
@@ -385,7 +397,7 @@ async function runtimeStatus() {
     : "";
   const [local, tunnel, processText] = await Promise.all([
     health(localBase, token),
-    publicBase ? health(publicBase, token) : Promise.resolve({ ok: false, status: 0, latency: 0, error: "Không dùng public tunnel" }),
+    publicBase ? health(publicBase, token, 3) : Promise.resolve({ ok: false, status: 0, latency: 0, error: "Không dùng public tunnel" }),
     runPowerShell("@((Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('node.exe','cloudflared.exe') -and $_.CommandLine -match 'codexpro\\.mjs.*start|dist\\\\http\\.js|cloudflared.*codexpro' } | Select-Object ProcessId,Name,CommandLine)) | ConvertTo-Json -Depth 3 -Compress").catch(() => "[]")
   ]);
   let processes = [];
