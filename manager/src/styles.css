@@ -1,5 +1,5 @@
 :root {
-  font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   color: #eef1f6;
   background: #090b10;
   font-synthesis: none;
@@ -15,11 +15,11 @@
 
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; scrollbar-color: #343c4b #090b10; scrollbar-width: thin; }
-body { margin: 0; min-width: 920px; min-height: 100vh; background: #090b10; font-size: 18px; }
+body { margin: 0; min-width: 920px; min-height: 100vh; background: #090b10; font-size: 18px; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: wait; opacity: .55; }
-code, pre { font-family: "Cascadia Code", Consolas, monospace; }
+code, pre { font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, "Cascadia Code", Consolas, monospace; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: #090b10; }
@@ -73,8 +73,9 @@ nav button:hover, nav button.active { color: #fff; background: #171b24; }
 main { margin-left: 232px; padding: 42px 50px 80px; }
 header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 42px; }
 h1, h2, h3, p { margin-top: 0; }
-h1 { font-size: 36px; margin-bottom: 8px; letter-spacing: -1.2px; }
-h2 { font-size: 23px; letter-spacing: -.4px; margin-bottom: 8px; }
+h1, h2, .brand strong { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; }
+h1 { font-size: 36px; margin-bottom: 8px; letter-spacing: -1.05px; font-weight: 750; }
+h2 { font-size: 23px; letter-spacing: -.35px; margin-bottom: 8px; font-weight: 700; }
 h3 { font-size: 15px; color: #c5cbd6; margin: 22px 0 8px; }
 .subtitle, .section-note { color: var(--muted); margin: 0; }
 .live-refresh { display: flex; align-items: center; gap: 9px; color: #8e98a9; border: 1px solid var(--border); background: #11141a; border-radius: 999px; padding: 9px 13px; font-size: 13px; font-weight: 600; }
@@ -106,7 +107,7 @@ section { margin-bottom: 38px; }
 .link-actions { display: flex; align-items: center; gap: 9px; }
 .text-button { margin-left: auto; border: 0; background: none; color: #8da4ff; font-size: 14px; }
 
-.profile-count { color: #9aa5b7; border: 1px solid var(--border); background: #11151c; border-radius: 999px; padding: 7px 11px; font-size: 13px; font-weight: 700; }
+.profile-count { color: #9aa5b7; border: 1px solid var(--border); background: #11151c; border-radius: 999px; padding: 7px 11px; font-size: 13px; font-weight: 700; white-space: nowrap; }
 .profile-list { display: grid; gap: 10px; }
 .browser-profile { display: flex; align-items: center; gap: 14px; padding: 17px; border: 1px solid var(--border); border-radius: 14px; background: linear-gradient(145deg, #12161e, #0f1218); }
 .browser-profile.is-online { border-color: #28503a; box-shadow: inset 3px 0 0 #53e58e; }
@@ -143,6 +144,7 @@ section { margin-bottom: 38px; }
 .already-connected { min-width: 170px; padding: 10px 13px; color: #9df0bd; border: 1px solid #34734e; background: #153321; border-radius: 9px; text-align: center; font-size: 14px; font-weight: 800; }
 
 .request-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.request-grid > .empty { grid-column: 1 / span 2; }
 .request-card { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: 15px; background: linear-gradient(150deg, #131821, #0f1218); }
 .request-card.is-online { border-color: #28503a; }
 .request-card.is-offline { opacity: .68; border-color: #6e3038; }
