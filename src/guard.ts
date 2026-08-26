@@ -68,11 +68,19 @@ export class WorkspaceManager {
   private readonly workspaces = new Map<string, Workspace>();
   private selectedWorkspaceId?: string;
 
-  constructor(private readonly config: CodexProConfig) {}
+  constructor(
+    private readonly config: CodexProConfig,
+    private readonly onWorkspaceAccess?: (workspace: Workspace) => void
+  ) {}
+
+  private touch(workspace: Workspace): Workspace {
+    this.onWorkspaceAccess?.(workspace);
+    return workspace;
+  }
 
   defaultWorkspace(): Workspace {
     const existing = [...this.workspaces.values()].find((workspace) => workspace.root === this.config.defaultRoot);
-    return existing ?? this.openWorkspace(this.config.defaultRoot, { select: false });
+    return existing ? this.touch(existing) : this.openWorkspace(this.config.defaultRoot, { select: false });
   }
 
   selectDefaultWorkspace(): Workspace {
@@ -102,7 +110,7 @@ export class WorkspaceManager {
     const existing = [...this.workspaces.values()].find((workspace) => workspace.root === realRoot);
     if (existing) {
       if (options.select !== false) this.selectedWorkspaceId = existing.id;
-      return existing;
+      return this.touch(existing);
     }
 
     const id = workspaceIdForRoot(realRoot);
@@ -114,14 +122,14 @@ export class WorkspaceManager {
     sharedWorkspaceCatalog.set(id, workspace);
     this.workspaces.set(id, workspace);
     if (options.select !== false) this.selectedWorkspaceId = id;
-    return workspace;
+    return this.touch(workspace);
   }
 
   getWorkspace(id?: string): Workspace {
     if (!id) {
       if (this.selectedWorkspaceId) {
         const selected = this.workspaces.get(this.selectedWorkspaceId);
-        if (selected) return selected;
+        if (selected) return this.touch(selected);
       }
       return this.selectDefaultWorkspace();
     }
@@ -137,7 +145,7 @@ export class WorkspaceManager {
     if (!workspace) {
       throw new CodexProError(`Unknown workspace_id: ${id}. Call open_workspace first.`);
     }
-    return workspace;
+    return this.touch(workspace);
   }
 
   listWorkspaces(): Workspace[] {

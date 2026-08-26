@@ -570,28 +570,30 @@ function App() {
 
         <section id="projects">
           <div className="section-head">
-            <div><p className="eyebrow">WORKSPACES</p><h2>Repo và dự án</h2><p className="section-note">Từ profile/runtime CodexPro và các thư mục bạn tự thêm.</p></div>
-            <button className="button secondary" onClick={addProject} disabled={Boolean(busy)}>+ Thêm dự án</button>
+            <div><p className="eyebrow">CHATGPT WORKSPACES</p><h2>Repo và dự án</h2><p className="section-note">Các repo/thư mục mà ChatGPT đang mở qua CodexPro. Dự án thêm tay chỉ được ghim vào danh sách này.</p></div>
+            <button className="button secondary" onClick={addProject} disabled={Boolean(busy)}>+ Ghim repo</button>
           </div>
           <div className="project-list">
-            {projects.length === 0 && <div className="empty">Chưa tìm thấy dự án CodexPro.</div>}
+            {projects.length === 0 && <div className="empty">Chưa có repo hoặc dự án nào đang được ChatGPT mở qua CodexPro.</div>}
             {projects.map((project) => (
               <article className="project" key={project.root}>
                 <div className="repo-icon">{project.name.slice(0, 1).toUpperCase()}</div>
                 <div className="project-main">
-                  <div className="project-title"><strong>{project.name}</strong>{project.active && <span className="badge">ĐANG CHẠY</span>}</div>
+                  <div className="project-title"><strong>{project.name}</strong>{project.active && <span className="badge">CHATGPT ĐANG DÙNG</span>}</div>
                   <code>{project.root}</code>
                   <div className="project-meta">
                     <span>{project.source}</span>
-                    <span>{project.isGit ? `nhánh ${project.branch}` : "không phải Git repo"}</span>
+                    {project.active && <span>{project.sessionCount} phiên MCP</span>}
+                    <span>{project.isGit ? `nhánh ${project.branch}` : "thư mục dự án"}</span>
                     <span className={project.changes ? "changed" : "clean"}>{project.changes ? `${project.changes} thay đổi` : "sạch"}</span>
+                    {project.lastSeenAt && <span>Hoạt động {new Date(project.lastSeenAt).toLocaleTimeString("vi-VN")}</span>}
                     {project.commit?.hash && <span>{project.commit.hash} · {project.commit.subject}</span>}
                   </div>
                 </div>
                 <div className="project-actions">
                   <button onClick={() => inspect(project)} disabled={Boolean(busy)}>{busy === project.root ? "Đang kiểm tra..." : "Kiểm tra qua MCP"}</button>
                   <button onClick={() => api.openFolder(project.root)}>Mở thư mục</button>
-                  {!project.active && project.source === "Đã thêm" && <button className="remove" title="Bỏ khỏi danh sách" onClick={async () => setProjects(await api.removeProject(project.root))}>×</button>}
+                  {!project.active && project.source === "Đã ghim" && <button className="remove" title="Bỏ khỏi danh sách" onClick={async () => setProjects(await api.removeProject(project.root))}>×</button>}
                 </div>
               </article>
             ))}

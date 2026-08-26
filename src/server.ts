@@ -1017,10 +1017,11 @@ const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, d
 
 export interface CodexProServerContext {
   workerId?: string | null;
+  onWorkspaceSelected?: (workspace: Workspace) => void;
 }
 
 export function createCodexProServer(config: CodexProConfig, context: CodexProServerContext = {}): McpServer {
-  const workspaces = new WorkspaceManager(config);
+  const workspaces = new WorkspaceManager(config, context.onWorkspaceSelected);
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
   const browser = getSharedBrowserAutomation();

@@ -459,32 +459,46 @@ async function gitSummary(root) {
 }
 
 async function listProjects() {
-  const task = await scheduledTask();
-  const activeRoot = task.root || parseTaskArguments(task.arguments).root;
+  const status = await runtimeStatus();
+  const chatGptWorkspaces = Array.isArray(status?.local?.data?.mcpSessions?.projectWorkspaces)
+    ? status.local.data.mcpSessions.projectWorkspaces
+    : [];
   const sources = new Map();
-  for (const file of jsonFiles(path.join(codexProHome, "profiles"))) {
-    const profile = readJson(file);
-    if (typeof profile?.root === "string") sources.set(path.resolve(profile.root), "CodexPro profile");
+
+  for (const workspace of chatGptWorkspaces) {
+    if (typeof workspace?.root !== "string" || !workspace.root) continue;
+    const root = path.resolve(workspace.root);
+    sources.set(root, {
+      source: "ChatGPT",
+      active: Number(workspace.sessionCount) > 0,
+      sessionCount: Number(workspace.sessionCount) || 0,
+      lastSeenAt: workspace.lastSeenAt || "",
+      clients: Array.isArray(workspace.clients) ? workspace.clients : []
+    });
   }
-  for (const file of jsonFiles(path.join(codexProHome, "runtime"))) {
-    const runtime = readJson(file);
-    if (typeof runtime?.root === "string") sources.set(path.resolve(runtime.root), "CodexPro runtime");
+
+  for (const savedRoot of managerProjects()) {
+    const root = path.resolve(savedRoot);
+    if (!sources.has(root)) {
+      sources.set(root, { source: "Đã ghim", active: false, sessionCount: 0, lastSeenAt: "", clients: [] });
+    }
   }
-  for (const root of managerProjects()) sources.set(path.resolve(root), sources.get(path.resolve(root)) || "Đã thêm");
-  if (activeRoot) sources.set(path.resolve(activeRoot), "Đang chạy");
 
   const projects = [];
-  for (const [root, source] of sources) {
+  for (const [root, meta] of sources) {
     if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) continue;
     projects.push({
       root,
       name: path.basename(root),
-      source,
-      active: Boolean(activeRoot && path.resolve(activeRoot).toLowerCase() === root.toLowerCase()),
+      source: meta.source,
+      active: meta.active,
+      sessionCount: meta.sessionCount,
+      lastSeenAt: meta.lastSeenAt,
+      clients: meta.clients,
       ...(await gitSummary(root))
     });
   }
-  return projects.sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name));
+  return projects.sort((a, b) => Number(b.active) - Number(a.active) || String(b.lastSeenAt).localeCompare(String(a.lastSeenAt)) || a.name.localeCompare(b.name));
 }
 
 async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {

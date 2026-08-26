@@ -424,6 +424,8 @@ try {
   if (
     initialHealth.mcpSessions?.activeSessions !== 0 ||
     !Array.isArray(initialHealth.mcpSessions?.workerConnections) ||
+    !Array.isArray(initialHealth.mcpSessions?.projectWorkspaces) ||
+    initialHealth.mcpSessions.projectWorkspaces.length !== 0 ||
     initialHealth.mcpSessions?.capacity?.maxSessions !== 16 ||
     initialHealth.mcpSessions?.capacity?.maxSessionsPerWorker !== 3 ||
     initialHealth.mcpSessions?.capacity?.maxUnattributedSessions !== 4 ||
@@ -903,6 +905,15 @@ try {
     });
     if (!withSkills.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'http-smoke-skill')) {
       throw new Error('HTTP open_workspace did not discover workspace skill inventory when requested');
+    }
+    const projectHealthResponse = await fetch(`${baseUrl}/healthz`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    const projectHealth = await projectHealthResponse.json();
+    const expectedWorkspaceRoot = await fs.realpath(root);
+    const trackedWorkspace = projectHealth.mcpSessions?.projectWorkspaces?.find?.((workspace) => workspace.root === expectedWorkspaceRoot);
+    if (!trackedWorkspace || trackedWorkspace.sessionCount < 1 || !trackedWorkspace.clients?.includes?.('codexpro-http-smoke')) {
+      throw new Error(`healthz did not expose the MCP project workspace: ${JSON.stringify(projectHealth.mcpSessions?.projectWorkspaces)}`);
     }
   });
 

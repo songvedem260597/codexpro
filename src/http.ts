@@ -1598,6 +1598,10 @@ async function main(): Promise<void> {
     createdAt: number;
     lastSeenAt: number;
     workerId: string | null;
+    clientName: string | null;
+    clientVersion: string | null;
+    workspaceId: string | null;
+    workspaceRoot: string | null;
   };
 
   const transports = new Map<string, TransportRecord>();
@@ -1741,16 +1745,32 @@ async function main(): Promise<void> {
     unattributedSessions: number;
     capacity: { maxSessions: number; maxSessionsPerWorker: number; maxUnattributedSessions: number; workerTtlMs: number; unattributedTtlMs: number };
     workerConnections: Array<{ workerId: string; sessionCount: number; totalSessions: number; connectedAt: string; lastSeenAt: string }>;
+    projectWorkspaces: Array<{ workspaceId: string; root: string; sessionCount: number; lastSeenAt: string; clients: string[]; workers: string[] }>;
   } {
     pruneTransports();
     const activeSessions = new Map<string, number>();
+    const projectWorkspaceMap = new Map<string, { workspaceId: string; root: string; sessionCount: number; lastSeenAt: number; clients: Set<string>; workers: Set<string> }>();
     let unattributedSessions = 0;
     for (const record of transports.values()) {
-      if (!record.workerId) {
-        unattributedSessions += 1;
-        continue;
-      }
-      activeSessions.set(record.workerId, (activeSessions.get(record.workerId) ?? 0) + 1);
+      if (!record.workerId) unattributedSessions += 1;
+      else activeSessions.set(record.workerId, (activeSessions.get(record.workerId) ?? 0) + 1);
+
+      const isManagerSession = record.clientName?.toLowerCase().startsWith("codexpro manager") ?? false;
+      if (!record.workspaceRoot || !record.workspaceId || isManagerSession) continue;
+      const key = process.platform === "win32" ? record.workspaceRoot.toLowerCase() : record.workspaceRoot;
+      const current = projectWorkspaceMap.get(key) ?? {
+        workspaceId: record.workspaceId,
+        root: record.workspaceRoot,
+        sessionCount: 0,
+        lastSeenAt: 0,
+        clients: new Set<string>(),
+        workers: new Set<string>()
+      };
+      current.sessionCount += 1;
+      current.lastSeenAt = Math.max(current.lastSeenAt, record.lastSeenAt);
+      if (record.clientName) current.clients.add(record.clientName);
+      if (record.workerId) current.workers.add(record.workerId);
+      projectWorkspaceMap.set(key, current);
     }
     return {
       activeSessions: transports.size,
@@ -1768,7 +1788,15 @@ async function main(): Promise<void> {
         totalSessions: record.totalSessions,
         connectedAt: new Date(record.connectedAt).toISOString(),
         lastSeenAt: new Date(record.lastSeenAt).toISOString()
-      })).sort((left, right) => left.workerId.localeCompare(right.workerId))
+      })).sort((left, right) => left.workerId.localeCompare(right.workerId)),
+      projectWorkspaces: [...projectWorkspaceMap.values()].map((workspace) => ({
+        workspaceId: workspace.workspaceId,
+        root: workspace.root,
+        sessionCount: workspace.sessionCount,
+        lastSeenAt: new Date(workspace.lastSeenAt).toISOString(),
+        clients: [...workspace.clients].sort(),
+        workers: [...workspace.workers].sort()
+      })).sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
     };
   }
 
@@ -1843,9 +1871,10 @@ async function main(): Promise<void> {
       if (existingTransport) {
         transport = existingTransport;
       } else if (!sessionId && isInitializeRequest(req.body)) {
+        const clientInfo = requestClientInfo(req);
         logMcpLifecycle("initialize_received", {
           workerId,
-          ...requestClientInfo(req),
+          ...clientInfo,
           activeSessions: transports.size
         });
         transport = new StreamableHTTPServerTransport({
@@ -1857,7 +1886,11 @@ async function main(): Promise<void> {
               transport,
               createdAt: timestamp,
               lastSeenAt: timestamp,
-              workerId
+              workerId,
+              clientName: clientInfo.clientName ?? null,
+              clientVersion: clientInfo.clientVersion ?? null,
+              workspaceId: null,
+              workspaceRoot: null
             });
             recordWorkerActivity(workerId, timestamp, true);
             pruneTransports();
@@ -1885,7 +1918,18 @@ async function main(): Promise<void> {
           });
         };
 
-        const server = createCodexProServer(config, { workerId });
+        const server = createCodexProServer(config, {
+          workerId,
+          onWorkspaceSelected: (workspace) => {
+            const activeSessionId = (transport as any).sessionId as string | undefined;
+            if (!activeSessionId) return;
+            const record = transports.get(activeSessionId);
+            if (!record) return;
+            record.workspaceId = workspace.id;
+            record.workspaceRoot = workspace.root;
+            record.lastSeenAt = Date.now();
+          }
+        });
         await server.connect(transport);
       } else {
         sendSessionError(res, sessionId, workerId);
