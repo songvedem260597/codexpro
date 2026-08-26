@@ -20,6 +20,7 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
+import { ensureBrowserExtensionBridge } from "./browserExtensionBridge.js";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -1445,6 +1446,7 @@ async function main(): Promise<void> {
   }
 
   const config = loadConfig();
+  if (config.browserControl) ensureBrowserExtensionBridge();
   if (config.requireHttpToken && !config.authToken) {
     throw new Error(
       "CODEXPRO_HTTP_TOKEN is required for this HTTP binding. " +

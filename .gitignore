@@ -9,6 +9,10 @@ dist/
 .playwright-cli/
 .worktrees/
 output/
+manager/node_modules/
+manager/dist/
+manager/release/
+manager/*-smoke.png
 CODEXPRO_MCP_REPORT.md
 *.local.md
 *.local.json

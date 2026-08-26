@@ -21,6 +21,8 @@ import { redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { CONTROL_PLANE_TOOL_NAMES, controlPlaneToolDefinitions } from "./controlPlaneOps.js";
 import { codexPatchToUnifiedDiff, codexPatchTouchedPaths, isCodexPatchEnvelope } from "./patchOps.js";
+import { runBrowserControl } from "./browserOps.js";
+import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, runBrowserExtensionCommand } from "./browserExtensionBridge.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -386,7 +388,8 @@ const STANDARD_TOOL_NAMES = [
   "export_pro_context",
   "handoff_to_agent",
   ...CONTROL_PLANE_TOOL_NAMES,
-  ...BROWSER_TOOL_NAMES
+  ...BROWSER_TOOL_NAMES,
+  "browser_control"
 ] as const;
 
 const FULL_TOOL_NAMES = [
@@ -419,7 +422,8 @@ const FULL_TOOL_NAMES = [
   "handoff_to_agent",
   "handoff_to_codex",
   ...CONTROL_PLANE_TOOL_NAMES,
-  ...BROWSER_TOOL_NAMES
+  ...BROWSER_TOOL_NAMES,
+  "browser_control"
 ] as const;
 
 const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
@@ -465,6 +469,10 @@ function toolNamesForMode(config: CodexProConfig): string[] {
     const analysisIndex = names.indexOf("inspect_workspace");
     if (analysisIndex !== -1) names.splice(analysisIndex, 1);
   }
+  if (!config.browserControl || config.connectionTest || config.toolMode === "minimal") {
+    const browserIndex = names.indexOf("browser_control");
+    if (browserIndex !== -1) names.splice(browserIndex, 1);
+  }
   if (config.connectionTest) {
     for (const hiddenTool of CONNECTION_TEST_HIDDEN_TOOLS) {
       const toolIndex = names.indexOf(hiddenTool);
@@ -505,6 +513,7 @@ function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
   if (name === "inspect_workspace" && !config.analysisEnabled) return false;
+  if (name === "browser_control") return config.browserControl && !config.connectionTest && config.toolMode !== "minimal";
   if (name === "handoff_to_agent" && config.writeMode === "handoff") return true;
   if (config.toolMode === "full") return true;
   if (config.toolMode === "minimal") return MINIMAL_TOOLS.has(name);
@@ -1005,6 +1014,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
   const guard = new PathGuard(config);
   const browser = getSharedBrowserAutomation();
   const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
+  if (config.browserControl) ensureBrowserExtensionBridge();
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
 
@@ -1146,6 +1156,8 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           signedBridgeAuth: Boolean(config.controlPlaneToken),
           boundWorkerId: context.workerId ?? null
         },
+        browserControl: config.browserControl,
+        browserDebugUrl: config.browserControl ? config.browserDebugUrl : null,
         toolCards: config.toolCards,
         connectionTest: config.connectionTest,
         analysisEnabled: config.analysisEnabled,
@@ -2904,6 +2916,97 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       );
     }
   }
+
+  registerCodexTool(
+    config,
+    server,
+    "browser_control",
+    {
+      title: "Browser Control",
+      description:
+        "Control the Chrome profile explicitly marked ACTIVE by the CodexPro Profile Bridge extension, with the dedicated port-9223 Chrome as fallback. Use list_profiles/status/list_tabs, then snapshot to obtain CSS selectors before click/type.",
+      inputSchema: {
+        action: z.enum(["status", "list_profiles", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "type", "press", "screenshot"]),
+        profile_id: z.string().optional().describe("Optional extension profile id. Omit to use the profile marked ACTIVE. Ignored for the dedicated fallback browser."),
+        browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
+        target_id: z.string().optional().describe("Tab id from list_tabs. Omit to use the first page tab."),
+        url: z.string().optional().describe("HTTP(S) URL for open_tab or navigate."),
+        selector: z.string().optional().describe("CSS selector from snapshot for click or type."),
+        text: z.string().optional().describe("Text to enter for type."),
+        key: z.string().optional().describe("Key for press, such as Enter, Tab, Escape, or ArrowDown."),
+        max_chars: z.number().int().min(500).max(50000).optional().describe("Maximum visible page text returned by snapshot. Default: 20000."),
+        full_page: z.boolean().optional().describe("Capture beyond the viewport for screenshot. Default: false.")
+      },
+      annotations: BASH_ANNOTATIONS,
+      _meta: {
+        "openai/toolInvocation/invoking": "Controlling CodexPro Chrome...",
+        "openai/toolInvocation/invoked": "Browser action complete"
+      }
+    },
+    async (args) => {
+      const profiles = listBrowserExtensionProfiles();
+      if (args.action === "list_profiles") {
+        return textResult(`# Browser Profiles\n\n${profiles.length ? profiles.map((profile) => `- ${profile.active ? "ACTIVE" : "idle"} · ${profile.label} · ${profile.connected ? "online" : "offline"} · ${profile.profile_id}`).join("\n") : "No extension profiles connected."}`, { action: args.action, profiles });
+      }
+      if (args.action === "status") {
+        let dedicated: Record<string, any>;
+        try {
+          dedicated = await runBrowserControl(config.browserDebugUrl, { action: "status" });
+        } catch (error) {
+          dedicated = { connected: false, error: error instanceof Error ? error.message : String(error) };
+        }
+        return textResult(`# Browser Control Status\n\nDedicated Chrome: ${dedicated.connected ? "online" : "offline"}\nExtension profiles: ${profiles.length}\nACTIVE: ${profiles.find((profile) => profile.active)?.label ?? "none"}`, {
+          action: args.action,
+          dedicated,
+          profiles,
+          active_profile_id: profiles.find((profile) => profile.active)?.profile_id ?? null
+        });
+      }
+      if ((args.action === "open_tab" || args.action === "navigate") && args.url) {
+        const parsed = new URL(args.url);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new CodexProError("Browser navigation only allows http and https URLs.");
+      }
+      let result: Record<string, any>;
+      const selectedProfile = args.profile_id || profiles.find((profile) => profile.active && profile.connected)?.profile_id;
+      const useExtension = args.browser !== "dedicated" && Boolean(selectedProfile);
+      if (useExtension) {
+        result = await runBrowserExtensionCommand(args.action, {
+          target_id: args.target_id,
+          url: args.url,
+          selector: args.selector,
+          text: args.text,
+          key: args.key,
+          max_chars: args.max_chars,
+          full_page: args.full_page
+        }, selectedProfile);
+        result.browser_backend = "extension";
+        result.profile_id = selectedProfile;
+      } else {
+        result = await runBrowserControl(config.browserDebugUrl, {
+          action: args.action,
+          targetId: args.target_id,
+          url: args.url,
+          selector: args.selector,
+          text: args.text,
+          key: args.key,
+          maxChars: args.max_chars,
+          fullPage: args.full_page
+        });
+        result.browser_backend = "dedicated";
+      }
+      if (result.image_base64) {
+        const { image_base64, ...structured } = result;
+        return {
+          content: [
+            { type: "image", data: image_base64, mimeType: result.mime_type ?? "image/png" },
+            { type: "text", text: `Browser screenshot captured for tab ${result.target_id}.` }
+          ],
+          structuredContent: structured
+        };
+      }
+      return textResult(`# Browser Control\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\``, result);
+    }
+  );
 
   registerCodexTool(
     config,

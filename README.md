@@ -309,6 +309,7 @@ Common fixes:
 - ChatGPT cannot call tools in one model/chat: switch to a ChatGPT surface that supports Developer Mode app actions.
 - Local port is busy: start another repo with `--port 8788`.
 - Tool list looks stale: create a new ChatGPT app entry or change the connector URL token.
+- Windows Scheduled Task stopped after sleep, restart, or a process exit: run `npm run windows:recover`. This preserves existing triggers and adds one `IgnoreNew` recovery attempt every minute without starting a watchdog process.
 
 ## Development
 
@@ -318,6 +319,17 @@ npm run build
 npm run smoke
 npm run stress
 ```
+
+### Windows desktop manager
+
+The React + Electron manager shows Scheduled Task/MCP/tunnel health, copies or rotates the private MCP URL, and inspects saved or added repositories through CodexPro MCP. Build its installable Windows executable with:
+
+```powershell
+npm --prefix manager install
+npm run manager:dist
+```
+
+The installer is generated under `manager/release/`.
 
 Useful release checks:
 

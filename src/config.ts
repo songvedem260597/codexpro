@@ -44,6 +44,8 @@ export interface CodexProConfig {
   analysisLimits: AnalysisLimits;
   controlPlaneUrl?: string;
   controlPlaneToken?: string;
+  browserControl: boolean;
+  browserDebugUrl: string;
 }
 
 const DEFAULT_BLOCKED_GLOBS = [
@@ -271,6 +273,23 @@ function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
 
+function browserDebugUrlFrom(value: string | undefined): string {
+  const raw = value?.trim() || "http://127.0.0.1:9223";
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`CODEXPRO_BROWSER_DEBUG_URL must be a valid loopback URL, got: ${raw}`);
+  }
+  if (parsed.protocol !== "http:" || !isLoopbackHost(parsed.hostname)) {
+    throw new Error("CODEXPRO_BROWSER_DEBUG_URL must use http on 127.0.0.1, localhost, or ::1.");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== "/") {
+    throw new Error("CODEXPRO_BROWSER_DEBUG_URL must be an origin only, for example http://127.0.0.1:9223.");
+  }
+  return parsed.origin;
+}
+
 export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
   const args = parseArgs(argv);
 
@@ -382,6 +401,8 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     toolCards: boolFrom(toolCardsArg ?? process.env.CODEXPRO_TOOL_CARDS, false),
     connectionTest: boolFrom(process.env.CODEXPRO_CONNECTION_TEST, false),
     analysisEnabled: boolFrom(process.env.CODEXPRO_ANALYSIS, true),
+    browserControl: boolFrom(process.env.CODEXPRO_BROWSER_CONTROL, false),
+    browserDebugUrl: browserDebugUrlFrom(process.env.CODEXPRO_BROWSER_DEBUG_URL),
     analysisLimits: {
       maxInventoryFiles: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_INVENTORY_FILES, DEFAULT_ANALYSIS_LIMITS.maxInventoryFiles, 100, 100_000),
       maxAnalyzedFiles: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_ANALYZED_FILES, DEFAULT_ANALYSIS_LIMITS.maxAnalyzedFiles, 10, 50_000),
