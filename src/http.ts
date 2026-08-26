@@ -22,6 +22,40 @@ import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
 import { ensureBrowserExtensionBridge } from "./browserExtensionBridge.js";
 
+const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
+
+function browserExtensionConnectorInfo(config: CodexProConfig) {
+  const runtime = readRuntimeConnection(config.defaultRoot);
+  const profile = readWorkspaceProfile(config.defaultRoot);
+  const hostname =
+    profile.hostname ??
+    process.env.CODEXPRO_PUBLIC_HOSTNAME ??
+    process.env.CODEXPRO_HOSTNAME ??
+    process.env.NGROK_DOMAIN ??
+    "";
+  const endpoint = typeof runtime.endpoint === "string" && runtime.endpoint
+    ? runtime.endpoint
+    : hostname
+      ? `https://${normalizePublicHostname(hostname)}/mcp`
+      : "";
+  if (!endpoint) throw new Error("CodexPro public MCP URL is not ready. Start the public tunnel first.");
+
+  const serverUrl = new URL(endpoint);
+  if (serverUrl.protocol !== "https:") {
+    throw new Error("ChatGPT requires the public HTTPS CodexPro MCP URL; the current runtime is local-only.");
+  }
+  if (serverUrl.pathname === "/" || !serverUrl.pathname) serverUrl.pathname = "/mcp";
+  if (serverUrl.pathname !== "/mcp") throw new Error("CodexPro public endpoint must use the /mcp path.");
+  if (config.authToken) serverUrl.searchParams.set("codexpro_token", config.authToken);
+
+  return {
+    name: "CodexPro",
+    server_url: serverUrl.toString(),
+    settings_url: CHATGPT_CONNECTOR_SETTINGS_URL,
+    authentication: "none" as const
+  };
+}
+
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -1446,7 +1480,9 @@ async function main(): Promise<void> {
   }
 
   const config = loadConfig();
-  if (config.browserControl) ensureBrowserExtensionBridge();
+  if (config.browserControl) {
+    ensureBrowserExtensionBridge({ connectorInfo: () => browserExtensionConnectorInfo(config) });
+  }
   if (config.requireHttpToken && !config.authToken) {
     throw new Error(
       "CODEXPRO_HTTP_TOKEN is required for this HTTP binding. " +

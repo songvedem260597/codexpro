@@ -12,6 +12,7 @@ output/
 manager/node_modules/
 manager/dist/
 manager/release/
+release/
 manager/*-smoke.png
 CODEXPRO_MCP_REPORT.md
 *.local.md

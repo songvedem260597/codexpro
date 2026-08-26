@@ -24,6 +24,7 @@ import { CONTROL_PLANE_TOOL_NAMES, controlPlaneToolDefinitions } from "./control
 import { codexPatchToUnifiedDiff, codexPatchTouchedPaths, isCodexPatchEnvelope } from "./patchOps.js";
 import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, runBrowserExtensionCommand } from "./browserExtensionBridge.js";
+import { recordMcpUsage } from "./mcpUsage.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -317,13 +318,19 @@ function registerToolCompat(
 ): void {
   const wrapped = async (args: any) => {
     const started = Date.now();
+    const usageArgs = args ?? {};
     try {
-      const result = tagToolResult(await handler(args ?? {}), name, options);
-      logToolCall(name, result?.isError ? "error" : "ok", started);
+      const result = tagToolResult(await handler(usageArgs), name, options);
+      const status = result?.isError ? "error" : "ok";
+      const durationMs = Date.now() - started;
+      logToolCall(name, status, started);
+      await recordMcpUsage(name, usageArgs, result, status, durationMs);
       return result;
     } catch (error) {
       const result = tagToolResult(errorResult(error), name, options);
+      const durationMs = Date.now() - started;
       logToolCall(name, "error", started);
+      await recordMcpUsage(name, usageArgs, result, "error", durationMs);
       return result;
     }
   };
@@ -3007,10 +3014,16 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       description:
         "Control the Chrome profile explicitly marked ACTIVE by the CodexPro Profile Bridge extension, with the dedicated port-9223 Chrome as fallback. Use list_profiles/status/list_tabs, then snapshot to obtain CSS selectors before click/type.",
       inputSchema: {
-        action: z.enum(["status", "list_profiles", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "type", "press", "screenshot"]),
+        action: z.enum(["status", "list_profiles", "check_chatgpt", "setup_chatgpt", "reload_extension", "send_chat_request", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "type", "press", "screenshot"]),
         profile_id: z.string().optional().describe("Optional extension profile id. Omit to use the profile marked ACTIVE. Ignored for the dedicated fallback browser."),
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
         target_id: z.string().optional().describe("Tab id from list_tabs. Omit to use the first page tab."),
+        conversation_id: z.string().optional().describe("Exact ChatGPT conversation id for send_chat_request. Opens that chat in the selected profile when needed."),
+        attachments: z.array(z.object({
+          name: z.string().min(1).max(255),
+          mime_type: z.string().min(1).max(160),
+          data_base64: z.string().min(1).max(14_000_000)
+        })).max(4).optional().describe("Files to attach to send_chat_request. Base64 payload; maximum 4 files."),
         url: z.string().optional().describe("HTTP(S) URL for open_tab or navigate."),
         selector: z.string().optional().describe("CSS selector from snapshot for click or type."),
         text: z.string().optional().describe("Text to enter for type."),
@@ -3045,14 +3058,22 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
       if ((args.action === "open_tab" || args.action === "navigate") && args.url) {
         const parsed = new URL(args.url);
-        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new CodexProError("Browser navigation only allows http and https URLs.");
+        const extensionReloadUrl = parsed.protocol === "chrome-extension:" && parsed.hostname === "gndipignbnipohooclcbhjliikamjlpl" && parsed.pathname === "/popup.html";
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && !extensionReloadUrl) {
+          throw new CodexProError("Browser navigation only allows http, https, and the signed CodexPro reload page.");
+        }
       }
       let result: Record<string, any>;
       const selectedProfile = args.profile_id || profiles.find((profile) => profile.active && profile.connected)?.profile_id;
+      if ((args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "send_chat_request" || args.action === "get_chat_response") && !selectedProfile) {
+        throw new CodexProError("Choose an online Chrome extension profile before setting up CodexPro in ChatGPT.");
+      }
       const useExtension = args.browser !== "dedicated" && Boolean(selectedProfile);
       if (useExtension) {
         result = await runBrowserExtensionCommand(args.action, {
           target_id: args.target_id,
+          conversation_id: args.conversation_id,
+          attachments: args.attachments,
           url: args.url,
           selector: args.selector,
           text: args.text,
