@@ -5,11 +5,13 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>CodexPro Profile Bridge</title>
   <style>
-    body{font:14px system-ui,sans-serif;width:290px;margin:0;padding:16px;background:#111318;color:#f5f7fb}
+    body{font:14px system-ui,sans-serif;width:320px;margin:0;padding:16px;background:#111318;color:#f5f7fb}
     h1{font-size:16px;margin:0 0 12px}.card{background:#1b1f27;border:1px solid #303744;border-radius:12px;padding:12px}
     #label{font-weight:700;overflow-wrap:anywhere}#email,#status{font-size:12px;color:#aeb7c5;margin-top:5px;overflow-wrap:anywhere}
     button{width:100%;margin-top:12px;padding:10px;border:0;border-radius:10px;font-weight:800;cursor:pointer;background:#39d98a;color:#07130d}
-    button.active{background:#ffb020;color:#211300}button:disabled{opacity:.55;cursor:wait}.hint{font-size:11px;color:#8e98a8;margin-top:10px;line-height:1.4}
+    button.secondary{background:#252b36;color:#f5f7fb;border:1px solid #3a4352}button.active{background:#ffb020;color:#211300}
+    button:disabled{opacity:.55;cursor:wait}.hint{font-size:11px;color:#8e98a8;margin-top:10px;line-height:1.4}
+    #installStatus[data-tone="ok"]{color:#66e6a4}#installStatus[data-tone="error"]{color:#ff8585}#installStatus[data-tone="busy"]{color:#ffca6a}
   </style>
 </head>
 <body>
@@ -19,8 +21,10 @@
     <div id="email"></div>
     <div id="status">Bridge: đang kiểm tra</div>
     <button id="activate" disabled>ACTIVE PROFILE NÀY</button>
+    <button id="install" class="secondary" disabled>THÊM CODEXPRO VÀO CHATGPT</button>
+    <div id="installStatus" class="hint">Tự bật Developer mode, thêm MCP và mở chat kiểm tra.</div>
   </div>
-  <div class="hint">Chỉ profile có trạng thái ACTIVE mới được CodexPro điều khiển. Bấm nút ở profile khác để chuyển quyền.</div>
+  <div class="hint">Mỗi Chrome profile cài extension riêng. Bấm thêm CodexPro ngay trong profile muốn kết nối; không cần copy link hay nhập Auth.</div>
   <script src="popup.js"></script>
 </body>
 </html>

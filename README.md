@@ -299,6 +299,15 @@ npm --prefix manager install
 npm run manager:dist
 ```
 
+### Chrome profile extension
+
+Load the `chrome-extension` directory in each Chrome profile that should use CodexPro. The popup has two independent actions:
+
+- **ACTIVE PROFILE NÀY** selects the one profile that `browser_control` may operate.
+- **THÊM CODEXPRO VÀO CHATGPT** obtains the current private MCP URL from the loopback bridge, enables ChatGPT Developer mode when the account allows it, creates the app as **CodexPro** with **Server URL** and **No Auth**, opens a new chat, selects `@CodexPro`, calls `server_config`, and waits for `CodexPro READY`.
+
+The private MCP URL is delivered only to the signed CodexPro extension origin and is not persisted by the extension. Each Chrome profile keeps its own installation result. ChatGPT plan, workspace role, or administrator restrictions can still prevent Developer mode from being enabled; the popup reports that condition instead of marking setup complete.
+
 The installer is generated under `manager/release/`.
 
 Useful release checks:
