@@ -29,7 +29,8 @@ CodexPro can expose:
 - `.ai-bridge` planning files
 - optional shell command execution through the `bash` tool, hidden when bash mode is off
 - server-side Playwright navigation and interaction in standard/full tool modes
-- optional write/edit/apply_patch capability depending on `CODEXPRO_WRITE_MODE`, advertised only in workspace write mode
+- optional create/write/edit/apply_patch/import_file capability depending on `CODEXPRO_WRITE_MODE`, advertised only in workspace write mode
+- optional ChatGPT attachment import through `import_file`, which downloads only platform-provided HTTPS file references from approved origins and never accepts arbitrary model-supplied URLs
 - optional local handoff execution through `codexpro execute-handoff`, run from the user's terminal only
 - optional local execute/review looping through `codexpro loop-handoff`, run from the user's terminal only with a user-provided reviewer command and iteration limit
 

@@ -42,7 +42,8 @@ try {
     bashMode: "safe",
     requireBashSession: false,
     inheritEnv: true,
-    maxOutputBytes: 100_000
+    maxOutputBytes: 100_000,
+    maxBashTimeoutMs: 600_000
   };
   const workspace = { id: "git-write-policy-smoke", root: repoRoot };
   const guard = {

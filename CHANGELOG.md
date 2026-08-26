@@ -4,6 +4,17 @@
 
 - Added server-side Playwright Chromium tools for opening public/localhost pages, bounded DOM snapshots, click/type/select actions, PNG screenshots, console capture, explicit close, and idle cleanup. Browser page state survives MCP transport reconnects within one CodexPro process. Browser networking blocks file URLs, URL credentials, cloud metadata, and private networks outside loopback. Playwright signal handlers stay disabled so the CodexPro launcher remains responsible for clean service shutdown and restart.
 - Added cross-platform safe Git writes: explicit-file staging, hook-disabled unsigned commits, and option-free pushes of verified local branches to HTTPS `origin` remotes, while continuing to block broad staging, force, deleting, tag, and alternate-remote pushes.
+
+## 0.30.0 (2026-08-08)
+
+- Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.
+- Rejected invalid relative `HOME` values such as `=` in restricted bash child environments, prefer a usable absolute `USERPROFILE`/`HOME`, and forward Windows `APPDATA`/`LOCALAPPDATA` when valid so npm cache dirs are not created inside workspaces.
+- Raised the bash `timeout_ms` hard cap from 180s to 10 minutes by default (max 15 minutes via `CODEXPRO_MAX_BASH_TIMEOUT_MS`). Per-command default remains 30s.
+- Follow directory symlinks under configured skill roots during skill discovery so managers such as cc-switch can install skills as links. Thanks @yuczzzzz. Keep symlinked/junction skills tagged by their configured scan root and accept both realpathed and caller-supplied home spellings so Windows junctions keep `user` / `~/` identity.
+- Added `import_file` for ChatGPT Apps SDK attachments (`openai/fileParams`), with HTTPS host allowlisting, redirect revalidation, streaming size limits, SHA-256 checks, MIME sniffing, and workspace write-mode gating.
+- Documented update steps (`npm install -g codexpro@latest`), ChatGPT web Agent vs CodexPro, and dual-account / dual-tunnel process separation in the English and Chinese FAQs.
+- Updated transitive dependencies so `npm audit --audit-level=high` reports zero known vulnerabilities.
+
 - Added saved additional projects with `codexpro settings set --project <path>`, session-local workspace selection through the existing `open_workspace` tool, and `--clear-projects` for removing the saved allowlist.
 - Isolated workspace selection between HTTP MCP sessions while preserving explicit workspace-id access for configured roots, with stdio, HTTP, profile, and regression coverage.
 - Added native workspace image inspection for PNG, JPEG, GIF, and WebP files through `view_image`.

@@ -447,44 +447,65 @@ function assertBashSession(config: CodexProConfig, sessionId?: string): string |
   return config.bashSessionId;
 }
 
-function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
-  if (config.inheritEnv) {
-    return { ...process.env, NO_COLOR: "1", CI: process.env.CI ?? "1" };
+function isUsableAbsoluteDir(candidate: string | undefined): string | undefined {
+  if (!candidate) return undefined;
+  const trimmed = candidate.trim();
+  if (!trimmed) return undefined;
+  if (!path.isAbsolute(trimmed) && !path.win32.isAbsolute(trimmed)) return undefined;
+  try {
+    const resolved = path.resolve(trimmed);
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) return resolved;
+  } catch {
+    // Ignore unreadable candidates and keep searching.
   }
-  const env: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-    HOME: process.env.HOME ?? "",
-    USER: process.env.USER ?? "",
-    SHELL: process.env.SHELL ?? "/bin/bash",
-    TMPDIR: process.env.TMPDIR ?? "/tmp",
+  return undefined;
+}
+
+/** Resolve a usable absolute home for restricted child processes. Rejects relative junk like "=". */
+export function resolveUsableHomeDir(env: NodeJS.ProcessEnv = process.env): string {
+  return (
+    isUsableAbsoluteDir(env.USERPROFILE) ??
+    isUsableAbsoluteDir(env.HOME) ??
+    isUsableAbsoluteDir(os.homedir()) ??
+    path.resolve(os.homedir())
+  );
+}
+
+export function makeRestrictedBashEnv(
+  config: CodexProConfig,
+  env: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  if (config.inheritEnv) {
+    return { ...env, NO_COLOR: "1", CI: env.CI ?? "1" };
+  }
+  const home = resolveUsableHomeDir(env);
+  const restricted: NodeJS.ProcessEnv = {
+    PATH: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    HOME: home,
+    USER: env.USER ?? env.USERNAME ?? "",
+    SHELL: env.SHELL ?? "/bin/bash",
+    TMPDIR: isUsableAbsoluteDir(env.TMPDIR) ?? isUsableAbsoluteDir(env.TMP) ?? os.tmpdir(),
     TERM: "dumb",
     NO_COLOR: "1",
     CI: "1"
   };
   if (process.platform === "win32") {
-    const requiredWindowsKeys = [
-      "SystemRoot",
-      "WINDIR",
-      "ComSpec",
-      "PATHEXT",
-      "TEMP",
-      "TMP",
-      "USERPROFILE",
-      "HOMEDRIVE",
-      "HOMEPATH",
-      "LOCALAPPDATA",
-      "APPDATA",
-      "ProgramData",
-      "ProgramFiles",
-      "ProgramFiles(x86)",
-      "ProgramW6432",
-      "PSModulePath"
-    ];
-    for (const key of requiredWindowsKeys) {
-      if (process.env[key]) env[key] = process.env[key];
+    restricted.USERPROFILE = home;
+    const appData = isUsableAbsoluteDir(env.APPDATA);
+    const localAppData = isUsableAbsoluteDir(env.LOCALAPPDATA);
+    if (appData) restricted.APPDATA = appData;
+    if (localAppData) restricted.LOCALAPPDATA = localAppData;
+    if (env.USERNAME) restricted.USERNAME = env.USERNAME;
+    if (env.HOMEDRIVE && env.HOMEPATH && path.win32.isAbsolute(path.win32.join(env.HOMEDRIVE, env.HOMEPATH))) {
+      restricted.HOMEDRIVE = env.HOMEDRIVE;
+      restricted.HOMEPATH = env.HOMEPATH;
     }
   }
-  return env;
+  return restricted;
+}
+
+function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
+  return makeRestrictedBashEnv(config);
 }
 
 function shellExecutable(): string {
@@ -593,7 +614,7 @@ export async function runBash(
   const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
   const cwd = cwdResolved.absPath;
   assertSensitiveGitProtection(command, cwd);
-  const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 30_000, 180_000));
+  const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 30_000, config.maxBashTimeoutMs));
   const start = Date.now();
 
   return new Promise((resolve, reject) => {
