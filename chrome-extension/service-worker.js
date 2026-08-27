@@ -301,7 +301,7 @@ async function sendChatRequestPage(text,attachments=[]) {
   const retryingSameDraft=Boolean(text&&draft&&draft===text);
   if(draft&&!retryingSameDraft)return {ok:false,error:'Ô ChatGPT đang có một bản nháp khác. Hãy gửi/xóa bản nháp đó trong Chrome rồi thử lại.'};
   const composerRoot=composer.closest('form')||composer.parentElement;
-  const existingFileDraft=Boolean(composerRoot?.querySelector('[data-testid="attachment-item"],[data-testid^="file-upload"],button[aria-label*="Remove file" i],button[aria-label*="Remove attachment" i],button[aria-label*="Xóa tệp" i]'))||Array.from(document.querySelectorAll('input[type="file"]')).some(input=>input.files?.length);
+  const existingFileDraft=Boolean(composerRoot?.querySelector('[data-testid="attachment-item"],[data-testid^="file-upload"],button[aria-label*="Remove file" i],button[aria-label*="Remove attachment" i],button[aria-label*="Xóa tệp" i]'));
   if(existingFileDraft)return {ok:false,error:'Ô chat đang có file chưa gửi; CodexPro không ghi đè bản nháp.'};
   if(attachments.length){
     const candidates=Array.from(document.querySelectorAll('input[type="file"]')).filter(input=>!input.disabled);
@@ -380,6 +380,21 @@ async function readChatResponsePage() {
   const sleep=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const nodeText=node=>String(node?.innerText||node?.textContent||'').replace(/\u200b/g,'').trim();
+  const conversationLimitNotice=()=>{
+    const limitPattern=/(?:you(?:'|’)?ve reached the maximum length for this conversation|maximum length for this conversation|đ(?:ã|a) (?:đạt|chạm|tới).*?(?:độ dài|do dai).*?(?:tối đa|toi da).*?(?:cuộc trò chuyện|đoạn chat))/i;
+    const startNewChatPattern=/(?:start new chat|bắt đầu (?:một )?(?:cuộc trò chuyện|đoạn chat) mới)/i;
+    const buttons=Array.from(document.querySelectorAll('button,a,[role="button"]')).filter(visible);
+    for(const button of buttons){
+      const label=nodeText(button)||String(button.getAttribute?.('aria-label')||'').trim();
+      if(!startNewChatPattern.test(label))continue;
+      let node=button;
+      for(let depth=0;node&&depth<5;depth+=1,node=node.parentElement){
+        const text=nodeText(node);
+        if(text.length<=1400&&limitPattern.test(text))return {reached:true,message:text.slice(0,500),button_label:label};
+      }
+    }
+    return {reached:false,message:'',button_label:''};
+  };
   const structuredText=node=>{
     if(!node)return '';
     const clone=node.cloneNode(true);
@@ -466,7 +481,8 @@ async function readChatResponsePage() {
   const truncated=sectionText?sectionTruncated:Boolean(latestAssistant?.truncated);
   const finalLine=String(text||'').split(/\r?\n/).map(line=>line.trim()).filter(Boolean).at(-1)||'';
   const incomplete=!busy&&selectedSectionHadToolActivity&&text.length>0&&text.length<80&&/[,;:–—-]\s*[^.!?…]{1,16}$/u.test(finalLine);
-  return {ok:true,title:document.title,url:location.href,text,text_length:text.length,truncated,incomplete,incomplete_reason:incomplete?'tool_final_cut_off':'',message_count:allMessages.filter(message=>message.role==='assistant').length,total_message_count:allMessages.length,messages,busy,updated_at:new Date().toISOString()};
+  const limit=conversationLimitNotice();
+  return {ok:true,title:document.title,url:location.href,text,text_length:text.length,truncated,incomplete,incomplete_reason:incomplete?'tool_final_cut_off':'',conversation_limit_reached:limit.reached,conversation_limit_message:limit.message,conversation_limit_button_label:limit.button_label,message_count:allMessages.filter(message=>message.role==='assistant').length,total_message_count:allMessages.length,messages,busy,updated_at:new Date().toISOString()};
 }
 
 async function targetTab(args) {

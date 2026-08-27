@@ -17,7 +17,7 @@ const managerProjectsFile = path.join(codexProHome, "manager-projects.json");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.12";
+const WORKER_EXTENSION_VERSION = "0.5.13";
 const RUNTIME_BASE_CACHE_MS = 10000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
@@ -51,7 +51,29 @@ function requestFileSummary(filePath) {
   const resolved = path.resolve(String(filePath || ""));
   const stat = fs.statSync(resolved);
   if (!stat.isFile()) throw new Error(`Không phải file hợp lệ: ${path.basename(resolved)}`);
-  return { path: resolved, name: path.basename(resolved), size: stat.size, mimeType: mimeTypeForFile(resolved) };
+  const mimeType = mimeTypeForFile(resolved);
+  let previewDataUrl = "";
+  if (mimeType.startsWith("image/")) {
+    try {
+      const image = nativeImage.createFromPath(resolved);
+      if (!image.isEmpty()) {
+        const { width, height } = image.getSize();
+        const longest = Math.max(width, height, 1);
+        const scale = Math.min(1, 96 / longest);
+        const thumbnail = scale < 1
+          ? image.resize({
+              width: Math.max(1, Math.round(width * scale)),
+              height: Math.max(1, Math.round(height * scale)),
+              quality: "good"
+            })
+          : image;
+        previewDataUrl = thumbnail.toDataURL();
+      }
+    } catch {
+      previewDataUrl = "";
+    }
+  }
+  return { path: resolved, name: path.basename(resolved), size: stat.size, mimeType, previewDataUrl };
 }
 
 async function chooseRequestFiles() {
@@ -73,7 +95,7 @@ async function chooseRequestFiles() {
 
 async function clipboardImagePng() {
   if (typeof clipboard.readImage === "function") {
-    const image = clipboard.readImage();
+    const image = await Promise.resolve(clipboard.readImage());
     if (!image?.isEmpty?.()) return image.toPNG();
   }
   if (typeof clipboard.read === "function") {
@@ -282,33 +304,54 @@ function createWindow() {
         }
         let pasteProbe = null;
         if (process.env.CODEXPRO_MANAGER_SMOKE_PASTE_IMAGE === "1") {
-          const previousClipboard = typeof clipboard.read === "function" ? await clipboard.read() : null;
-          const sample = nativeImage.createFromDataURL("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlU6V0AAAAASUVORK5CYII=");
+          const previousImage = typeof clipboard.readImage === "function" ? await Promise.resolve(clipboard.readImage()) : null;
+          const previousText = typeof clipboard.readText === "function" ? String(await Promise.resolve(clipboard.readText()) || "") : "";
+          const sampleBitmap = Buffer.alloc(24 * 24 * 4);
+          for (let index = 0; index < sampleBitmap.length; index += 4) {
+            sampleBitmap[index] = 0x3f;
+            sampleBitmap[index + 1] = 0x85;
+            sampleBitmap[index + 2] = 0xff;
+            sampleBitmap[index + 3] = 0xff;
+          }
+          const sample = nativeImage.createFromBitmap(sampleBitmap, { width: 24, height: 24, scaleFactor: 1 });
           try {
-            if (typeof clipboard.writeImage === "function") clipboard.writeImage(sample);
+            if (typeof clipboard.writeImage === "function") await Promise.resolve(clipboard.writeImage(sample));
             else await clipboard.write([new ClipboardItem({ "image/png": new Blob([sample.toPNG()], { type: "image/png" }) })]);
-            pasteProbe = await win.webContents.executeJavaScript(`(async () => {
+            const pasteTargetReady = await win.webContents.executeJavaScript(`(() => {
               const card = [...document.querySelectorAll('.request-card')].find((item) => {
                 const textarea = item.querySelector('textarea');
                 return textarea && !textarea.disabled;
               });
-              if (!card) return { ok: false, error: 'Không có textarea rảnh để test paste ảnh.' };
-              const textarea = card.querySelector('textarea');
-              const event = new Event('paste', { bubbles: true, cancelable: true });
-              Object.defineProperty(event, 'clipboardData', { value: { items: [{ type: 'image/png' }], files: [] } });
-              textarea.dispatchEvent(event);
-              await new Promise((resolve) => setTimeout(resolve, 500));
-              const attachment = card.querySelector('.request-file');
-              attachment?.scrollIntoView({ block: 'center' });
-              return {
-                ok: Boolean(attachment),
-                attachment: attachment?.querySelector('.request-file-copy strong')?.textContent?.trim() || '',
-                toast: document.querySelector('.toast')?.textContent?.trim() || '',
-                placeholder: textarea.getAttribute('placeholder') || ''
-              };
+              const textarea = card?.querySelector('textarea');
+              textarea?.focus();
+              return Boolean(textarea);
             })()`, true);
+            if (!pasteTargetReady) pasteProbe = { ok: false, error: 'Không có textarea rảnh để test paste ảnh.' };
+            else {
+              win.webContents.sendInputEvent({ type: "keyDown", keyCode: "V", modifiers: ["control"] });
+              win.webContents.sendInputEvent({ type: "keyUp", keyCode: "V", modifiers: ["control"] });
+              await new Promise((resolve) => setTimeout(resolve, 1400));
+              pasteProbe = await win.webContents.executeJavaScript(`(() => {
+                const card = [...document.querySelectorAll('.request-card')].find((item) => item.querySelector('textarea:focus'))
+                  || [...document.querySelectorAll('.request-card')].find((item) => item.querySelector('textarea'));
+                const textarea = card?.querySelector('textarea');
+                const attachment = card?.querySelector('.request-file');
+                attachment?.scrollIntoView({ block: 'center' });
+                const thumbnail = attachment?.querySelector('img.request-file-image');
+                return {
+                  ok: Boolean(thumbnail),
+                  attachment: attachment?.querySelector('.request-file-copy strong')?.textContent?.trim() || '',
+                  hasThumbnail: Boolean(thumbnail),
+                  thumbnailSource: Boolean(thumbnail?.getAttribute('src')?.startsWith('data:image/')),
+                  toast: document.querySelector('.toast')?.textContent?.trim() || '',
+                  error: card?.querySelector('.request-send-error')?.textContent?.trim() || '',
+                  placeholder: textarea?.getAttribute('placeholder') || ''
+                };
+              })()`, true);
+            }
           } finally {
-            if (previousClipboard && typeof clipboard.write === "function") await clipboard.write(previousClipboard);
+            if (previousImage && !previousImage.isEmpty() && typeof clipboard.writeImage === "function") clipboard.writeImage(previousImage);
+            else if (typeof clipboard.writeText === "function") clipboard.writeText(previousText || "");
           }
         }
         let openProfileProbe = null;
@@ -700,7 +743,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.40" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.42" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1029,7 +1072,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.40" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.42" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
