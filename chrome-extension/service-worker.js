@@ -1,13 +1,21 @@
 const BRIDGE = 'http://127.0.0.1:9224';
 const HEADERS = {'content-type':'application/json','x-codexpro-extension':'profile-bridge-v1'};
 const CHAT_REQUEST_STALE_MS = 30 * 60 * 1000;
+const CHAT_NETWORK_STATE_KEY = 'codexproChatNetworkStateV1';
+const DOM_READ_TIMEOUT_MS = 2500;
 let polling = false;
 let installing = false;
-const activeChatRequests = new Map();
-const domBusySinceByTab = new Map();
+const chatNetworkStateByTab = new Map();
+const pendingConversationByTab = new Map();
+let chatNetworkStateLoaded = false;
+let chatNetworkStateLoadPromise = null;
 let recentConversationCache = {at:0,items:[]};
 const TITLE_OVERRIDE_TTL_MS = 10 * 60 * 1000;
 let conversationTitleOverrides = null;
+
+function conversationIdFromUrl(value) {
+  try{return new URL(String(value||'')).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1]||'';}catch{return '';}
+}
 
 function isChatGenerationRequest(details) {
   if(details.tabId < 0 || details.method !== 'POST')return false;
@@ -15,81 +23,147 @@ function isChatGenerationRequest(details) {
     const url=new URL(details.url);
     const path=url.pathname.replace(/\/+$/,'');
     if(url.hostname!=='chatgpt.com')return false;
-    const conversationEndpoint=/\/(?:backend-api|backend-anon)\/(?:f\/)?conversation$/.test(path);
-    const responsesEndpoint=/\/backend-api\/(?:codex\/)?responses$/.test(path);
-    if(!conversationEndpoint&&!responsesEndpoint)return false;
-    const raw=Array.isArray(details.requestBody?.raw)
-      ? details.requestBody.raw.map(part=>part.bytes?new TextDecoder().decode(part.bytes):'').join('')
-      : '';
-    if(!raw)return false;
-    const payload=JSON.parse(raw);
-    if(!payload||typeof payload!=='object')return false;
-    const action=String(payload.action||'').toLowerCase();
-    const hasGenerationAction=['next','variant','retry'].includes(action);
-    const hasMessages=Array.isArray(payload.messages)&&payload.messages.length>0;
-    const hasInput=Array.isArray(payload.input)?payload.input.length>0:Boolean(payload.input);
-    // ChatGPT may silently POST action=continue to resume an old stream while a
-    // completed conversation is open. It is background synchronization, not a
-    // new user job, unless that request also carries a new message.
-    return conversationEndpoint?(hasMessages||hasGenerationAction):(hasInput||hasMessages);
+    return /\/(?:backend-api|backend-anon)\/(?:f\/)?conversation$/.test(path)
+      || /\/backend-api\/(?:codex\/)?responses$/.test(path);
   }catch{return false;}
+}
+
+async function ensureChatNetworkStateLoaded() {
+  if(chatNetworkStateLoaded)return;
+  if(chatNetworkStateLoadPromise)return await chatNetworkStateLoadPromise;
+  chatNetworkStateLoadPromise=(async()=>{
+    try{
+      const stored=await chrome.storage.local.get(CHAT_NETWORK_STATE_KEY);
+      const raw=stored[CHAT_NETWORK_STATE_KEY]&&typeof stored[CHAT_NETWORK_STATE_KEY]==='object'?stored[CHAT_NETWORK_STATE_KEY]:{};
+      const now=Date.now();
+      for(const [tabId,value] of Object.entries(raw)){
+        if(!value||typeof value!=='object')continue;
+        const at=Number(value.completed_at_ms||value.started_at_ms||0);
+        if(!at||now-at>CHAT_REQUEST_STALE_MS)continue;
+        chatNetworkStateByTab.set(Number(tabId),value);
+      }
+    }catch{}
+    chatNetworkStateLoaded=true;
+    chatNetworkStateLoadPromise=null;
+  })();
+  await chatNetworkStateLoadPromise;
+}
+
+async function persistChatNetworkState() {
+  try{
+    const now=Date.now();
+    const entries=[...chatNetworkStateByTab.entries()]
+      .filter(([,value])=>now-Number(value?.completed_at_ms||value?.started_at_ms||0)<=CHAT_REQUEST_STALE_MS)
+      .slice(-50);
+    await chrome.storage.local.set({[CHAT_NETWORK_STATE_KEY]:Object.fromEntries(entries.map(([tabId,value])=>[String(tabId),value]))});
+  }catch{}
+}
+
+function generationContextFor(details) {
+  const pending=pendingConversationByTab.get(details.tabId);
+  if(pending&&Date.now()-Number(pending.at||0)<30000){
+    pendingConversationByTab.delete(details.tabId);
+    return {conversation_id:String(pending.conversation_id||''),source:String(pending.source||'codexpro')};
+  }
+  return {conversation_id:conversationIdFromUrl(details.documentUrl),source:'page'};
 }
 
 function beginChatRequest(details) {
   if(!isChatGenerationRequest(details))return;
-  activeChatRequests.set(details.requestId,{tabId:details.tabId,startedAt:Date.now()});
+  void (async()=>{
+    await ensureChatNetworkStateLoaded();
+    const context=generationContextFor(details);
+    const now=Date.now();
+    chatNetworkStateByTab.set(details.tabId,{
+      state:'generating',
+      request_id:String(details.requestId||''),
+      started_at_ms:now,
+      completed_at_ms:0,
+      conversation_id:context.conversation_id,
+      source:context.source,
+      status_code:0,
+      error:''
+    });
+    await persistChatNetworkState();
+    scheduleRealtimeProfilePush();
+  })();
 }
 
-function finishChatRequest(details) {
-  activeChatRequests.delete(details.requestId);
+function finishChatRequest(details,state) {
+  if(!isChatGenerationRequest(details))return;
+  void (async()=>{
+    await ensureChatNetworkStateLoaded();
+    const current=chatNetworkStateByTab.get(details.tabId);
+    if(current?.request_id&&String(current.request_id)!==String(details.requestId||''))return;
+    const now=Date.now();
+    const startedAt=Number(current?.started_at_ms||now);
+    const statusCode=Number(details.statusCode)||0;
+    const failed=state==='failed'||statusCode>=400;
+    chatNetworkStateByTab.set(details.tabId,{
+      ...(current||{}),
+      state:failed?'failed':'completed',
+      request_id:String(details.requestId||current?.request_id||''),
+      started_at_ms:startedAt,
+      completed_at_ms:now,
+      conversation_id:String(current?.conversation_id||conversationIdFromUrl(details.documentUrl)||''),
+      source:String(current?.source||'page'),
+      status_code:statusCode,
+      error:failed?String(details.error||`HTTP ${statusCode||'error'}`).slice(0,300):''
+    });
+    await persistChatNetworkState();
+    scheduleRealtimeProfilePush();
+  })();
 }
 
-function chatRequestState(tabId) {
+async function bindConversationToTab(tabId,conversationId) {
+  if(!conversationId)return;
+  await ensureChatNetworkStateLoaded();
+  const current=chatNetworkStateByTab.get(tabId);
+  if(current){chatNetworkStateByTab.set(tabId,{...current,conversation_id:conversationId});await persistChatNetworkState();}
+}
+
+async function chatRequestState(tabId,conversationId='') {
+  await ensureChatNetworkStateLoaded();
   const now=Date.now();
-  let startedAt=0;
-  let count=0;
-  for(const [requestId,request] of activeChatRequests){
-    if(now-request.startedAt>CHAT_REQUEST_STALE_MS){activeChatRequests.delete(requestId);continue;}
-    if(request.tabId===tabId){count+=1;startedAt=startedAt?Math.min(startedAt,request.startedAt):request.startedAt;}
-  }
-  return {busy:count>0,busy_request_count:count,busy_since:startedAt?new Date(startedAt).toISOString():''};
+  const current=chatNetworkStateByTab.get(tabId);
+  if(!current)return {busy:false,busy_request_count:0,busy_since:'',network_state:'idle',network_source:'',network_last_started_at:'',network_last_completed_at:'',network_status_code:0,network_error:'',network_duration_ms:0};
+  const at=Number(current.completed_at_ms||current.started_at_ms||0);
+  if(!at||now-at>CHAT_REQUEST_STALE_MS){chatNetworkStateByTab.delete(tabId);void persistChatNetworkState();return {busy:false,busy_request_count:0,busy_since:'',network_state:'idle',network_source:'',network_last_started_at:'',network_last_completed_at:'',network_status_code:0,network_error:'',network_duration_ms:0};}
+  if(conversationId&&current.conversation_id&&current.conversation_id!==conversationId)return {busy:false,busy_request_count:0,busy_since:'',network_state:'idle',network_source:'',network_last_started_at:'',network_last_completed_at:'',network_status_code:0,network_error:'',network_duration_ms:0};
+  const busy=current.state==='generating';
+  return {
+    busy,
+    busy_request_count:busy?1:0,
+    busy_since:busy&&current.started_at_ms?new Date(current.started_at_ms).toISOString():'',
+    network_state:String(current.state||'idle'),
+    network_source:String(current.source||''),
+    network_last_started_at:current.started_at_ms?new Date(current.started_at_ms).toISOString():'',
+    network_last_completed_at:current.completed_at_ms?new Date(current.completed_at_ms).toISOString():'',
+    network_status_code:Number(current.status_code)||0,
+    network_error:String(current.error||''),
+    network_duration_ms:current.completed_at_ms&&current.started_at_ms?Math.max(0,Number(current.completed_at_ms)-Number(current.started_at_ms)):0
+  };
 }
 
-function detectChatBusyPage() {
-  const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
-  const stopSelectors=['button[data-testid="stop-button"]','button[aria-label*="Stop generating" i]','button[aria-label*="Stop streaming" i]','button[aria-label*="Dừng" i]'];
-  if(stopSelectors.some(selector=>visible(document.querySelector(selector))))return {busy:true,settling:false,source:'stop-selector'};
-  const composerSubmit=document.querySelector('#composer-submit-button');
-  const submitLabel=String(composerSubmit?.innerText||composerSubmit?.textContent||composerSubmit?.getAttribute?.('aria-label')||'').trim();
-  if(visible(composerSubmit)&&/(?:stop\s+(?:answering|generating|streaming)|dừng(?:\s+trả\s+lời)?)/i.test(submitLabel))return {busy:true,settling:false,source:'composer-stop'};
-
-  const sections=Array.from(document.querySelectorAll('main section,section[data-testid^="conversation-turn-"],article[data-testid^="conversation-turn-"]')).filter(visible);
-  for(let index=sections.length-1;index>=0;index-=1){
-    const section=sections[index];
-    const buttons=Array.from(section.querySelectorAll('button'));
-    const toolActivity=buttons.some(button=>/(?:called tool|worked for|thinking|reasoning)/i.test(String(button.innerText||button.textContent||'').trim()));
-    if(!toolActivity)continue;
-    const responseNode=section.querySelector('.markdown,.prose,[class*="markdown"]');
-    const text=String(responseNode?.innerText||responseNode?.textContent||'').replace(/\u200b/g,'').trim();
-    const finalLine=text.split(/\r?\n/).map(line=>line.trim()).filter(Boolean).at(-1)||'';
-    const settling=text.length>0&&text.length<80&&/[,;:–—-]\s*[^.!?…]{1,16}$/u.test(finalLine);
-    return {busy:false,settling,source:settling?'tool-final-settling':''};
-  }
-  return {busy:false,settling:false,source:''};
+let realtimeProfilePushTimer=null;
+function scheduleRealtimeProfilePush(delayMs=40) {
+  if(realtimeProfilePushTimer)clearTimeout(realtimeProfilePushTimer);
+  realtimeProfilePushTimer=setTimeout(()=>{
+    realtimeProfilePushTimer=null;
+    void (async()=>{
+      try{
+        const [profile,tabs]=await Promise.all([profileInfo(),tabList()]);
+        await fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,tabs})});
+      }catch{}
+    })();
+  },delayMs);
 }
 
-async function domChatState(tabId) {
-  try{
-    const [injected]=await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:detectChatBusyPage});
-    return {busy:Boolean(injected?.result?.busy),settling:Boolean(injected?.result?.settling),source:String(injected?.result?.source||'')};
-  }catch{return {busy:false,settling:false,source:''};}
-}
-
-chrome.webRequest.onBeforeRequest.addListener(beginChatRequest,{urls:['https://chatgpt.com/*'],types:['xmlhttprequest','other']},['requestBody']);
-chrome.webRequest.onCompleted.addListener(finishChatRequest,{urls:['https://chatgpt.com/*'],types:['xmlhttprequest','other']});
-chrome.webRequest.onErrorOccurred.addListener(finishChatRequest,{urls:['https://chatgpt.com/*'],types:['xmlhttprequest','other']});
-chrome.webRequest.onBeforeRedirect.addListener(finishChatRequest,{urls:['https://chatgpt.com/*'],types:['xmlhttprequest','other']});
-chrome.tabs.onRemoved.addListener(tabId=>{for(const [requestId,request] of activeChatRequests){if(request.tabId===tabId)activeChatRequests.delete(requestId);}domBusySinceByTab.delete(tabId);});
+chrome.webRequest.onBeforeRequest.addListener(beginChatRequest,{urls:['https://chatgpt.com/*'],types:['xmlhttprequest','other']});
+chrome.webRequest.onCompleted.addListener(details=>finishChatRequest(details,'completed'),{urls:['https://chatgpt.com/*'],types:['xmlhttprequest','other']});
+chrome.webRequest.onErrorOccurred.addListener(details=>finishChatRequest(details,'failed'),{urls:['https://chatgpt.com/*'],types:['xmlhttprequest','other']});
+chrome.webRequest.onBeforeRedirect.addListener(details=>finishChatRequest(details,'completed'),{urls:['https://chatgpt.com/*'],types:['xmlhttprequest','other']});
+chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
 
 async function profileInfo() {
   const stored = await chrome.storage.local.get(['profileId','active','connectorInstall']);
@@ -121,16 +195,8 @@ async function tabList() {
   const tabs = await chrome.tabs.query({});
   const titleOverrides=await getConversationTitleOverrides();
   return await Promise.all(tabs.map(async tab => {
-    const networkState=chatRequestState(tab.id);
-    const isChatGpt=String(tab.url||'').startsWith('https://chatgpt.com/');
-    const domState=isChatGpt?await domChatState(tab.id):{busy:false,settling:false,source:''};
-    if(domState.busy&&!domBusySinceByTab.has(tab.id))domBusySinceByTab.set(tab.id,Date.now());
-    if(!domState.busy)domBusySinceByTab.delete(tab.id);
-    const domStartedAt=domBusySinceByTab.get(tab.id)||0;
-    const networkStartedAt=networkState.busy_since?Date.parse(networkState.busy_since):0;
-    const startedAt=[networkStartedAt,domStartedAt].filter(Boolean).sort((a,b)=>a-b)[0]||0;
-    const busy=networkState.busy||domState.busy;
-    const conversationId=String(tab.url||'').match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1]||'';
+    const conversationId=conversationIdFromUrl(tab.url);
+    const networkState=await chatRequestState(tab.id,conversationId);
     const titleOverride=conversationId?titleOverrides[conversationId]:null;
     return {
       id:tab.id,
@@ -138,11 +204,20 @@ async function tabList() {
       active:Boolean(tab.active),
       title:String(titleOverride?.title||tab.title||''),
       url:tab.url || '',
-      busy,
-      settling:Boolean(domState.settling),
-      busy_request_count:networkState.busy_request_count||Number(domState.busy),
-      busy_since:busy&&startedAt?new Date(startedAt).toISOString():'',
-      busy_source:networkState.busy&&domState.busy?'network+dom':networkState.busy?'network':domState.busy?domState.source||'dom':domState.settling?domState.source||'settling':''
+      busy:networkState.busy,
+      settling:false,
+      busy_request_count:networkState.busy_request_count,
+      busy_since:networkState.busy_since,
+      busy_source:networkState.busy?'network':'',
+      network_state:networkState.network_state,
+      network_source:networkState.network_source,
+      network_last_started_at:networkState.network_last_started_at,
+      network_last_completed_at:networkState.network_last_completed_at,
+      network_status_code:networkState.network_status_code,
+      network_error:networkState.network_error,
+      network_duration_ms:networkState.network_duration_ms,
+      conversation_limit_reached:false,
+      conversation_limit_message:''
     };
   }));
 }
@@ -493,6 +568,16 @@ async function targetTab(args) {
   return tab;
 }
 
+async function promiseWithTimeout(promise,timeoutMs,label) {
+  let timer;
+  try{
+    return await Promise.race([
+      promise,
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(label||'Timed out.')),timeoutMs);})
+    ]);
+  }finally{if(timer)clearTimeout(timer);}
+}
+
 async function execute(command) {
   const {action,args={}}=command;
   if(action==='reload_extension'){
@@ -530,15 +615,18 @@ async function execute(command) {
       tab=await chrome.tabs.create({url:`https://chatgpt.com/c/${conversationId}`,active:false});await waitForTab(tab.id,45000);tab=await chrome.tabs.get(tab.id);
     }
     if(!tab?.id)throw new Error('Profile này không có đoạn chat dự án đang mở.');
-    if(chatRequestState(tab.id).busy)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
+    if((await chatRequestState(tab.id,conversationId)).busy)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
+    pendingConversationByTab.set(tab.id,{conversation_id:newChat?'':conversationId||conversationIdFromUrl(tab.url),source:'codexpro',at:Date.now()});
     const [injected]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:sendChatRequestPage,args:[text,attachments]});
-    if(!injected.result?.ok){if(newChat)await chrome.tabs.remove(tab.id).catch(()=>{});throw new Error(injected.result?.error||'Không gửi được yêu cầu vào ChatGPT.');}
+    if(!injected.result?.ok){pendingConversationByTab.delete(tab.id);if(newChat)await chrome.tabs.remove(tab.id).catch(()=>{});throw new Error(injected.result?.error||'Không gửi được yêu cầu vào ChatGPT.');}
     if(newChat){
       const created=await waitForConversationUrl(tab.id,45000);
+      await bindConversationToTab(tab.id,created.conversationId);
       recentConversationCache={at:0,items:[]};
-      return {action,target_id:tab.id,conversation_id:created.conversationId,new_chat:true,...injected.result};
+      return {action,target_id:tab.id,conversation_id:created.conversationId,new_chat:true,network_tracking:true,...injected.result};
     }
-    return {action,target_id:tab.id,conversation_id:conversationId,...injected.result};
+    await bindConversationToTab(tab.id,conversationId);
+    return {action,target_id:tab.id,conversation_id:conversationId,network_tracking:true,...injected.result};
   }
   if(action==='rename_chat'){
     const conversationId=String(args.conversation_id||'').trim();
@@ -580,9 +668,48 @@ async function execute(command) {
       tab=await chrome.tabs.create({url:`https://chatgpt.com/c/${conversationId}`,active:false});await waitForTab(tab.id,45000);tab=await chrome.tabs.get(tab.id);
     }
     if(!tab?.id)throw new Error('Không mở được đoạn chat cần đọc phản hồi.');
-    const [injected]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:readChatResponsePage});
-    if(!injected.result?.ok)throw new Error(injected.result?.error||'Không đọc được phản hồi ChatGPT.');
-    return {action,target_id:tab.id,...injected.result};
+    const networkState=await chatRequestState(tab.id,conversationId);
+    const networkPayload={
+      network_state:networkState.network_state,
+      network_source:networkState.network_source,
+      network_last_started_at:networkState.network_last_started_at,
+      network_last_completed_at:networkState.network_last_completed_at,
+      network_status_code:networkState.network_status_code,
+      network_error:networkState.network_error,
+      network_duration_ms:networkState.network_duration_ms
+    };
+    try{
+      const [injected]=await promiseWithTimeout(
+        chrome.scripting.executeScript({target:{tabId:tab.id},func:readChatResponsePage}),
+        DOM_READ_TIMEOUT_MS,
+        'Chrome renderer không phản hồi khi đọc DOM.'
+      );
+      if(!injected?.result?.ok)throw new Error(injected?.result?.error||'Không đọc được phản hồi ChatGPT.');
+      return {action,target_id:tab.id,...injected.result,busy:networkState.busy,dom_available:true,dom_busy:Boolean(injected.result.busy),...networkPayload};
+    }catch(error){
+      return {
+        action,
+        target_id:tab.id,
+        ok:true,
+        title:String(tab.title||''),
+        url:String(tab.url||''),
+        text:'',
+        text_length:0,
+        truncated:false,
+        incomplete:false,
+        incomplete_reason:'',
+        conversation_limit_reached:false,
+        conversation_limit_message:'',
+        message_count:0,
+        total_message_count:0,
+        messages:[],
+        busy:networkState.busy,
+        dom_available:false,
+        dom_error:String(error?.message||error).slice(0,500),
+        updated_at:new Date().toISOString(),
+        ...networkPayload
+      };
+    }
   }
   if(action==='open_tab'){const tab=await chrome.tabs.create({url:args.url,active:true});return {action,target_id:tab.id,title:tab.title||'',url:tab.url||args.url};}
   const tab=await targetTab(args);

@@ -37,6 +37,13 @@ export interface ExtensionProfileSummary {
     active: boolean;
     busy: boolean;
     settling: boolean;
+    network_state: string;
+    network_source: string;
+    network_last_started_at: string;
+    network_last_completed_at: string;
+    network_status_code: number;
+    network_error: string;
+    network_duration_ms: number;
   }>;
   recent_conversations: Array<{
     id: string;
@@ -350,7 +357,14 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
           url: String(tab.url ?? "").trim().slice(0, 2000),
           active: tab.active === true,
           busy: tab.busy === true,
-          settling: tab.settling === true
+          settling: tab.settling === true,
+          network_state: tab.network_state === "generating" ? "generating" : tab.network_state === "completed" ? "completed" : tab.network_state === "failed" ? "failed" : "idle",
+          network_source: String(tab.network_source ?? "").trim().slice(0, 32),
+          network_last_started_at: String(tab.network_last_started_at ?? "").trim().slice(0, 64),
+          network_last_completed_at: String(tab.network_last_completed_at ?? "").trim().slice(0, 64),
+          network_status_code: Number(tab.network_status_code) || 0,
+          network_error: String(tab.network_error ?? "").trim().slice(0, 500),
+          network_duration_ms: Math.max(0, Number(tab.network_duration_ms) || 0)
         }))
         .filter((tab) => Number.isInteger(tab.id) && tab.id >= 0);
       const recentConversations = profile.recentConversations

@@ -250,6 +250,16 @@ section { margin-bottom: 38px; }
 .conversation-rollover-notice.is-creating strong { color: #ffd58e; }
 .conversation-rollover-notice.is-failed { border-bottom-color: #6a3540; background: #2a1117; }
 .conversation-rollover-notice.is-failed strong { color: #ffadb7; }
+.network-response-notice { flex: 0 0 auto; display: grid; gap: 3px; padding: 8px 12px; border-bottom: 1px solid #294530; background: #101b14; font-size: 12px; line-height: 1.45; }
+.network-response-notice strong { color: #86e6a6; font-size: 12px; }
+.network-response-notice span { color: #8ea99a; }
+.network-response-notice.is-generating { border-bottom-color: #334267; background: #111827; }
+.network-response-notice.is-generating strong { color: #aabfff; }
+.network-response-notice.is-failed { border-bottom-color: #6a3540; background: #2a1117; }
+.network-response-notice.is-failed strong { color: #ffadb7; }
+.network-complete-empty { display: grid; gap: 5px; }
+.network-complete-empty strong { color: #86e6a6; }
+.network-complete-empty span { color: #7d899c; }
 .response-status-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #55df8b; box-shadow: 0 0 8px #55df8b88; }
 .chat-response.is-streaming .response-status-dot { background: #7f9eff; box-shadow: 0 0 9px #7f9effaa; animation: response-pulse 1s ease-in-out infinite; }
 .chat-response.is-incomplete .response-status-dot { background: #e0a64e; box-shadow: 0 0 9px #e0a64e88; }

@@ -165,7 +165,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.14";
+const WORKER_EXTENSION_VERSION = "0.5.15";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -209,6 +209,11 @@ function applyConversationTitleOverrides(status, overrides) {
       };
     })
   };
+}
+
+function hasConversationLengthLimit(result) {
+  const text = `${String(result?.conversation_limit_message || "")}\n${String(result?.text || "")}`;
+  return Boolean(result?.conversation_limit_reached) || /(?:you(?:'|’)?ve reached the maximum length for this conversation|maximum length for this conversation|đ(?:ã|a) (?:đạt|chạm|tới).*?(?:độ dài|do dai).*?(?:tối đa|toi da).*?(?:cuộc trò chuyện|đoạn chat))/i.test(text);
 }
 
 function buildConversationRolloverPrompt(result) {
@@ -259,6 +264,7 @@ function App() {
   const statusRefreshInFlight = useRef(false);
   const profileCheckTimes = useRef(new Map());
   const responseFetches = useRef(new Set());
+  const networkCompletionReads = useRef(new Map());
   const conversationRollovers = useRef(new Map());
   const profilesRef = useRef([]);
   const requestTargetsRef = useRef({});
@@ -364,6 +370,50 @@ function App() {
   }, [status?.browserProfiles]);
 
   useEffect(() => {
+    for (const profile of status?.browserProfiles || []) {
+      if (!profile?.connected || !extensionReady(profile.extension_version)) continue;
+      for (const tab of profile.conversation_tabs || []) {
+        const conversationId = String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+        if (!conversationId) continue;
+        const selectedTarget = String(requestTargetsRef.current[profile.profile_id] || "");
+        const currentResponse = requestResponses[profile.profile_id];
+        const relevant = selectedTarget === conversationId || currentResponse?.conversationId === conversationId || (chatProfileId === profile.profile_id && tab.active);
+        if (!relevant) continue;
+        const networkState = String(tab.network_state || (tab.busy ? "generating" : "idle"));
+        const networkCompletedAt = String(tab.network_last_completed_at || "");
+        setRequestResponses((current) => {
+          const previous = current[profile.profile_id] || {};
+          if (previous.conversationId && previous.conversationId !== conversationId) return current;
+          if (previous.networkState === networkState && previous.networkCompletedAt === networkCompletedAt && previous.networkError === String(tab.network_error || "")) return current;
+          return {
+            ...current,
+            [profile.profile_id]: {
+              ...previous,
+              visible: true,
+              conversationId,
+              busy: networkState === "generating",
+              loading: networkState === "generating" ? previous.loading !== false : false,
+              networkState,
+              networkSource: String(tab.network_source || ""),
+              networkStartedAt: String(tab.network_last_started_at || ""),
+              networkCompletedAt,
+              networkStatusCode: Number(tab.network_status_code) || 0,
+              networkError: String(tab.network_error || ""),
+              networkDurationMs: Number(tab.network_duration_ms) || 0
+            }
+          };
+        });
+        if (networkState !== "completed" || !networkCompletedAt) continue;
+        const completionKey = `${profile.profile_id}:${conversationId}`;
+        if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) continue;
+        networkCompletionReads.current.set(completionKey, networkCompletedAt);
+        if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
+        void loadResponse(profile, conversationId, true);
+      }
+    }
+  }, [status?.browserProfiles, chatProfileId, requestResponses, notify]);
+
+  useEffect(() => {
     requestTargetsRef.current = requestTargets;
   }, [requestTargets]);
 
@@ -380,20 +430,6 @@ function App() {
     const response = requestResponses[chatProfileId];
     if (profile.connected && (!response || response.conversationId !== initialTarget)) void loadResponse(profile, initialTarget, true);
   }, [chatProfileId, status?.browserProfiles, requestResponses]);
-
-  useEffect(() => {
-    if (!chatProfileId) return undefined;
-    const poll = () => {
-      const profile = profilesRef.current.find((item) => item.profile_id === chatProfileId);
-      if (!profile?.connected) return;
-      const conversations = profileRequestChats(profile);
-      const conversationId = String(requestTargetsRef.current[chatProfileId] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "");
-      if (conversationId) void loadResponse(profile, conversationId, true);
-    };
-    poll();
-    const timer = window.setInterval(poll, REALTIME_POLL_MS);
-    return () => window.clearInterval(timer);
-  }, [chatProfileId]);
 
   useEffect(() => {
     if (!chatProfileId) return;
@@ -664,8 +700,7 @@ function App() {
         };
       });
       notify(newChat ? "Đã tạo chat mới và gửi tin nhắn đầu tiên" : `Đã gửi${result.attachment_count ? ` ${result.attachment_count} file` : ""} vào ${result.title || profile.active_chat_title || profile.label}`);
-      window.setTimeout(() => void loadResponse(profile, resolvedConversationId, true), 1200);
-      window.setTimeout(() => void refresh(false), 900);
+      window.setTimeout(() => void refresh(false), 500);
     } catch (err) {
       const message = err?.message || String(err);
       if (!newChat && text) {
@@ -719,6 +754,7 @@ function App() {
       conversationRollovers.current.set(key, { status: "done", at: Date.now(), conversationId: newConversationId });
       requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: newConversationId };
       setRequestTargets((current) => ({ ...current, [profileId]: newConversationId }));
+      setChatProfileId(profileId);
       setRenameChat(null);
       setRequestSendErrors((current) => ({ ...current, [profileId]: "" }));
       setRequestResponses((current) => ({
@@ -774,9 +810,19 @@ function App() {
     }
     try {
       const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId });
+      const domAvailable = result.dom_available !== false;
+      const conversationLimitReached = domAvailable && hasConversationLengthLimit(result);
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         const sameConversation = previous.conversationId === conversationId;
+        const nextMessages = domAvailable && Array.isArray(result.messages)
+          ? result.messages.slice(-20).map((message, index) => ({
+              id: String(message?.id || `${message?.role || "message"}-${index}`),
+              role: message?.role === "user" ? "user" : "assistant",
+              text: String(message?.text || ""),
+              truncated: Boolean(message?.truncated)
+            })).filter((message) => message.text)
+          : (sameConversation && Array.isArray(previous.messages) ? previous.messages : []);
         return {
           ...current,
           [profile.profile_id]: {
@@ -785,27 +831,29 @@ function App() {
             loading: false,
             error: "",
             conversationId,
-            text: result.text || "",
-            messages: Array.isArray(result.messages)
-              ? result.messages.slice(-20).map((message, index) => ({
-                  id: String(message?.id || `${message?.role || "message"}-${index}`),
-                  role: message?.role === "user" ? "user" : "assistant",
-                  text: String(message?.text || ""),
-                  truncated: Boolean(message?.truncated)
-                })).filter((message) => message.text)
-              : [],
+            text: domAvailable ? (result.text || "") : (sameConversation ? previous.text || "" : ""),
+            messages: nextMessages,
             busy: Boolean(result.busy),
-            truncated: Boolean(result.truncated),
-            incomplete: Boolean(result.incomplete),
-            incompleteReason: result.incomplete_reason || "",
-            conversationLimitReached: Boolean(result.conversation_limit_reached),
-            conversationLimitMessage: result.conversation_limit_message || "",
-            messageCount: Number(result.message_count) || 0,
+            truncated: domAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
+            incomplete: domAvailable ? Boolean(result.incomplete) : false,
+            incompleteReason: domAvailable ? (result.incomplete_reason || "") : "",
+            conversationLimitReached,
+            conversationLimitMessage: domAvailable ? (result.conversation_limit_message || (conversationLimitReached ? "ChatGPT báo đoạn chat đã đạt giới hạn độ dài." : "")) : "",
+            domAvailable,
+            domError: result.dom_error || "",
+            networkState: String(result.network_state || previous.networkState || (result.busy ? "generating" : "idle")),
+            networkSource: String(result.network_source || previous.networkSource || ""),
+            networkStartedAt: result.network_last_started_at || previous.networkStartedAt || "",
+            networkCompletedAt: result.network_last_completed_at || previous.networkCompletedAt || "",
+            networkStatusCode: Number(result.network_status_code) || Number(previous.networkStatusCode) || 0,
+            networkError: String(result.network_error || previous.networkError || ""),
+            networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
+            messageCount: domAvailable ? Number(result.message_count) || 0 : Number(previous.messageCount) || 0,
             updatedAt: result.updated_at || new Date().toISOString()
           }
         };
       });
-      if (result.conversation_limit_reached && !result.busy) void rolloverFullConversation(profile, conversationId, result);
+      if (conversationLimitReached && !result.busy) void rolloverFullConversation(profile, conversationId, result);
       return result;
     } catch (err) {
       const message = err?.message || String(err);
@@ -868,8 +916,7 @@ function App() {
       });
       setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), loading: true, incomplete: false } }));
       notify("Đã yêu cầu ChatGPT tiếp tục phần bị ngắt");
-      window.setTimeout(() => void loadResponse(profile, conversationId, true), 1000);
-      window.setTimeout(() => void refresh(false), 700);
+      window.setTimeout(() => void refresh(false), 500);
     } catch (err) {
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: err?.message || String(err) }));
     } finally {
@@ -894,11 +941,28 @@ function App() {
     const responseMessages = responseCurrent && Array.isArray(response?.messages) ? response.messages : [];
     const hasResponseContent = Boolean(response?.text || responseMessages.length);
     const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${selectedTarget}`));
-    const selectedBusy = Boolean(selectedTab?.busy || (responseCurrent && response?.busy));
+    const selectedNetworkState = String(selectedTab?.network_state || (responseCurrent ? response?.networkState : "") || (selectedTab?.busy ? "generating" : "idle"));
+    const selectedNetworkCompleted = selectedNetworkState === "completed";
+    const selectedNetworkFailed = selectedNetworkState === "failed";
+    const selectedBusy = selectedNetworkState === "generating" || Boolean(selectedTab?.busy || (responseCurrent && response?.busy));
     const selectedSettling = Boolean(selectedTab?.settling || (responseCurrent && response?.incomplete));
+    const domUnavailable = Boolean(responseCurrent && response?.domAvailable === false);
     const rolloverCreating = Boolean(responseCurrent && response?.rolloverStatus === "creating");
     const working = profile.connected && (profile.activity === "working" || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
+    const responseHeadline = isNewChat
+      ? "Chat mới"
+      : selectedBusy
+        ? "AI đang xử lý · theo dõi bằng network"
+        : selectedNetworkFailed
+          ? "Request AI kết thúc với lỗi network"
+          : selectedNetworkCompleted && domUnavailable
+            ? "AI đã phản hồi xong · Chrome UI đang treo"
+            : selectedNetworkCompleted
+              ? "AI đã phản hồi xong · network xác nhận"
+              : responseCurrent && response?.incomplete
+                ? "Phản hồi có vẻ bị ngắt"
+                : "Chờ tín hiệu network";
 
     return (
       <div className="modal-backdrop chat-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setChatProfileId("")}>
@@ -953,8 +1017,9 @@ function App() {
             <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
               <div className="chat-response-head">
-                <div><span className="response-status-dot" /><strong>{isNewChat ? "Chat mới" : selectedBusy ? "ChatGPT đang trả lời…" : responseCurrent && response?.incomplete ? "Phản hồi có vẻ bị ngắt" : "Tự cập nhật tin nhắn"}</strong>{!isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
+                <div><span className="response-status-dot" /><strong>{responseHeadline}</strong>{!isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
                 <div className="response-head-actions">
+                  {responseCurrent && domUnavailable && !selectedBusy && <button type="button" onClick={() => void loadResponse(profile, selectedTarget, false)} disabled={Boolean(busy)}>Thử đọc UI</button>}
                   {responseCurrent && response?.incomplete && !selectedBusy && <button type="button" className="continue-response" onClick={() => void continueIncompleteResponse(profile, selectedTarget)} disabled={Boolean(busy)}>Tiếp tục</button>}
                   {responseCurrent && response?.text && <button type="button" onClick={async () => { await api.copyText(response.text); notify("Đã copy phản hồi mới nhất"); }}>Copy</button>}
                 </div>
@@ -965,7 +1030,13 @@ function App() {
                   <span>{response.rolloverNotice}</span>
                 </div>
               )}
-              {!profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang lấy tin nhắn gần nhất…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
+              {responseCurrent && !isNewChat && selectedNetworkState !== "idle" && (
+                <div className={`network-response-notice is-${selectedNetworkState}`}>
+                  <strong>{selectedBusy ? "Network: AI đang xử lý" : selectedNetworkFailed ? "Network: request thất bại" : "Network: AI đã hoàn tất phản hồi"}</strong>
+                  <span>{selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : selectedNetworkCompleted ? `Không cần DOM để xác nhận hoàn tất${response?.networkDurationMs || selectedTab?.network_duration_ms ? ` · ${Math.round((response?.networkDurationMs || selectedTab?.network_duration_ms) / 1000)}s` : ""}.` : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
+                </div>
+              )}
+              {!profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
                 <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={() => holdResponseAutoScroll(profile.profile_id)} onTouchMove={() => holdResponseAutoScroll(profile.profile_id)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
                   {(responseMessages.length ? responseMessages : [{ id: "latest-assistant", role: "assistant", text: response.text, truncated: response.truncated }]).map((message) => (
                     <div className={`chat-transcript-message is-${message.role}`} key={message.id}>
