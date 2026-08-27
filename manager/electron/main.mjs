@@ -601,7 +601,7 @@ function hasProcessFlag(command, name) {
 }
 
 function runtimeLaunchArgs(command, fallbackRoot) {
-  if (!command) return ["start", "--root", fallbackRoot, "--headless"];
+  if (!command) return ["start", "--root", fallbackRoot, "--browser-control", "--headless"];
   const root = processOption(command, "root") || fallbackRoot;
   const args = ["start", "--root", root];
   for (const allowedRoot of processOptions(command, "allow-root")) args.push("--allow-root", allowedRoot);
@@ -612,6 +612,7 @@ function runtimeLaunchArgs(command, fallbackRoot) {
   for (const flag of ["headless", "no-profile", "no-copy-url", "require-bash-session"]) {
     if (hasProcessFlag(command, flag)) args.push(`--${flag}`);
   }
+  if (!hasProcessFlag(command, "browser-control")) args.push("--browser-control");
   if (!hasProcessFlag(command, "headless")) args.push("--headless");
   return args;
 }
@@ -1198,8 +1199,9 @@ async function controlServer(action) {
     const profile = profileForRoot(runtime?.root);
     const root = processOption(processCommand, "root") || runtime?.root || profile?.root || managerProjects()[0] || "";
     if (!root) throw new Error("Chưa có workspace CodexPro. Hãy chạy codexpro setup hoặc thêm một dự án trước.");
-    if (action === "start" && runtime?.active) return runtimeStatus();
-    if (action === "restart" && processAlive(runtime?.pid)) {
+    const browserControlEnabled = hasProcessFlag(processCommand, "browser-control") || profile?.browserControl === true;
+    if (action === "start" && runtime?.active && browserControlEnabled) return runtimeStatus();
+    if ((action === "restart" || (action === "start" && runtime?.active && !browserControlEnabled)) && processAlive(runtime?.pid)) {
       try { process.kill(Number(runtime.pid), "SIGTERM"); } catch {}
       await new Promise((resolve) => setTimeout(resolve, 1400));
     }
