@@ -165,7 +165,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.15";
+const WORKER_EXTENSION_VERSION = "0.5.16";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -209,11 +209,6 @@ function applyConversationTitleOverrides(status, overrides) {
       };
     })
   };
-}
-
-function hasConversationLengthLimit(result) {
-  const text = `${String(result?.conversation_limit_message || "")}\n${String(result?.text || "")}`;
-  return Boolean(result?.conversation_limit_reached) || /(?:you(?:'|’)?ve reached the maximum length for this conversation|maximum length for this conversation|đ(?:ã|a) (?:đạt|chạm|tới).*?(?:độ dài|do dai).*?(?:tối đa|toi da).*?(?:cuộc trò chuyện|đoạn chat))/i.test(text);
 }
 
 function buildConversationRolloverPrompt(result) {
@@ -399,7 +394,8 @@ function App() {
               networkCompletedAt,
               networkStatusCode: Number(tab.network_status_code) || 0,
               networkError: String(tab.network_error || ""),
-              networkDurationMs: Number(tab.network_duration_ms) || 0
+              networkDurationMs: Number(tab.network_duration_ms) || 0,
+              contentNeedsRefresh: networkState === "completed" ? true : networkState === "generating" ? false : Boolean(previous.contentNeedsRefresh)
             }
           };
         });
@@ -408,7 +404,6 @@ function App() {
         if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) continue;
         networkCompletionReads.current.set(completionKey, networkCompletedAt);
         if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
-        void loadResponse(profile, conversationId, true);
       }
     }
   }, [status?.browserProfiles, chatProfileId, requestResponses, notify]);
@@ -674,7 +669,36 @@ function App() {
     }
     try {
       const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, text, attachments });
+      const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
+      const generationState = String(result?.generation_state || result?.network_state || "idle");
       const resolvedConversationId = String(result?.conversation_id || conversationId);
+      if (submissionState === "uncertain") {
+        setRequestResponses((current) => {
+          const previous = current[profile.profile_id] || {};
+          const previousMessages = previous.conversationId === conversationId && Array.isArray(previous.messages) ? previous.messages : [];
+          const messages = text
+            ? previousMessages.map((message) => message?.role === "user" && message?.pending && message?.text === text ? { ...message, pending: false, uncertain: true } : message)
+            : previousMessages;
+          return {
+            ...current,
+            [profile.profile_id]: {
+              ...previous,
+              visible: true,
+              loading: false,
+              error: "",
+              conversationId,
+              messages,
+              submissionState: "uncertain",
+              sendUncertain: true
+            }
+          };
+        });
+        const uncertainMessage = "Chưa xác định được tin nhắn đã gửi hay chưa. CodexPro không tự gửi lại để tránh duplicate.";
+        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: uncertainMessage }));
+        notify("Trạng thái gửi chưa chắc chắn · CodexPro không tự gửi lại");
+        window.setTimeout(() => void refresh(false), 500);
+        return;
+      }
       if (newChat && resolvedConversationId && resolvedConversationId !== NEW_CHAT_TARGET) {
         setRequestTargets((current) => ({ ...current, [profile.profile_id]: resolvedConversationId }));
       }
@@ -683,26 +707,58 @@ function App() {
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         const previousMessages = previous.conversationId === resolvedConversationId && Array.isArray(previous.messages) ? previous.messages : [];
-        const alreadyOptimistic = text && previousMessages.some((message) => message?.role === "user" && message?.pending && message?.text === text);
-        const optimisticMessages = text && !alreadyOptimistic
-          ? [...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: true }].slice(-20)
-          : previousMessages;
+        const matchingPendingIndex = text ? previousMessages.findIndex((message) => message?.role === "user" && message?.pending && message?.text === text) : -1;
+        let optimisticMessages = previousMessages;
+        if (text && matchingPendingIndex >= 0) {
+          optimisticMessages = previousMessages.map((message, index) => index === matchingPendingIndex ? { ...message, pending: false, uncertain: false } : message);
+        } else if (text) {
+          optimisticMessages = [...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: false, uncertain: false }].slice(-20);
+        }
         return {
           ...current,
           [profile.profile_id]: {
             ...previous,
             visible: true,
-            loading: true,
+            loading: generationState === "generating",
             error: "",
             conversationId: resolvedConversationId,
-            messages: optimisticMessages
+            messages: optimisticMessages,
+            submissionState: "submitted",
+            sendUncertain: false,
+            networkState: generationState,
+            networkError: String(result?.network_error || previous.networkError || ""),
+            networkStatusCode: Number(result?.network_status_code) || Number(previous.networkStatusCode) || 0
           }
         };
       });
-      notify(newChat ? "Đã tạo chat mới và gửi tin nhắn đầu tiên" : `Đã gửi${result.attachment_count ? ` ${result.attachment_count} file` : ""} vào ${result.title || profile.active_chat_title || profile.label}`);
+      if (generationState === "failed") {
+        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Tin nhắn đã gửi nhưng AI gặp lỗi network${result?.network_error ? `: ${result.network_error}` : ""}.` }));
+        notify("Tin nhắn đã gửi · AI gặp lỗi network");
+      } else {
+        notify(newChat ? "Đã tạo chat mới và gửi tin nhắn đầu tiên" : `Đã gửi${result.attachment_count ? ` ${result.attachment_count} file` : ""} vào ${result.title || profile.active_chat_title || profile.label}`);
+      }
       window.setTimeout(() => void refresh(false), 500);
     } catch (err) {
       const message = err?.message || String(err);
+      const conversationLimitReached = !newChat && message.includes("CONVERSATION_LIMIT_REACHED:");
+      if (conversationLimitReached) {
+        const previous = requestResponses[profile.profile_id] || {};
+        const cleanMessages = Array.isArray(previous.messages) ? previous.messages.filter((item) => !item?.pending) : [];
+        const rolloverMessages = text ? [...cleanMessages, { id: `rollover-user-${Date.now()}`, role: "user", text }].slice(-20) : cleanMessages;
+        const newConversationId = await rolloverFullConversation(profile, conversationId, {
+          ...previous,
+          title: conversations.find((chat) => chat.id === conversationId)?.title || profile.active_chat_title || "",
+          messages: rolloverMessages,
+          conversation_limit_reached: true,
+          conversation_limit_message: message.replace(/^.*CONVERSATION_LIMIT_REACHED:\s*/s, "").trim() || "ChatGPT báo đoạn chat đã đạt giới hạn độ dài.",
+          rollover_attachments: attachments
+        });
+        if (newConversationId) {
+          setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
+          setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
+          return;
+        }
+      }
       if (!newChat && text) {
         setRequestResponses((current) => {
           const previous = current[profile.profile_id] || {};
@@ -710,7 +766,7 @@ function App() {
           return { ...current, [profile.profile_id]: { ...previous, loading: false, messages } };
         });
       }
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: message }));
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: conversationLimitReached ? "Chat đã đầy và chưa chuyển được sang chat mới." : message }));
     } finally {
       setBusy("");
     }
@@ -746,7 +802,7 @@ function App() {
         conversationId: "",
         newChat: true,
         text: handoffText,
-        attachments: []
+        attachments: Array.isArray(result?.rollover_attachments) ? result.rollover_attachments : []
       });
       const newConversationId = String(created?.conversation_id || "").trim();
       if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT chưa trả conversation id cho chat tiếp nối.");
@@ -774,8 +830,7 @@ function App() {
         }
       }));
       notify("Chat cũ đã đầy · CodexPro đã tự tạo chat mới để tiếp tục dự án");
-      window.setTimeout(() => void loadResponse(profile, newConversationId, true), 1000);
-      window.setTimeout(() => void refresh(false), 700);
+      window.setTimeout(() => void refresh(false), 500);
       return newConversationId;
     } catch (err) {
       const message = err?.message || String(err);
@@ -799,7 +854,7 @@ function App() {
     }
   }
 
-  async function loadResponse(profile, explicitConversationId, silent = false) {
+  async function loadResponse(profile, explicitConversationId, silent = false, readDom = false) {
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const conversationId = String(explicitConversationId || requestTargets[profile.profile_id] || defaultTarget || "");
@@ -809,9 +864,8 @@ function App() {
       setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
     }
     try {
-      const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId });
+      const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId, readDom });
       const domAvailable = result.dom_available !== false;
-      const conversationLimitReached = domAvailable && hasConversationLengthLimit(result);
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         const sameConversation = previous.conversationId === conversationId;
@@ -837,9 +891,15 @@ function App() {
             truncated: domAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
             incomplete: domAvailable ? Boolean(result.incomplete) : false,
             incompleteReason: domAvailable ? (result.incomplete_reason || "") : "",
-            conversationLimitReached,
-            conversationLimitMessage: domAvailable ? (result.conversation_limit_message || (conversationLimitReached ? "ChatGPT báo đoạn chat đã đạt giới hạn độ dài." : "")) : "",
+            conversationLimitReached: Boolean(previous.conversationLimitReached),
+            conversationLimitMessage: previous.conversationLimitMessage || "",
             domAvailable,
+            domSkipped: Boolean(result.dom_skipped),
+            contentNeedsRefresh: result.dom_skipped
+              ? String(result.network_state || previous.networkState || "") === "completed"
+              : domAvailable
+                ? false
+                : Boolean(previous.contentNeedsRefresh),
             domError: result.dom_error || "",
             networkState: String(result.network_state || previous.networkState || (result.busy ? "generating" : "idle")),
             networkSource: String(result.network_source || previous.networkSource || ""),
@@ -853,7 +913,6 @@ function App() {
           }
         };
       });
-      if (conversationLimitReached && !result.busy) void rolloverFullConversation(profile, conversationId, result);
       return result;
     } catch (err) {
       const message = err?.message || String(err);
@@ -946,7 +1005,8 @@ function App() {
     const selectedNetworkFailed = selectedNetworkState === "failed";
     const selectedBusy = selectedNetworkState === "generating" || Boolean(selectedTab?.busy || (responseCurrent && response?.busy));
     const selectedSettling = Boolean(selectedTab?.settling || (responseCurrent && response?.incomplete));
-    const domUnavailable = Boolean(responseCurrent && response?.domAvailable === false);
+    const domUnavailable = Boolean(responseCurrent && response?.domAvailable === false && !response?.domSkipped);
+    const contentNeedsRefresh = Boolean(responseCurrent && response?.contentNeedsRefresh);
     const rolloverCreating = Boolean(responseCurrent && response?.rolloverStatus === "creating");
     const working = profile.connected && (profile.activity === "working" || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
@@ -958,8 +1018,10 @@ function App() {
           ? "Request AI kết thúc với lỗi network"
           : selectedNetworkCompleted && domUnavailable
             ? "AI đã phản hồi xong · Chrome UI đang treo"
-            : selectedNetworkCompleted
-              ? "AI đã phản hồi xong · network xác nhận"
+            : selectedNetworkCompleted && contentNeedsRefresh
+              ? "AI đã phản hồi xong · nội dung chưa đọc"
+              : selectedNetworkCompleted
+                ? "AI đã phản hồi xong · network xác nhận"
               : responseCurrent && response?.incomplete
                 ? "Phản hồi có vẻ bị ngắt"
                 : "Chờ tín hiệu network";
@@ -1019,7 +1081,7 @@ function App() {
               <div className="chat-response-head">
                 <div><span className="response-status-dot" /><strong>{responseHeadline}</strong>{!isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
                 <div className="response-head-actions">
-                  {responseCurrent && domUnavailable && !selectedBusy && <button type="button" onClick={() => void loadResponse(profile, selectedTarget, false)} disabled={Boolean(busy)}>Thử đọc UI</button>}
+                  {responseCurrent && !isNewChat && !selectedBusy && (contentNeedsRefresh || domUnavailable) && <button type="button" onClick={() => void loadResponse(profile, selectedTarget, false, true)} disabled={Boolean(busy)}>Đọc nội dung</button>}
                   {responseCurrent && response?.incomplete && !selectedBusy && <button type="button" className="continue-response" onClick={() => void continueIncompleteResponse(profile, selectedTarget)} disabled={Boolean(busy)}>Tiếp tục</button>}
                   {responseCurrent && response?.text && <button type="button" onClick={async () => { await api.copyText(response.text); notify("Đã copy phản hồi mới nhất"); }}>Copy</button>}
                 </div>
@@ -1036,13 +1098,13 @@ function App() {
                   <span>{selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : selectedNetworkCompleted ? `Không cần DOM để xác nhận hoàn tất${response?.networkDurationMs || selectedTab?.network_duration_ms ? ` · ${Math.round((response?.networkDurationMs || selectedTab?.network_duration_ms) / 1000)}s` : ""}.` : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
                 </div>
               )}
-              {!profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
+              {!profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
                 <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={() => holdResponseAutoScroll(profile.profile_id)} onTouchMove={() => holdResponseAutoScroll(profile.profile_id)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
                   {(responseMessages.length ? responseMessages : [{ id: "latest-assistant", role: "assistant", text: response.text, truncated: response.truncated }]).map((message) => (
                     <div className={`chat-transcript-message is-${message.role}`} key={message.id}>
                       <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
                       <div className="latest-response-content">
-                        <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : ""}</span>
+                        <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
                         {message.role === "assistant" ? <ResponseText text={message.text} truncated={message.truncated} /> : <div className="chat-message-text user-message-text">{message.text}</div>}
                       </div>
                     </div>

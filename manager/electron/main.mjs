@@ -17,7 +17,7 @@ const managerProjectsFile = path.join(codexProHome, "manager-projects.json");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.15";
+const WORKER_EXTENSION_VERSION = "0.5.16";
 const RUNTIME_BASE_CACHE_MS = 10000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
@@ -1059,7 +1059,8 @@ async function getProfileResponse(payload) {
   return await localMcpTool(base.config, base.token, "browser_control", {
     action: "get_chat_response",
     profile_id: profileId,
-    conversation_id: conversationId
+    conversation_id: conversationId,
+    read_dom: payload?.readDom !== false
   }, 80000);
 }
 
