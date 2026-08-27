@@ -280,6 +280,9 @@ function typePage(selector,text) {
 async function sendChatRequestPage(text,attachments=[]) {
   const sleep=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
+  const normalizedText=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim();
+  const composerText=element=>element?.isContentEditable?normalizedText(element.innerText||element.textContent||''):normalizedText(element?.value||'');
+  const userMessages=()=>Array.from(document.querySelectorAll('[data-message-author-role="user"]')).map(node=>normalizedText(node.innerText||node.textContent||'')).filter(Boolean);
   if(location.origin!=='https://chatgpt.com'||(!location.pathname.startsWith('/c/')&&location.pathname!=='/'))return {ok:false,error:'Tab đã chọn không phải ChatGPT.'};
   const stopSelectors=['button[data-testid="stop-button"]','button[aria-label*="Stop generating" i]','button[aria-label*="Stop streaming" i]','button[aria-label*="Dừng" i]'];
   const composerSubmit=document.querySelector('#composer-submit-button');
@@ -327,11 +330,18 @@ async function sendChatRequestPage(text,attachments=[]) {
         const selection=window.getSelection(),range=document.createRange(),paragraph=composer.querySelector('p:last-child')||composer;
         range.selectNodeContents(paragraph);range.collapse(false);selection.removeAllRanges();selection.addRange(range);
         document.execCommand('insertText',false,` ${text}`);
-      }else composer.textContent=text;
+      }else{
+        const selection=window.getSelection(),range=document.createRange();
+        range.selectNodeContents(composer);selection.removeAllRanges();selection.addRange(range);
+        if(!document.execCommand('insertText',false,text))composer.textContent=text;
+      }
     }else{const proto=composer instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;if(setter)setter.call(composer,text);else composer.value=text;}
     composer.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:text}));
     composer.dispatchEvent(new Event('change',{bubbles:true}));
+    for(let attempt=0;attempt<30&&composerText(composer)!==normalizedText(text);attempt+=1)await sleep(50);
+    if(composerText(composer)!==normalizedText(text))return {ok:false,error:'ChatGPT chưa nhận nội dung vào composer; chưa gửi để tránh báo thành công giả.'};
   }
+  const beforeUserCount=userMessages().length;
   let send;
   for(let attempt=0;attempt<(attachments.length?900:40);attempt+=1){
     send=['#composer-submit-button','button[data-testid="send-button"]','button[aria-label*="Send" i]','button[aria-label*="Gửi" i]'].map(selector=>document.querySelector(selector)).find(element=>{
@@ -344,7 +354,26 @@ async function sendChatRequestPage(text,attachments=[]) {
   }
   if(!send)return {ok:false,error:attachments.length?'ChatGPT chưa tải file xong hoặc không chấp nhận định dạng file này.':'Đã nhập yêu cầu nhưng nút gửi chưa sẵn sàng.'};
   send.click();
-  return {ok:true,title:document.title,url:location.href,length:text.length,attachment_count:attachments.length,attachment_names:attachments.map(file=>file.name)};
+  let submitted=false;
+  let submittedBy='';
+  const expected=normalizedText(text);
+  for(let attempt=0;attempt<120;attempt+=1){
+    const currentComposer=findComposer();
+    const currentDraft=composerText(currentComposer);
+    const currentUsers=userMessages();
+    const latestUser=currentUsers.at(-1)||'';
+    const userAdded=currentUsers.length>beforeUserCount&&(expected?latestUser.includes(expected):true);
+    const composerCleared=!currentDraft||currentDraft!==expected;
+    const currentSubmit=document.querySelector('#composer-submit-button');
+    const currentSubmitLabel=String(currentSubmit?.innerText||currentSubmit?.textContent||currentSubmit?.getAttribute?.('aria-label')||'').trim();
+    const generating=(visible(currentSubmit)&&/(?:stop\s+(?:answering|generating|streaming)|dừng(?:\s+trả\s+lời)?)/i.test(currentSubmitLabel))
+      || stopSelectors.some(selector=>visible(document.querySelector(selector)));
+    if(userAdded){submitted=true;submittedBy='user-message';break;}
+    if(composerCleared&&generating){submitted=true;submittedBy='composer+generating';break;}
+    await sleep(100);
+  }
+  if(!submitted)return {ok:false,error:'Đã bấm gửi nhưng không xác minh được tin nhắn xuất hiện trên ChatGPT. Vui lòng thử lại.'};
+  return {ok:true,title:document.title,url:location.href,length:text.length,attachment_count:attachments.length,attachment_names:attachments.map(file=>file.name),submitted:true,submitted_by:submittedBy};
 }
 
 async function readChatResponsePage() {
@@ -541,7 +570,15 @@ async function execute(command) {
   }
   if(action==='open_tab'){const tab=await chrome.tabs.create({url:args.url,active:true});return {action,target_id:tab.id,title:tab.title||'',url:tab.url||args.url};}
   const tab=await targetTab(args);
-  if(action==='activate_tab'){await chrome.tabs.update(tab.id,{active:true});if(tab.windowId)await chrome.windows.update(tab.windowId,{focused:true});return {action,target_id:tab.id,ok:true};}
+  if(action==='activate_tab'){
+    await chrome.tabs.update(tab.id,{active:true});
+    let windowInfo=null;
+    if(Number.isInteger(tab.windowId)){
+      try{await chrome.windows.update(tab.windowId,{state:'maximized'});}catch{}
+      try{windowInfo=await chrome.windows.update(tab.windowId,{focused:true});}catch{}
+    }
+    return {action,target_id:tab.id,ok:true,window_id:tab.windowId,window_state:String(windowInfo?.state||''),window_focused:Boolean(windowInfo?.focused)};
+  }
   if(action==='close_tab'){await chrome.tabs.remove(tab.id);return {action,target_id:tab.id,ok:true};}
   if(action==='navigate'){const updated=await chrome.tabs.update(tab.id,{url:args.url});return {action,target_id:tab.id,url:updated.url||args.url,title:updated.title||''};}
   if(action==='snapshot'){const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:snapshotPage,args:[Math.max(500,Math.min(50000,args.max_chars||20000))]});return {action,target_id:tab.id,...result.result};}

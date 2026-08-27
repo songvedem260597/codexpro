@@ -90,6 +90,7 @@ function ChatDropdown({ value, conversations, disabled, onChange }) {
               type="button"
               role="option"
               aria-selected={chat.id === value}
+              data-conversation-id={chat.id}
               className={`chat-dropdown-option ${chat.id === value ? "is-selected" : ""}`}
               key={chat.id}
               onClick={() => { onChange(chat.id); setOpen(false); }}
@@ -163,7 +164,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.11";
+const WORKER_EXTENSION_VERSION = "0.5.12";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -534,15 +535,26 @@ function App() {
   }
 
   async function openProfile(profile) {
-    const activeTab = (profile.conversation_tabs || []).find((tab) => tab.active) || profile.conversation_tabs?.[0];
-    const activeConversationId = String(activeTab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+    const tabs = profile.conversation_tabs || [];
+    const activeTab = tabs.find((tab) => tab.active) || tabs[0];
+    const conversationOf = (tab) => String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+    const activeConversationId = conversationOf(activeTab);
     const conversations = profileRequestChats(profile);
     const defaultTarget = activeConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "";
     const conversationId = String(requestTargets[profile.profile_id] || defaultTarget);
+    const selectedTab = tabs.find((tab) => conversationOf(tab) === conversationId);
+    const targetTab = selectedTab || activeTab;
+    const selectedConversation = conversations.find((chat) => String(chat.id) === conversationId);
     setBusy(`open-profile:${profile.profile_id}`);
     setError("");
     try {
-      await api.openProfileChat({ profileId: profile.profile_id, conversationId });
+      await api.openProfileChat({
+        profileId: profile.profile_id,
+        conversationId,
+        targetId: targetTab?.id,
+        targetConversationId: conversationOf(targetTab),
+        title: selectedConversation?.title || targetTab?.title || profile.active_chat_title || ""
+      });
     } catch (err) {
       setError(err?.message || String(err));
     } finally {
@@ -577,6 +589,23 @@ function App() {
     setBusy(`request:${profile.profile_id}`);
     setError("");
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+    if (!newChat && text) {
+      setRequestResponses((current) => {
+        const previous = current[profile.profile_id] || {};
+        const previousMessages = previous.conversationId === conversationId && Array.isArray(previous.messages) ? previous.messages : [];
+        return {
+          ...current,
+          [profile.profile_id]: {
+            ...previous,
+            visible: true,
+            loading: true,
+            error: "",
+            conversationId,
+            messages: [...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: true }].slice(-20)
+          }
+        };
+      });
+    }
     try {
       const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, text, attachments });
       const resolvedConversationId = String(result?.conversation_id || conversationId);
@@ -585,12 +614,37 @@ function App() {
       }
       setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
       setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
-      setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId: resolvedConversationId } }));
+      setRequestResponses((current) => {
+        const previous = current[profile.profile_id] || {};
+        const previousMessages = previous.conversationId === resolvedConversationId && Array.isArray(previous.messages) ? previous.messages : [];
+        const alreadyOptimistic = text && previousMessages.some((message) => message?.role === "user" && message?.pending && message?.text === text);
+        const optimisticMessages = text && !alreadyOptimistic
+          ? [...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: true }].slice(-20)
+          : previousMessages;
+        return {
+          ...current,
+          [profile.profile_id]: {
+            ...previous,
+            visible: true,
+            loading: true,
+            error: "",
+            conversationId: resolvedConversationId,
+            messages: optimisticMessages
+          }
+        };
+      });
       notify(newChat ? "Đã tạo chat mới và gửi tin nhắn đầu tiên" : `Đã gửi${result.attachment_count ? ` ${result.attachment_count} file` : ""} vào ${result.title || profile.active_chat_title || profile.label}`);
       window.setTimeout(() => void loadResponse(profile, resolvedConversationId, true), 1200);
       window.setTimeout(() => void refresh(false), 900);
     } catch (err) {
       const message = err?.message || String(err);
+      if (!newChat && text) {
+        setRequestResponses((current) => {
+          const previous = current[profile.profile_id] || {};
+          const messages = Array.isArray(previous.messages) ? previous.messages.filter((item) => !(item?.role === "user" && item?.pending && item?.text === text)) : [];
+          return { ...current, [profile.profile_id]: { ...previous, loading: false, messages } };
+        });
+      }
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: message }));
     } finally {
       setBusy("");
@@ -616,6 +670,14 @@ function App() {
           error: "",
           conversationId,
           text: result.text || "",
+          messages: Array.isArray(result.messages)
+            ? result.messages.slice(-20).map((message, index) => ({
+                id: String(message?.id || `${message?.role || "message"}-${index}`),
+                role: message?.role === "user" ? "user" : "assistant",
+                text: String(message?.text || ""),
+                truncated: Boolean(message?.truncated)
+              })).filter((message) => message.text)
+            : [],
           busy: Boolean(result.busy),
           truncated: Boolean(result.truncated),
           incomplete: Boolean(result.incomplete),
@@ -709,6 +771,8 @@ function App() {
     const response = requestResponses[profile.profile_id];
     const sendError = requestSendErrors[profile.profile_id] || "";
     const responseCurrent = response?.conversationId === selectedTarget;
+    const responseMessages = responseCurrent && Array.isArray(response?.messages) ? response.messages : [];
+    const hasResponseContent = Boolean(response?.text || responseMessages.length);
     const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${selectedTarget}`));
     const selectedBusy = Boolean(selectedTab?.busy || (responseCurrent && response?.busy));
     const selectedSettling = Boolean(selectedTab?.settling || (responseCurrent && response?.incomplete));
@@ -761,29 +825,33 @@ function App() {
             <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => {
               setRenameChat(null);
               setRequestTargets((current) => ({ ...current, [profile.profile_id]: id }));
-              setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: true, error: "", conversationId: id, text: "" } }));
+              setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: true, error: "", conversationId: id, text: "", messages: [] } }));
               void loadResponse(profile, id, true);
             }} disabled={!profile.connected || !conversations.length || sending} />
 
-            <label className="request-label">Phản hồi mới nhất</label>
+            <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
               <div className="chat-response-head">
-                <div><span className="response-status-dot" /><strong>{isNewChat ? "Chat mới" : selectedBusy ? "ChatGPT đang trả lời…" : responseCurrent && response?.incomplete ? "Phản hồi có vẻ bị ngắt" : "Tự cập nhật phản hồi"}</strong>{!isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
+                <div><span className="response-status-dot" /><strong>{isNewChat ? "Chat mới" : selectedBusy ? "ChatGPT đang trả lời…" : responseCurrent && response?.incomplete ? "Phản hồi có vẻ bị ngắt" : "Tự cập nhật tin nhắn"}</strong>{!isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
                 <div className="response-head-actions">
                   {responseCurrent && response?.incomplete && !selectedBusy && <button type="button" className="continue-response" onClick={() => void continueIncompleteResponse(profile, selectedTarget)} disabled={Boolean(busy)}>Tiếp tục</button>}
                   {responseCurrent && response?.text && <button type="button" onClick={async () => { await api.copyText(response.text); notify("Đã copy phản hồi mới nhất"); }}>Copy</button>}
                 </div>
               </div>
-              {!profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : !responseCurrent || response?.loading && !response?.text ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang lấy phản hồi mới nhất…</div> : response?.error ? <div className="response-error">{response.error}</div> : response?.text ? (
-                <div className="latest-response" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={() => holdResponseAutoScroll(profile.profile_id)} onTouchMove={() => holdResponseAutoScroll(profile.profile_id)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
-                  <div className="chat-message-avatar">✦</div>
-                  <div className="latest-response-content">
-                    <span className="chat-message-role">ChatGPT</span>
-                    <ResponseText text={response.text} truncated={response.truncated} />
-                    {response.busy && <span className="typing-dots latest-response-typing"><i /><i /><i /></span>}
-                  </div>
+              {!profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang lấy tin nhắn gần nhất…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
+                <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={() => holdResponseAutoScroll(profile.profile_id)} onTouchMove={() => holdResponseAutoScroll(profile.profile_id)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
+                  {(responseMessages.length ? responseMessages : [{ id: "latest-assistant", role: "assistant", text: response.text, truncated: response.truncated }]).map((message) => (
+                    <div className={`chat-transcript-message is-${message.role}`} key={message.id}>
+                      <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
+                      <div className="latest-response-content">
+                        <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : ""}</span>
+                        {message.role === "assistant" ? <ResponseText text={message.text} truncated={message.truncated} /> : <div className="chat-message-text user-message-text">{message.text}</div>}
+                      </div>
+                    </div>
+                  ))}
+                  {response.busy && <div className="chat-transcript-message is-assistant is-typing"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">ChatGPT</span><span className="typing-dots latest-response-typing"><i /><i /><i /></span></div></div>}
                 </div>
-              ) : <div className="response-empty">Đoạn chat này chưa có phản hồi ChatGPT.</div>}
+              ) : <div className="response-empty">Đoạn chat này chưa có tin nhắn.</div>}
             </div>
 
             <label className="request-label" htmlFor={`request-${profile.profile_id}`}>Nhắn tiếp</label>
@@ -831,7 +899,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
-          <small>CodexPro Manager 0.2.36</small>
+          <small>CodexPro Manager 0.2.40</small>
         </div>
       </aside>
 
