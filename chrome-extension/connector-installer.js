@@ -1,5 +1,5 @@
 (() => {
-  const INSTALLER_REVISION = '2026-08-28-1';
+  const INSTALLER_REVISION = '2026-08-28-2';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
 
@@ -427,7 +427,7 @@
       const page = normalize(document.body?.innerText || '');
       const connected = page.includes('codexpro da ket noi') || page.includes('da ket noi codexpro') || page.includes('codexpro connected') || page.includes('connected codexpro');
       const toolCalled = page.includes('called tool') || page.includes('cong cu duoc goi');
-      return reply.includes('codexpro ready') || (toolCalled && connected) || reply.includes('da ket noi codexpro') || (reply.includes('server_config') && reply.includes('codexpro'));
+      return reply.includes('codexpro ready') || (toolCalled && (connected || reply.includes('codexpro'))) || reply.includes('da ket noi codexpro') || (reply.includes('server_config') && reply.includes('codexpro'));
     }, 70000, 500);
     if (!ready) throw new Error('Đã gửi test nhưng chưa nhận được phản hồi CodexPro READY trong 70 giây.');
     status('CodexPro READY · cài đặt và kiểm tra hoàn tất.', 'ok');
