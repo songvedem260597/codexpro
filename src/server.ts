@@ -2621,11 +2621,13 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       description:
         "Control the Chrome profile explicitly marked ACTIVE by the CodexPro Profile Bridge extension, with the dedicated port-9223 Chrome as fallback. Use list_profiles/status/list_tabs, then snapshot to obtain CSS selectors before click/type.",
       inputSchema: {
-        action: z.enum(["status", "list_profiles", "check_chatgpt", "setup_chatgpt", "reload_extension", "send_chat_request", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "type", "press", "screenshot"]),
+        action: z.enum(["status", "list_profiles", "check_chatgpt", "setup_chatgpt", "reload_extension", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "type", "press", "screenshot"]),
         profile_id: z.string().optional().describe("Optional extension profile id. Omit to use the profile marked ACTIVE. Ignored for the dedicated fallback browser."),
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
         target_id: z.string().optional().describe("Tab id from list_tabs. Omit to use the first page tab."),
-        conversation_id: z.string().optional().describe("Exact ChatGPT conversation id for send_chat_request. Opens that chat in the selected profile when needed."),
+        conversation_id: z.string().optional().describe("Exact ChatGPT conversation id for send_chat_request, rename_chat, or get_chat_response."),
+        new_chat: z.boolean().optional().describe("For send_chat_request, create a new ChatGPT conversation in a background tab without focusing the profile."),
+        title: z.string().max(120).optional().describe("New conversation title for rename_chat."),
         attachments: z.array(z.object({
           name: z.string().min(1).max(255),
           mime_type: z.string().min(1).max(160),
@@ -2672,7 +2674,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
       let result: Record<string, any>;
       const selectedProfile = args.profile_id || profiles.find((profile) => profile.active && profile.connected)?.profile_id;
-      if ((args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "send_chat_request" || args.action === "get_chat_response") && !selectedProfile) {
+      if ((args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "send_chat_request" || args.action === "rename_chat" || args.action === "hide_chat" || args.action === "get_chat_response") && !selectedProfile) {
         throw new CodexProError("Choose an online Chrome extension profile before setting up CodexPro in ChatGPT.");
       }
       const useExtension = args.browser !== "dedicated" && Boolean(selectedProfile);
@@ -2680,6 +2682,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         result = await runBrowserExtensionCommand(args.action, {
           target_id: args.target_id,
           conversation_id: args.conversation_id,
+          new_chat: args.new_chat,
+          title: args.title,
           attachments: args.attachments,
           url: args.url,
           selector: args.selector,

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, shell } from "electron";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -17,6 +17,22 @@ const managerProjectsFile = path.join(codexProHome, "manager-projects.json");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
+const WORKER_EXTENSION_VERSION = "0.5.10";
+const RUNTIME_BASE_CACHE_MS = 10000;
+let runtimeBaseCache = null;
+let runtimeBasePromise = null;
+
+function versionAtLeast(version, target = WORKER_EXTENSION_VERSION) {
+  const current = String(version || "").split(".").map(Number);
+  const required = String(target || "").split(".").map(Number);
+  const length = Math.max(current.length, required.length);
+  for (let index = 0; index < length; index += 1) {
+    const left = Number.isFinite(current[index]) ? current[index] : 0;
+    const right = Number.isFinite(required[index]) ? required[index] : 0;
+    if (left !== right) return left > right;
+  }
+  return true;
+}
 
 function mimeTypeForFile(filePath) {
   const extension = path.extname(filePath).toLowerCase();
@@ -53,6 +69,52 @@ async function chooseRequestFiles() {
   if (files.some((file) => file.size > MAX_REQUEST_ATTACHMENT_BYTES)) throw new Error("Mỗi file được tối đa 8 MB.");
   if (files.reduce((total, file) => total + file.size, 0) > MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES) throw new Error("Tổng file đính kèm được tối đa 10 MB.");
   return files;
+}
+
+async function clipboardImagePng() {
+  if (typeof clipboard.readImage === "function") {
+    const image = clipboard.readImage();
+    if (!image?.isEmpty?.()) return image.toPNG();
+  }
+  if (typeof clipboard.read === "function") {
+    const items = await clipboard.read();
+    for (const item of items || []) {
+      const imageType = (item.types || []).find((type) => /^image\/(png|jpeg|jpg|webp)$/i.test(type));
+      if (imageType) {
+        const blob = await item.getType(imageType);
+        if (blob instanceof Blob) {
+          const buffer = Buffer.from(await blob.arrayBuffer());
+          if (/^image\/png$/i.test(imageType)) return buffer;
+          const image = nativeImage.createFromBuffer(buffer);
+          if (!image.isEmpty()) return image.toPNG();
+        }
+      }
+      if ((item.types || []).includes("text/uri-list")) {
+        const blob = await item.getType("text/uri-list");
+        if (!(blob instanceof Blob)) continue;
+        const urls = (await blob.text()).split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+        for (const url of urls) {
+          if (!url.startsWith("file://")) continue;
+          const filePath = fileURLToPath(url);
+          if (!/\.(png|jpe?g|gif|webp)$/i.test(filePath) || !fs.existsSync(filePath)) continue;
+          const image = nativeImage.createFromBuffer(await fs.promises.readFile(filePath));
+          if (!image.isEmpty()) return image.toPNG();
+        }
+      }
+    }
+  }
+  return null;
+}
+
+async function captureClipboardImage() {
+  const png = await clipboardImagePng();
+  if (!png?.length) return null;
+  if (png.length > MAX_REQUEST_ATTACHMENT_BYTES) throw new Error("Ảnh trong clipboard lớn quá 8 MB.");
+  const directory = path.join(app.getPath("temp"), "codexpro-manager", "clipboard-images");
+  await fs.promises.mkdir(directory, { recursive: true });
+  const filePath = path.join(directory, `clipboard-${Date.now()}-${randomBytes(4).toString("hex")}.png`);
+  await fs.promises.writeFile(filePath, png, { flag: "wx" });
+  return requestFileSummary(filePath);
 }
 
 function createWindow() {
@@ -98,6 +160,64 @@ function createWindow() {
         if (status.local?.ok && projects[0]?.root) {
           inspection = await win.webContents.executeJavaScript(`window.codexpro.inspectProject(${JSON.stringify(projects[0].root)})`, true);
         }
+        const chatSmokeRequested = [
+          process.env.CODEXPRO_MANAGER_SMOKE_CHAT_MODAL,
+          process.env.CODEXPRO_MANAGER_SMOKE_RENAME,
+          process.env.CODEXPRO_MANAGER_SMOKE_DROPDOWN,
+          process.env.CODEXPRO_MANAGER_SMOKE_RESPONSE,
+          process.env.CODEXPRO_MANAGER_SMOKE_SEND,
+          process.env.CODEXPRO_MANAGER_SMOKE_PASTE_IMAGE,
+          process.env.CODEXPRO_MANAGER_SMOKE_REALTIME_RESPONSE
+        ].some((value) => value === "1");
+        let chatModalProbe = null;
+        if (chatSmokeRequested) {
+          const preferredProfile = String(process.env.CODEXPRO_MANAGER_SMOKE_SCROLL_PROFILE || "").trim();
+          const clickProbe = await win.webContents.executeJavaScript(`(() => {
+            const cards = [...document.querySelectorAll('.browser-profile')];
+            const card = cards.find((item) => ${JSON.stringify(preferredProfile)} && item.querySelector('code')?.textContent?.includes(${JSON.stringify(preferredProfile)}))
+              || cards.find((item) => !item.querySelector('.profile-chat')?.disabled);
+            const button = card?.querySelector('.profile-chat:not(:disabled)');
+            button?.click();
+            return { cardFound: Boolean(card), buttonFound: Boolean(button), profile: card?.querySelector('code')?.textContent || '' };
+          })()`, true);
+          await new Promise((resolve) => setTimeout(resolve, 1400));
+          chatModalProbe = await win.webContents.executeJavaScript(`(() => {
+            const modal = document.querySelector('.chat-modal');
+            return { open: Boolean(modal), profile: modal?.querySelector('.chat-modal-profile code')?.textContent || '', hasResponse: Boolean(modal?.querySelector('.chat-response')), hasTextarea: Boolean(modal?.querySelector('textarea')) };
+          })()`, true);
+          chatModalProbe.click = clickProbe;
+        }
+        let renameProbe = null;
+        if (process.env.CODEXPRO_MANAGER_SMOKE_RENAME === "1") {
+          const renameTitle = String(process.env.CODEXPRO_MANAGER_SMOKE_RENAME_TITLE || "CodexPro rename UI probe").trim();
+          renameProbe = await win.webContents.executeJavaScript(`(async () => {
+            const modal = document.querySelector('.chat-modal');
+            const button = [...(modal?.querySelectorAll('.chat-manage-actions button') || [])].find((item) => /đổi tên/i.test(item.textContent || ''));
+            const beforeTitle = modal?.querySelector('.chat-dropdown-value strong')?.textContent?.trim() || '';
+            if (!button || button.disabled) return { ok: false, error: 'Nút Đổi tên không bấm được.', beforeTitle };
+            button.click();
+            await new Promise((resolve) => setTimeout(resolve, 180));
+            const input = modal.querySelector('.chat-rename-input');
+            const save = modal.querySelector('.chat-rename-save');
+            if (!input || !save) return { ok: false, error: 'Không mở được editor đổi tên.', beforeTitle };
+            input.focus();
+            const oldValue = input.value;
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+            setter?.call(input, ${JSON.stringify(renameTitle)});
+            if (input._valueTracker) input._valueTracker.setValue(oldValue);
+            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(renameTitle)} }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const currentSave = modal.querySelector('.chat-rename-save');
+            const saveDisabledBeforeClick = Boolean(currentSave?.disabled);
+            if (currentSave && !saveDisabledBeforeClick) currentSave.click();
+            await new Promise((resolve) => setTimeout(resolve, 5200));
+            const afterTitle = modal.querySelector('.chat-dropdown-value strong')?.textContent?.trim() || '';
+            const toast = document.querySelector('.toast')?.textContent?.trim() || '';
+            const error = modal.querySelector('.request-send-error')?.textContent?.trim() || document.querySelector('.alert')?.textContent?.trim() || '';
+            return { ok: afterTitle === ${JSON.stringify(renameTitle)} && !error, beforeTitle, afterTitle, toast, error, saveDisabledBeforeClick, editorClosed: !modal.querySelector('.chat-rename-editor') };
+          })()`, true);
+        }
         if (process.env.CODEXPRO_MANAGER_SMOKE_DROPDOWN === "1") {
           await win.webContents.executeJavaScript("document.querySelector('.chat-dropdown-trigger:not(:disabled)')?.click()", true);
           await new Promise((resolve) => setTimeout(resolve, 200));
@@ -106,10 +226,163 @@ function createWindow() {
           await win.webContents.executeJavaScript("if (!document.querySelector('.chat-response')) document.querySelector('.response-toggle:not(:disabled)')?.click()", true);
           await new Promise((resolve) => setTimeout(resolve, 5000));
         }
-        const image = await win.webContents.capturePage();
+        let sendProbe = null;
+        if (process.env.CODEXPRO_MANAGER_SMOKE_SEND === "1") {
+          sendProbe = await win.webContents.executeJavaScript(`(async () => {
+            const cards = [...document.querySelectorAll('.request-card')];
+            const card = cards.find((item) => {
+              const textarea = item.querySelector('textarea');
+              const button = item.querySelector('.request-card-actions .button.primary');
+              return textarea && !textarea.disabled && button && !/đang trả lời/i.test(button.textContent || '');
+            });
+            if (!card) return { ok: false, error: 'Không có card rảnh để test gửi.' };
+            const textarea = card.querySelector('textarea');
+            const button = card.querySelector('.request-card-actions .button.primary');
+            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+            setter?.call(textarea, 'CodexPro Manager UI send probe — trả lời OK.');
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            textarea.dispatchEvent(new Event('change', { bubbles: true }));
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            button.click();
+            await new Promise((resolve) => setTimeout(resolve, 12000));
+            return {
+              ok: textarea.value === '',
+              textarea: textarea.value,
+              buttonText: button.textContent?.trim() || '',
+              toast: document.querySelector('.toast')?.textContent?.trim() || '',
+              error: document.querySelector('.error-banner')?.textContent?.trim() || document.querySelector('.error')?.textContent?.trim() || ''
+            };
+          })()`, true);
+        }
+        let pasteProbe = null;
+        if (process.env.CODEXPRO_MANAGER_SMOKE_PASTE_IMAGE === "1") {
+          const previousClipboard = typeof clipboard.read === "function" ? await clipboard.read() : null;
+          const sample = nativeImage.createFromDataURL("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlU6V0AAAAASUVORK5CYII=");
+          try {
+            if (typeof clipboard.writeImage === "function") clipboard.writeImage(sample);
+            else await clipboard.write([new ClipboardItem({ "image/png": new Blob([sample.toPNG()], { type: "image/png" }) })]);
+            pasteProbe = await win.webContents.executeJavaScript(`(async () => {
+              const card = [...document.querySelectorAll('.request-card')].find((item) => {
+                const textarea = item.querySelector('textarea');
+                return textarea && !textarea.disabled;
+              });
+              if (!card) return { ok: false, error: 'Không có textarea rảnh để test paste ảnh.' };
+              const textarea = card.querySelector('textarea');
+              const event = new Event('paste', { bubbles: true, cancelable: true });
+              Object.defineProperty(event, 'clipboardData', { value: { items: [{ type: 'image/png' }], files: [] } });
+              textarea.dispatchEvent(event);
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              const attachment = card.querySelector('.request-file');
+              attachment?.scrollIntoView({ block: 'center' });
+              return {
+                ok: Boolean(attachment),
+                attachment: attachment?.querySelector('.request-file-copy strong')?.textContent?.trim() || '',
+                toast: document.querySelector('.toast')?.textContent?.trim() || '',
+                placeholder: textarea.getAttribute('placeholder') || ''
+              };
+            })()`, true);
+          } finally {
+            if (previousClipboard && typeof clipboard.write === "function") await clipboard.write(previousClipboard);
+          }
+        }
+        let openProfileProbe = null;
+        const openProfilePrefix = String(process.env.CODEXPRO_MANAGER_SMOKE_OPEN_PROFILE || "").trim();
+        if (openProfilePrefix) {
+          const beforeProfile = status.browserProfiles?.find((item) => item.profile_id.startsWith(openProfilePrefix));
+          const beforeActiveTab = beforeProfile?.conversation_tabs?.find((item) => item.active) || beforeProfile?.conversation_tabs?.[0];
+          const expectedConversationId = String(beforeActiveTab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+          const expectedTitle = String(beforeActiveTab?.title || beforeProfile?.active_chat_title || "");
+          const ui = await win.webContents.executeJavaScript(`(async () => {
+            const card = [...document.querySelectorAll('.browser-profile')].find((item) => item.querySelector('code')?.textContent?.includes(${JSON.stringify(openProfilePrefix)}));
+            const button = card?.querySelector('.open-profile');
+            if (!button) return { ok: false, error: 'Không tìm thấy nút Mở profile.' };
+            button.click();
+            await new Promise((resolve) => setTimeout(resolve, 6000));
+            return { ok: true, disabled: button.disabled, text: button.textContent?.trim() || '', error: document.querySelector('.alert')?.textContent?.trim() || '' };
+          })()`, true);
+          const directPayload = beforeProfile?.profile_id ? { profileId: beforeProfile.profile_id, conversationId: expectedConversationId } : null;
+          const direct = directPayload
+            ? await win.webContents.executeJavaScript(`window.codexpro.openProfileChat(${JSON.stringify(directPayload)}).then((value) => JSON.parse(JSON.stringify(value)))`, true)
+            : null;
+          const afterStatus = await win.webContents.executeJavaScript("window.codexpro.getStatus().then((value) => JSON.parse(JSON.stringify(value)))", true);
+          const afterProfile = afterStatus.browserProfiles?.find((item) => item.profile_id.startsWith(openProfilePrefix));
+          const afterActiveTab = afterProfile?.conversation_tabs?.find((item) => item.active) || afterProfile?.conversation_tabs?.[0];
+          const afterConversationId = String(afterActiveTab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+          let foreground = null;
+          try {
+            foreground = JSON.parse(await runPowerShell(`
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class CodexProSmokeForeground {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+'@
+$h=[CodexProSmokeForeground]::GetForegroundWindow()
+[uint32]$processId=0
+[CodexProSmokeForeground]::GetWindowThreadProcessId($h,[ref]$processId)|Out-Null
+if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.ProcessName;title=$p.MainWindowTitle;processId=$p.Id}|ConvertTo-Json -Compress}else{[pscustomobject]@{process='';title='';processId=0}|ConvertTo-Json -Compress}
+`));
+          } catch {}
+          openProfileProbe = {
+            ok: Boolean(ui?.ok) && !ui?.error && Boolean(direct?.window_focus?.ok) && beforeProfile?.tab_count === afterProfile?.tab_count && (!expectedConversationId || expectedConversationId === afterConversationId),
+            beforeTabCount: beforeProfile?.tab_count ?? null,
+            afterTabCount: afterProfile?.tab_count ?? null,
+            expectedConversationId,
+            afterConversationId,
+            expectedTitle,
+            direct,
+            foreground,
+            ui
+          };
+        }
+        let realtimeProbe = null;
+        if (process.env.CODEXPRO_MANAGER_SMOKE_REALTIME_RESPONSE === "1") {
+          const preferredProfile = String(process.env.CODEXPRO_MANAGER_SMOKE_SCROLL_PROFILE || "").trim();
+          const profile = status.browserProfiles?.find((item) => preferredProfile && item.profile_id.startsWith(preferredProfile) && item.connected)
+            || status.browserProfiles?.find((item) => item.connected && item.activity === "working" && item.conversation_tabs?.some((tab) => tab.busy));
+          const tab = profile?.conversation_tabs?.find((item) => item.busy) || profile?.conversation_tabs?.find((item) => item.active);
+          const conversationId = String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+          if (profile?.profile_id && conversationId) {
+            const started = Date.now();
+            const response = await win.webContents.executeJavaScript(`window.codexpro.getProfileResponse(${JSON.stringify({ profileId: profile.profile_id, conversationId })}).then((value) => JSON.parse(JSON.stringify(value)))`, true);
+            await new Promise((resolve) => setTimeout(resolve, 1800));
+            const ui = await win.webContents.executeJavaScript(`(() => {
+              const modal = document.querySelector('.chat-modal');
+              const card = modal?.querySelector('.request-card');
+              const modalProfile = modal?.querySelector('.chat-modal-profile code')?.textContent || '';
+              if (!card || !modalProfile.includes(${JSON.stringify(profile.profile_id)})) return { text: '', status: '', found: false };
+              return { found: true, text: card.querySelector('.chat-message-text')?.textContent || '', status: card.querySelector('.chat-response-head strong')?.textContent || '', bulletCount: card.querySelectorAll('.response-bullets li').length, numberedCount: card.querySelectorAll('.response-numbered li').length };
+            })()`, true);
+            realtimeProbe = { ok: Boolean(response?.text) && Boolean(ui?.text), busy: Boolean(response?.busy), textLength: Number(response?.text_length || response?.text?.length || 0), uiTextLength: String(ui?.text || '').length, bulletCount: Number(ui?.bulletCount || 0), numberedCount: Number(ui?.numberedCount || 0), latencyMs: Date.now() - started, tail: String(response?.text || "").slice(-220), uiTail: String(ui?.text || '').slice(-220), uiStatus: ui?.status || '' };
+          } else realtimeProbe = { ok: false, error: "Không có profile WORKING để test realtime." };
+        }
+        const workerUpdateProbe = await win.webContents.executeJavaScript(`(() => {
+          const button = document.querySelector('.reload-all');
+          return button ? { text: button.textContent?.trim() || '', disabled: Boolean(button.disabled), primary: button.classList.contains('primary'), title: button.getAttribute('title') || '' } : null;
+        })()`, true);
+        const activeChatTitleProbe = await win.webContents.executeJavaScript(`(() => [...document.querySelectorAll('.browser-profile')].map((card) => ({
+          profile: card.querySelector('code')?.textContent?.trim() || '',
+          title: card.querySelector('.active-chat-chip')?.textContent?.trim() || '',
+          metaStillHasChat: /(?:^|\\s)Chat:/i.test(card.querySelector('.profile-meta')?.textContent || '')
+        })))()`, true);
+        const scrollProfile = String(process.env.CODEXPRO_MANAGER_SMOKE_SCROLL_PROFILE || "").trim();
+        if (scrollProfile) {
+          await win.webContents.executeJavaScript(`(() => {
+            const card = [...document.querySelectorAll('.request-card')].find((item) => item.querySelector('code')?.textContent?.includes(${JSON.stringify(scrollProfile)}));
+            card?.scrollIntoView({ block: 'center' });
+          })()`, true);
+          await new Promise((resolve) => setTimeout(resolve, 350));
+        }
         const screenshot = process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT;
+        if (screenshot) {
+          win.show();
+          await new Promise((resolve) => setTimeout(resolve, 350));
+        }
+        const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null }));
+        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, chatModalProbe, renameProbe, sendProbe, pasteProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe }));
       } catch (error) {
         console.error(error instanceof Error ? error.stack || error.message : String(error));
         process.exitCode = 1;
@@ -198,40 +471,66 @@ function connectorLink(config, token) {
   return url.toString();
 }
 
-async function runtimeStatus() {
-  const task = await scheduledTask();
-  const config = parseTaskArguments(task.arguments);
-  const token = readToken(config.tokenFile);
-  const localBase = `http://127.0.0.1:${config.port}`;
-  const publicBase = config.hostname
-    ? (config.hostname.includes("://") ? config.hostname : `https://${config.hostname}`).replace(/\/mcp\/?$/, "")
-    : "";
-  const [local, tunnel, processText] = await Promise.all([
-    health(localBase, token),
-    publicBase ? health(publicBase, token) : Promise.resolve({ ok: false, status: 0, latency: 0, error: "Không dùng public tunnel" }),
-    runPowerShell("@((Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('node.exe','cloudflared.exe') -and $_.CommandLine -match 'codexpro\\.mjs.*start|dist\\\\http\\.js|cloudflared.*codexpro' } | Select-Object ProcessId,Name,CommandLine)) | ConvertTo-Json -Depth 3 -Compress").catch(() => "[]")
-  ]);
-  let processes = [];
+async function runtimeBaseStatus() {
+  if (runtimeBaseCache && Date.now() - runtimeBaseCache.cachedAt < RUNTIME_BASE_CACHE_MS) return runtimeBaseCache.value;
+  if (runtimeBasePromise) return runtimeBasePromise;
+  runtimeBasePromise = (async () => {
+    const task = await scheduledTask();
+    const config = parseTaskArguments(task.arguments);
+    const token = readToken(config.tokenFile);
+    const localBase = `http://127.0.0.1:${config.port}`;
+    const publicBase = config.hostname
+      ? (config.hostname.includes("://") ? config.hostname : `https://${config.hostname}`).replace(/\/mcp\/?$/, "")
+      : "";
+    const [local, tunnel, processText] = await Promise.all([
+      health(localBase, token),
+      publicBase ? health(publicBase, token) : Promise.resolve({ ok: false, status: 0, latency: 0, error: "Không dùng public tunnel" }),
+      runPowerShell("@((Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('node.exe','cloudflared.exe') -and $_.CommandLine -match 'codexpro\\.mjs.*start|dist\\\\http\\.js|cloudflared.*codexpro' } | Select-Object ProcessId,Name,CommandLine)) | ConvertTo-Json -Depth 3 -Compress").catch(() => "[]")
+    ]);
+    let processes = [];
+    try {
+      const parsed = JSON.parse(processText || "[]");
+      processes = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+    } catch {
+      processes = [];
+    }
+    const value = {
+      task,
+      config,
+      token,
+      local,
+      tunnel,
+      processes: processes.map((item) => ({ pid: item.ProcessId, name: item.Name })),
+      mcpLink: connectorLink(config, token),
+      tokenConfigured: Boolean(token),
+      autoStart: Boolean(task.autoStartCommand)
+    };
+    runtimeBaseCache = { cachedAt: Date.now(), value };
+    return value;
+  })();
   try {
-    const parsed = JSON.parse(processText || "[]");
-    processes = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
-  } catch {
-    processes = [];
+    return await runtimeBasePromise;
+  } finally {
+    runtimeBasePromise = null;
   }
-  const browserProfiles = local.ok
-    ? await listBrowserProfilesThroughMcp(config, token).catch(() => [])
+}
+
+async function runtimeStatus() {
+  const base = await runtimeBaseStatus();
+  const browserProfiles = base.local.ok
+    ? await listBrowserProfilesThroughMcp(base.config, base.token).catch(() => [])
     : [];
   return {
     checkedAt: new Date().toISOString(),
-    task,
-    config,
-    local,
-    tunnel,
-    processes: processes.map((item) => ({ pid: item.ProcessId, name: item.Name })),
+    task: base.task,
+    config: base.config,
+    local: base.local,
+    tunnel: base.tunnel,
+    processes: base.processes,
     browserProfiles,
-    mcpLink: connectorLink(config, token),
-    tokenConfigured: Boolean(token),
-    autoStart: Boolean(task.autoStartCommand)
+    mcpLink: base.mcpLink,
+    tokenConfigured: base.tokenConfigured,
+    autoStart: base.autoStart
   };
 }
 
@@ -322,30 +621,69 @@ async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
     signal: AbortSignal.timeout(timeoutMs)
   });
   if (!response.ok) throw new Error(`MCP HTTP ${response.status}`);
+  const nextSessionId = response.headers.get("mcp-session-id") || sessionId;
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  if (contentType.includes("text/event-stream") && response.body) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split(/\r?\n\r?\n/);
+        buffer = events.pop() || "";
+        for (const event of events) {
+          const data = event.split(/\r?\n/)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim())
+            .join("\n");
+          if (!data) continue;
+          const payload = JSON.parse(data);
+          if (payload.error) throw new Error(payload.error.message || "MCP trả về lỗi");
+          await reader.cancel().catch(() => {});
+          return { payload, sessionId: nextSessionId };
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (!buffer.trim()) return { payload: {}, sessionId: nextSessionId };
+    const data = buffer.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
+    if (!data) return { payload: {}, sessionId: nextSessionId };
+    const payload = JSON.parse(data);
+    if (payload.error) throw new Error(payload.error.message || "MCP trả về lỗi");
+    return { payload, sessionId: nextSessionId };
+  }
   const text = await response.text();
-  if (!text.trim()) return { payload: {}, sessionId: response.headers.get("mcp-session-id") || sessionId };
-  const dataLine = text.split(/\r?\n/).find((line) => line.startsWith("data:"));
-  const payload = JSON.parse(dataLine ? dataLine.slice(5).trim() : text);
+  if (!text.trim()) return { payload: {}, sessionId: nextSessionId };
+  const payload = JSON.parse(text);
   if (payload.error) throw new Error(payload.error.message || "MCP trả về lỗi");
-  return { payload, sessionId: response.headers.get("mcp-session-id") || sessionId };
+  return { payload, sessionId: nextSessionId };
 }
 
 async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
   const url = `http://127.0.0.1:${config.port}/mcp`;
+  const debug = process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1";
+  if (debug) console.error(`[manager-mcp] ${toolName}: initialize`);
   const initialized = await mcpRequest(url, token, {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.9" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.36" } }
   });
   const sessionId = initialized.sessionId;
+  if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
+  if (debug) console.error(`[manager-mcp] ${toolName}: tools/call`);
   const called = await mcpRequest(url, token, {
     jsonrpc: "2.0",
     id: 2,
     method: "tools/call",
     params: { name: toolName, arguments: args }
   }, sessionId, timeoutMs);
+  if (debug) console.error(`[manager-mcp] ${toolName}: tools/call complete`);
   const result = called.payload.result;
   if (result?.isError) {
     const message = result.content?.find((item) => item.type === "text")?.text || "CodexPro MCP trả về lỗi.";
@@ -366,9 +704,8 @@ async function setupChatGptProfile(profileId) {
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const profile = status.browserProfiles.find((item) => item.profile_id === id);
   if (!profile?.connected) throw new Error("Chrome profile này đang offline. Hãy mở Chrome và bật extension CodexPro.");
-  const [major = 0, minor = 0] = String(profile.extension_version || "").split(".").map(Number);
-  if (!(major > 0 || (major === 0 && minor >= 4))) {
-    throw new Error("Extension profile này chưa phải bản 0.5.1. Hãy bấm Reload extension rồi thử lại.");
+  if (!versionAtLeast(profile.extension_version)) {
+    throw new Error(`Worker extension của profile này chưa phải bản ${WORKER_EXTENSION_VERSION}. Hãy bấm Update worker extension rồi thử lại.`);
   }
   const token = readToken(status.config.tokenFile);
   return await localMcpTool(status.config, token, "browser_control", {
@@ -391,44 +728,152 @@ async function checkChatGptProfile(profileId) {
   }, 65000);
 }
 
+async function focusChromeWindow(chatTitle) {
+  const title = String(chatTitle || "").trim();
+  if (!title) return { ok: false, reason: "missing_title" };
+  const encodedTitle = Buffer.from(title, "utf8").toString("base64");
+  const script = `
+$target=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedTitle}'))
+Add-Type @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class CodexProWindowFocus {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+}
+'@
+$found=[IntPtr]::Zero
+$foundTitle=''
+for($attempt=0;$attempt -lt 25 -and $found -eq [IntPtr]::Zero;$attempt++){
+  [CodexProWindowFocus]::EnumWindows({param($h,$l)
+    if(-not [CodexProWindowFocus]::IsWindowVisible($h)){return $true}
+    $sb=New-Object Text.StringBuilder 512
+    [CodexProWindowFocus]::GetWindowText($h,$sb,$sb.Capacity)|Out-Null
+    $windowTitle=$sb.ToString()
+    if(-not $windowTitle){return $true}
+    [uint32]$processId=0
+    [CodexProWindowFocus]::GetWindowThreadProcessId($h,[ref]$processId)|Out-Null
+    try{$process=Get-Process -Id $processId -ErrorAction Stop}catch{return $true}
+    if($process.ProcessName -eq 'chrome' -and ($windowTitle -eq ($target+' - Google Chrome') -or $windowTitle.StartsWith($target+' - '))){
+      $script:found=$h
+      $script:foundTitle=$windowTitle
+      return $false
+    }
+    return $true
+  },[IntPtr]::Zero)|Out-Null
+  if($found -eq [IntPtr]::Zero){Start-Sleep -Milliseconds 120}
+}
+if($found -eq [IntPtr]::Zero){[pscustomobject]@{ok=$false;title=$target}|ConvertTo-Json -Compress;exit 0}
+[CodexProWindowFocus]::ShowWindowAsync($found,3)|Out-Null
+$ws=New-Object -ComObject WScript.Shell
+$activated=$ws.AppActivate($foundTitle)
+Start-Sleep -Milliseconds 220
+[CodexProWindowFocus]::ShowWindowAsync($found,3)|Out-Null
+$foreground=[CodexProWindowFocus]::GetForegroundWindow()
+$maximized=[CodexProWindowFocus]::IsZoomed($found)
+[pscustomobject]@{ok=([bool]$activated -and [bool]$maximized);activated=[bool]$activated;maximized=[bool]$maximized;foreground_match=($foreground -eq $found);title=$foundTitle;hwnd=$found.ToInt64();foreground=$foreground.ToInt64()}|ConvertTo-Json -Compress
+`;
+  try {
+    return JSON.parse(await runPowerShell(script));
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function openProfileChat(payload) {
+  const profileId = String(payload?.profileId || "").trim();
+  const conversationId = String(payload?.conversationId || "").trim();
+  if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
+  if (conversationId && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
+
+  const status = await runtimeStatus();
+  if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  const profile = status.browserProfiles.find((item) => item.profile_id === profileId);
+  if (!profile?.connected) throw new Error("Extension của profile này đang mất heartbeat với CodexPro.");
+  const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
+  if (!tabs.length) throw new Error("Profile này chưa có tab ChatGPT đang mở.");
+
+  const conversationOf = (tab) => String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+  let target = conversationId
+    ? tabs.find((tab) => tab.active && conversationOf(tab) === conversationId) || tabs.find((tab) => conversationOf(tab) === conversationId)
+    : tabs.find((tab) => tab.active) || tabs[0];
+  const token = readToken(status.config.tokenFile);
+
+  if (conversationId && !target) {
+    target = tabs.find((tab) => tab.active) || tabs[0];
+    await localMcpTool(status.config, token, "browser_control", {
+      action: "navigate",
+      profile_id: profileId,
+      target_id: String(target.id),
+      url: `https://chatgpt.com/c/${conversationId}`
+    }, 30000);
+  }
+
+  await localMcpTool(status.config, token, "browser_control", {
+    action: "activate_tab",
+    profile_id: profileId,
+    target_id: String(target.id)
+  }, 20000);
+  const resolvedConversationId = conversationId || conversationOf(target);
+  const conversation = (profile.recent_conversations || []).find((item) => String(item.id || "") === resolvedConversationId);
+  const windowFocus = await focusChromeWindow(conversation?.title || target.title || profile.active_chat_title || "");
+  return { ok: true, profile_id: profileId, conversation_id: resolvedConversationId, target_id: target.id, window_focus: windowFocus };
+}
+
 async function reloadChromeProfiles() {
   const status = await runtimeStatus();
-  const profiles = status.browserProfiles.filter((profile) => profile.connected);
-  if (!profiles.length) throw new Error("Không có Chrome profile nào đang kết nối.");
-  const legacy = profiles.filter((profile) => {
+  const connectedProfiles = status.browserProfiles.filter((profile) => profile.connected);
+  if (!connectedProfiles.length) throw new Error("Không có Chrome profile nào đang kết nối.");
+  const outdated = connectedProfiles.filter((profile) => !versionAtLeast(profile.extension_version));
+  if (!outdated.length) return { ok: true, mode: "up_to_date", count: 0, failed: 0, version: WORKER_EXTENSION_VERSION };
+  if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+
+  const token = readToken(status.config.tokenFile);
+  const legacy = outdated.filter((profile) => {
     const [major = 0, minor = 0] = String(profile.extension_version || "").split(".").map(Number);
     return !(major > 0 || (major === 0 && minor >= 4));
   });
-  if (legacy.length) {
-    if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-    const token = readToken(status.config.tokenFile);
-    const results = await Promise.allSettled(legacy.map((profile) => localMcpTool(status.config, token, "browser_control", {
-      action: "open_tab",
-      profile_id: profile.profile_id,
-      url: "chrome-extension://gndipignbnipohooclcbhjliikamjlpl/popup.html?codexpro_reload=1"
-    }, 20000)));
-    const reloaded = results.filter((result) => result.status === "fulfilled").length;
-    if (!reloaded) throw new Error("Không profile cũ nào mở được trang reload nội bộ.");
-    return { ok: true, mode: "bootstrap_reload", count: reloaded, failed: legacy.length - reloaded };
-  }
-  if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-  const token = readToken(status.config.tokenFile);
-  const results = await Promise.allSettled(profiles.map((profile) => localMcpTool(status.config, token, "browser_control", {
+  const modern = outdated.filter((profile) => !legacy.includes(profile));
+
+  const legacyResults = await Promise.allSettled(legacy.map((profile) => localMcpTool(status.config, token, "browser_control", {
+    action: "open_tab",
+    profile_id: profile.profile_id,
+    url: "chrome-extension://gndipignbnipohooclcbhjliikamjlpl/popup.html?codexpro_reload=1"
+  }, 20000)));
+  const modernResults = await Promise.allSettled(modern.map((profile) => localMcpTool(status.config, token, "browser_control", {
     action: "reload_extension",
     profile_id: profile.profile_id
   }, 20000)));
-  const reloaded = results.filter((result) => result.status === "fulfilled").length;
-  if (!reloaded) throw new Error("Không profile nào nhận được lệnh reload.");
-  return { ok: true, mode: "extension_reload", count: reloaded, failed: profiles.length - reloaded };
+
+  const results = [...legacyResults, ...modernResults];
+  const updated = results.filter((result) => result.status === "fulfilled").length;
+  if (!updated) throw new Error("Không profile worker cũ nào nhận được lệnh update.");
+  return {
+    ok: true,
+    mode: legacy.length ? (modern.length ? "mixed_update" : "bootstrap_reload") : "extension_reload",
+    count: updated,
+    failed: outdated.length - updated,
+    version: WORKER_EXTENSION_VERSION
+  };
 }
 
 async function sendProfileRequest(payload) {
+  const sendDebug = process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1";
+  if (sendDebug) console.error('[manager-send] start');
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
+  const newChat = Boolean(payload?.newChat);
   const text = String(payload?.text || "").trim();
   const requestedFiles = Array.isArray(payload?.attachments) ? payload.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
-  if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
+  if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
   if (text.length > 12000) throw new Error("Yêu cầu dài quá 12.000 ký tự.");
   const files = requestedFiles.map((file) => requestFileSummary(file?.path));
@@ -439,11 +884,46 @@ async function sendProfileRequest(payload) {
     mime_type: file.mimeType,
     data_base64: (await fs.promises.readFile(file.path)).toString("base64")
   })));
+  if (sendDebug) console.error('[manager-send] before runtimeStatus');
+  const status = await runtimeStatus();
+  if (sendDebug) console.error('[manager-send] after runtimeStatus');
+  if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  const profile = status.browserProfiles.find((item) => item.profile_id === profileId);
+  if (!profile?.connected) throw new Error("Extension của profile này đang mất heartbeat với CodexPro.");
+  const selectedConversationTab = newChat ? null : (profile.conversation_tabs || []).find((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] === conversationId);
+  if (selectedConversationTab?.busy) throw new Error("Đoạn chat này đang xử lý yêu cầu khác. Hãy chờ phản hồi hiện tại hoàn tất.");
+  if (!newChat) {
+    const allowedConversationIds = new Set([
+      ...(profile.recent_conversations || []).map((conversation) => String(conversation.id || "")),
+      ...(profile.conversation_tabs || []).map((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "")
+    ]);
+    if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
+  }
+  const token = readToken(status.config.tokenFile);
+  if (sendDebug) console.error('[manager-send] before send_chat_request tool');
+  const result = await localMcpTool(status.config, token, "browser_control", {
+    action: "send_chat_request",
+    profile_id: profileId,
+    conversation_id: newChat ? undefined : conversationId,
+    new_chat: newChat,
+    text,
+    attachments
+  }, 120000);
+  if (sendDebug) console.error('[manager-send] after send_chat_request tool');
+  return result;
+}
+
+async function renameProfileChat(payload) {
+  const profileId = String(payload?.profileId || "").trim();
+  const conversationId = String(payload?.conversationId || "").trim();
+  const title = String(payload?.title || "").trim();
+  if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
+  if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
+  if (!title || title.length > 120) throw new Error("Tên đoạn chat phải từ 1 đến 120 ký tự.");
   const status = await runtimeStatus();
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const profile = status.browserProfiles.find((item) => item.profile_id === profileId);
-  if (!profile?.connected) throw new Error("Profile này đang treo hoặc extension đã offline.");
-  if (profile.activity === "working") throw new Error("Profile này đang xử lý yêu cầu khác. Hãy chờ về trạng thái rảnh.");
+  if (!profile?.connected) throw new Error("Extension của profile này đang mất heartbeat với CodexPro.");
   const allowedConversationIds = new Set([
     ...(profile.recent_conversations || []).map((conversation) => String(conversation.id || "")),
     ...(profile.conversation_tabs || []).map((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "")
@@ -451,12 +931,11 @@ async function sendProfileRequest(payload) {
   if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
   const token = readToken(status.config.tokenFile);
   return await localMcpTool(status.config, token, "browser_control", {
-    action: "send_chat_request",
+    action: "rename_chat",
     profile_id: profileId,
     conversation_id: conversationId,
-    text,
-    attachments
-  }, 120000);
+    title
+  }, 30000);
 }
 
 async function getProfileResponse(payload) {
@@ -464,17 +943,9 @@ async function getProfileResponse(payload) {
   const conversationId = String(payload?.conversationId || "").trim();
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
-  const status = await runtimeStatus();
-  if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-  const profile = status.browserProfiles.find((item) => item.profile_id === profileId);
-  if (!profile?.connected) throw new Error("Profile này đang treo hoặc extension đã offline.");
-  const allowedConversationIds = new Set([
-    ...(profile.recent_conversations || []).map((conversation) => String(conversation.id || "")),
-    ...(profile.conversation_tabs || []).map((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "")
-  ]);
-  if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
-  const token = readToken(status.config.tokenFile);
-  return await localMcpTool(status.config, token, "browser_control", {
+  const base = await runtimeBaseStatus();
+  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  return await localMcpTool(base.config, base.token, "browser_control", {
     action: "get_chat_response",
     profile_id: profileId,
     conversation_id: conversationId
@@ -490,7 +961,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.9" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.36" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
@@ -549,9 +1020,12 @@ ipcMain.handle("codexpro:rotate-link", async () => {
 ipcMain.handle("codexpro:projects", () => listProjects());
 ipcMain.handle("codexpro:check-profile", (_event, profileId) => checkChatGptProfile(profileId));
 ipcMain.handle("codexpro:setup-profile", (_event, profileId) => setupChatGptProfile(profileId));
+ipcMain.handle("codexpro:open-profile-chat", (_event, payload) => openProfileChat(payload));
 ipcMain.handle("codexpro:reload-profiles", () => reloadChromeProfiles());
 ipcMain.handle("codexpro:choose-request-files", () => chooseRequestFiles());
+ipcMain.handle("codexpro:capture-clipboard-image", () => captureClipboardImage());
 ipcMain.handle("codexpro:send-profile-request", (_event, payload) => sendProfileRequest(payload));
+ipcMain.handle("codexpro:rename-profile-chat", (_event, payload) => renameProfileChat(payload));
 ipcMain.handle("codexpro:get-profile-response", (_event, payload) => getProfileResponse(payload));
 ipcMain.handle("codexpro:choose-project", async () => {
   const result = await dialog.showOpenDialog({ properties: ["openDirectory"], title: "Chọn repo hoặc dự án" });
