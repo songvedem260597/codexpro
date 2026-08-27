@@ -930,11 +930,30 @@ async function installConnector() {
   try{
     const profile=await profileInfo();
     const connector=await connectorInfo(profile);
-    const tab=await openChatGpt(connector.settings_url || 'https://chatgpt.com/plugins?q=CodexPro');
+    const settingsUrl=connector.settings_url || 'https://chatgpt.com/plugins?q=CodexPro';
+    const tab=await openChatGpt(settingsUrl);
     const result=await sendInstallerMessage(tab.id,connector);
     if(!result?.ok)throw new Error(result?.error || 'ChatGPT không hoàn tất thêm CodexPro.');
-    await chrome.tabs.update(tab.id,{url:'https://chatgpt.com/',active:true});
+    await chrome.tabs.update(tab.id,{url:settingsUrl,active:true});
     await waitForTab(tab.id,45000);
+    const opened=await sendPageMessage(tab.id,{type:'codexpro-open-installed-connector'});
+    if(!opened?.ok)throw new Error(opened?.error || 'Không mở được CodexPro sau khi cài.');
+    if(opened.href){
+      await chrome.tabs.update(tab.id,{url:opened.href,active:true});
+      await waitForTab(tab.id,45000);
+    }else{
+      await new Promise(resolve=>setTimeout(resolve,1800));
+      await waitForTab(tab.id,45000);
+    }
+    const chatLaunch=await sendPageMessage(tab.id,{type:'codexpro-open-connector-chat'});
+    if(!chatLaunch?.ok)throw new Error(chatLaunch?.error || 'Không mở được CodexPro trong đoạn chat.');
+    if(chatLaunch.href){
+      await chrome.tabs.update(tab.id,{url:chatLaunch.href,active:true});
+      await waitForTab(tab.id,45000);
+    }else{
+      await new Promise(resolve=>setTimeout(resolve,1800));
+      await waitForTab(tab.id,45000);
+    }
     const testResult=await sendPageMessage(tab.id,{type:'codexpro-run-connection-test'},90000);
     if(!testResult?.ok)throw new Error(testResult?.error || 'Đã thêm CodexPro nhưng chưa gửi được chat kiểm tra.');
     const saved={ok:true,message:testResult.message || 'Đã thêm CodexPro và gửi chat kiểm tra.',at:new Date().toISOString()};
