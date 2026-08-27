@@ -8,6 +8,10 @@ import workerWorking from "./assets/worker-working.gif";
 const api = window.codexpro;
 const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
+const RESPONSE_AUTO_SCROLL_RESUME_MS = 3000;
+const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
+const REALTIME_POLL_MS = 1000;
+const NEW_CHAT_TARGET = "__codexpro_new_chat__";
 
 function Dot({ ok }) {
   return <span className={`dot ${ok ? "ok" : "bad"}`} aria-hidden="true" />;
@@ -28,7 +32,7 @@ function Icon({ children }) {
 }
 
 const workerIcons = {
-  hung: { src: workerHung, label: "CodexPro đang treo" },
+  hung: { src: workerHung, label: "CodexPro mất kết nối extension" },
   idle: { src: workerIdle, label: "CodexPro đang rảnh" },
   working: { src: workerWorking, label: "CodexPro đang làm việc" }
 };
@@ -46,7 +50,7 @@ function WorkerIcon({ state }) {
 function ChatDropdown({ value, conversations, disabled, onChange }) {
   const [open, setOpen] = useState(false);
   const root = useRef(null);
-  const selected = conversations.find((chat) => chat.id === value);
+  const selected = value === NEW_CHAT_TARGET ? { id: NEW_CHAT_TARGET, title: "Chat mới", open: false, draft: true } : conversations.find((chat) => chat.id === value);
 
   useEffect(() => {
     const close = (event) => {
@@ -75,7 +79,7 @@ function ChatDropdown({ value, conversations, disabled, onChange }) {
       >
         <span className="chat-dropdown-value">
           <strong>{selected?.title || "Chưa tải được các đoạn chat gần đây"}</strong>
-          {selected && <small>{selected.open ? "Đang mở trong Chrome" : "Chat gần đây"}</small>}
+          {selected && <small>{selected.draft ? "Chưa tạo trên ChatGPT" : selected.open ? "Đang mở trong Chrome" : "Chat gần đây"}</small>}
         </span>
         <svg className="chat-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
       </button>
@@ -108,9 +112,62 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function ResponseText({ text, truncated }) {
+  const source = `${String(text || "")}${truncated ? "\n\n[Đã rút gọn khi hiển thị]" : ""}`;
+  const lines = source.split(/\r?\n/);
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const bullet = line.match(/^\s*[•*-]\s+(.+)$/);
+    if (bullet) {
+      const items = [];
+      while (index < lines.length) {
+        const match = lines[index].match(/^\s*[•*-]\s+(.+)$/);
+        if (!match) break;
+        items.push(match[1]);
+        index += 1;
+      }
+      blocks.push(<ul className="response-list response-bullets" key={`ul-${index}`}>{items.map((item, itemIndex) => <li key={`${itemIndex}-${item}`}>{item}</li>)}</ul>);
+      continue;
+    }
+
+    const numbered = line.match(/^\s*(\d+)[.)]\s+(.+)$/);
+    if (numbered) {
+      const items = [];
+      const start = Number(numbered[1]) || 1;
+      while (index < lines.length) {
+        const match = lines[index].match(/^\s*(\d+)[.)]\s+(.+)$/);
+        if (!match) break;
+        items.push(match[2]);
+        index += 1;
+      }
+      blocks.push(<ol className="response-list response-numbered" start={start} key={`ol-${index}`}>{items.map((item, itemIndex) => <li key={`${itemIndex}-${item}`}>{item}</li>)}</ol>);
+      continue;
+    }
+
+    const paragraph = [];
+    while (index < lines.length && lines[index].trim() && !/^\s*[•*-]\s+/.test(lines[index]) && !/^\s*\d+[.)]\s+/.test(lines[index])) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    blocks.push(<p key={`p-${index}`}>{paragraph.join("\n")}</p>);
+  }
+
+  return <div className="chat-message-text response-rich-text">{blocks}</div>;
+}
+
+const WORKER_EXTENSION_VERSION = "0.5.11";
+
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
-  const target = [0, 5, 1];
+  const target = WORKER_EXTENSION_VERSION.split(".").map(Number);
   for (let index = 0; index < target.length; index += 1) {
     const current = Number.isFinite(parts[index]) ? parts[index] : 0;
     if (current !== target[index]) return current > target[index];
@@ -127,8 +184,33 @@ function profileRequestChats(profile) {
   }).filter(Boolean).slice(0, 3);
 }
 
+function applyConversationTitleOverrides(status, overrides) {
+  if (!status || !overrides || !Object.keys(overrides).length) return status;
+  return {
+    ...status,
+    browserProfiles: (status.browserProfiles || []).map((profile) => {
+      const recentConversations = (profile.recent_conversations || []).map((chat) => {
+        const title = overrides[`${profile.profile_id}:${chat.id}`];
+        return title ? { ...chat, title } : chat;
+      });
+      const conversationTabs = (profile.conversation_tabs || []).map((tab) => {
+        const conversationId = String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+        const title = overrides[`${profile.profile_id}:${conversationId}`];
+        return title ? { ...tab, title } : tab;
+      });
+      const activeTab = conversationTabs.find((tab) => tab.active) || conversationTabs[0];
+      return {
+        ...profile,
+        recent_conversations: recentConversations,
+        conversation_tabs: conversationTabs,
+        active_chat_title: activeTab?.title || profile.active_chat_title
+      };
+    })
+  };
+}
+
 function App() {
-  const [activePage, setActivePage] = useState(() => new URLSearchParams(window.location.search).get("page") === "requests" ? "requests" : "overview");
+  const [chatProfileId, setChatProfileId] = useState("");
   const [status, setStatus] = useState(null);
   const [projects, setProjects] = useState([]);
   const [busy, setBusy] = useState("");
@@ -140,14 +222,53 @@ function App() {
   const [requestTargets, setRequestTargets] = useState({});
   const [requestFiles, setRequestFiles] = useState({});
   const [requestResponses, setRequestResponses] = useState({});
+  const [requestSendErrors, setRequestSendErrors] = useState({});
+  const [renameChat, setRenameChat] = useState(null);
+  const conversationTitleOverridesRef = useRef({});
   const refreshInFlight = useRef(false);
+  const statusRefreshInFlight = useRef(false);
   const profileCheckTimes = useRef(new Map());
   const responseFetches = useRef(new Set());
-  const responseScrollRefs = useRef(new Map());
+  const profilesRef = useRef([]);
+  const requestTargetsRef = useRef({});
+  const responseBodyRefs = useRef(new Map());
+  const responseScrollPauseUntil = useRef(new Map());
+  const responseScrollTimers = useRef(new Map());
 
   const notify = useCallback((message) => {
     setToast(message);
     window.setTimeout(() => setToast(""), 2600);
+  }, []);
+
+  const scrollResponseToBottom = useCallback((profileId) => {
+    const container = responseBodyRefs.current.get(profileId);
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, []);
+
+  const holdResponseAutoScroll = useCallback((profileId) => {
+    const currentTimer = responseScrollTimers.current.get(profileId);
+    const resumeAt = Date.now() + RESPONSE_AUTO_SCROLL_RESUME_MS;
+    responseScrollPauseUntil.current.set(profileId, resumeAt);
+    if (currentTimer) window.clearTimeout(currentTimer);
+    const timer = window.setTimeout(() => {
+      if ((responseScrollPauseUntil.current.get(profileId) || 0) > Date.now()) return;
+      responseScrollPauseUntil.current.delete(profileId);
+      responseScrollTimers.current.delete(profileId);
+      scrollResponseToBottom(profileId);
+    }, RESPONSE_AUTO_SCROLL_RESUME_MS + 40);
+    responseScrollTimers.current.set(profileId, timer);
+  }, [scrollResponseToBottom]);
+
+  const pauseResponseAutoScroll = useCallback((profileId, container) => {
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distanceFromBottom <= RESPONSE_BOTTOM_THRESHOLD_PX) return;
+    holdResponseAutoScroll(profileId);
+  }, [holdResponseAutoScroll]);
+
+  useEffect(() => () => {
+    for (const timer of responseScrollTimers.current.values()) window.clearTimeout(timer);
+    responseScrollTimers.current.clear();
   }, []);
 
   const refresh = useCallback(async (foreground = false) => {
@@ -157,7 +278,7 @@ function App() {
     setError("");
     try {
       const [nextStatus, nextProjects] = await Promise.all([api.getStatus(), api.listProjects()]);
-      setStatus(nextStatus);
+      setStatus(applyConversationTitleOverrides(nextStatus, conversationTitleOverridesRef.current));
       setProjects(nextProjects);
     } catch (err) {
       setError(err?.message || String(err));
@@ -167,11 +288,27 @@ function App() {
     }
   }, []);
 
+  const refreshStatus = useCallback(async () => {
+    if (statusRefreshInFlight.current || refreshInFlight.current) return;
+    statusRefreshInFlight.current = true;
+    try {
+      setStatus(applyConversationTitleOverrides(await api.getStatus(), conversationTitleOverridesRef.current));
+    } catch {
+      // Background realtime refresh should not flash a global error for a transient miss.
+    } finally {
+      statusRefreshInFlight.current = false;
+    }
+  }, []);
+
   useEffect(() => {
     void refresh(true);
-    const timer = window.setInterval(() => void refresh(false), 10000);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
+    const statusTimer = window.setInterval(() => void refreshStatus(), REALTIME_POLL_MS);
+    const projectsTimer = window.setInterval(() => void refresh(false), 10000);
+    return () => {
+      window.clearInterval(statusTimer);
+      window.clearInterval(projectsTimer);
+    };
+  }, [refresh, refreshStatus]);
 
   const platform = status?.platform || status?.task?.platform || "Windows";
 
@@ -194,63 +331,68 @@ function App() {
   }, [status?.browserProfiles, refresh]);
 
   useEffect(() => {
-    if (activePage !== "requests") return;
-    for (const profile of status?.browserProfiles || []) {
-      if (!profile.connected) continue;
+    profilesRef.current = status?.browserProfiles || [];
+  }, [status?.browserProfiles]);
+
+  useEffect(() => {
+    requestTargetsRef.current = requestTargets;
+  }, [requestTargets]);
+
+  useEffect(() => {
+    if (!chatProfileId) return;
+    const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
+    if (!profile) return;
+    const conversations = profileRequestChats(profile);
+    const initialTarget = requestTargetsRef.current[chatProfileId] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "";
+    if (!initialTarget) return;
+    if (!requestTargetsRef.current[chatProfileId]) {
+      setRequestTargets((current) => ({ ...current, [chatProfileId]: initialTarget }));
+    }
+    const response = requestResponses[chatProfileId];
+    if (profile.connected && (!response || response.conversationId !== initialTarget)) void loadResponse(profile, initialTarget, true);
+  }, [chatProfileId, status?.browserProfiles, requestResponses]);
+
+  useEffect(() => {
+    if (!chatProfileId) return undefined;
+    const poll = () => {
+      const profile = profilesRef.current.find((item) => item.profile_id === chatProfileId);
+      if (!profile?.connected) return;
       const conversations = profileRequestChats(profile);
-      const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
-      const conversationId = String(requestTargets[profile.profile_id] || defaultTarget || "");
-      if (!conversationId) continue;
-      const response = requestResponses[profile.profile_id];
-      if (!response || response.conversationId !== conversationId) void loadResponse(profile, conversationId, true);
-    }
-  }, [activePage, status?.browserProfiles, requestTargets]);
-
-  useEffect(() => {
-    if (activePage !== "requests") return undefined;
-    const timer = window.setInterval(() => {
-      for (const profile of status?.browserProfiles || []) {
-        if (!profile.connected) continue;
-        const conversations = profileRequestChats(profile);
-        const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
-        const conversationId = String(requestTargets[profile.profile_id] || defaultTarget || "");
-        if (conversationId) void loadResponse(profile, conversationId, true);
-      }
-    }, 1000);
+      const conversationId = String(requestTargetsRef.current[chatProfileId] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "");
+      if (conversationId) void loadResponse(profile, conversationId, true);
+    };
+    poll();
+    const timer = window.setInterval(poll, REALTIME_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [activePage, status?.browserProfiles, requestTargets]);
+  }, [chatProfileId]);
 
   useEffect(() => {
-    if (activePage !== "requests") return;
-    for (const profile of status?.browserProfiles || []) {
-      if (!profile.connected || profile.activity !== "working") continue;
-      const busyTab = (profile.conversation_tabs || []).find((tab) => tab.busy) || (profile.conversation_tabs || []).find((tab) => tab.active);
-      const conversationId = String(busyTab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1];
-      if (!conversationId) continue;
-      if (requestTargets[profile.profile_id] !== conversationId) {
-        setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
-      }
-      const response = requestResponses[profile.profile_id];
-      if (!response || response.conversationId !== conversationId) void loadResponse(profile, conversationId, true);
-    }
-  }, [activePage, status?.browserProfiles]);
+    if (!chatProfileId) return;
+    const response = requestResponses[chatProfileId];
+    if (!response?.text) return;
+    if ((responseScrollPauseUntil.current.get(chatProfileId) || 0) > Date.now()) return;
+    scrollResponseToBottom(chatProfileId);
+  }, [chatProfileId, requestResponses, scrollResponseToBottom]);
 
   useEffect(() => {
-    if (activePage !== "requests") return;
-    for (const [profileId, response] of Object.entries(requestResponses)) {
-      const container = responseScrollRefs.current.get(profileId);
-      if (!container || !response?.messages?.length) continue;
-      if (response.busy || container.scrollHeight - container.scrollTop - container.clientHeight < 120) {
-        container.scrollTop = container.scrollHeight;
-      }
-    }
-  }, [activePage, requestResponses]);
+    if (!chatProfileId) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const closeOnEscape = (event) => {
+      if (event.key === "Escape") setChatProfileId("");
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [chatProfileId]);
 
   const profileSummary = useMemo(() => {
     const allProfiles = status?.browserProfiles || [];
     const profiles = allProfiles.filter((profile) => profile.connected);
     return {
-      working: profiles.filter((profile) => profile.activity === "working").length,
+      working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length,
       idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile.extension_version))).length,
       hung: allProfiles.filter((profile) => !profile.connected).length,
       missing: profiles.filter((profile) => profile.activity === "no_chatgpt" && !profile.connector_installed).length,
@@ -335,18 +477,91 @@ function App() {
     }
   }
 
+  function openChat(profile) {
+    const conversations = profileRequestChats(profile);
+    const conversationId = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "");
+    if (conversationId) setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
+    setChatProfileId(profile.profile_id);
+    if (profile.connected && conversationId && conversationId !== NEW_CHAT_TARGET) {
+      setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
+      void loadResponse(profile, conversationId, true);
+    }
+  }
+
+  function startNewChat(profile) {
+    setRenameChat(null);
+    setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
+    setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
+    setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
+    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+    setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: false, error: "", conversationId: NEW_CHAT_TARGET, text: "", busy: false } }));
+  }
+
+  function beginRenameSelectedChat(profile, conversationId, currentTitle) {
+    if (!conversationId || conversationId === NEW_CHAT_TARGET || busy) return;
+    setRenameChat({ profileId: profile.profile_id, conversationId, originalTitle: currentTitle || "", title: currentTitle || "" });
+    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+  }
+
+  async function saveRenamedChat(profile) {
+    if (!renameChat || renameChat.profileId !== profile.profile_id || busy) return;
+    const { conversationId, originalTitle } = renameChat;
+    const title = String(renameChat.title || "").trim();
+    if (!title) {
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Tên đoạn chat không được để trống." }));
+      return;
+    }
+    if (title.length > 120) {
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Tên đoạn chat được tối đa 120 ký tự." }));
+      return;
+    }
+    if (title === originalTitle) {
+      setRenameChat(null);
+      return;
+    }
+    setBusy(`rename-chat:${profile.profile_id}`);
+    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+    try {
+      await api.renameProfileChat({ profileId: profile.profile_id, conversationId, title });
+      conversationTitleOverridesRef.current = { ...conversationTitleOverridesRef.current, [`${profile.profile_id}:${conversationId}`]: title };
+      setStatus((current) => applyConversationTitleOverrides(current, conversationTitleOverridesRef.current));
+      setRenameChat(null);
+      notify(`Đã đổi tên thành “${title}”`);
+      window.setTimeout(() => void refresh(false), 2500);
+    } catch (err) {
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: err?.message || String(err) }));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function openProfile(profile) {
+    const activeTab = (profile.conversation_tabs || []).find((tab) => tab.active) || profile.conversation_tabs?.[0];
+    const activeConversationId = String(activeTab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+    const conversations = profileRequestChats(profile);
+    const defaultTarget = activeConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "";
+    const conversationId = String(requestTargets[profile.profile_id] || defaultTarget);
+    setBusy(`open-profile:${profile.profile_id}`);
+    setError("");
+    try {
+      await api.openProfileChat({ profileId: profile.profile_id, conversationId });
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function reloadProfiles() {
-    const needsChromeRestart = profileSummary.reload > 0;
-    const message = needsChromeRestart
-      ? `Reload nền ${profileSummary.reload} extension cũ? Các tab ChatGPT đang mở sẽ được giữ nguyên.`
-      : "Reload extension CodexPro trong tất cả profile đang kết nối?";
+    if (!profileSummary.reload) return;
+    const message = `Update worker extension lên ${WORKER_EXTENSION_VERSION} cho ${profileSummary.reload} profile đang dùng bản cũ? Các tab ChatGPT đang mở sẽ được giữ nguyên.`;
     if (!window.confirm(message)) return;
     setBusy("reload-profiles");
     setError("");
     try {
       const result = await api.reloadProfiles();
-      notify(result.mode === "bootstrap_reload" ? `Đang nâng ${result.count} profile lên extension mới` : `Đã gửi reload tới ${result.count} profile`);
-      window.setTimeout(() => void refresh(false), result.mode === "bootstrap_reload" ? 8000 : 3500);
+      notify(result.count ? `Đang update ${result.count} worker extension lên ${result.version || WORKER_EXTENSION_VERSION}` : `Worker extension đã ở bản ${WORKER_EXTENSION_VERSION}`);
+      window.setTimeout(() => void refresh(false), result.mode === "bootstrap_reload" || result.mode === "mixed_update" ? 8000 : 3500);
     } catch (err) {
       setError(err?.message || String(err));
     } finally {
@@ -358,20 +573,27 @@ function App() {
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const conversationId = String(requestTargets[profile.profile_id] ?? defaultTarget ?? "");
+    const newChat = conversationId === NEW_CHAT_TARGET;
     const text = String(requestDrafts[profile.profile_id] || "").trim();
     const attachments = requestFiles[profile.profile_id] || [];
     setBusy(`request:${profile.profile_id}`);
     setError("");
+    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
     try {
-      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId, text, attachments });
+      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, text, attachments });
+      const resolvedConversationId = String(result?.conversation_id || conversationId);
+      if (newChat && resolvedConversationId && resolvedConversationId !== NEW_CHAT_TARGET) {
+        setRequestTargets((current) => ({ ...current, [profile.profile_id]: resolvedConversationId }));
+      }
       setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
       setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
-      setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
-      notify(`Đã gửi${result.attachment_count ? ` ${result.attachment_count} file` : ""} vào ${result.title || profile.active_chat_title || profile.label}`);
-      window.setTimeout(() => void loadResponse(profile, conversationId, true), 1200);
+      setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId: resolvedConversationId } }));
+      notify(newChat ? "Đã tạo chat mới và gửi tin nhắn đầu tiên" : `Đã gửi${result.attachment_count ? ` ${result.attachment_count} file` : ""} vào ${result.title || profile.active_chat_title || profile.label}`);
+      window.setTimeout(() => void loadResponse(profile, resolvedConversationId, true), 1200);
       window.setTimeout(() => void refresh(false), 900);
     } catch (err) {
-      setError(err?.message || String(err));
+      const message = err?.message || String(err);
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: message }));
     } finally {
       setBusy("");
     }
@@ -381,7 +603,7 @@ function App() {
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const conversationId = String(explicitConversationId || requestTargets[profile.profile_id] || defaultTarget || "");
-    if (!conversationId || responseFetches.current.has(profile.profile_id)) return null;
+    if (!conversationId || conversationId === NEW_CHAT_TARGET || responseFetches.current.has(profile.profile_id)) return null;
     responseFetches.current.add(profile.profile_id);
     if (!silent) {
       setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
@@ -396,11 +618,11 @@ function App() {
           error: "",
           conversationId,
           text: result.text || "",
-          messages: Array.isArray(result.messages) ? result.messages : [],
           busy: Boolean(result.busy),
           truncated: Boolean(result.truncated),
+          incomplete: Boolean(result.incomplete),
+          incompleteReason: result.incomplete_reason || "",
           messageCount: Number(result.message_count) || 0,
-          totalMessageCount: Number(result.total_message_count) || 0,
           updatedAt: result.updated_at || new Date().toISOString()
         }
       }));
@@ -415,13 +637,13 @@ function App() {
     }
   }
 
-  function toggleResponse(profile) {
-    const current = requestResponses[profile.profile_id];
-    if (current?.visible) {
-      setRequestResponses((responses) => ({ ...responses, [profile.profile_id]: { ...responses[profile.profile_id], visible: false } }));
-      return;
-    }
-    void loadResponse(profile);
+  function addRequestAttachments(profileId, selected) {
+    const current = requestFiles[profileId] || [];
+    const merged = [...current, ...selected].filter((file, index, files) => files.findIndex((candidate) => candidate.path === file.path) === index);
+    if (merged.length > 4) throw new Error("Mỗi yêu cầu được đính kèm tối đa 4 file.");
+    if (merged.some((file) => file.size > 8 * 1024 * 1024)) throw new Error("Mỗi file được tối đa 8 MB.");
+    if (merged.reduce((total, file) => total + file.size, 0) > 10 * 1024 * 1024) throw new Error("Tổng file đính kèm được tối đa 10 MB.");
+    setRequestFiles((files) => ({ ...files, [profileId]: merged }));
   }
 
   async function chooseRequestAttachments(profileId) {
@@ -429,14 +651,174 @@ function App() {
     try {
       const selected = await api.chooseRequestFiles();
       if (!selected.length) return;
-      const current = requestFiles[profileId] || [];
-      const merged = [...current, ...selected].filter((file, index, files) => files.findIndex((candidate) => candidate.path === file.path) === index);
-      if (merged.length > 4) throw new Error("Mỗi yêu cầu được đính kèm tối đa 4 file.");
-      if (merged.reduce((total, file) => total + file.size, 0) > 10 * 1024 * 1024) throw new Error("Tổng file đính kèm được tối đa 10 MB.");
-      setRequestFiles((files) => ({ ...files, [profileId]: merged }));
+      addRequestAttachments(profileId, selected);
     } catch (err) {
       setError(err?.message || String(err));
     }
+  }
+
+  async function pasteRequestImage(profileId, event) {
+    const items = Array.from(event.clipboardData?.items || []);
+    const files = Array.from(event.clipboardData?.files || []);
+    const hasImage = items.some((item) => String(item.type || "").startsWith("image/")) || files.some((file) => String(file.type || "").startsWith("image/"));
+    if (!hasImage) return;
+    event.preventDefault();
+    setRequestSendErrors((current) => ({ ...current, [profileId]: "" }));
+    try {
+      const image = await api.captureClipboardImage();
+      if (!image) throw new Error("Không đọc được ảnh từ clipboard.");
+      addRequestAttachments(profileId, [image]);
+      notify("Đã dán ảnh từ clipboard");
+    } catch (err) {
+      const message = err?.message || String(err);
+      setRequestSendErrors((current) => ({ ...current, [profileId]: message }));
+    }
+  }
+
+  async function continueIncompleteResponse(profile, conversationId) {
+    if (!conversationId || busy) return;
+    setBusy(`continue:${profile.profile_id}`);
+    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+    try {
+      await api.sendProfileRequest({
+        profileId: profile.profile_id,
+        conversationId,
+        text: "Tiếp tục từ đúng chỗ phản hồi vừa bị ngắt. Không lặp lại phần trước; hoàn thành câu trả lời còn dang dở.",
+        attachments: []
+      });
+      setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), loading: true, incomplete: false } }));
+      notify("Đã yêu cầu ChatGPT tiếp tục phần bị ngắt");
+      window.setTimeout(() => void loadResponse(profile, conversationId, true), 1000);
+      window.setTimeout(() => void refresh(false), 700);
+    } catch (err) {
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: err?.message || String(err) }));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function renderChatModal() {
+    const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
+    if (!profile) return null;
+    const conversations = profileRequestChats(profile);
+    const selectedTarget = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "");
+    const isNewChat = selectedTarget === NEW_CHAT_TARGET;
+    const selectedConversation = conversations.find((chat) => chat.id === selectedTarget);
+    const renameOpen = Boolean(renameChat && renameChat.profileId === profile.profile_id && renameChat.conversationId === selectedTarget);
+    const sending = busy === `request:${profile.profile_id}`;
+    const draft = requestDrafts[profile.profile_id] || "";
+    const attachments = requestFiles[profile.profile_id] || [];
+    const response = requestResponses[profile.profile_id];
+    const sendError = requestSendErrors[profile.profile_id] || "";
+    const responseCurrent = response?.conversationId === selectedTarget;
+    const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${selectedTarget}`));
+    const selectedBusy = Boolean(selectedTab?.busy || (responseCurrent && response?.busy));
+    const selectedSettling = Boolean(selectedTab?.settling || (responseCurrent && response?.incomplete));
+    const working = profile.connected && (profile.activity === "working" || selectedBusy || selectedSettling);
+    const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
+
+    return (
+      <div className="modal-backdrop chat-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setChatProfileId("")}>
+        <div className="modal chat-modal">
+          <div className="modal-head chat-modal-head">
+            <div className="chat-modal-profile">
+              <WorkerIcon state={workerState} />
+              <div>
+                <p className="eyebrow">CHATGPT · {profile.label}</p>
+                <div className="profile-title"><strong>{profile.email || profile.label}</strong>{selectedSettling ? <span className="badge profile-settling">ĐANG HOÀN TẤT</span> : working ? <span className="badge profile-working">ĐANG LÀM VIỆC</span> : profile.connected ? <span className="badge connected">ĐANG RẢNH</span> : <span className="badge profile-hung">MẤT KẾT NỐI</span>}</div>
+                <code>{profile.profile_id}</code>
+              </div>
+            </div>
+            <button type="button" aria-label="Đóng chat" onClick={() => setChatProfileId("")}>×</button>
+          </div>
+
+          <article className={`request-card chat-popup-card ${profile.connected ? "is-online" : "is-offline"}`}>
+            <div className="request-label-row">
+              <label className="request-label">Đoạn chat <small>tối đa 3 gần nhất</small></label>
+              <div className="chat-manage-actions">
+                <button type="button" onClick={() => beginRenameSelectedChat(profile, selectedTarget, selectedConversation?.title || "")} disabled={!profile.connected || isNewChat || !selectedConversation || Boolean(busy)}>Đổi tên</button>
+                <button type="button" onClick={() => startNewChat(profile)} disabled={!profile.connected || Boolean(busy)}>＋ Chat mới</button>
+              </div>
+            </div>
+            {renameOpen && (
+              <div className="chat-rename-editor">
+                <input
+                  className="chat-rename-input"
+                  type="text"
+                  value={renameChat.title}
+                  maxLength={120}
+                  autoFocus
+                  aria-label="Tên đoạn chat mới"
+                  onChange={(event) => setRenameChat((current) => current ? { ...current, title: event.target.value } : current)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") { event.preventDefault(); void saveRenamedChat(profile); }
+                    if (event.key === "Escape") { event.preventDefault(); setRenameChat(null); }
+                  }}
+                  disabled={Boolean(busy)}
+                />
+                <button type="button" className="chat-rename-cancel" onClick={() => setRenameChat(null)} disabled={Boolean(busy)}>Hủy</button>
+                <button type="button" className="chat-rename-save" onClick={() => void saveRenamedChat(profile)} disabled={Boolean(busy) || !String(renameChat.title || "").trim()}>Lưu</button>
+              </div>
+            )}
+            <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => {
+              setRenameChat(null);
+              setRequestTargets((current) => ({ ...current, [profile.profile_id]: id }));
+              setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: true, error: "", conversationId: id, text: "" } }));
+              void loadResponse(profile, id, true);
+            }} disabled={!profile.connected || !conversations.length || sending} />
+
+            <label className="request-label">Phản hồi mới nhất</label>
+            <div className={`chat-response is-inline ${selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
+              <div className="chat-response-head">
+                <div><span className="response-status-dot" /><strong>{isNewChat ? "Chat mới" : selectedBusy ? "ChatGPT đang trả lời…" : responseCurrent && response?.incomplete ? "Phản hồi có vẻ bị ngắt" : "Tự cập nhật phản hồi"}</strong>{!isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
+                <div className="response-head-actions">
+                  {responseCurrent && response?.incomplete && !selectedBusy && <button type="button" className="continue-response" onClick={() => void continueIncompleteResponse(profile, selectedTarget)} disabled={Boolean(busy)}>Tiếp tục</button>}
+                  {responseCurrent && response?.text && <button type="button" onClick={async () => { await api.copyText(response.text); notify("Đã copy phản hồi mới nhất"); }}>Copy</button>}
+                </div>
+              </div>
+              {!profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : !responseCurrent || response?.loading && !response?.text ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang lấy phản hồi mới nhất…</div> : response?.error ? <div className="response-error">{response.error}</div> : response?.text ? (
+                <div className="latest-response" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={() => holdResponseAutoScroll(profile.profile_id)} onTouchMove={() => holdResponseAutoScroll(profile.profile_id)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
+                  <div className="chat-message-avatar">✦</div>
+                  <div className="latest-response-content">
+                    <span className="chat-message-role">ChatGPT</span>
+                    <ResponseText text={response.text} truncated={response.truncated} />
+                    {response.busy && <span className="typing-dots latest-response-typing"><i /><i /><i /></span>}
+                  </div>
+                </div>
+              ) : <div className="response-empty">Đoạn chat này chưa có phản hồi ChatGPT.</div>}
+            </div>
+
+            <label className="request-label" htmlFor={`request-${profile.profile_id}`}>Nhắn tiếp</label>
+            <div className="request-composer">
+              <textarea id={`request-${profile.profile_id}`} value={draft} maxLength={12000} placeholder="Nhập tin nhắn hoặc Ctrl+V ảnh như ChatGPT…" onPaste={(event) => void pasteRequestImage(profile.profile_id, event)} onChange={(event) => { setRequestDrafts((current) => ({ ...current, [profile.profile_id]: event.target.value })); if (sendError) setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" })); }} disabled={!profile.connected || sending} />
+              {attachments.length > 0 && (
+                <div className="request-files">
+                  {attachments.map((file) => (
+                    <div className="request-file" key={file.path} title={file.path}>
+                      <span className="request-file-icon">▤</span>
+                      <span className="request-file-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span>
+                      <button type="button" aria-label={`Bỏ ${file.name}`} onClick={() => setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== file.path) }))} disabled={sending}>×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="request-composer-toolbar">
+                <button type="button" className="attach-button" onClick={() => chooseRequestAttachments(profile.profile_id)} disabled={!profile.connected || sending || attachments.length >= 4}><span>＋</span> Thêm file</button>
+                <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${draft.length.toLocaleString("vi-VN")}/12.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
+              </div>
+            </div>
+            {sendError && <div className="request-send-error">{sendError}</div>}
+            <div className="request-card-foot">
+              <span>{selectedBusy ? "Đang nhận phản hồi · realtime ~1 giây" : "Realtime phản hồi ~1 giây"}</span>
+              <div className="request-card-actions">
+                <button type="button" className="button secondary" onClick={() => openProfile(profile)} disabled={Boolean(busy) || !profile.connected || isNewChat || !(profile.conversation_tabs?.length)}>Mở Chrome</button>
+                <button type="button" className="button primary" onClick={() => sendRequest(profile)} disabled={Boolean(busy) || !profile.connected || selectedBusy || (!isNewChat && !conversations.length) || (!draft.trim() && !attachments.length)}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : selectedBusy ? "Chat này đang trả lời" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -447,28 +829,27 @@ function App() {
           <div><strong>CodexPro</strong><span>Manager</span></div>
         </div>
         <nav>
-          <button className={activePage === "overview" ? "active" : ""} onClick={() => setActivePage("overview")}><Icon>⌁</Icon>Tổng quan</button>
-          <button className={activePage === "requests" ? "active" : ""} onClick={() => setActivePage("requests")}><Icon>✎</Icon>Giao việc</button>
+          <button className="active"><Icon>⌁</Icon>Tổng quan</button>
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.9</small>
+          <small>CodexPro Manager 0.2.36</small>
         </div>
       </aside>
 
-      <main>
+      <main className="page-overview">
         <header>
           <div>
             <p className="eyebrow">{platform.toUpperCase()} CONTROL CENTER</p>
-            <h1>{activePage === "requests" ? "Giao việc cho CodexPro" : "CodexPro của bạn"}</h1>
-            <p className="subtitle">{activePage === "requests" ? "Gửi yêu cầu vào đúng đoạn chat dự án của từng Chrome profile." : "Một chỗ để xem server, quản lý link MCP và kiểm tra repo."}</p>
+            <h1>CodexPro của bạn</h1>
+            <p className="subtitle">Một chỗ để xem server, quản lý link MCP và kiểm tra repo.</p>
           </div>
-          <div className="live-refresh"><Dot ok={status?.local?.ok} /><span>Tự động làm mới mỗi 10 giây</span></div>
+          <div className="live-refresh"><Dot ok={status?.local?.ok} /><span>Realtime ~1 giây</span></div>
         </header>
 
         {error && <div className="alert"><span>!</span>{error}<button onClick={() => setError("")}>×</button></div>}
 
-        <div className="page-view" hidden={activePage !== "overview"}>
+        <div className="page-view">
         <section id="overview">
           <div className="section-head"><div><p className="eyebrow">LIVE STATUS</p><h2>Trạng thái hệ thống</h2></div><span className="last-check">{status ? `Cập nhật ${new Date(status.checkedAt).toLocaleTimeString("vi-VN")}` : "Đang kiểm tra..."}</span></div>
           <div className="status-grid">
@@ -508,9 +889,14 @@ function App() {
               <p className="section-note">Mỗi profile có extension CodexPro sẽ tự xuất hiện tại đây. Chọn đúng profile để app tự thêm và test MCP.</p>
             </div>
             <div className="profile-head-actions">
-              <span className="profile-count">{profileSummary.working} làm việc · {profileSummary.idle} rảnh · {profileSummary.hung} treo · {profileSummary.missing} chưa cài{profileSummary.reload ? ` · ${profileSummary.reload} cần reload` : ""}</span>
-              <button className="button secondary reload-all" onClick={reloadProfiles} disabled={Boolean(busy) || !(status?.browserProfiles?.some((profile) => profile.connected))}>
-                {busy === "reload-profiles" ? "Đang reload…" : profileSummary.reload ? `Reload ${profileSummary.reload} profile` : "Reload tất cả"}
+              <span className="profile-count">{profileSummary.working} làm việc · {profileSummary.idle} rảnh · {profileSummary.hung} mất kết nối · {profileSummary.missing} chưa cài{profileSummary.reload ? ` · ${profileSummary.reload} cần update worker` : ""}</span>
+              <button
+                className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}
+                onClick={reloadProfiles}
+                disabled={Boolean(busy) || profileSummary.reload === 0}
+                title={profileSummary.reload ? `${profileSummary.reload} profile đang dùng worker cũ hơn ${WORKER_EXTENSION_VERSION}` : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
+              >
+                {busy === "reload-profiles" ? "Đang update worker…" : "Update worker extension"}
               </button>
             </div>
           </div>
@@ -518,14 +904,30 @@ function App() {
             {!status?.browserProfiles?.length && (
               <div className="empty">Chưa có Chrome profile nào kết nối. Hãy Load unpacked extension CodexPro trong profile cần dùng.</div>
             )}
-            {status?.browserProfiles?.map((profile) => {
+            {[...(status?.browserProfiles || [])]
+              .sort((left, right) => {
+                const rank = (profile) => {
+                  if (!profile.connected) return 3;
+                  const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
+                  const activeTab = tabs.find((tab) => tab.active) || tabs[0];
+                  if (activeTab?.settling === true || profile.activity === "settling") return 1;
+                  if (activeTab?.busy === false || (!activeTab && profile.activity === "idle")) return 0;
+                  if (activeTab?.busy === true || profile.activity === "working") return 1;
+                  return 2;
+                };
+                const rankDiff = rank(left) - rank(right);
+                if (rankDiff) return rankDiff;
+                return String(left.profile_id || "").localeCompare(String(right.profile_id || ""));
+              })
+              .map((profile) => {
               const ready = extensionReady(profile.extension_version);
               const profileBusy = busy === `profile:${profile.profile_id}`;
               const profileChecking = checkingProfiles.includes(profile.profile_id);
               const hung = !profile.connected;
+              const settling = profile.connected && profile.activity === "settling";
               const working = profile.connected && profile.activity === "working";
               const idle = profile.connected && profile.activity === "idle" && (profile.connector_installed || !ready);
-              const workerState = hung ? "hung" : working ? "working" : "idle";
+              const workerState = hung ? "hung" : working || settling ? "working" : "idle";
               return (
                 <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"}`} key={profile.profile_id}>
                   <WorkerIcon state={workerState} />
@@ -533,23 +935,40 @@ function App() {
                     <div className="profile-title">
                       <strong>{profile.email || profile.label}</strong>
                       {profile.active && <span className="badge">ACTIVE</span>}
-                      {hung && <span className="badge profile-hung">TREO</span>}
+                      {hung && <span className="badge profile-hung">MẤT KẾT NỐI</span>}
+                      {settling && <span className="badge profile-settling">ĐANG HOÀN TẤT</span>}
                       {working && <span className="badge profile-working">ĐANG LÀM VIỆC</span>}
                       {idle && <span className="badge connected">ĐANG RẢNH</span>}
-                      {!profile.connector_installed && !profileChecking && !idle && !working && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
+                      {!profile.connector_installed && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
+                      {profile.active_chat_title && <span className="active-chat-chip" title={profile.active_chat_title}>{profile.active_chat_title}</span>}
                     </div>
                     <code>{profile.email ? profile.label : profile.profile_id}</code>
                     <div className="profile-meta">
-                      <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Extension offline"}</span>
+                      <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Mất heartbeat extension"}</span>
                       <span>v{profile.extension_version || "cũ"}</span>
                       <span>{profile.tab_count} tab</span>
-                      {profile.active_chat_title && <span className="chat-title">Chat: {profile.active_chat_title}</span>}
                       {profile.connector_message && <span className={profile.connector_installed ? "ready-text" : "profile-warning"}>{profile.connector_message}</span>}
                     </div>
                   </div>
                   <div className="profile-actions">
-                    {!ready && <span className="update-needed">Reload extension 0.5.1</span>}
+                    {!ready && <span className="update-needed">Có worker {WORKER_EXTENSION_VERSION} mới</span>}
                     {profileChecking && <span className="checking-profile">Đang kiểm tra ChatGPT…</span>}
+                    <div className="profile-action-buttons">
+                      <button
+                        className="button primary profile-chat"
+                        onClick={() => openChat(profile)}
+                        disabled={!profile.connected || !profile.connector_installed || !profileRequestChats(profile).length}
+                      >
+                        Chat
+                      </button>
+                      <button
+                        className="button secondary open-profile"
+                        onClick={() => openProfile(profile)}
+                        disabled={Boolean(busy) || !profile.connected || !(profile.conversation_tabs?.length)}
+                      >
+                        {busy === `open-profile:${profile.profile_id}` ? "Đang mở…" : "Mở profile"}
+                      </button>
+                    </div>
                     {profile.connector_installed ? (
                       <span className="already-connected">✓ Đã thêm CodexPro</span>
                     ) : (
@@ -601,98 +1020,9 @@ function App() {
         </section>
         </div>
 
-        <section className="request-page" hidden={activePage !== "requests"}>
-          <div className="section-head">
-            <div>
-              <p className="eyebrow">CHATGPT PROJECT REQUESTS</p>
-              <h2>Đoạn chat theo profile</h2>
-              <p className="section-note">Chọn đúng đoạn chat rồi nhập yêu cầu. Chat đang làm việc sẽ tự mở phản hồi trực tiếp; app không gửi nếu profile bị treo hoặc ô ChatGPT đang có nội dung/file chưa gửi.</p>
-            </div>
-            <span className="profile-count">{(status?.browserProfiles || []).filter((profile) => profile.connected && profile.connector_installed).length} profile sẵn sàng</span>
-          </div>
-          <div className="request-grid">
-            {(status?.browserProfiles || []).filter((profile) => profile.connector_installed).map((profile) => {
-              const conversations = profileRequestChats(profile);
-              const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id ?? "";
-              const selectedTarget = requestTargets[profile.profile_id] ?? defaultTarget;
-              const sending = busy === `request:${profile.profile_id}`;
-              const working = profile.connected && profile.activity === "working";
-              const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
-              const draft = requestDrafts[profile.profile_id] || "";
-              const attachments = requestFiles[profile.profile_id] || [];
-              const response = requestResponses[profile.profile_id];
-              const responseCurrent = response?.conversationId === selectedTarget;
-              const messages = responseCurrent && Array.isArray(response?.messages)
-                ? response.messages
-                : responseCurrent && response?.text
-                  ? [{ id: "assistant-latest", role: "assistant", text: response.text, truncated: response.truncated }]
-                  : [];
-              return (
-                <article className={`request-card ${profile.connected ? "is-online" : "is-offline"}`} key={profile.profile_id}>
-                  <div className="request-card-head">
-                    <WorkerIcon state={workerState} />
-                    <div>
-                      <div className="profile-title"><strong>{profile.email || profile.label}</strong>{working ? <span className="badge profile-working">ĐANG LÀM VIỆC</span> : profile.connected ? <span className="badge connected">ĐANG RẢNH</span> : <span className="badge profile-hung">TREO</span>}</div>
-                      <code>{profile.profile_id}</code>
-                    </div>
-                  </div>
-                  <label className="request-label">Đoạn chat dự án</label>
-                  <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => {
-                    setRequestTargets((current) => ({ ...current, [profile.profile_id]: id }));
-                    setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: true, error: "", conversationId: id, messages: [] } }));
-                    void loadResponse(profile, id, true);
-                  }} disabled={!profile.connected || !conversations.length || sending} />
-                  <label className="request-label">Hội thoại trực tiếp</label>
-                  <div className={`chat-response is-inline ${responseCurrent && response?.busy ? "is-streaming" : ""}`}>
-                    <div className="chat-response-head">
-                      <div><span className="response-status-dot" /><strong>{responseCurrent && response?.busy ? "ChatGPT đang trả lời…" : "Đồng bộ với ChatGPT"}</strong>{responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
-                      {responseCurrent && response?.text && <button type="button" onClick={async () => { await api.copyText(response.text); notify("Đã copy phản hồi mới nhất"); }}>Copy phản hồi</button>}
-                    </div>
-                    <div className="chat-thread" ref={(element) => { if (element) responseScrollRefs.current.set(profile.profile_id, element); else responseScrollRefs.current.delete(profile.profile_id); }}>
-                      {!profile.connected ? <div className="response-empty">Profile đang offline nên chưa thể đồng bộ đoạn chat.</div> : !responseCurrent || response?.loading && !messages.length ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang tải hội thoại…</div> : response?.error ? <div className="response-error">{response.error}</div> : messages.length ? messages.map((message, index) => (
-                        <div className={`chat-message ${message.role === "user" ? "is-user" : "is-assistant"}`} key={`${message.id || message.role}-${index}`}>
-                          {message.role !== "user" && <div className="chat-message-avatar">✦</div>}
-                          <div className="chat-message-content">
-                            <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}</span>
-                            <div className="chat-message-text">{message.text}{message.truncated ? "\n\n[Đã rút gọn khi hiển thị]" : ""}</div>
-                          </div>
-                        </div>
-                      )) : <div className="response-empty">Đoạn chat này chưa có tin nhắn để hiển thị.</div>}
-                      {responseCurrent && response?.busy && <div className="chat-message is-assistant is-typing"><div className="chat-message-avatar">✦</div><div className="chat-message-content"><span className="chat-message-role">ChatGPT</span><span className="typing-dots"><i /><i /><i /></span></div></div>}
-                    </div>
-                  </div>
-                  <label className="request-label" htmlFor={`request-${profile.profile_id}`}>Nhắn tiếp</label>
-                  <div className="request-composer">
-                    <textarea id={`request-${profile.profile_id}`} value={draft} maxLength={12000} placeholder="Nhập tin nhắn như đang chat với ChatGPT…" onChange={(event) => setRequestDrafts((current) => ({ ...current, [profile.profile_id]: event.target.value }))} disabled={!profile.connected || sending} />
-                    {attachments.length > 0 && (
-                      <div className="request-files">
-                        {attachments.map((file) => (
-                          <div className="request-file" key={file.path} title={file.path}>
-                            <span className="request-file-icon">▤</span>
-                            <span className="request-file-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span>
-                            <button type="button" aria-label={`Bỏ ${file.name}`} onClick={() => setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== file.path) }))} disabled={sending}>×</button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <div className="request-composer-toolbar">
-                      <button type="button" className="attach-button" onClick={() => chooseRequestAttachments(profile.profile_id)} disabled={!profile.connected || sending || attachments.length >= 4}><span>＋</span> Thêm file</button>
-                      <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${draft.length.toLocaleString("vi-VN")}/12.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
-                    </div>
-                  </div>
-                  <div className="request-card-foot">
-                    <span>{responseCurrent && response?.busy ? "Đang nhận phản hồi trực tiếp · tự cập nhật ~1 giây" : "Tự đồng bộ hội thoại ~1 giây"}</span>
-                    <div className="request-card-actions">
-                      <button className="button primary" onClick={() => sendRequest(profile)} disabled={Boolean(busy) || !profile.connected || working || !conversations.length || (!draft.trim() && !attachments.length)}>{sending ? "Đang tải file + gửi…" : working ? "ChatGPT đang trả lời" : "Gửi tin nhắn"}</button>
-                    </div>
-                  </div>
-                </article>
-              );
-            })}
-            {!(status?.browserProfiles || []).some((profile) => profile.connector_installed) && <div className="empty">Chưa có profile nào đã kết nối CodexPro.</div>}
-          </div>
-        </section>
       </main>
+
+      {renderChatModal()}
 
       {inspection && (
         <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setInspection(null)}>

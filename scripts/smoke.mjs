@@ -516,12 +516,15 @@ if (openedByPath.structuredContent.workspace_id !== ws) {
   throw new Error(`open_workspace path alias returned ${openedByPath.structuredContent.workspace_id}, expected ${ws}`);
 }
 await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'demo.txt' } });
+const fakeGithubToken = `ghp_${'A'.repeat(32)}`;
+const fakeOpenAiKey = `sk-${'B'.repeat(36)}`;
+const fakeOpenAiReplacementKey = `sk-${'C'.repeat(21)}`;
 await fs.writeFile(path.join(tmp, 'tokens.txt'), [
-  'Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456',
+  `Authorization: Bearer ${fakeGithubToken}`,
   'https://example.test/mcp?codexpro_token=verysecretcodexprotoken123&x=1',
   'codexpro_token=secretsecret12345',
   '"codexpro_token": "shortcodextoken"',
-  'ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz123456',
+  `ANTHROPIC_API_KEY=${fakeOpenAiKey}`,
   '"api_key": "jsonsecretvalueabcdefghijklmnop"',
   'service_token: yamlsecretvalueabcdefghijklmnop',
   'ngrok config add-authtoken 2abcDEFghiJKLmnopQRSTuvWXyz_1234567890',
@@ -535,7 +538,7 @@ if (secretPayload.includes('sk-realSecretValue123') || !secretPayload.includes('
 }
 const tokenRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'tokens.txt' } });
 const tokenPayload = JSON.stringify(tokenRead);
-for (const leaked of ['ghp_abcdefghijklmnopqrstuvwxyz123456', 'verysecretcodexprotoken123', 'secretsecret12345', 'shortcodextoken', 'sk-ant-abcdefghijklmnopqrstuvwxyz123456', 'jsonsecretvalueabcdefghijklmnop', 'yamlsecretvalueabcdefghijklmnop', '2abcDEFghiJKLmnopQRSTuvWXyz_1234567890', 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJjb2RleHBybyJ9.signature1234567890']) {
+for (const leaked of [fakeGithubToken, 'verysecretcodexprotoken123', 'secretsecret12345', 'shortcodextoken', fakeOpenAiKey, 'jsonsecretvalueabcdefghijklmnop', 'yamlsecretvalueabcdefghijklmnop', '2abcDEFghiJKLmnopQRSTuvWXyz_1234567890', 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJjb2RleHBybyJ9.signature1234567890']) {
   if (tokenPayload.includes(leaked)) throw new Error(`read leaked token-like content: ${leaked}`);
 }
 if (!tokenPayload.includes('/Users/rebel/.codexpro/cloudflare-tunnel-token')) {
@@ -558,10 +561,10 @@ await client.request('tools/call', {
     workspace_id: ws,
     path: 'notes.md',
     old_text: 'sk-realSecretValue123',
-    new_text: 'sk-updatedSecretValue456'
+    new_text: fakeOpenAiReplacementKey
   }
 });
-if (!((await fs.readFile(path.join(tmp, 'notes.md'), 'utf8')).includes('sk-updatedSecretValue456'))) {
+if (!((await fs.readFile(path.join(tmp, 'notes.md'), 'utf8')).includes(fakeOpenAiReplacementKey))) {
   throw new Error('edit blocked or changed secret-like source content');
 }
 await client.request('tools/call', {

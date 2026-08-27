@@ -28,7 +28,7 @@ export interface ExtensionProfileSummary {
   chatgpt_tab_count: number;
   busy_request_count: number;
   busy_since: string;
-  activity: "working" | "idle" | "no_chatgpt";
+  activity: "working" | "settling" | "idle" | "no_chatgpt";
   active_chat_title: string;
   conversation_tabs: Array<{
     id: number;
@@ -36,6 +36,7 @@ export interface ExtensionProfileSummary {
     url: string;
     active: boolean;
     busy: boolean;
+    settling: boolean;
   }>;
   recent_conversations: Array<{
     id: string;
@@ -332,20 +333,24 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       });
       const activeConversation = conversationTabs.find((tab) => tab.active === true);
       const busyTabs = chatgptTabs.filter((tab) => tab.busy === true);
+      const settlingTabs = chatgptTabs.filter((tab) => tab.settling === true);
       const busyRequestCount = busyTabs.reduce((total, tab) => total + Math.max(1, Number(tab.busy_request_count) || 0), 0);
       const busySince = busyTabs
         .map((tab) => String(tab.busy_since ?? ""))
         .filter(Boolean)
         .sort()[0] ?? "";
-      const activity: ExtensionProfileSummary["activity"] = busyRequestCount > 0 ? "working" : chatgptTabs.length ? "idle" : "no_chatgpt";
-      const activeChatTitle = String((activeConversation ?? conversationTabs[0])?.title ?? "").trim().slice(0, 300);
+      const activity: ExtensionProfileSummary["activity"] = busyRequestCount > 0 ? "working" : settlingTabs.length ? "settling" : chatgptTabs.length ? "idle" : "no_chatgpt";
+      const titleConversation = activeConversation ?? conversationTabs[0];
+      let activeConversationId = "";
+      try { activeConversationId = new URL(String(titleConversation?.url ?? "")).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1] ?? ""; } catch {}
       const conversationSummaries = conversationTabs
         .map((tab) => ({
           id: Number(tab.id),
           title: String(tab.title ?? "Đoạn chat chưa có tiêu đề").trim().slice(0, 300),
           url: String(tab.url ?? "").trim().slice(0, 2000),
           active: tab.active === true,
-          busy: tab.busy === true
+          busy: tab.busy === true,
+          settling: tab.settling === true
         }))
         .filter((tab) => Number.isInteger(tab.id) && tab.id >= 0);
       const recentConversations = profile.recentConversations
@@ -370,6 +375,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
         })
         .filter((conversation) => /^[A-Za-z0-9-]{8,160}$/.test(conversation.id))
         .slice(0, 3);
+      const activeChatTitle = String(recentConversations.find((conversation) => conversation.id === activeConversationId)?.title ?? titleConversation?.title ?? "").trim().slice(0, 300);
       return {
       profile_id: profile.id,
       email: profile.email,
