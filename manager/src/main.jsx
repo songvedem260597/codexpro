@@ -188,12 +188,17 @@ function ChatDropdown({ value, conversations, disabled, onChange }) {
 
 function ProjectDropdown({ value, projects, disabled, onChange }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const root = useRef(null);
   const selected = projects.find((project) => project.root === value);
+  const normalizedQuery = query.trim().toLocaleLowerCase("vi-VN");
+  const filteredProjects = normalizedQuery
+    ? projects.filter((project) => [project.name, project.repoFullName, project.branch, project.root].some((field) => String(field || "").toLocaleLowerCase("vi-VN").includes(normalizedQuery)))
+    : projects;
 
   useEffect(() => {
     const close = (event) => {
-      if (!root.current?.contains(event.target)) setOpen(false);
+      if (!root.current?.contains(event.target)) { setOpen(false); setQuery(""); }
     };
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
@@ -201,24 +206,30 @@ function ProjectDropdown({ value, projects, disabled, onChange }) {
 
   return (
     <div className={`project-dropdown ${open ? "is-open" : ""} ${disabled ? "is-disabled" : ""}`} ref={root}>
-      <button type="button" className="project-dropdown-trigger" aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => setOpen((current) => !current)}>
+      <button type="button" className="project-dropdown-trigger" aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { setOpen((current) => !current); if (open) setQuery(""); }}>
         <span className="project-dropdown-mark">⌘</span>
         <span className="project-dropdown-value">
           <strong>{selected?.name || "Chọn repo cần code"}</strong>
-          <small>{selected ? `${selected.branch || "git"} · ${selected.root}` : "Chỉ hiển thị Git repo CodexPro đã quét được"}</small>
+          <small>{selected ? `${selected.repoFullName ? `${selected.repoFullName} · ` : ""}${selected.branch || "git"} · ${selected.root}` : "Chỉ hiển thị Git repo CodexPro đã quét được"}</small>
         </span>
         <svg className="project-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
       </button>
       {open && (
         <div className="project-dropdown-menu" role="listbox" aria-label="Chọn repo cần code">
-          {projects.map((project) => (
+          <div className="project-dropdown-search">
+            <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></svg>
+            <input autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm theo tên repo, branch hoặc đường dẫn…" aria-label="Tìm repo" />
+            {query && <button type="button" aria-label="Xóa từ khóa" onClick={() => setQuery("")}>×</button>}
+          </div>
+          {filteredProjects.map((project) => (
             <button type="button" role="option" aria-selected={project.root === value} className={`project-dropdown-option ${project.root === value ? "is-selected" : ""}`} key={project.root} onClick={() => { onChange(project.root); setOpen(false); }}>
               <span className="project-dropdown-mark">⌘</span>
-              <span className="project-dropdown-copy"><strong>{project.name}</strong><small>{project.branch || "git"} · {project.root}</small></span>
+              <span className="project-dropdown-copy"><strong>{project.name}</strong><small>{project.repoFullName ? `${project.repoFullName} · ` : ""}{project.branch || "git"} · {project.root}</small></span>
               {project.changes > 0 && <span className="project-dropdown-changes">{project.changes} đổi</span>}
               {project.root === value && <span className="project-dropdown-check">✓</span>}
             </button>
           ))}
+          {!filteredProjects.length && <div className="project-dropdown-empty">Không tìm thấy repo phù hợp.</div>}
         </div>
       )}
     </div>
@@ -1389,7 +1400,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
-          <small>CodexPro Manager 0.2.51</small>
+          <small>CodexPro Manager 0.2.52</small>
         </div>
       </aside>
 
@@ -1564,6 +1575,7 @@ function App() {
                   <div className="project-title"><strong>{project.name}</strong>{project.active && <span className="badge">ĐANG CHẠY</span>}</div>
                   <code>{project.root}</code>
                   <div className="project-meta">
+                    {project.repoFullName && <span>{project.repoFullName}</span>}
                     <span>{project.source}</span>
                     <span>{project.isGit ? `nhánh ${project.branch}` : "không phải Git repo"}</span>
                     <span className={project.changes ? "changed" : "clean"}>{project.changes ? `${project.changes} thay đổi` : "sạch"}</span>

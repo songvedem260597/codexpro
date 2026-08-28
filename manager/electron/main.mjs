@@ -441,6 +441,9 @@ function createWindow() {
             return { open: Boolean(modal), profile: modal?.querySelector('.chat-modal-profile code')?.textContent || '', hasProjectDropdown: Boolean(modal?.querySelector('.project-dropdown')), selectedProject: modal?.querySelector('.project-dropdown-value strong')?.textContent?.trim() || '', hasChatSelector: Boolean(modal?.querySelector('.chat-dropdown, .chat-manage-actions')), hasResponse: Boolean(modal?.querySelector('.chat-response')), hasTextarea: Boolean(modal?.querySelector('textarea')) };
           })()`, true);
           chatModalProbe.click = clickProbe;
+          await win.webContents.executeJavaScript("document.querySelector('.project-dropdown-trigger:not(:disabled)')?.click()", true);
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          chatModalProbe.hasProjectSearch = await win.webContents.executeJavaScript("Boolean(document.querySelector('.project-dropdown-search input[type=search]'))", true);
         }
         let renameProbe = null;
         if (process.env.CODEXPRO_MANAGER_SMOKE_RENAME === "1") {
@@ -688,7 +691,7 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         }
         const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe }));
+        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe }));
       } catch (error) {
         console.error(error instanceof Error ? error.stack || error.message : String(error));
         process.exitCode = 1;
@@ -885,6 +888,18 @@ function githubRepoFromRemote(remoteUrl) {
   return match ? `${match[1]}/${match[2].replace(/\.git$/i, "")}` : "";
 }
 
+function repoIdentityFromRemote(remoteUrl) {
+  const value = String(remoteUrl || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!value) return { officialName: "", repoFullName: "" };
+  const githubRepo = githubRepoFromRemote(value);
+  if (githubRepo) return { officialName: githubRepo.split("/").pop() || "", repoFullName: githubRepo };
+  const withoutQuery = value.split(/[?#]/, 1)[0];
+  const parts = withoutQuery.replace(/\.git$/i, "").split(/[/:]/).filter(Boolean);
+  const officialName = parts.pop() || "";
+  const owner = parts.pop() || "";
+  return { officialName, repoFullName: owner ? `${owner}/${officialName}` : officialName };
+}
+
 const githubRepoCache = new Map();
 async function githubRepoForRoot(root) {
   const normalizedRoot = path.resolve(String(root || ""));
@@ -910,16 +925,18 @@ async function gitSummary(root) {
       remoteUrl = remote.stdout.trim();
     } catch {}
     const [hash = "", subject = "", date = ""] = commitText.trim().split("\t");
+    const identity = repoIdentityFromRemote(remoteUrl);
     return {
       isGit: true,
       branch: branchText.trim() || "detached",
       changes: statusText.split(/\r?\n/).filter(Boolean).length,
       commit: { hash, subject, date },
       remoteUrl,
-      githubRepo: githubRepoFromRemote(remoteUrl)
+      githubRepo: githubRepoFromRemote(remoteUrl),
+      ...identity
     };
   } catch {
-    return { isGit: false, branch: "", changes: 0, commit: null, remoteUrl: "", githubRepo: "" };
+    return { isGit: false, branch: "", changes: 0, commit: null, remoteUrl: "", githubRepo: "", officialName: "", repoFullName: "" };
   }
 }
 
@@ -1027,12 +1044,15 @@ async function listProjects() {
     while (nextIndex < entries.length) {
       const [root, source] = entries[nextIndex++];
       if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) continue;
+      const summary = await gitSummary(root);
+      const localName = path.basename(root);
       projects.push({
         root,
-        name: path.basename(root),
+        localName,
+        name: summary.officialName || localName,
         source,
         active: Boolean(activeRoot && path.resolve(activeRoot).toLowerCase() === root.toLowerCase()),
-        ...(await gitSummary(root))
+        ...summary
       });
     }
   }));
@@ -1102,7 +1122,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.51" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.52" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1466,7 +1486,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.51" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.52" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
