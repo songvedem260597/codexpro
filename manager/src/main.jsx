@@ -55,6 +55,8 @@ const DEFAULT_MANAGER_SETTINGS = {
   fontFamily: "system",
   fontSize: 14,
   repoSelections: {},
+  selectedWorkerPackId: "default",
+  workerImagePacks: [],
   workerImages: { idle: "", working: "", hung: "" },
   workerImageDataUrls: { idle: "", working: "", hung: "" }
 };
@@ -70,7 +72,7 @@ function WorkerIcon({ state, customImages }) {
   );
 }
 
-function SettingsDropdown({ value, options, disabled, onChange }) {
+function SettingsDropdown({ value, options, disabled, onChange, ariaLabel = "Chọn font chữ", selectedHint = "" }) {
   const [open, setOpen] = useState(false);
   const root = useRef(null);
   const selected = options.find((option) => option.value === value) || options[0];
@@ -102,12 +104,12 @@ function SettingsDropdown({ value, options, disabled, onChange }) {
       >
         <span className="settings-dropdown-value">
           <strong>{selected?.label || "Chọn giá trị"}</strong>
-          <small>{selected?.value === "system" ? "Theo giao diện hệ thống" : "Áp dụng cho toàn bộ CodexPro"}</small>
+          <small>{selectedHint || selected?.hint || (selected?.value === "system" ? "Theo giao diện hệ thống" : "Áp dụng cho toàn bộ CodexPro")}</small>
         </span>
         <svg className="settings-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
       </button>
       {open && (
-        <div className="settings-dropdown-menu" role="listbox" aria-label="Chọn font chữ">
+        <div className="settings-dropdown-menu" role="listbox" aria-label={ariaLabel}>
           {options.map((option) => (
             <button
               type="button"
@@ -116,9 +118,9 @@ function SettingsDropdown({ value, options, disabled, onChange }) {
               className={`settings-dropdown-option ${option.value === value ? "is-selected" : ""}`}
               key={option.value}
               onClick={() => { onChange(option.value); setOpen(false); }}
-              style={{ fontFamily: option.css }}
+              style={option.css ? { fontFamily: option.css } : undefined}
             >
-              <span>{option.label}</span>
+              <span className="settings-dropdown-option-copy"><strong>{option.label}</strong>{option.hint && <small>{option.hint}</small>}</span>
               {option.value === value && <span className="settings-dropdown-check">✓</span>}
             </button>
           ))}
@@ -454,6 +456,9 @@ function App() {
   const [chatWidthInput, setChatWidthInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatWidth));
   const [chatHeightInput, setChatHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatHeight));
   const [settingsBusy, setSettingsBusy] = useState("");
+  const [workerPackDraft, setWorkerPackDraft] = useState("");
+  const [showWorkerPackCreator, setShowWorkerPackCreator] = useState(false);
+  const [workerPackDeleteArmed, setWorkerPackDeleteArmed] = useState("");
   const [chatProfileId, setChatProfileId] = useState("");
   const [status, setStatus] = useState(null);
   const [projects, setProjects] = useState([]);
@@ -510,7 +515,8 @@ function App() {
       ...(next || {}),
       repoSelections: { ...DEFAULT_MANAGER_SETTINGS.repoSelections, ...(next?.repoSelections || {}) },
       workerImages: { ...DEFAULT_MANAGER_SETTINGS.workerImages, ...(next?.workerImages || {}) },
-      workerImageDataUrls: { ...DEFAULT_MANAGER_SETTINGS.workerImageDataUrls, ...(next?.workerImageDataUrls || {}) }
+      workerImageDataUrls: { ...DEFAULT_MANAGER_SETTINGS.workerImageDataUrls, ...(next?.workerImageDataUrls || {}) },
+      workerImagePacks: Array.isArray(next?.workerImagePacks) ? next.workerImagePacks : []
     });
   }, []);
 
@@ -563,8 +569,52 @@ function App() {
   const changeWorkerImage = useCallback(async (state) => {
     setSettingsBusy(`worker:${state}`);
     try {
-      applyManagerSettings(await api.chooseWorkerImage(state));
+      applyManagerSettings(await api.chooseWorkerImage({ packId: managerSettings.selectedWorkerPackId, state }));
       notify(`Đã đổi ảnh worker ${state}`);
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setSettingsBusy("");
+    }
+  }, [applyManagerSettings, managerSettings.selectedWorkerPackId, notify]);
+
+  const restoreWorkerImage = useCallback(async (state) => {
+    setSettingsBusy(`worker:${state}`);
+    try {
+      applyManagerSettings(await api.resetWorkerImage({ packId: managerSettings.selectedWorkerPackId, state }));
+      notify(`Đã khôi phục ảnh worker ${state}`);
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setSettingsBusy("");
+    }
+  }, [applyManagerSettings, managerSettings.selectedWorkerPackId, notify]);
+
+  const createWorkerImagePack = useCallback(async () => {
+    const name = workerPackDraft.trim();
+    if (!name) return;
+    setSettingsBusy("worker-pack:create");
+    try {
+      applyManagerSettings(await api.createWorkerImagePack(name));
+      setWorkerPackDraft("");
+      setShowWorkerPackCreator(false);
+      setWorkerPackDeleteArmed("");
+      notify(`Đã tạo bộ ảnh “${name.slice(0, 60)}”`);
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setSettingsBusy("");
+    }
+  }, [applyManagerSettings, notify, workerPackDraft]);
+
+  const selectWorkerImagePack = useCallback(async (packId) => {
+    setSettingsBusy("worker-pack:select");
+    try {
+      const next = await api.selectWorkerImagePack(packId);
+      applyManagerSettings(next);
+      setWorkerPackDeleteArmed("");
+      const selected = next.workerImagePacks?.find((pack) => pack.id === packId);
+      notify(`Đang dùng ${selected ? `bộ “${selected.name}”` : "bộ mặc định"}`);
     } catch (err) {
       setError(err?.message || String(err));
     } finally {
@@ -572,17 +622,24 @@ function App() {
     }
   }, [applyManagerSettings, notify]);
 
-  const restoreWorkerImage = useCallback(async (state) => {
-    setSettingsBusy(`worker:${state}`);
+  const deleteWorkerImagePack = useCallback(async () => {
+    const pack = managerSettings.workerImagePacks.find((item) => item.id === managerSettings.selectedWorkerPackId);
+    if (!pack) return;
+    if (workerPackDeleteArmed !== pack.id) {
+      setWorkerPackDeleteArmed(pack.id);
+      return;
+    }
+    setSettingsBusy("worker-pack:delete");
     try {
-      applyManagerSettings(await api.resetWorkerImage(state));
-      notify(`Đã khôi phục ảnh worker ${state}`);
+      applyManagerSettings(await api.deleteWorkerImagePack(pack.id));
+      setWorkerPackDeleteArmed("");
+      notify(`Đã xóa bộ ảnh “${pack.name}”`);
     } catch (err) {
       setError(err?.message || String(err));
     } finally {
       setSettingsBusy("");
     }
-  }, [applyManagerSettings, notify]);
+  }, [applyManagerSettings, managerSettings.selectedWorkerPackId, managerSettings.workerImagePacks, notify, workerPackDeleteArmed]);
 
   const restoreManagerSettings = useCallback(async () => {
     setSettingsBusy("reset");
@@ -1652,6 +1709,15 @@ function App() {
     { state: "working", title: "Đang làm việc", description: "Hiện khi ChatGPT đang xử lý hoặc hoàn tất turn." },
     { state: "hung", title: "Mất kết nối", description: "Hiện khi extension/profile mất heartbeat." }
   ];
+  const selectedWorkerPack = managerSettings.workerImagePacks.find((pack) => pack.id === managerSettings.selectedWorkerPackId) || null;
+  const workerPackOptions = [
+    { value: "default", label: "Bộ mặc định", hint: "Ảnh worker đi kèm CodexPro" },
+    ...managerSettings.workerImagePacks.map((pack) => ({
+      value: pack.id,
+      label: pack.name,
+      hint: `${Object.values(pack.imageDataUrls || {}).filter(Boolean).length}/3 ảnh đã tải lên`
+    }))
+  ];
 
   return (
     <div className="app-shell" style={appStyle}>
@@ -1666,7 +1732,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.67</small>
+          <small>CodexPro Manager 0.2.68</small>
         </div>
       </aside>
 
@@ -2063,13 +2129,50 @@ function App() {
             <div className="settings-panel-head">
               <div>
                 <p className="eyebrow">WORKER APPEARANCE</p>
-                <h2>Ảnh cho từng trạng thái worker</h2>
-                <p className="section-note">Hỗ trợ PNG, JPG, GIF, WEBP tối đa 10 MB. Ảnh được copy vào dữ liệu CodexPro nên không phụ thuộc file gốc.</p>
+                <h2>Bộ ảnh worker</h2>
+                <p className="section-note">Tạo nhiều bộ, tải ảnh cho từng trạng thái rồi đổi bộ đang dùng bất cứ lúc nào. Hỗ trợ PNG, JPG, GIF, WEBP tối đa 10 MB.</p>
               </div>
             </div>
+            <div className="worker-pack-toolbar">
+              <div className="worker-pack-select">
+                <label>Bộ đang dùng</label>
+                <SettingsDropdown
+                  value={managerSettings.selectedWorkerPackId}
+                  options={workerPackOptions}
+                  disabled={Boolean(settingsBusy)}
+                  ariaLabel="Chọn bộ ảnh worker"
+                  onChange={(value) => void selectWorkerImagePack(value)}
+                />
+              </div>
+              <div className="worker-pack-preview-strip" aria-label="Xem trước bộ ảnh đang dùng">
+                {workerSettingItems.map((item) => <WorkerIcon key={item.state} state={item.state} customImages={managerSettings.workerImageDataUrls} />)}
+              </div>
+              <div className="worker-pack-actions">
+                <button type="button" className="button secondary" onClick={() => { setWorkerPackDraft(`Bộ worker ${managerSettings.workerImagePacks.length + 1}`); setShowWorkerPackCreator(true); }} disabled={Boolean(settingsBusy)}>＋ Tạo bộ mới</button>
+                <button type="button" className={`button danger-quiet ${workerPackDeleteArmed === selectedWorkerPack?.id ? "is-armed" : ""}`} onClick={() => void deleteWorkerImagePack()} disabled={Boolean(settingsBusy) || !selectedWorkerPack}>{workerPackDeleteArmed === selectedWorkerPack?.id ? "Xác nhận xóa" : "Xóa bộ"}</button>
+              </div>
+            </div>
+            {showWorkerPackCreator && (
+              <div className="worker-pack-creator">
+                <input
+                  autoFocus
+                  value={workerPackDraft}
+                  maxLength={60}
+                  placeholder="Tên bộ ảnh worker"
+                  onChange={(event) => setWorkerPackDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void createWorkerImagePack();
+                    if (event.key === "Escape") { setShowWorkerPackCreator(false); setWorkerPackDraft(""); }
+                  }}
+                />
+                <button type="button" className="button primary" onClick={() => void createWorkerImagePack()} disabled={Boolean(settingsBusy) || !workerPackDraft.trim()}>Tạo bộ</button>
+                <button type="button" className="button ghost" onClick={() => { setShowWorkerPackCreator(false); setWorkerPackDraft(""); }} disabled={Boolean(settingsBusy)}>Hủy</button>
+              </div>
+            )}
+            {!selectedWorkerPack && <p className="worker-pack-help">Bộ mặc định chỉ để sử dụng. Hãy bấm <strong>Tạo bộ mới</strong> để upload ảnh riêng.</p>}
             <div className="worker-settings-grid">
               {workerSettingItems.map((item) => {
-                const customized = Boolean(managerSettings.workerImageDataUrls?.[item.state]);
+                const customized = Boolean(selectedWorkerPack?.imageDataUrls?.[item.state]);
                 const loading = settingsBusy === `worker:${item.state}`;
                 return (
                   <article className="worker-setting-card" key={item.state}>
@@ -2079,7 +2182,7 @@ function App() {
                       <p>{item.description}</p>
                     </div>
                     <div className="worker-setting-actions">
-                      <button type="button" className="button secondary" onClick={() => void changeWorkerImage(item.state)} disabled={Boolean(settingsBusy)}>{loading ? "Đang chọn…" : "Chọn ảnh"}</button>
+                      <button type="button" className="button secondary" onClick={() => void changeWorkerImage(item.state)} disabled={Boolean(settingsBusy) || !selectedWorkerPack}>{loading ? "Đang chọn…" : "Chọn ảnh"}</button>
                       <button type="button" className="button ghost" onClick={() => void restoreWorkerImage(item.state)} disabled={Boolean(settingsBusy) || !customized}>Mặc định</button>
                     </div>
                   </article>
