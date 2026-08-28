@@ -1010,7 +1010,7 @@ async function execute(command) {
       await cleanupAttempt();
       const limit=await probeConversationLimit(tab.id);
       if(limit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(limit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
-      return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,send_uncertain:true,error:'SEND_UNCERTAIN: '+String(error?.message||error),attempt_id:attemptId};
+      return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'prepare-timeout',submit_path:'prepare-timeout',path_attempted:['prepare'],send_uncertain:true,error:'SEND_UNCERTAIN: '+String(error?.message||error),attempt_id:attemptId};
     }
     if(!injected?.result?.ok){
       pendingConversationByTab.delete(tab.id);
@@ -1032,23 +1032,39 @@ async function execute(command) {
           return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,...submitResult,ok:true,submission_state:'failed',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,send_uncertain:false,error:'ATTACHMENT_UPLOAD_FAILED: '+String(error?.message||error),attempt_id:attemptId,cleanup};
         }
       }
-      try{
-        const trustedEnter=await promiseWithTimeout(
-          trustedSubmitChatComposerTab(tab.id,attemptId),
-          TRUSTED_INPUT_TIMEOUT_MS,
-          'Chrome không phản hồi khi gửi bằng Enter trusted.'
+      const attachmentSubmit=attachments.length>0;
+      if(attachmentSubmit){
+        const [attachmentSendReady]=await promiseWithTimeout(
+          chrome.scripting.executeScript({target:{tabId:tab.id},func:prepareTrustedClickFallbackPage,args:[attemptId]}),
+          DOM_ACTION_TIMEOUT_MS,
+          'Chrome không phản hồi khi chuẩn bị nút Send cho attachment.'
         );
-        submitResult={...submitResult,trusted_enter_dispatched:true,...trustedEnter};
+        if(!attachmentSendReady?.result?.ok){
+          pendingConversationByTab.delete(tab.id);
+          const cleanup=await cleanupAttempt();
+          return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,...submitResult,ok:true,submission_state:'failed',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'trusted-click-attachment',submit_path:'trusted-click-attachment',path_attempted:['trusted-click-attachment'],send_uncertain:false,error:'ATTACHMENT_SUBMIT_FAILED: '+String(attachmentSendReady?.result?.error||'Không tìm thấy nút Send khả dụng sau khi upload.'),attempt_id:attemptId,cleanup};
+        }
+        submitResult={...submitResult,submit_path:'trusted-click-attachment',path_attempted:['trusted-click-attachment'],submitted_by:'trusted-click-attachment'};
+      }
+      try{
+        const trustedSubmit=await promiseWithTimeout(
+          attachmentSubmit?trustedSubmitChatSendButtonTab(tab.id,attemptId):trustedSubmitChatComposerTab(tab.id,attemptId),
+          TRUSTED_INPUT_TIMEOUT_MS,
+          attachmentSubmit?'Chrome không phản hồi khi bấm Send cho attachment.':'Chrome không phản hồi khi gửi bằng Enter trusted.'
+        );
+        submitResult=attachmentSubmit
+          ? {...submitResult,trusted_click_dispatched:true,...trustedSubmit}
+          : {...submitResult,trusted_enter_dispatched:true,...trustedSubmit};
       }catch(error){
         let networkAck=null;
         try{networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100,3000);}catch{}
-        const trustedEnterError=String(error?.message||error).slice(0,300);
-        if(networkAck)return await resultForNetwork(networkAck,{...submitResult,trusted_enter_error:trustedEnterError});
+        const trustedSubmitError=String(error?.message||error).slice(0,300);
+        if(networkAck)return await resultForNetwork(networkAck,{...submitResult,...(attachmentSubmit?{trusted_click_error:trustedSubmitError}:{trusted_enter_error:trustedSubmitError})});
         const evidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
         pendingConversationByTab.delete(tab.id);
         const limit=await probeConversationLimit(tab.id);
         if(limit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(limit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
-        return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,...submitResult,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,network_evidence:evidence,submitted:false,send_uncertain:true,error:'SEND_UNCERTAIN: Trusted Enter không hoàn tất và chưa thấy generation request. Không fallback click vì trạng thái dispatch chưa chắc chắn, tránh duplicate.',trusted_enter_error:trustedEnterError,attempt_id:attemptId,cleanup_skipped:true,cleanup_reason:'Enter dispatch không chắc chắn.'};
+        return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,...submitResult,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,network_evidence:evidence,submitted:false,send_uncertain:true,error:`SEND_UNCERTAIN: ${attachmentSubmit?'Trusted click attachment':'Trusted Enter'} không hoàn tất và chưa thấy generation request. Không tự gửi lại vì trạng thái dispatch chưa chắc chắn, tránh duplicate.`,...(attachmentSubmit?{trusted_click_error:trustedSubmitError}:{trusted_enter_error:trustedSubmitError}),attempt_id:attemptId,cleanup_skipped:true,cleanup_reason:`${attachmentSubmit?'Click attachment':'Enter'} dispatch không chắc chắn.`};
       }
 
       let earlyAck=null;
@@ -1063,7 +1079,7 @@ async function execute(command) {
       const earlyEvidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
       const submitActivity=earlyEvidence.filter(isChatSubmitLifecycleEvidence);
       const safeClickFallback=shouldUseTrustedClickFallback(attemptState?.result,earlyEvidence);
-      if(safeClickFallback){
+      if(!attachmentSubmit&&safeClickFallback){
         const fallbackReason='Trusted Enter đã dispatch nhưng draft vẫn nguyên và không có request submit nào; dùng trusted click cuối cùng.';
         const [fallbackReady]=await promiseWithTimeout(
           chrome.scripting.executeScript({target:{tabId:tab.id},func:prepareTrustedClickFallbackPage,args:[attemptId]}),
@@ -1758,6 +1774,17 @@ async function trustedActivateChatSendButtonTab(tabId,attemptId) {
     await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',buttons:1,clickCount:1});
     await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',buttons:0,clickCount:1});
   });
+}
+
+async function trustedSubmitChatSendButtonTab(tabId,attemptId) {
+  if(!attemptId)throw new Error('Trusted attachment send attempt không hợp lệ.');
+  let tracker;
+  try{tracker=await startCdpChatNetworkTracker(tabId);}
+  catch(error){throw new Error('TRUSTED_CLICK_NOT_DISPATCHED: '+String(error?.message||error));}
+  try{await trustedActivateChatSendButtonTab(tabId,attemptId);}
+  catch(error){await tracker.cleanup();throw new Error('TRUSTED_CLICK_NOT_DISPATCHED: '+String(error?.message||error));}
+  const network=await tracker.started;
+  return {dispatched:true,page_brought_to_front:true,focus_emulation_used:false,cdp_network_acknowledged:Boolean(network?.network_acknowledged),cdp_generation_endpoint:String(network?.generation_endpoint||''),cdp_request_id:String(network?.request_id||''),cdp_tracker_timeout:Boolean(network?.timeout)};
 }
 
 async function trustedSubmitChatComposerTab(tabId,attemptId) {

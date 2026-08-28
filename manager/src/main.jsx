@@ -1146,7 +1146,7 @@ function App() {
           };
         });
         const technicalReason = String(result?.error || "Chưa thấy network ACK.").replace(/^SEND_UNCERTAIN:\s*/i, "");
-        const submitPath = String(result?.submitted_by || result?.submit_path || "unknown");
+        const submitPath = String(result?.submitted_by || result?.submit_path || "pre-submit");
         const generationEndpoint = String(result?.network_generation_endpoint || "");
         const uncertainMessage = `Chưa xác định được tin nhắn đã gửi hay chưa. Path: ${submitPath}.${generationEndpoint ? ` Endpoint: ${generationEndpoint}.` : ""} ${technicalReason}`;
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: uncertainMessage }));
