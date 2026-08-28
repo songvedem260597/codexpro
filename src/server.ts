@@ -19,7 +19,7 @@ import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidg
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { runBrowserControl } from "./browserOps.js";
-import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileWorkspace } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
@@ -937,7 +937,11 @@ const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, d
 
 export function createCodexProServer(config: CodexProConfig, options: { browserProfileId?: string } = {}): McpServer {
   const browserProfileId = String(options.browserProfileId || "").trim();
-  const workspaces = new WorkspaceManager(config, browserProfileId ? (workspace) => setBrowserExtensionProfileWorkspace(browserProfileId, workspace.root) : undefined);
+  const workspaces = new WorkspaceManager(
+    config,
+    browserProfileId ? (workspace) => setBrowserExtensionProfileWorkspace(browserProfileId, workspace.root) : undefined,
+    browserProfileId ? () => getBrowserExtensionProfileWorkspaceBinding(browserProfileId) : undefined
+  );
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
   const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
@@ -2622,8 +2626,9 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       description:
         "Control the Chrome profile explicitly marked ACTIVE by the CodexPro Profile Bridge extension, with the dedicated port-9223 Chrome as fallback. Use list_profiles/status/list_tabs, then snapshot to obtain CSS selectors before click/type.",
       inputSchema: {
-        action: z.enum(["status", "list_profiles", "check_chatgpt", "setup_chatgpt", "reload_extension", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "type", "press", "screenshot"]),
+        action: z.enum(["status", "list_profiles", "select_workspace", "check_chatgpt", "setup_chatgpt", "reload_extension", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "type", "press", "screenshot"]),
         profile_id: z.string().optional().describe("Optional extension profile id. Omit to use the profile marked ACTIVE. Ignored for the dedicated fallback browser."),
+        root: z.string().optional().describe("Workspace root for select_workspace. The selected profile is locked to this root until changed by CodexPro Manager."),
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
         target_id: z.string().optional().describe("Tab id from list_tabs. Omit to use the first page tab."),
         conversation_id: z.string().optional().describe("Exact ChatGPT conversation id for send_chat_request, rename_chat, or get_chat_response."),
@@ -2676,8 +2681,20 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
       let result: Record<string, any>;
       const selectedProfile = args.profile_id || profiles.find((profile) => profile.active && profile.connected)?.profile_id;
-      if ((args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "send_chat_request" || args.action === "rename_chat" || args.action === "hide_chat" || args.action === "get_chat_response") && !selectedProfile) {
+      if ((args.action === "select_workspace" || args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "send_chat_request" || args.action === "rename_chat" || args.action === "hide_chat" || args.action === "get_chat_response") && !selectedProfile) {
         throw new CodexProError("Choose an online Chrome extension profile before setting up CodexPro in ChatGPT.");
+      }
+      if (args.action === "select_workspace") {
+        const workspace = workspaces.openWorkspace(String(args.root || ""));
+        setBrowserExtensionProfileWorkspaceBinding(selectedProfile!, workspace.root);
+        setBrowserExtensionProfileWorkspace(selectedProfile!, workspace.root);
+        return textResult(`# Workspace Locked\n\nProfile: ${selectedProfile}\nRoot: ${workspace.root}`, {
+          action: args.action,
+          profile_id: selectedProfile,
+          workspace_id: workspace.id,
+          root: workspace.root,
+          locked: true
+        });
       }
       const useExtension = args.browser !== "dedicated" && Boolean(selectedProfile);
       if (useExtension) {

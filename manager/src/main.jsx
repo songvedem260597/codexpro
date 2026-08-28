@@ -50,7 +50,9 @@ const FONT_OPTIONS = [
 
 const DEFAULT_MANAGER_SETTINGS = {
   chatWidth: 940,
+  chatHeight: 330,
   fontFamily: "system",
+  repoSelections: {},
   workerImages: { idle: "", working: "", hung: "" },
   workerImageDataUrls: { idle: "", working: "", hung: "" }
 };
@@ -184,6 +186,45 @@ function ChatDropdown({ value, conversations, disabled, onChange }) {
   );
 }
 
+function ProjectDropdown({ value, projects, disabled, onChange }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef(null);
+  const selected = projects.find((project) => project.root === value);
+
+  useEffect(() => {
+    const close = (event) => {
+      if (!root.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, []);
+
+  return (
+    <div className={`project-dropdown ${open ? "is-open" : ""} ${disabled ? "is-disabled" : ""}`} ref={root}>
+      <button type="button" className="project-dropdown-trigger" aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => setOpen((current) => !current)}>
+        <span className="project-dropdown-mark">⌘</span>
+        <span className="project-dropdown-value">
+          <strong>{selected?.name || "Chọn repo cần code"}</strong>
+          <small>{selected ? `${selected.branch || "git"} · ${selected.root}` : "Chỉ hiển thị Git repo CodexPro đã quét được"}</small>
+        </span>
+        <svg className="project-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+      </button>
+      {open && (
+        <div className="project-dropdown-menu" role="listbox" aria-label="Chọn repo cần code">
+          {projects.map((project) => (
+            <button type="button" role="option" aria-selected={project.root === value} className={`project-dropdown-option ${project.root === value ? "is-selected" : ""}`} key={project.root} onClick={() => { onChange(project.root); setOpen(false); }}>
+              <span className="project-dropdown-mark">⌘</span>
+              <span className="project-dropdown-copy"><strong>{project.name}</strong><small>{project.branch || "git"} · {project.root}</small></span>
+              {project.changes > 0 && <span className="project-dropdown-changes">{project.changes} đổi</span>}
+              {project.root === value && <span className="project-dropdown-check">✓</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
@@ -291,6 +332,7 @@ function buildConversationRolloverPrompt(result) {
   const prefix = [
     "Đoạn chat trước vừa đạt giới hạn độ dài nên CodexPro đã tự tạo cuộc chat mới này.",
     "Hãy tiếp tục đúng dự án/công việc đang làm từ bối cảnh gần nhất bên dưới. Không bắt đầu lại từ đầu và không yêu cầu người dùng lặp lại thông tin đã có nếu có thể suy ra từ bối cảnh.",
+    result?.projectRoot ? `Repo tiếp tục (đã khóa trong CodexPro): ${String(result.projectRoot).trim()}` : "",
     result?.title ? `Tên chat trước: ${String(result.title).trim()}` : "",
     "",
     "Bối cảnh gần nhất từ chat trước:"
@@ -319,6 +361,7 @@ function App() {
   const [activePage, setActivePage] = useState("overview");
   const [managerSettings, setManagerSettings] = useState(DEFAULT_MANAGER_SETTINGS);
   const [chatWidthInput, setChatWidthInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatWidth));
+  const [chatHeightInput, setChatHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatHeight));
   const [settingsBusy, setSettingsBusy] = useState("");
   const [chatProfileId, setChatProfileId] = useState("");
   const [status, setStatus] = useState(null);
@@ -330,6 +373,7 @@ function App() {
   const [checkingProfiles, setCheckingProfiles] = useState([]);
   const [requestDrafts, setRequestDrafts] = useState({});
   const [requestTargets, setRequestTargets] = useState({});
+  const [requestProjectRoots, setRequestProjectRoots] = useState({});
   const [requestFiles, setRequestFiles] = useState({});
   const [requestResponses, setRequestResponses] = useState({});
   const [requestSendErrors, setRequestSendErrors] = useState({});
@@ -356,6 +400,7 @@ function App() {
     setManagerSettings({
       ...DEFAULT_MANAGER_SETTINGS,
       ...(next || {}),
+      repoSelections: { ...DEFAULT_MANAGER_SETTINGS.repoSelections, ...(next?.repoSelections || {}) },
       workerImages: { ...DEFAULT_MANAGER_SETTINGS.workerImages, ...(next?.workerImages || {}) },
       workerImageDataUrls: { ...DEFAULT_MANAGER_SETTINGS.workerImageDataUrls, ...(next?.workerImageDataUrls || {}) }
     });
@@ -368,6 +413,10 @@ function App() {
       .catch((err) => { if (!cancelled) setError(err?.message || String(err)); });
     return () => { cancelled = true; };
   }, [applyManagerSettings]);
+
+  useEffect(() => {
+    setRequestProjectRoots((current) => ({ ...(managerSettings.repoSelections || {}), ...current }));
+  }, [managerSettings.repoSelections]);
 
   const saveManagerSetting = useCallback(async (patch, message = "Đã lưu cài đặt") => {
     setSettingsBusy("save");
@@ -385,12 +434,23 @@ function App() {
     setChatWidthInput(String(managerSettings.chatWidth));
   }, [managerSettings.chatWidth]);
 
+  useEffect(() => {
+    setChatHeightInput(String(managerSettings.chatHeight));
+  }, [managerSettings.chatHeight]);
+
   const commitChatWidthInput = useCallback(() => {
     const parsed = Number(chatWidthInput);
     const nextWidth = Math.max(720, Math.min(1600, Number.isFinite(parsed) ? Math.round(parsed / 20) * 20 : managerSettings.chatWidth));
     setChatWidthInput(String(nextWidth));
     if (nextWidth !== managerSettings.chatWidth) void saveManagerSetting({ chatWidth: nextWidth }, "Đã lưu độ rộng popup");
   }, [chatWidthInput, managerSettings.chatWidth, saveManagerSetting]);
+
+  const commitChatHeightInput = useCallback(() => {
+    const parsed = Number(chatHeightInput);
+    const nextHeight = Math.max(180, Math.min(700, Number.isFinite(parsed) ? Math.round(parsed / 10) * 10 : managerSettings.chatHeight));
+    setChatHeightInput(String(nextHeight));
+    if (nextHeight !== managerSettings.chatHeight) void saveManagerSetting({ chatHeight: nextHeight }, "Đã lưu chiều cao khung chat");
+  }, [chatHeightInput, managerSettings.chatHeight, saveManagerSetting]);
 
   const changeWorkerImage = useCallback(async (state) => {
     setSettingsBusy(`worker:${state}`);
@@ -680,6 +740,26 @@ function App() {
     }
   }
 
+  function projectRootForProfile(profile) {
+    const gitProjects = projects.filter((project) => project.isGit);
+    const requested = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
+    const exact = gitProjects.find((project) => project.root.toLowerCase() === requested.toLowerCase());
+    if (exact) return exact.root;
+    const currentWorkspace = String(profile.current_workspace_root || "");
+    return gitProjects.find((project) => project.root.toLowerCase() === currentWorkspace.toLowerCase())?.root
+      || gitProjects.find((project) => project.active)?.root
+      || gitProjects[0]?.root
+      || "";
+  }
+
+  function selectProjectForProfile(profileId, root) {
+    setRequestProjectRoots((current) => ({ ...current, [profileId]: root }));
+    setManagerSettings((current) => ({ ...current, repoSelections: { ...(current.repoSelections || {}), [profileId]: root } }));
+    void api.saveManagerSettings({ repoSelections: { [profileId]: root } })
+      .then(applyManagerSettings)
+      .catch((err) => setRequestSendErrors((current) => ({ ...current, [profileId]: err?.message || String(err) })));
+  }
+
   async function setupProfile(profile) {
     setBusy(`profile:${profile.profile_id}`);
     setError("");
@@ -698,6 +778,8 @@ function App() {
     const conversations = profileRequestChats(profile);
     const conversationId = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "");
     if (conversationId) setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
+    const projectRoot = projectRootForProfile(profile);
+    if (projectRoot) setRequestProjectRoots((current) => ({ ...current, [profile.profile_id]: projectRoot }));
     setChatProfileId(profile.profile_id);
     if (profile.connected && conversationId && conversationId !== NEW_CHAT_TARGET) {
       setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
@@ -804,6 +886,11 @@ function App() {
     const newChat = conversationId === NEW_CHAT_TARGET;
     const text = String(requestDrafts[profile.profile_id] || "").trim();
     const attachments = requestFiles[profile.profile_id] || [];
+    const projectRoot = projectRootForProfile(profile);
+    if (!projectRoot) {
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có Git repo nào trong workspace CodexPro. Hãy thêm repo ở tab Dự án trước." }));
+      return;
+    }
     setBusy(`request:${profile.profile_id}`);
     setError("");
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
@@ -825,7 +912,7 @@ function App() {
       });
     }
     try {
-      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, text, attachments });
+      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, projectRoot, text, attachments });
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
       const resolvedConversationId = String(result?.conversation_id || conversationId);
@@ -908,6 +995,7 @@ function App() {
           messages: rolloverMessages,
           conversation_limit_reached: true,
           conversation_limit_message: message.replace(/^.*CONVERSATION_LIMIT_REACHED:\s*/s, "").trim() || "ChatGPT báo đoạn chat đã đạt giới hạn độ dài.",
+          projectRoot,
           rollover_attachments: attachments
         });
         if (newConversationId) {
@@ -958,6 +1046,7 @@ function App() {
         profileId,
         conversationId: "",
         newChat: true,
+        projectRoot: result?.projectRoot || projectRootForProfile(profile),
         text: handoffText,
         attachments: Array.isArray(result?.rollover_attachments) ? result.rollover_attachments : []
       });
@@ -1127,6 +1216,7 @@ function App() {
       await api.sendProfileRequest({
         profileId: profile.profile_id,
         conversationId,
+        projectRoot: projectRootForProfile(profile),
         text: "Tiếp tục từ đúng chỗ phản hồi vừa bị ngắt. Không lặp lại phần trước; hoàn thành câu trả lời còn dang dở.",
         attachments: []
       });
@@ -1144,6 +1234,8 @@ function App() {
     const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
     if (!profile) return null;
     const conversations = profileRequestChats(profile);
+    const gitProjects = projects.filter((project) => project.isGit);
+    const selectedProjectRoot = projectRootForProfile(profile);
     const selectedTarget = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "");
     const isNewChat = selectedTarget === NEW_CHAT_TARGET;
     const selectedConversation = conversations.find((chat) => chat.id === selectedTarget);
@@ -1199,6 +1291,9 @@ function App() {
           </div>
 
           <article className={`request-card chat-popup-card ${profile.connected ? "is-online" : "is-offline"}`}>
+            <label className="request-label">Repo cần code <small>khóa cho profile/chat hiện tại</small></label>
+            <ProjectDropdown value={selectedProjectRoot} projects={gitProjects} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} disabled={!profile.connected || !gitProjects.length || sending || selectedBusy || rolloverCreating} />
+            {!gitProjects.length && <div className="request-send-error">Chưa có Git repo nào. Thêm repo ở tab Dự án trước.</div>}
             <div className="request-label-row">
               <label className="request-label">Đoạn chat <small>tối đa 3 gần nhất</small></label>
               <div className="chat-manage-actions">
@@ -1297,7 +1392,7 @@ function App() {
               <span>{selectedBusy ? "Đang nhận phản hồi · realtime ~1 giây" : "Realtime phản hồi ~1 giây"}</span>
               <div className="request-card-actions">
                 <button type="button" className="button secondary" onClick={() => openProfile(profile)} disabled={Boolean(busy) || !profile.connected || isNewChat || !(profile.conversation_tabs?.length)}>Mở Chrome</button>
-                <button type="button" className="button primary" onClick={() => sendRequest(profile)} disabled={Boolean(busy) || !profile.connected || selectedBusy || rolloverCreating || (!isNewChat && !conversations.length) || (!draft.trim() && !attachments.length)}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
+                <button type="button" className="button primary" onClick={() => sendRequest(profile)} disabled={Boolean(busy) || !profile.connected || !selectedProjectRoot || selectedBusy || rolloverCreating || (!isNewChat && !conversations.length) || (!draft.trim() && !attachments.length)}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
               </div>
             </div>
           </article>
@@ -1309,6 +1404,7 @@ function App() {
   const selectedFont = FONT_OPTIONS.find((option) => option.value === managerSettings.fontFamily) || FONT_OPTIONS[0];
   const appStyle = {
     "--chat-modal-width": `${managerSettings.chatWidth}px`,
+    "--chat-response-height": `${managerSettings.chatHeight}px`,
     "--app-font-family": selectedFont.css
   };
   const workerSettingItems = [
@@ -1330,7 +1426,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
-          <small>CodexPro Manager 0.2.48</small>
+          <small>CodexPro Manager 0.2.50</small>
         </div>
       </aside>
 
@@ -1582,6 +1678,71 @@ function App() {
             </div>
             <div className="width-scale"><span>720px</span><span>Mặc định 940px</span><span>1600px</span></div>
             <div className="chat-width-preview"><div style={{ width: `${Math.max(42, Math.min(100, managerSettings.chatWidth / 16))}%` }}><span>Chat popup</span><small>{managerSettings.chatWidth}px</small></div></div>
+          </section>
+
+          <section className="settings-panel">
+            <div className="settings-panel-head">
+              <div>
+                <p className="eyebrow">CHAT CONTENT</p>
+                <h2>Chiều cao khung chat bên trong</h2>
+                <p className="section-note">Chỉnh chiều cao vùng “Tin nhắn gần nhất” trong popup Chat. Nội dung dài vẫn cuộn độc lập bên trong khung.</p>
+              </div>
+              <div className="settings-number-field">
+                <input
+                  type="number"
+                  min="180"
+                  max="700"
+                  step="10"
+                  inputMode="numeric"
+                  aria-label="Chiều cao khung chat bên trong"
+                  value={chatHeightInput}
+                  disabled={settingsBusy === "save"}
+                  onChange={(event) => setChatHeightInput(event.target.value.replace(/[^0-9]/g, ""))}
+                  onBlur={commitChatHeightInput}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                    if (event.key === "Escape") {
+                      setChatHeightInput(String(managerSettings.chatHeight));
+                      event.currentTarget.blur();
+                    }
+                  }}
+                />
+                <span>px</span>
+              </div>
+            </div>
+            <div className="width-control">
+              <button
+                type="button"
+                className="setting-step-button"
+                aria-label="Giảm chiều cao khung chat"
+                disabled={settingsBusy === "save" || managerSettings.chatHeight <= 180}
+                onClick={() => void saveManagerSetting({ chatHeight: Math.max(180, managerSettings.chatHeight - 20) }, "Đã giảm chiều cao khung chat")}
+              >−</button>
+              <input
+                className="settings-range chat-height-range"
+                type="range"
+                min="180"
+                max="700"
+                step="10"
+                value={managerSettings.chatHeight}
+                onChange={(event) => setManagerSettings((current) => ({ ...current, chatHeight: Number(event.target.value) }))}
+                onPointerUp={(event) => void saveManagerSetting({ chatHeight: Number(event.currentTarget.value) }, "Đã lưu chiều cao khung chat")}
+                onKeyUp={(event) => void saveManagerSetting({ chatHeight: Number(event.currentTarget.value) }, "Đã lưu chiều cao khung chat")}
+              />
+              <button
+                type="button"
+                className="setting-step-button"
+                aria-label="Tăng chiều cao khung chat"
+                disabled={settingsBusy === "save" || managerSettings.chatHeight >= 700}
+                onClick={() => void saveManagerSetting({ chatHeight: Math.min(700, managerSettings.chatHeight + 20) }, "Đã tăng chiều cao khung chat")}
+              >＋</button>
+            </div>
+            <div className="width-scale"><span>180px</span><span>Mặc định 330px</span><span>700px</span></div>
+            <div className="chat-height-preview">
+              <div style={{ height: `${Math.max(34, Math.min(100, managerSettings.chatHeight / 7))}%` }}>
+                <span>Tin nhắn gần nhất</span><small>{managerSettings.chatHeight}px</small>
+              </div>
+            </div>
           </section>
 
           <section className="settings-panel">

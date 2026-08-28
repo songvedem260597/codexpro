@@ -101,7 +101,7 @@ const WORKER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp
 const MAX_WORKER_IMAGE_BYTES = 10 * 1024 * 1024;
 
 function defaultManagerSettings() {
-  return { chatWidth: 940, fontFamily: "system", workerImages: { idle: "", working: "", hung: "" } };
+  return { chatWidth: 940, chatHeight: 330, fontFamily: "system", repoSelections: {}, workerImages: { idle: "", working: "", hung: "" } };
 }
 
 function readManagerSettings() {
@@ -110,7 +110,12 @@ function readManagerSettings() {
     const parsed = JSON.parse(fs.readFileSync(managerSettingsFile, "utf8"));
     return {
       chatWidth: Math.max(720, Math.min(1600, Number(parsed?.chatWidth) || defaults.chatWidth)),
+      chatHeight: Math.max(180, Math.min(700, Number(parsed?.chatHeight) || defaults.chatHeight)),
       fontFamily: MANAGER_FONT_CHOICES.has(String(parsed?.fontFamily || "")) ? String(parsed.fontFamily) : defaults.fontFamily,
+      repoSelections: Object.fromEntries(Object.entries(parsed?.repoSelections && typeof parsed.repoSelections === "object" ? parsed.repoSelections : {})
+        .filter(([profileId, root]) => /^[A-Za-z0-9._-]{1,160}$/.test(profileId) && typeof root === "string" && root.trim())
+        .slice(0, 40)
+        .map(([profileId, root]) => [profileId, path.resolve(root)])),
       workerImages: {
         idle: String(parsed?.workerImages?.idle || ""),
         working: String(parsed?.workerImages?.working || ""),
@@ -160,8 +165,19 @@ function saveManagerSettingsPatch(patch = {}) {
   if (Object.prototype.hasOwnProperty.call(patch, "chatWidth")) {
     next.chatWidth = Math.max(720, Math.min(1600, Number(patch.chatWidth) || current.chatWidth));
   }
+  if (Object.prototype.hasOwnProperty.call(patch, "chatHeight")) {
+    next.chatHeight = Math.max(180, Math.min(700, Number(patch.chatHeight) || current.chatHeight));
+  }
   if (Object.prototype.hasOwnProperty.call(patch, "fontFamily") && MANAGER_FONT_CHOICES.has(String(patch.fontFamily))) {
     next.fontFamily = String(patch.fontFamily);
+  }
+  if (patch?.repoSelections && typeof patch.repoSelections === "object") {
+    next.repoSelections = { ...(current.repoSelections || {}) };
+    for (const [profileId, root] of Object.entries(patch.repoSelections)) {
+      if (!/^[A-Za-z0-9._-]{1,160}$/.test(profileId)) continue;
+      if (typeof root === "string" && root.trim()) next.repoSelections[profileId] = path.resolve(root);
+      else delete next.repoSelections[profileId];
+    }
   }
   writeManagerSettings(next);
   return managerSettingsPayload();
@@ -216,7 +232,7 @@ function resetManagerSettings() {
   for (const workerPath of Object.values(current.workerImages || {})) {
     if (workerPath && path.dirname(path.resolve(workerPath)) === path.resolve(managerAssetsDir)) fs.rmSync(path.resolve(workerPath), { force: true });
   }
-  const defaults = defaultManagerSettings();
+  const defaults = { ...defaultManagerSettings(), repoSelections: { ...(current.repoSelections || {}) } };
   writeManagerSettings(defaults);
   return managerSettingsPayload();
 }
@@ -322,14 +338,22 @@ function createWindow() {
           await new Promise((resolve) => setTimeout(resolve, 300));
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
             await win.webContents.executeJavaScript(`(async () => {
-              const range = document.querySelector('.settings-range');
+              const range = document.querySelector('.settings-range:not(.chat-height-range)');
+              const heightRange = document.querySelector('.chat-height-range');
+              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
               if (range) {
-                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
                 setter?.call(range, '1180');
                 range.dispatchEvent(new Event('input', { bubbles: true }));
                 range.dispatchEvent(new Event('change', { bubbles: true }));
                 range.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', bubbles: true }));
               }
+              if (heightRange) {
+                setter?.call(heightRange, '520');
+                heightRange.dispatchEvent(new Event('input', { bubbles: true }));
+                heightRange.dispatchEvent(new Event('change', { bubbles: true }));
+                heightRange.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', bubbles: true }));
+              }
+              await new Promise((resolve) => setTimeout(resolve, 250));
               const trigger = document.querySelector('.settings-dropdown-trigger');
               trigger?.click();
               await new Promise((resolve) => setTimeout(resolve, 80));
@@ -340,6 +364,7 @@ function createWindow() {
           }
           const afterSettings = await win.webContents.executeJavaScript("window.codexpro.getManagerSettings().then((value) => JSON.parse(JSON.stringify(value)))", true);
           let chatModalWidth = 0;
+          let chatResponseHeight = 0;
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
             const chatButtonFound = await win.webContents.executeJavaScript(`(() => {
               const button = document.querySelector('.profile-chat:not(:disabled)');
@@ -349,6 +374,7 @@ function createWindow() {
             if (chatButtonFound) {
               await new Promise((resolve) => setTimeout(resolve, 350));
               chatModalWidth = await win.webContents.executeJavaScript("Math.round(document.querySelector('.chat-modal')?.getBoundingClientRect().width || 0)", true);
+              chatResponseHeight = await win.webContents.executeJavaScript("Math.round(document.querySelector('.chat-modal .chat-response.is-inline')?.getBoundingClientRect().height || 0)", true);
               await win.webContents.executeJavaScript("document.querySelector('.chat-modal-head > button')?.click()", true);
               await new Promise((resolve) => setTimeout(resolve, 120));
             }
@@ -358,25 +384,29 @@ function createWindow() {
             const main = document.querySelector('main');
             return {
               settingsVisible: !settingsView?.hidden,
-              rangeValue: document.querySelector('.settings-range')?.value || '',
-              numberValue: document.querySelector('.settings-number-field input')?.value || '',
+              rangeValue: document.querySelector('.settings-range:not(.chat-height-range)')?.value || '',
+              heightRangeValue: document.querySelector('.chat-height-range')?.value || '',
+              numberValue: document.querySelectorAll('.settings-number-field input')?.[0]?.value || '',
+              heightNumberValue: document.querySelectorAll('.settings-number-field input')?.[1]?.value || '',
               fontValue: document.querySelector('.settings-dropdown-value strong')?.textContent?.trim() || '',
               workerCards: document.querySelectorAll('.worker-setting-card').length,
               settingsWidth: Math.round(settingsView?.getBoundingClientRect().width || 0),
               mainContentWidth: Math.round((main?.clientWidth || 0) - 100),
               chatWidthVar: document.querySelector('.app-shell')?.style.getPropertyValue('--chat-modal-width') || '',
+              chatHeightVar: document.querySelector('.app-shell')?.style.getPropertyValue('--chat-response-height') || '',
               fontVar: document.querySelector('.app-shell')?.style.getPropertyValue('--app-font-family') || ''
             };
           })()`, true);
           settingsProbe = {
-            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (afterSettings.chatWidth === 1180 && afterSettings.fontFamily === "tahoma" && /Tahoma/i.test(uiSettings.fontValue) && uiSettings.numberValue === "1180" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3))),
-            before: { chatWidth: beforeSettings.chatWidth, fontFamily: beforeSettings.fontFamily },
-            saved: { chatWidth: afterSettings.chatWidth, fontFamily: afterSettings.fontFamily },
+            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "tahoma" && /Tahoma/i.test(uiSettings.fontValue) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
+            before: { chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily },
+            saved: { chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily },
             chatModalWidth,
+            chatResponseHeight,
             ui: uiSettings
           };
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
-            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ chatWidth: beforeSettings.chatWidth, fontFamily: beforeSettings.fontFamily })})`, true);
+            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily })})`, true);
           }
         }
         const chatSmokeRequested = [
@@ -402,7 +432,7 @@ function createWindow() {
           await new Promise((resolve) => setTimeout(resolve, 1400));
           chatModalProbe = await win.webContents.executeJavaScript(`(() => {
             const modal = document.querySelector('.chat-modal');
-            return { open: Boolean(modal), profile: modal?.querySelector('.chat-modal-profile code')?.textContent || '', hasResponse: Boolean(modal?.querySelector('.chat-response')), hasTextarea: Boolean(modal?.querySelector('textarea')) };
+            return { open: Boolean(modal), profile: modal?.querySelector('.chat-modal-profile code')?.textContent || '', hasProjectDropdown: Boolean(modal?.querySelector('.project-dropdown')), selectedProject: modal?.querySelector('.project-dropdown-value strong')?.textContent?.trim() || '', hasResponse: Boolean(modal?.querySelector('.chat-response')), hasTextarea: Boolean(modal?.querySelector('textarea')) };
           })()`, true);
           chatModalProbe.click = clickProbe;
         }
@@ -974,7 +1004,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.48" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.50" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1213,10 +1243,12 @@ async function sendProfileRequest(payload) {
   const conversationId = String(payload?.conversationId || "").trim();
   const newChat = Boolean(payload?.newChat);
   const text = String(payload?.text || "").trim();
+  const requestedProjectRoot = String(payload?.projectRoot || "").trim();
   const requestedFiles = Array.isArray(payload?.attachments) ? payload.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
+  if (!requestedProjectRoot) throw new Error("Hãy chọn repo cần code trước khi gửi yêu cầu.");
   if (text.length > 12000) throw new Error("Yêu cầu dài quá 12.000 ký tự.");
   const files = requestedFiles.map((file) => requestFileSummary(file?.path));
   if (files.some((file) => file.size > MAX_REQUEST_ATTACHMENT_BYTES)) throw new Error("Mỗi file được tối đa 8 MB.");
@@ -1230,6 +1262,9 @@ async function sendProfileRequest(payload) {
   let status = await runtimeStatus();
   if (sendDebug) console.error('[manager-send] after runtimeStatus');
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  const knownProjects = await listProjects();
+  const selectedProject = knownProjects.find((project) => project.isGit && path.resolve(project.root).toLowerCase() === path.resolve(requestedProjectRoot).toLowerCase());
+  if (!selectedProject) throw new Error("Repo đã chọn không còn nằm trong danh sách Git workspace của CodexPro.");
   let profile = status.browserProfiles.find((item) => item.profile_id === profileId);
   if (!profile?.connected) throw new Error("Extension của profile này đang mất heartbeat với CodexPro.");
   const token = readToken(status.config.tokenFile);
@@ -1260,12 +1295,24 @@ async function sendProfileRequest(payload) {
     if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
   }
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
+  await localMcpTool(status.config, token, "browser_control", {
+    action: "select_workspace",
+    profile_id: profileId,
+    root: selectedProject.root
+  }, 20000);
+  const taskText = [
+    "@CodexPro",
+    `Repo đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
+    "Hãy dùng CodexPro để đọc và thao tác đúng repo đã khóa ở trên. Không chuyển sang workspace/repo khác. Tiếp tục từ trạng thái git và công việc hiện có của repo này.",
+    "",
+    text ? `Yêu cầu của người dùng:\n${text}` : "Yêu cầu của người dùng nằm trong file đính kèm."
+  ].join("\n");
   const result = await localMcpTool(status.config, token, "browser_control", {
     action: "send_chat_request",
     profile_id: profileId,
     conversation_id: newChat ? undefined : conversationId,
     new_chat: newChat,
-    text,
+    text: taskText,
     attachments
   }, 120000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
@@ -1321,7 +1368,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.48" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.50" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);

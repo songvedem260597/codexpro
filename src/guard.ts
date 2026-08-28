@@ -70,8 +70,18 @@ export class WorkspaceManager {
 
   constructor(
     private readonly config: CodexProConfig,
-    private readonly onSelectedWorkspace?: (workspace: Workspace) => void
+    private readonly onSelectedWorkspace?: (workspace: Workspace) => void,
+    private readonly requiredWorkspaceRoot?: () => string
   ) {}
+
+  private boundRoot(): string {
+    const root = String(this.requiredWorkspaceRoot?.() || "").trim();
+    return root ? path.resolve(expandHome(root)) : "";
+  }
+
+  private sameRoot(left: string, right: string): boolean {
+    return path.resolve(left).localeCompare(path.resolve(right), undefined, { sensitivity: "accent" }) === 0;
+  }
 
   private selectWorkspace(workspace: Workspace): Workspace {
     this.selectedWorkspaceId = workspace.id;
@@ -80,8 +90,9 @@ export class WorkspaceManager {
   }
 
   defaultWorkspace(): Workspace {
-    const existing = [...this.workspaces.values()].find((workspace) => workspace.root === this.config.defaultRoot);
-    return existing ?? this.openWorkspace(this.config.defaultRoot, { select: false });
+    const root = this.boundRoot() || this.config.defaultRoot;
+    const existing = [...this.workspaces.values()].find((workspace) => this.sameRoot(workspace.root, root));
+    return existing ?? this.openWorkspace(root, { select: false });
   }
 
   selectDefaultWorkspace(): Workspace {
@@ -90,8 +101,12 @@ export class WorkspaceManager {
   }
 
   openWorkspace(rootInput?: string, options: { select?: boolean } = {}): Workspace {
-    const requested = rootInput?.trim() ? expandHome(rootInput.trim()) : this.config.defaultRoot;
+    const lockedRoot = this.boundRoot();
+    const requested = rootInput?.trim() ? expandHome(rootInput.trim()) : lockedRoot || this.config.defaultRoot;
     const resolved = path.resolve(requested);
+    if (lockedRoot && !this.sameRoot(resolved, lockedRoot)) {
+      throw new CodexProError(`Workspace is locked by CodexPro Manager: ${lockedRoot}`);
+    }
     if (!fs.existsSync(resolved)) {
       throw new CodexProError(`Workspace root does not exist: ${resolved}`);
     }
@@ -126,6 +141,14 @@ export class WorkspaceManager {
   }
 
   getWorkspace(id?: string): Workspace {
+    const lockedRoot = this.boundRoot();
+    if (lockedRoot) {
+      const lockedWorkspace = this.openWorkspace(lockedRoot, { select: false });
+      if (id && id !== lockedWorkspace.id) {
+        throw new CodexProError(`Workspace is locked by CodexPro Manager: ${lockedWorkspace.root}`);
+      }
+      return this.selectWorkspace(lockedWorkspace);
+    }
     if (!id) {
       if (this.selectedWorkspaceId) {
         const selected = this.workspaces.get(this.selectedWorkspaceId);
