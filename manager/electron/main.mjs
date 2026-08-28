@@ -109,6 +109,22 @@ async function chooseRequestFiles() {
   return files;
 }
 
+async function chooseWorkspaceTarget(kind = "directory") {
+  const normalizedKind = String(kind || "directory").toLowerCase();
+  if (!new Set(["directory", "file"]).has(normalizedKind)) throw new Error("Kiểu đường dẫn không hợp lệ.");
+  const result = await dialog.showOpenDialog({
+    title: normalizedKind === "file" ? "Chọn file ngoài repo" : "Chọn thư mục hoặc dự án ngoài repo",
+    properties: normalizedKind === "file" ? ["openFile"] : ["openDirectory"]
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const targetPath = path.resolve(result.filePaths[0]);
+  const stat = fs.statSync(targetPath);
+  if (normalizedKind === "file" && !stat.isFile()) throw new Error("Đường dẫn đã chọn không phải file.");
+  if (normalizedKind === "directory" && !stat.isDirectory()) throw new Error("Đường dẫn đã chọn không phải thư mục.");
+  const root = normalizedKind === "file" ? path.dirname(targetPath) : targetPath;
+  return { kind: normalizedKind, root, path: targetPath, name: path.basename(targetPath) };
+}
+
 const MANAGER_FONT_CHOICES = new Set(["system", "arial", "tahoma", "verdana", "trebuchet", "georgia", "cascadia"]);
 const WORKER_IMAGE_STATES = new Set(["idle", "working", "hung"]);
 const WORKER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
@@ -1902,6 +1918,7 @@ async function sendProfileRequest(payload) {
   const newChat = Boolean(payload?.newChat);
   const text = String(payload?.text || "").trim();
   const requestedProjectRoot = String(payload?.projectRoot || "").trim();
+  const requestedTargetPath = String(payload?.targetPath || "").trim();
   const requestedFiles = Array.isArray(payload?.attachments) ? payload.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
   const taskId = `cpt_${randomBytes(12).toString("hex")}`;
   const toolRetry = Boolean(payload?.toolRetry);
@@ -1909,7 +1926,7 @@ async function sendProfileRequest(payload) {
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
-  if (!requestedProjectRoot) throw new Error("Hãy chọn repo cần code trước khi gửi yêu cầu.");
+  if (!requestedProjectRoot) throw new Error("Hãy chọn thư mục hoặc dự án cần làm trước khi gửi yêu cầu.");
   if (text.length > 12000) throw new Error("Yêu cầu dài quá 12.000 ký tự.");
   const files = requestedFiles.map((file) => requestFileSummary(file?.path));
   if (files.some((file) => file.size > MAX_REQUEST_ATTACHMENT_BYTES)) throw new Error("Mỗi file được tối đa 8 MB.");
@@ -1924,8 +1941,14 @@ async function sendProfileRequest(payload) {
   if (sendDebug) console.error('[manager-send] after runtimeStatus');
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const knownProjects = await listProjects();
-  const selectedProject = knownProjects.find((project) => project.isGit && path.resolve(project.root).toLowerCase() === path.resolve(requestedProjectRoot).toLowerCase());
-  if (!selectedProject) throw new Error("Repo đã chọn không còn nằm trong danh sách Git workspace của CodexPro.");
+  const selectedProject = knownProjects.find((project) => path.resolve(project.root).toLowerCase() === path.resolve(requestedProjectRoot).toLowerCase());
+  if (!selectedProject) throw new Error("Thư mục đã chọn không còn nằm trong danh sách workspace của CodexPro.");
+  let targetPath = "";
+  if (requestedTargetPath) {
+    targetPath = path.resolve(requestedTargetPath);
+    if (!fs.existsSync(targetPath)) throw new Error("File hoặc thư mục mục tiêu không còn tồn tại.");
+    if (!pathInside(targetPath, selectedProject.root)) throw new Error("File mục tiêu phải nằm trong workspace đã chọn.");
+  }
   let profile = status.browserProfiles.find((item) => item.profile_id === profileId);
   if (!profile?.connected) throw new Error("Extension của profile này đang mất heartbeat với CodexPro.");
   const token = readToken(status.config.tokenFile);
@@ -1958,11 +1981,12 @@ async function sendProfileRequest(payload) {
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
   const taskText = [
     ...(newChat ? ["@CodexPro"] : ["Hãy sử dụng MCP CodexPro đã được kích hoạt trong đoạn chat này."]),
-    `Repo đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
+    `Workspace đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
+    ...(targetPath && path.resolve(targetPath).toLowerCase() !== path.resolve(selectedProject.root).toLowerCase() ? [`File/thư mục mục tiêu người dùng đã chọn trực tiếp: ${targetPath}`] : []),
     `Task ID bắt buộc: ${taskId}`,
     `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
     "BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Không được trả lời rằng không có tool/MCP, tool/MCP không sử dụng được hoặc tool/MCP bị disable khi chưa thực hiện một tool-call MCP CodexPro thực tế và nhận lỗi kỹ thuật từ chính lần gọi đó.",
-    "Sau khi begin_repo_task thành công, hãy đọc và thao tác đúng repo đã khóa. Không chuyển sang workspace/repo khác. Tiếp tục từ trạng thái git và công việc hiện có của repo này.",
+    "Sau khi begin_repo_task thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác. Nếu có file/thư mục mục tiêu được nêu ở trên thì ưu tiên thao tác đúng mục tiêu đó.",
     ...(toolRetry ? ["Đây là lần gửi lại vì phản hồi trước không có bằng chứng gọi CodexPro. Phải gọi codexpro action=begin_repo_task ngay."] : []),
     "",
     text ? `Yêu cầu của người dùng:\n${text}` : "Yêu cầu của người dùng nằm trong file đính kèm."
@@ -2187,6 +2211,7 @@ ipcMain.handle("codexpro:choose-project", async () => {
   const result = await dialog.showOpenDialog({ properties: ["openDirectory"], title: "Chọn repo hoặc dự án" });
   return result.canceled ? null : result.filePaths[0];
 });
+ipcMain.handle("codexpro:choose-workspace-target", (_event, kind) => chooseWorkspaceTarget(kind));
 ipcMain.handle("codexpro:add-project", async (_event, root) => {
   const resolved = path.resolve(String(root || ""));
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) throw new Error("Thư mục dự án không tồn tại.");

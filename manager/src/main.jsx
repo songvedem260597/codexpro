@@ -190,11 +190,12 @@ function ChatDropdown({ value, conversations, disabled, onChange }) {
   );
 }
 
-function ProjectDropdown({ value, projects, disabled, onChange }) {
+function ProjectDropdown({ value, projects, disabled, onChange, workspaceTarget, onBrowseDirectory, onBrowseFile }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const root = useRef(null);
   const selected = projects.find((project) => project.root === value);
+  const targetMatches = Boolean(workspaceTarget?.root && value && String(workspaceTarget.root).toLowerCase() === String(value).toLowerCase());
   const normalizedQuery = query.trim().toLocaleLowerCase("vi-VN");
   const filteredProjects = normalizedQuery
     ? projects.filter((project) => [project.name, project.repoFullName, project.branch, project.root].some((field) => String(field || "").toLocaleLowerCase("vi-VN").includes(normalizedQuery)))
@@ -213,28 +214,32 @@ function ProjectDropdown({ value, projects, disabled, onChange }) {
       <button type="button" className="project-dropdown-trigger" aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { setOpen((current) => !current); if (open) setQuery(""); }}>
         <span className="project-dropdown-mark">⌘</span>
         <span className="project-dropdown-value">
-          <strong>{selected?.name || "Chọn repo cần code"}</strong>
-          <small>{selected ? `${selected.repoFullName ? `${selected.repoFullName} · ` : ""}${selected.branch || "git"} · ${selected.root}` : "Chỉ hiển thị Git repo CodexPro đã quét được"}</small>
+          <strong>{targetMatches && workspaceTarget?.kind === "file" ? workspaceTarget.name : selected?.name || "Chọn dự án, thư mục hoặc file"}</strong>
+          <small>{targetMatches && workspaceTarget?.kind === "file" ? `File ngoài repo · ${workspaceTarget.path}` : selected ? `${selected.repoFullName ? `${selected.repoFullName} · ` : ""}${selected.isGit ? (selected.branch || "git") : "thư mục"} · ${selected.root}` : "Có thể chọn Git repo hoặc duyệt file/thư mục bất kỳ"}</small>
         </span>
         <svg className="project-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
       </button>
       {open && (
-        <div className="project-dropdown-menu" role="listbox" aria-label="Chọn repo cần code">
+        <div className="project-dropdown-menu" role="listbox" aria-label="Chọn dự án hoặc đường dẫn cần làm">
           <div className="project-dropdown-search">
             <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></svg>
-            <input autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm theo tên repo, branch hoặc đường dẫn…" aria-label="Tìm repo" />
+            <input autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm dự án, thư mục hoặc đường dẫn…" aria-label="Tìm dự án hoặc đường dẫn" />
             {query && <button type="button" aria-label="Xóa từ khóa" onClick={() => setQuery("")}>×</button>}
           </div>
           {filteredProjects.map((project) => (
             <button type="button" role="option" aria-selected={project.root === value} className={`project-dropdown-option ${project.root === value ? "is-selected" : ""}`} key={project.root} onClick={() => { onChange(project.root); setOpen(false); }}>
               <span className="project-dropdown-mark">⌘</span>
-              <span className="project-dropdown-copy"><strong>{project.name}</strong><small>{project.repoFullName ? `${project.repoFullName} · ` : ""}{project.branch || "git"} · {project.root}</small></span>
+              <span className="project-dropdown-copy"><strong>{project.name}</strong><small>{project.repoFullName ? `${project.repoFullName} · ` : ""}{project.isGit ? (project.branch || "git") : "thư mục"} · {project.root}</small></span>
               {formatRepoActivity(project) && <span className="project-dropdown-activity">{formatRepoActivity(project)}</span>}
               {project.changes > 0 && <span className="project-dropdown-changes">{project.changes} đổi</span>}
               {project.root === value && <span className="project-dropdown-check">✓</span>}
             </button>
           ))}
-          {!filteredProjects.length && <div className="project-dropdown-empty">Không tìm thấy repo phù hợp.</div>}
+          {!filteredProjects.length && <div className="project-dropdown-empty">Không tìm thấy trong danh sách đã lưu.</div>}
+          <div className="project-dropdown-browse">
+            <button type="button" onClick={() => { setOpen(false); setQuery(""); onBrowseDirectory?.(); }}><span>▣</span> Chọn thư mục ngoài danh sách</button>
+            <button type="button" onClick={() => { setOpen(false); setQuery(""); onBrowseFile?.(); }}><span>▤</span> Chọn file ngoài repo</button>
+          </div>
         </div>
       )}
     </div>
@@ -537,6 +542,7 @@ function App() {
   const [requestDrafts, setRequestDrafts] = useState({});
   const [requestTargets, setRequestTargets] = useState({});
   const [requestProjectRoots, setRequestProjectRoots] = useState({});
+  const [requestWorkspaceTargets, setRequestWorkspaceTargets] = useState({});
   const [requestFiles, setRequestFiles] = useState({});
   const [requestResponses, setRequestResponses] = useState({});
   const [clearedResponseTargets, setClearedResponseTargets] = useState({});
@@ -1032,23 +1038,40 @@ function App() {
   }
 
   function projectRootForProfile(profile) {
-    const gitProjects = projects.filter((project) => project.isGit);
+    const workspaceProjects = projects;
     const requested = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
-    const exact = gitProjects.find((project) => project.root.toLowerCase() === requested.toLowerCase());
+    const exact = workspaceProjects.find((project) => project.root.toLowerCase() === requested.toLowerCase());
     if (exact) return exact.root;
     const currentWorkspace = String(profile.current_workspace_root || "");
-    return gitProjects.find((project) => project.root.toLowerCase() === currentWorkspace.toLowerCase())?.root
-      || gitProjects.find((project) => project.active)?.root
-      || gitProjects[0]?.root
+    return workspaceProjects.find((project) => project.root.toLowerCase() === currentWorkspace.toLowerCase())?.root
+      || workspaceProjects.find((project) => project.active)?.root
+      || workspaceProjects[0]?.root
       || "";
   }
 
-  function selectProjectForProfile(profileId, root) {
+  function selectProjectForProfile(profileId, root, workspaceTarget = null) {
     setRequestProjectRoots((current) => ({ ...current, [profileId]: root }));
+    setRequestWorkspaceTargets((current) => {
+      if (workspaceTarget) return { ...current, [profileId]: workspaceTarget };
+      const { [profileId]: _removed, ...next } = current;
+      return next;
+    });
     setManagerSettings((current) => ({ ...current, repoSelections: { ...(current.repoSelections || {}), [profileId]: root } }));
     void api.saveManagerSettings({ repoSelections: { [profileId]: root } })
       .then(applyManagerSettings)
       .catch((err) => setRequestSendErrors((current) => ({ ...current, [profileId]: err?.message || String(err) })));
+  }
+
+  async function browseWorkspaceTarget(profile, kind) {
+    try {
+      const target = await api.chooseWorkspaceTarget(kind);
+      if (!target?.root) return;
+      setProjects(await api.addProject(target.root));
+      selectProjectForProfile(profile.profile_id, target.root, target);
+      notify(target.kind === "file" ? `Đã chọn file ${target.name}` : `Đã chọn thư mục ${target.name}`);
+    } catch (err) {
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: err?.message || String(err) }));
+    }
   }
 
   async function setupProfile(profile) {
@@ -1180,8 +1203,9 @@ function App() {
     const text = String(requestDrafts[profile.profile_id] || "").trim();
     const attachments = requestFiles[profile.profile_id] || [];
     const projectRoot = projectRootForProfile(profile);
+    const workspaceTarget = requestWorkspaceTargets[profile.profile_id];
     if (!projectRoot) {
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có Git repo nào trong workspace CodexPro. Hãy thêm repo ở tab Dự án trước." }));
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có workspace nào được chọn. Hãy chọn repo, thư mục hoặc file trước." }));
       return;
     }
     setBusy(`request:${profile.profile_id}`);
@@ -1211,7 +1235,7 @@ function App() {
       });
     }
     try {
-      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, projectRoot, text, attachments });
+      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, projectRoot, targetPath: workspaceTarget?.path || "", text, attachments });
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
       const resolvedConversationId = String(result?.conversation_id || conversationId);
@@ -1676,7 +1700,7 @@ function App() {
     const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
     if (!profile) return null;
     const conversations = profileRequestChats(profile);
-    const gitProjects = projects.filter((project) => project.isGit);
+    const workspaceProjects = projects;
     const selectedProjectRoot = projectRootForProfile(profile);
     const selectedTarget = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
     const isNewChat = selectedTarget === NEW_CHAT_TARGET;
@@ -1741,9 +1765,9 @@ function App() {
           </div>
 
           <article className={`request-card chat-popup-card ${profile.connected ? "is-online" : "is-offline"}`}>
-            <label className="request-label">Repo cần code <small>khóa cho profile/chat hiện tại</small></label>
-            <ProjectDropdown value={selectedProjectRoot} projects={gitProjects} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} disabled={!profile.connected || !gitProjects.length || sending || selectedBusy || rolloverCreating} />
-            {!gitProjects.length && <div className="request-send-error">Chưa có Git repo nào. Thêm repo ở tab Dự án trước.</div>}
+            <label className="request-label">Dự án / đường dẫn cần làm <small>khóa cho profile/chat hiện tại</small></label>
+            <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} workspaceTarget={requestWorkspaceTargets[profile.profile_id]} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} onBrowseDirectory={() => void browseWorkspaceTarget(profile, "directory")} onBrowseFile={() => void browseWorkspaceTarget(profile, "file")} disabled={!profile.connected || sending || selectedBusy || rolloverCreating} />
+            {!workspaceProjects.length && <div className="request-send-error">Chưa có workspace đã lưu. Dùng nút chọn thư mục/file ngay trong danh sách phía trên.</div>}
             <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
               <div className="chat-response-head">
