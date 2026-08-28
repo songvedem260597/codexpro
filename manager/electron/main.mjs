@@ -20,7 +20,7 @@ const platformLabel = isWindows ? "Windows" : isMac ? "macOS" : process.platform
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.10";
+const WORKER_EXTENSION_VERSION = "0.5.16";
 const RUNTIME_BASE_CACHE_MS = 10000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
@@ -54,7 +54,29 @@ function requestFileSummary(filePath) {
   const resolved = path.resolve(String(filePath || ""));
   const stat = fs.statSync(resolved);
   if (!stat.isFile()) throw new Error(`Không phải file hợp lệ: ${path.basename(resolved)}`);
-  return { path: resolved, name: path.basename(resolved), size: stat.size, mimeType: mimeTypeForFile(resolved) };
+  const mimeType = mimeTypeForFile(resolved);
+  let previewDataUrl = "";
+  if (mimeType.startsWith("image/")) {
+    try {
+      const image = nativeImage.createFromPath(resolved);
+      if (!image.isEmpty()) {
+        const { width, height } = image.getSize();
+        const longest = Math.max(width, height, 1);
+        const scale = Math.min(1, 96 / longest);
+        const thumbnail = scale < 1
+          ? image.resize({
+              width: Math.max(1, Math.round(width * scale)),
+              height: Math.max(1, Math.round(height * scale)),
+              quality: "good"
+            })
+          : image;
+        previewDataUrl = thumbnail.toDataURL();
+      }
+    } catch {
+      previewDataUrl = "";
+    }
+  }
+  return { path: resolved, name: path.basename(resolved), size: stat.size, mimeType, previewDataUrl };
 }
 
 async function chooseRequestFiles() {
@@ -76,7 +98,7 @@ async function chooseRequestFiles() {
 
 async function clipboardImagePng() {
   if (typeof clipboard.readImage === "function") {
-    const image = clipboard.readImage();
+    const image = await Promise.resolve(clipboard.readImage());
     if (!image?.isEmpty?.()) return image.toPNG();
   }
   if (typeof clipboard.read === "function") {
@@ -231,6 +253,21 @@ function createWindow() {
         }
         let sendProbe = null;
         if (process.env.CODEXPRO_MANAGER_SMOKE_SEND === "1") {
+          const sendConversationId = String(process.env.CODEXPRO_MANAGER_SMOKE_SEND_CONVERSATION_ID || "").trim();
+          const sendText = String(process.env.CODEXPRO_MANAGER_SMOKE_SEND_TEXT || "CodexPro Manager UI send probe — trả lời OK.").trim();
+          if (sendConversationId) {
+            await win.webContents.executeJavaScript(`(async () => {
+              const trigger = document.querySelector('.chat-dropdown-trigger:not(:disabled)');
+              if (!trigger) return false;
+              trigger.click();
+              await new Promise((resolve) => setTimeout(resolve, 180));
+              const option = document.querySelector('[data-conversation-id=${JSON.stringify(sendConversationId)}]');
+              if (!option) return false;
+              option.click();
+              return true;
+            })()`, true);
+            await new Promise((resolve) => setTimeout(resolve, 1400));
+          }
           sendProbe = await win.webContents.executeJavaScript(`(async () => {
             const cards = [...document.querySelectorAll('.request-card')];
             const card = cards.find((item) => {
@@ -240,52 +277,84 @@ function createWindow() {
             });
             if (!card) return { ok: false, error: 'Không có card rảnh để test gửi.' };
             const textarea = card.querySelector('textarea');
-            const button = card.querySelector('.request-card-actions .button.primary');
+            const oldValue = textarea.value;
             const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-            setter?.call(textarea, 'CodexPro Manager UI send probe — trả lời OK.');
-            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            setter?.call(textarea, ${JSON.stringify(sendText)});
+            if (textarea._valueTracker) textarea._valueTracker.setValue(oldValue);
+            textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(sendText)} }));
             textarea.dispatchEvent(new Event('change', { bubbles: true }));
-            await new Promise((resolve) => setTimeout(resolve, 200));
-            button.click();
-            await new Promise((resolve) => setTimeout(resolve, 12000));
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            const currentButton = card.querySelector('.request-card-actions .button.primary');
+            if (!currentButton || currentButton.disabled) return { ok: false, error: 'Nút Gửi tin nhắn chưa sẵn sàng sau khi nhập.', textarea: card.querySelector('textarea')?.value || '' };
+            currentButton.click();
+            await new Promise((resolve) => setTimeout(resolve, 16000));
+            const currentTextarea = card.querySelector('textarea');
+            const toast = document.querySelector('.toast')?.textContent?.trim() || '';
+            const error = card.querySelector('.request-send-error')?.textContent?.trim() || document.querySelector('.error-banner')?.textContent?.trim() || document.querySelector('.error')?.textContent?.trim() || '';
+            const userMessages = [...card.querySelectorAll('.chat-transcript-message.is-user .user-message-text')].map((node) => node.textContent?.trim() || '').filter(Boolean);
+            const userMessageVisible = userMessages.includes(${JSON.stringify(sendText)});
             return {
-              ok: textarea.value === '',
-              textarea: textarea.value,
-              buttonText: button.textContent?.trim() || '',
-              toast: document.querySelector('.toast')?.textContent?.trim() || '',
-              error: document.querySelector('.error-banner')?.textContent?.trim() || document.querySelector('.error')?.textContent?.trim() || ''
+              ok: (currentTextarea?.value || '') === '' && !error && userMessageVisible,
+              textarea: currentTextarea?.value || '',
+              buttonText: card.querySelector('.request-card-actions .button.primary')?.textContent?.trim() || '',
+              toast,
+              error,
+              userMessageVisible,
+              userMessages: userMessages.slice(-5),
+              conversationTitle: card.querySelector('.chat-dropdown-value strong')?.textContent?.trim() || ''
             };
           })()`, true);
         }
         let pasteProbe = null;
         if (process.env.CODEXPRO_MANAGER_SMOKE_PASTE_IMAGE === "1") {
-          const previousClipboard = typeof clipboard.read === "function" ? await clipboard.read() : null;
-          const sample = nativeImage.createFromDataURL("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlU6V0AAAAASUVORK5CYII=");
+          const previousImage = typeof clipboard.readImage === "function" ? await Promise.resolve(clipboard.readImage()) : null;
+          const previousText = typeof clipboard.readText === "function" ? String(await Promise.resolve(clipboard.readText()) || "") : "";
+          const sampleBitmap = Buffer.alloc(24 * 24 * 4);
+          for (let index = 0; index < sampleBitmap.length; index += 4) {
+            sampleBitmap[index] = 0x3f;
+            sampleBitmap[index + 1] = 0x85;
+            sampleBitmap[index + 2] = 0xff;
+            sampleBitmap[index + 3] = 0xff;
+          }
+          const sample = nativeImage.createFromBitmap(sampleBitmap, { width: 24, height: 24, scaleFactor: 1 });
           try {
-            if (typeof clipboard.writeImage === "function") clipboard.writeImage(sample);
+            if (typeof clipboard.writeImage === "function") await Promise.resolve(clipboard.writeImage(sample));
             else await clipboard.write([new ClipboardItem({ "image/png": new Blob([sample.toPNG()], { type: "image/png" }) })]);
-            pasteProbe = await win.webContents.executeJavaScript(`(async () => {
+            const pasteTargetReady = await win.webContents.executeJavaScript(`(() => {
               const card = [...document.querySelectorAll('.request-card')].find((item) => {
                 const textarea = item.querySelector('textarea');
                 return textarea && !textarea.disabled;
               });
-              if (!card) return { ok: false, error: 'Không có textarea rảnh để test paste ảnh.' };
-              const textarea = card.querySelector('textarea');
-              const event = new Event('paste', { bubbles: true, cancelable: true });
-              Object.defineProperty(event, 'clipboardData', { value: { items: [{ type: 'image/png' }], files: [] } });
-              textarea.dispatchEvent(event);
-              await new Promise((resolve) => setTimeout(resolve, 500));
-              const attachment = card.querySelector('.request-file');
-              attachment?.scrollIntoView({ block: 'center' });
-              return {
-                ok: Boolean(attachment),
-                attachment: attachment?.querySelector('.request-file-copy strong')?.textContent?.trim() || '',
-                toast: document.querySelector('.toast')?.textContent?.trim() || '',
-                placeholder: textarea.getAttribute('placeholder') || ''
-              };
+              const textarea = card?.querySelector('textarea');
+              textarea?.focus();
+              return Boolean(textarea);
             })()`, true);
+            if (!pasteTargetReady) pasteProbe = { ok: false, error: 'Không có textarea rảnh để test paste ảnh.' };
+            else {
+              win.webContents.sendInputEvent({ type: "keyDown", keyCode: "V", modifiers: ["control"] });
+              win.webContents.sendInputEvent({ type: "keyUp", keyCode: "V", modifiers: ["control"] });
+              await new Promise((resolve) => setTimeout(resolve, 1400));
+              pasteProbe = await win.webContents.executeJavaScript(`(() => {
+                const card = [...document.querySelectorAll('.request-card')].find((item) => item.querySelector('textarea:focus'))
+                  || [...document.querySelectorAll('.request-card')].find((item) => item.querySelector('textarea'));
+                const textarea = card?.querySelector('textarea');
+                const attachment = card?.querySelector('.request-file');
+                attachment?.scrollIntoView({ block: 'center' });
+                const thumbnail = attachment?.querySelector('img.request-file-image');
+                return {
+                  ok: Boolean(thumbnail),
+                  attachment: attachment?.querySelector('.request-file-copy strong')?.textContent?.trim() || '',
+                  hasThumbnail: Boolean(thumbnail),
+                  thumbnailSource: Boolean(thumbnail?.getAttribute('src')?.startsWith('data:image/')),
+                  toast: document.querySelector('.toast')?.textContent?.trim() || '',
+                  error: card?.querySelector('.request-send-error')?.textContent?.trim() || '',
+                  placeholder: textarea?.getAttribute('placeholder') || ''
+                };
+              })()`, true);
+            }
           } finally {
-            if (previousClipboard && typeof clipboard.write === "function") await clipboard.write(previousClipboard);
+            if (previousImage && !previousImage.isEmpty() && typeof clipboard.writeImage === "function") clipboard.writeImage(previousImage);
+            else if (typeof clipboard.writeText === "function") clipboard.writeText(previousText || "");
           }
         }
         let openProfileProbe = null;
@@ -297,16 +366,20 @@ function createWindow() {
           const expectedTitle = String(beforeActiveTab?.title || beforeProfile?.active_chat_title || "");
           const ui = await win.webContents.executeJavaScript(`(async () => {
             const card = [...document.querySelectorAll('.browser-profile')].find((item) => item.querySelector('code')?.textContent?.includes(${JSON.stringify(openProfilePrefix)}));
-            const button = card?.querySelector('.open-profile');
-            if (!button) return { ok: false, error: 'Không tìm thấy nút Mở profile.' };
+            const chatButton = card?.querySelector('.profile-chat');
+            if (!chatButton) return { ok: false, error: 'Không tìm thấy nút Chat.' };
+            chatButton.click();
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            const modal = document.querySelector('.chat-modal');
+            const button = modal?.querySelector('.request-card-actions .button.secondary');
+            if (!button) return { ok: false, error: 'Không tìm thấy nút Mở Chrome trong popup.' };
+            const disabledBefore = button.disabled;
+            const textBefore = button.textContent?.trim() || '';
             button.click();
-            await new Promise((resolve) => setTimeout(resolve, 6000));
-            return { ok: true, disabled: button.disabled, text: button.textContent?.trim() || '', error: document.querySelector('.alert')?.textContent?.trim() || '' };
+            await new Promise((resolve) => setTimeout(resolve, 7000));
+            const currentButton = document.querySelector('.chat-modal .request-card-actions .button.secondary');
+            return { ok: true, disabledBefore, textBefore, disabledAfter: currentButton?.disabled ?? null, textAfter: currentButton?.textContent?.trim() || '', error: document.querySelector('.alert')?.textContent?.trim() || '' };
           })()`, true);
-          const directPayload = beforeProfile?.profile_id ? { profileId: beforeProfile.profile_id, conversationId: expectedConversationId } : null;
-          const direct = directPayload
-            ? await win.webContents.executeJavaScript(`window.codexpro.openProfileChat(${JSON.stringify(directPayload)}).then((value) => JSON.parse(JSON.stringify(value)))`, true)
-            : null;
           const afterStatus = await win.webContents.executeJavaScript("window.codexpro.getStatus().then((value) => JSON.parse(JSON.stringify(value)))", true);
           const afterProfile = afterStatus.browserProfiles?.find((item) => item.profile_id.startsWith(openProfilePrefix));
           const afterActiveTab = afterProfile?.conversation_tabs?.find((item) => item.active) || afterProfile?.conversation_tabs?.[0];
@@ -329,13 +402,12 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
 `));
           } catch {}
           openProfileProbe = {
-            ok: Boolean(ui?.ok) && !ui?.error && Boolean(direct?.window_focus?.ok) && beforeProfile?.tab_count === afterProfile?.tab_count && (!expectedConversationId || expectedConversationId === afterConversationId),
+            ok: Boolean(ui?.ok) && !ui?.error && !ui?.disabledBefore && String(foreground?.process || '').toLowerCase() === 'chrome' && beforeProfile?.tab_count === afterProfile?.tab_count && (!expectedConversationId || expectedConversationId === afterConversationId),
             beforeTabCount: beforeProfile?.tab_count ?? null,
             afterTabCount: afterProfile?.tab_count ?? null,
             expectedConversationId,
             afterConversationId,
             expectedTitle,
-            direct,
             foreground,
             ui
           };
@@ -879,7 +951,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.36" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.42" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -955,11 +1027,17 @@ public static class CodexProWindowFocus {
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr SetActiveWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 }
 '@
 $found=[IntPtr]::Zero
 $foundTitle=''
-for($attempt=0;$attempt -lt 25 -and $found -eq [IntPtr]::Zero;$attempt++){
+for($attempt=0;$attempt -lt 45 -and $found -eq [IntPtr]::Zero;$attempt++){
   [CodexProWindowFocus]::EnumWindows({param($h,$l)
     if(-not [CodexProWindowFocus]::IsWindowVisible($h)){return $true}
     $sb=New-Object Text.StringBuilder 512
@@ -976,17 +1054,38 @@ for($attempt=0;$attempt -lt 25 -and $found -eq [IntPtr]::Zero;$attempt++){
     }
     return $true
   },[IntPtr]::Zero)|Out-Null
-  if($found -eq [IntPtr]::Zero){Start-Sleep -Milliseconds 120}
+  if($found -eq [IntPtr]::Zero){Start-Sleep -Milliseconds 100}
 }
-if($found -eq [IntPtr]::Zero){[pscustomobject]@{ok=$false;title=$target}|ConvertTo-Json -Compress;exit 0}
-[CodexProWindowFocus]::ShowWindowAsync($found,3)|Out-Null
-$ws=New-Object -ComObject WScript.Shell
-$activated=$ws.AppActivate($foundTitle)
-Start-Sleep -Milliseconds 220
-[CodexProWindowFocus]::ShowWindowAsync($found,3)|Out-Null
+if($found -eq [IntPtr]::Zero){[pscustomobject]@{ok=$false;title=$target;reason='window_not_found'}|ConvertTo-Json -Compress;exit 0}
+
+[uint32]$targetPid=0
+$targetThread=[CodexProWindowFocus]::GetWindowThreadProcessId($found,[ref]$targetPid)
+$currentThread=[CodexProWindowFocus]::GetCurrentThreadId()
+$attachedTarget=$false
+$attachedForeground=$false
+for($attempt=0;$attempt -lt 4;$attempt++){
+  [CodexProWindowFocus]::ShowWindowAsync($found,3)|Out-Null
+  $foregroundBefore=[CodexProWindowFocus]::GetForegroundWindow()
+  [uint32]$foregroundPid=0
+  $foregroundThread=if($foregroundBefore -ne [IntPtr]::Zero){[CodexProWindowFocus]::GetWindowThreadProcessId($foregroundBefore,[ref]$foregroundPid)}else{0}
+  if($foregroundThread -gt 0 -and $foregroundThread -ne $currentThread){$attachedForeground=[CodexProWindowFocus]::AttachThreadInput($currentThread,$foregroundThread,$true)}
+  if($targetThread -gt 0 -and $targetThread -ne $currentThread){$attachedTarget=[CodexProWindowFocus]::AttachThreadInput($currentThread,$targetThread,$true)}
+  [CodexProWindowFocus]::BringWindowToTop($found)|Out-Null
+  [CodexProWindowFocus]::SetWindowPos($found,[IntPtr](-1),0,0,0,0,0x0053)|Out-Null
+  [CodexProWindowFocus]::SetWindowPos($found,[IntPtr](-2),0,0,0,0,0x0053)|Out-Null
+  [CodexProWindowFocus]::SetActiveWindow($found)|Out-Null
+  [CodexProWindowFocus]::SetForegroundWindow($found)|Out-Null
+  Start-Sleep -Milliseconds 160
+  $foreground=[CodexProWindowFocus]::GetForegroundWindow()
+  if($attachedTarget){[CodexProWindowFocus]::AttachThreadInput($currentThread,$targetThread,$false)|Out-Null;$attachedTarget=$false}
+  if($attachedForeground){[CodexProWindowFocus]::AttachThreadInput($currentThread,$foregroundThread,$false)|Out-Null;$attachedForeground=$false}
+  if($foreground -eq $found -and [CodexProWindowFocus]::IsZoomed($found)){break}
+  Start-Sleep -Milliseconds 100
+}
 $foreground=[CodexProWindowFocus]::GetForegroundWindow()
 $maximized=[CodexProWindowFocus]::IsZoomed($found)
-[pscustomobject]@{ok=([bool]$activated -and [bool]$maximized);activated=[bool]$activated;maximized=[bool]$maximized;foreground_match=($foreground -eq $found);title=$foundTitle;hwnd=$found.ToInt64();foreground=$foreground.ToInt64()}|ConvertTo-Json -Compress
+$foregroundMatch=($foreground -eq $found)
+[pscustomobject]@{ok=([bool]$foregroundMatch -and [bool]$maximized);activated=[bool]$foregroundMatch;maximized=[bool]$maximized;foreground_match=[bool]$foregroundMatch;title=$foundTitle;hwnd=$found.ToInt64();foreground=$foreground.ToInt64();target_pid=$targetPid}|ConvertTo-Json -Compress
 `;
   try {
     return JSON.parse(await runPowerShell(script));
@@ -998,41 +1097,53 @@ $maximized=[CodexProWindowFocus]::IsZoomed($found)
 async function openProfileChat(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
+  const targetId = String(payload?.targetId ?? "").trim();
+  const targetConversationId = String(payload?.targetConversationId || "").trim();
+  const title = String(payload?.title || "").trim();
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (conversationId && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
+  if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome của profile này.");
 
-  const status = await runtimeStatus();
-  if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-  const profile = status.browserProfiles.find((item) => item.profile_id === profileId);
-  if (!profile?.connected) throw new Error("Extension của profile này đang mất heartbeat với CodexPro.");
-  const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
-  if (!tabs.length) throw new Error("Profile này chưa có tab ChatGPT đang mở.");
+  const base = await runtimeBaseStatus();
+  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  const token = base.token;
 
-  const conversationOf = (tab) => String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-  let target = conversationId
-    ? tabs.find((tab) => tab.active && conversationOf(tab) === conversationId) || tabs.find((tab) => conversationOf(tab) === conversationId)
-    : tabs.find((tab) => tab.active) || tabs[0];
-  const token = readToken(status.config.tokenFile);
-
-  if (conversationId && !target) {
-    target = tabs.find((tab) => tab.active) || tabs[0];
-    await localMcpTool(status.config, token, "browser_control", {
+  if (conversationId && targetConversationId !== conversationId) {
+    await localMcpTool(base.config, token, "browser_control", {
       action: "navigate",
       profile_id: profileId,
-      target_id: String(target.id),
+      target_id: targetId,
       url: `https://chatgpt.com/c/${conversationId}`
     }, 30000);
   }
 
-  await localMcpTool(status.config, token, "browser_control", {
+  const activation = await localMcpTool(base.config, token, "browser_control", {
     action: "activate_tab",
     profile_id: profileId,
-    target_id: String(target.id)
+    target_id: targetId
   }, 20000);
-  const resolvedConversationId = conversationId || conversationOf(target);
-  const conversation = (profile.recent_conversations || []).find((item) => String(item.id || "") === resolvedConversationId);
-  const windowFocus = await focusChromeWindow(conversation?.title || target.title || profile.active_chat_title || "");
-  return { ok: true, profile_id: profileId, conversation_id: resolvedConversationId, target_id: target.id, window_focus: windowFocus };
+
+  let windowFocus = await focusChromeWindow(title);
+  if (!windowFocus?.ok && activation?.window_state === "maximized" && activation?.window_focused) {
+    windowFocus = {
+      ok: true,
+      activated: true,
+      maximized: true,
+      foreground_match: true,
+      source: "chrome.windows",
+      window_id: activation.window_id
+    };
+  }
+  if (!windowFocus?.ok) throw new Error("Đã chọn đúng tab nhưng Windows chưa đưa Chrome lên trước. Hãy thử lại một lần.");
+
+  return {
+    ok: true,
+    profile_id: profileId,
+    conversation_id: conversationId || targetConversationId,
+    target_id: Number(targetId),
+    activation,
+    window_focus: windowFocus
+  };
 }
 
 async function reloadChromeProfiles() {
@@ -1156,7 +1267,8 @@ async function getProfileResponse(payload) {
   return await localMcpTool(base.config, base.token, "browser_control", {
     action: "get_chat_response",
     profile_id: profileId,
-    conversation_id: conversationId
+    conversation_id: conversationId,
+    read_dom: payload?.readDom !== false
   }, 80000);
 }
 
@@ -1171,7 +1283,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.36" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.42" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
@@ -1273,7 +1385,12 @@ ipcMain.handle("codexpro:rotate-link", async () => {
 ipcMain.handle("codexpro:projects", () => listProjects());
 ipcMain.handle("codexpro:check-profile", (_event, profileId) => checkChatGptProfile(profileId));
 ipcMain.handle("codexpro:setup-profile", (_event, profileId) => setupChatGptProfile(profileId));
-ipcMain.handle("codexpro:open-profile-chat", (_event, payload) => openProfileChat(payload));
+ipcMain.handle("codexpro:open-profile-chat", async (event, payload) => {
+  const result = await openProfileChat(payload);
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  if (result?.window_focus?.ok && owner && !owner.isDestroyed()) owner.minimize();
+  return result;
+});
 ipcMain.handle("codexpro:reload-profiles", () => reloadChromeProfiles());
 ipcMain.handle("codexpro:choose-request-files", () => chooseRequestFiles());
 ipcMain.handle("codexpro:capture-clipboard-image", () => captureClipboardImage());

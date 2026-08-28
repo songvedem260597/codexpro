@@ -3020,6 +3020,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
         target_id: z.string().optional().describe("Tab id from list_tabs. Omit to use the first page tab."),
         conversation_id: z.string().optional().describe("Exact ChatGPT conversation id for send_chat_request, rename_chat, or get_chat_response."),
+        read_dom: z.boolean().optional().describe("For get_chat_response, read transcript text from the page DOM. Set false to return network state only."),
         new_chat: z.boolean().optional().describe("For send_chat_request, create a new ChatGPT conversation in a background tab without focusing the profile."),
         title: z.string().max(120).optional().describe("New conversation title for rename_chat."),
         attachments: z.array(z.object({
@@ -3076,6 +3077,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         result = await runBrowserExtensionCommand(args.action, {
           target_id: args.target_id,
           conversation_id: args.conversation_id,
+          read_dom: args.read_dom,
           new_chat: args.new_chat,
           title: args.title,
           attachments: args.attachments,
