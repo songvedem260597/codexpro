@@ -225,6 +225,7 @@ function ProjectDropdown({ value, projects, disabled, onChange }) {
             <button type="button" role="option" aria-selected={project.root === value} className={`project-dropdown-option ${project.root === value ? "is-selected" : ""}`} key={project.root} onClick={() => { onChange(project.root); setOpen(false); }}>
               <span className="project-dropdown-mark">⌘</span>
               <span className="project-dropdown-copy"><strong>{project.name}</strong><small>{project.repoFullName ? `${project.repoFullName} · ` : ""}{project.branch || "git"} · {project.root}</small></span>
+              {formatRepoActivity(project) && <span className="project-dropdown-activity">{formatRepoActivity(project)}</span>}
               {project.changes > 0 && <span className="project-dropdown-changes">{project.changes} đổi</span>}
               {project.root === value && <span className="project-dropdown-check">✓</span>}
             </button>
@@ -240,6 +241,21 @@ function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatRepoActivity(project) {
+  const timestamp = Date.parse(project?.activityAt || "");
+  if (!Number.isFinite(timestamp)) return "";
+  const elapsed = Math.max(0, Date.now() - timestamp);
+  const minutes = Math.floor(elapsed / 60000);
+  const label = project.activityKind === "push" ? "push" : project.activityKind === "remote" ? "remote" : "commit";
+  if (minutes < 1) return `${label} vừa xong`;
+  if (minutes < 60) return `${label} ${minutes} phút trước`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${label} ${hours} giờ trước`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${label} ${days} ngày trước`;
+  return `${label} ${new Date(timestamp).toLocaleDateString("vi-VN")}`;
 }
 
 function ResponseText({ text, truncated }) {
@@ -1404,7 +1420,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.53</small>
+          <small>CodexPro Manager 0.2.54</small>
         </div>
       </aside>
 
@@ -1580,6 +1596,7 @@ function App() {
                   <code>{project.root}</code>
                   <div className="project-meta">
                     {project.repoFullName && <span>{project.repoFullName}</span>}
+                    {formatRepoActivity(project) && <span className="recent-activity">{formatRepoActivity(project)}</span>}
                     <span>{project.source}</span>
                     {project.active && <span>{project.sessionCount} phiên MCP</span>}
                     <span>{project.isGit ? `nhánh ${project.branch}` : "thư mục dự án"}</span>

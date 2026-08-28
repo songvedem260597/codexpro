@@ -239,9 +239,11 @@ section { margin-bottom: 38px; }
 .project-dropdown-copy strong { font-size: 13px; }
 .project-dropdown-copy small { margin-top: 3px; color: #788f83; font-size: 11px; }
 .project-dropdown-changes { color: #ffc06a; font-size: 10px; font-weight: 800; white-space: nowrap; }
+.project-dropdown-activity { color: #82d8a2; font-size: 10px; font-weight: 800; white-space: nowrap; }
 .project-dropdown-check { color: #72e7a0; font-weight: 900; }
 .project-dropdown.is-disabled { opacity: .55; }
 .project-dropdown-empty { padding: 18px 12px; color: #83968b; text-align: center; font-size: 13px; }
+.project-meta .recent-activity { color: #82d8a2; font-weight: 700; }
 .request-composer { border: 1px solid #303846; border-radius: var(--radius-panel); background: #0d1016; overflow: hidden; transition: border-color .16s ease, box-shadow .16s ease; }
 .request-composer:focus-within { border-color: #6b8cff; box-shadow: 0 0 0 3px #6b8cff24; }
 .request-card .request-composer textarea { min-height: 88px; padding: 12px 13px 6px; border: 0; border-radius: 0; background: transparent; box-shadow: none; line-height: 1.5; }

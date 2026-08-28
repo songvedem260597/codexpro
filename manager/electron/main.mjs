@@ -701,7 +701,7 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         }
         const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe }));
+        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe }));
       } catch (error) {
         console.error(error instanceof Error ? error.stack || error.message : String(error));
         process.exitCode = 1;
@@ -1121,23 +1121,47 @@ async function gitSummary(root) {
     const { stdout: statusText } = await execFileAsync(git, ["-C", root, "status", "--porcelain"], { windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
     const { stdout: commitText } = await execFileAsync(git, ["-C", root, "log", "-1", "--pretty=format:%h%x09%s%x09%cI"], { windowsHide: true });
     let remoteUrl = "";
+    let upstream = "";
+    let pushedAt = "";
+    let remoteCommitAt = "";
     try {
       const remote = await execFileAsync(git, ["-C", root, "remote", "get-url", "origin"], { windowsHide: true });
       remoteUrl = remote.stdout.trim();
     } catch {}
+    try {
+      const upstreamResult = await execFileAsync("git.exe", ["-C", root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], { windowsHide: true });
+      upstream = upstreamResult.stdout.trim();
+      const [remoteCommit, pushReflog] = await Promise.allSettled([
+        execFileAsync("git.exe", ["-C", root, "log", "-1", "--pretty=format:%cI", upstream], { windowsHide: true }),
+        execFileAsync("git.exe", ["-C", root, "reflog", "show", "-1", "--format=%gI", upstream], { windowsHide: true })
+      ]);
+      if (remoteCommit.status === "fulfilled") remoteCommitAt = remoteCommit.value.stdout.trim();
+      if (pushReflog.status === "fulfilled") pushedAt = pushReflog.value.stdout.trim();
+    } catch {}
     const [hash = "", subject = "", date = ""] = commitText.trim().split("\t");
     const identity = repoIdentityFromRemote(remoteUrl);
+    const latestActivity = [
+      { kind: "commit", value: date, timestamp: Date.parse(date) || 0 },
+      { kind: "push", value: pushedAt, timestamp: Date.parse(pushedAt) || 0 },
+      { kind: "remote", value: remoteCommitAt, timestamp: Date.parse(remoteCommitAt) || 0 }
+    ].sort((left, right) => right.timestamp - left.timestamp)[0];
     return {
       isGit: true,
       branch: branchText.trim() || "detached",
       changes: statusText.split(/\r?\n/).filter(Boolean).length,
       commit: { hash, subject, date },
       remoteUrl,
+      upstream,
+      pushedAt,
+      remoteCommitAt,
+      activityAt: latestActivity?.value || date,
+      activityTimestamp: latestActivity?.timestamp || 0,
+      activityKind: latestActivity?.kind || "commit",
       githubRepo: githubRepoFromRemote(remoteUrl),
       ...identity
     };
   } catch {
-    return { isGit: false, branch: "", changes: 0, commit: null, remoteUrl: "", githubRepo: "", officialName: "", repoFullName: "" };
+    return { isGit: false, branch: "", changes: 0, commit: null, remoteUrl: "", upstream: "", pushedAt: "", remoteCommitAt: "", activityAt: "", activityTimestamp: 0, activityKind: "", githubRepo: "", officialName: "", repoFullName: "" };
   }
 }
 
@@ -1284,7 +1308,13 @@ async function listProjects() {
       });
     }
   }));
-  return projects.sort((a, b) => Number(b.active) - Number(a.active) || String(b.lastSeenAt).localeCompare(String(a.lastSeenAt)) || a.name.localeCompare(b.name));
+  return projects.sort((a, b) =>
+    Number(b.activityTimestamp || 0) - Number(a.activityTimestamp || 0)
+    || Number(b.active) - Number(a.active)
+    || String(b.lastSeenAt).localeCompare(String(a.lastSeenAt))
+    || Number(b.changes > 0) - Number(a.changes > 0)
+    || a.name.localeCompare(b.name)
+  );
 }
 
 async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
@@ -1350,7 +1380,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.53" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.54" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1716,7 +1746,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.53" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.54" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
