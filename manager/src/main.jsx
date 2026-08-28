@@ -1520,6 +1520,7 @@ function App() {
     const domUnavailable = Boolean(responseCurrent && response?.domAvailable === false && !response?.domSkipped);
     const contentNeedsRefresh = Boolean(responseCurrent && response?.contentNeedsRefresh);
     const rolloverCreating = Boolean(responseCurrent && response?.rolloverStatus === "creating");
+    const canSend = !busy && profile.connected && Boolean(selectedProjectRoot) && !selectedBusy && !rolloverCreating && (isNewChat || conversations.length > 0) && Boolean(draft.trim() || attachments.length);
     const working = profile.connected && (profile.activity === "working" || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
     const responseHeadline = isNewChat
@@ -1612,7 +1613,21 @@ function App() {
 
             <label className="request-label" htmlFor={`request-${profile.profile_id}`}>Nhắn tiếp</label>
             <div className="request-composer">
-              <textarea id={`request-${profile.profile_id}`} value={draft} maxLength={12000} placeholder={rolloverCreating ? "Chat cũ đã đầy · đang tạo chat mới để tiếp tục dự án…" : "Nhập tin nhắn hoặc Ctrl+V ảnh như ChatGPT…"} onPaste={(event) => void pasteRequestImage(profile.profile_id, event)} onChange={(event) => { setRequestDrafts((current) => ({ ...current, [profile.profile_id]: event.target.value })); if (sendError) setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" })); }} disabled={!profile.connected || sending || rolloverCreating} />
+              <textarea
+                id={`request-${profile.profile_id}`}
+                value={draft}
+                maxLength={12000}
+                placeholder={rolloverCreating ? "Chat cũ đã đầy · đang tạo chat mới để tiếp tục dự án…" : "Nhập tin nhắn hoặc Ctrl+V ảnh như ChatGPT…"}
+                onPaste={(event) => void pasteRequestImage(profile.profile_id, event)}
+                onChange={(event) => { setRequestDrafts((current) => ({ ...current, [profile.profile_id]: event.target.value })); if (sendError) setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" })); }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.nativeEvent?.isComposing || event.repeat) return;
+                  if (!canSend) return;
+                  event.preventDefault();
+                  void sendRequest(profile);
+                }}
+                disabled={!profile.connected || sending || rolloverCreating}
+              />
               {attachments.length > 0 && (
                 <div className="request-files">
                   {attachments.map((file) => (
@@ -1635,8 +1650,9 @@ function App() {
             <div className="request-card-foot">
               <span>{selectedBusy ? "Đang nhận phản hồi · realtime ~1 giây" : "Realtime phản hồi ~1 giây"}</span>
               <div className="request-card-actions">
+                <button type="button" className="button secondary" onClick={() => setChatProfileId("")}>Đóng</button>
                 <button type="button" className="button secondary" onClick={() => openProfile(profile)} disabled={Boolean(busy) || !profile.connected || isNewChat || !(profile.conversation_tabs?.length)}>Mở Chrome</button>
-                <button type="button" className="button primary" onClick={() => sendRequest(profile)} disabled={Boolean(busy) || !profile.connected || !selectedProjectRoot || selectedBusy || rolloverCreating || (!isNewChat && !conversations.length) || (!draft.trim() && !attachments.length)}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
+                <button type="button" className="button primary" onClick={() => sendRequest(profile)} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
               </div>
             </div>
           </article>
