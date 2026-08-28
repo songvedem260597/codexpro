@@ -68,7 +68,16 @@ export class WorkspaceManager {
   private readonly workspaces = new Map<string, Workspace>();
   private selectedWorkspaceId?: string;
 
-  constructor(private readonly config: CodexProConfig) {}
+  constructor(
+    private readonly config: CodexProConfig,
+    private readonly onSelectedWorkspace?: (workspace: Workspace) => void
+  ) {}
+
+  private selectWorkspace(workspace: Workspace): Workspace {
+    this.selectedWorkspaceId = workspace.id;
+    this.onSelectedWorkspace?.(workspace);
+    return workspace;
+  }
 
   defaultWorkspace(): Workspace {
     const existing = [...this.workspaces.values()].find((workspace) => workspace.root === this.config.defaultRoot);
@@ -77,8 +86,7 @@ export class WorkspaceManager {
 
   selectDefaultWorkspace(): Workspace {
     const workspace = this.defaultWorkspace();
-    this.selectedWorkspaceId = workspace.id;
-    return workspace;
+    return this.selectWorkspace(workspace);
   }
 
   openWorkspace(rootInput?: string, options: { select?: boolean } = {}): Workspace {
@@ -101,7 +109,7 @@ export class WorkspaceManager {
 
     const existing = [...this.workspaces.values()].find((workspace) => workspace.root === realRoot);
     if (existing) {
-      if (options.select !== false) this.selectedWorkspaceId = existing.id;
+      if (options.select !== false) this.selectWorkspace(existing);
       return existing;
     }
 
@@ -113,7 +121,7 @@ export class WorkspaceManager {
     const workspace = catalogWorkspace ?? { id, root: realRoot, openedAt: new Date().toISOString() };
     sharedWorkspaceCatalog.set(id, workspace);
     this.workspaces.set(id, workspace);
-    if (options.select !== false) this.selectedWorkspaceId = id;
+    if (options.select !== false) this.selectWorkspace(workspace);
     return workspace;
   }
 

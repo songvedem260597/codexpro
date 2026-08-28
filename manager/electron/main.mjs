@@ -19,7 +19,7 @@ const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.17";
+const WORKER_EXTENSION_VERSION = "0.5.26";
 const RUNTIME_BASE_CACHE_MS = 10000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
@@ -633,7 +633,8 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         })()`, true);
         const activeChatTitleProbe = await win.webContents.executeJavaScript(`(() => [...document.querySelectorAll('.browser-profile')].map((card) => ({
           profile: card.querySelector('code')?.textContent?.trim() || '',
-          title: card.querySelector('.active-chat-chip')?.textContent?.trim() || '',
+          repo: card.querySelector('.active-repo-chip')?.textContent?.trim() || '',
+          hasLegacyChatTitle: Boolean(card.querySelector('.active-chat-chip')),
           metaStillHasChat: /(?:^|\\s)Chat:/i.test(card.querySelector('.profile-meta')?.textContent || '')
         })))()`, true);
         const scrollProfile = String(process.env.CODEXPRO_MANAGER_SMOKE_SCROLL_PROFILE || "").trim();
@@ -786,9 +787,14 @@ async function runtimeBaseStatus() {
 
 async function runtimeStatus() {
   const base = await runtimeBaseStatus();
-  const browserProfiles = base.local.ok
+  const browserProfilesRaw = base.local.ok
     ? await listBrowserProfilesThroughMcp(base.config, base.token).catch(() => [])
     : [];
+  const browserProfiles = await Promise.all(browserProfilesRaw.map(async (profile) => {
+    const workspaceRoot = String(profile.current_workspace_root || "").trim();
+    if (!workspaceRoot) return { ...profile, current_workspace_repo: "" };
+    return { ...profile, current_workspace_repo: await githubRepoForRoot(workspaceRoot) };
+  }));
   return {
     checkedAt: new Date().toISOString(),
     task: base.task,
@@ -831,20 +837,48 @@ function saveManagerProjects(roots) {
   fs.writeFileSync(managerProjectsFile, `${JSON.stringify({ version: 1, roots }, null, 2)}\n`, { mode: 0o600 });
 }
 
+function githubRepoFromRemote(remoteUrl) {
+  const value = String(remoteUrl || "").trim().replace(/\\/g, "/");
+  if (!value) return "";
+  const match = value.match(/github\.com[/:]([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i);
+  return match ? `${match[1]}/${match[2].replace(/\.git$/i, "")}` : "";
+}
+
+const githubRepoCache = new Map();
+async function githubRepoForRoot(root) {
+  const normalizedRoot = path.resolve(String(root || ""));
+  const cached = githubRepoCache.get(normalizedRoot.toLowerCase());
+  if (cached && Date.now() - cached.at < 15_000) return cached.value;
+  let value = "";
+  try {
+    const remote = await execFileAsync("git.exe", ["-C", normalizedRoot, "remote", "get-url", "origin"], { windowsHide: true });
+    value = githubRepoFromRemote(remote.stdout.trim());
+  } catch {}
+  githubRepoCache.set(normalizedRoot.toLowerCase(), { at: Date.now(), value });
+  return value;
+}
+
 async function gitSummary(root) {
   try {
     const { stdout: branchText } = await execFileAsync("git.exe", ["-C", root, "branch", "--show-current"], { windowsHide: true });
     const { stdout: statusText } = await execFileAsync("git.exe", ["-C", root, "status", "--porcelain"], { windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
     const { stdout: commitText } = await execFileAsync("git.exe", ["-C", root, "log", "-1", "--pretty=format:%h%x09%s%x09%cI"], { windowsHide: true });
+    let remoteUrl = "";
+    try {
+      const remote = await execFileAsync("git.exe", ["-C", root, "remote", "get-url", "origin"], { windowsHide: true });
+      remoteUrl = remote.stdout.trim();
+    } catch {}
     const [hash = "", subject = "", date = ""] = commitText.trim().split("\t");
     return {
       isGit: true,
       branch: branchText.trim() || "detached",
       changes: statusText.split(/\r?\n/).filter(Boolean).length,
-      commit: { hash, subject, date }
+      commit: { hash, subject, date },
+      remoteUrl,
+      githubRepo: githubRepoFromRemote(remoteUrl)
     };
   } catch {
-    return { isGit: false, branch: "", changes: 0, commit: null };
+    return { isGit: false, branch: "", changes: 0, commit: null, remoteUrl: "", githubRepo: "" };
   }
 }
 
@@ -940,7 +974,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.44" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.46" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1270,7 +1304,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.44" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.46" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);

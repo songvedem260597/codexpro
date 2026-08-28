@@ -150,8 +150,8 @@ section { margin-bottom: 38px; }
 .badge.profile-settling { color: #ffd58e; border-color: #77582d; background: #2a2113; }
 .badge.profile-hung { color: #ffadb7; border-color: #85404b; background: #3b1d24; }
 .badge.profile-missing { color: #ffadb7; border-color: #85404b; background: #3b1d24; }
-.active-chat-chip { min-width: 0; max-width: min(520px, 44vw); color: #aebbd0; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.active-chat-chip::before { content: "·"; margin-right: 8px; color: #66758d; }
+.active-repo-chip { min-width: 0; max-width: min(520px, 44vw); display: inline-flex; align-items: center; gap: 6px; color: #aebbd0; font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.active-repo-chip::before { content: "↗"; flex: 0 0 auto; color: #6b8cff; font-size: 12px; font-weight: 800; }
 .profile-head-actions { display: flex; align-items: flex-end; flex-direction: column; gap: 9px; }
 .reload-all { min-width: 142px; }
 .profile-actions { width: 244px; flex: 0 0 244px; display: flex; align-items: stretch; flex-direction: column; gap: 8px; }

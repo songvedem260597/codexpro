@@ -1,5 +1,5 @@
 (() => {
-  const INSTALLER_REVISION = '2026-08-28-2';
+  const INSTALLER_REVISION = '2026-08-28-23';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
 
@@ -58,11 +58,66 @@
     });
   }
 
+  function pointerClick(element) {
+    if (!(element instanceof Element)) return false;
+    element.scrollIntoView({block: 'center', inline: 'center'});
+    try { element.focus({preventScroll: true}); } catch { element.focus?.(); }
+    const rect = element.getBoundingClientRect();
+    const clientX = rect.left + Math.max(1, rect.width / 2);
+    const clientY = rect.top + Math.max(1, rect.height / 2);
+    const base = {bubbles: true, cancelable: true, composed: true, view: window, button: 0, clientX, clientY};
+    try { element.dispatchEvent(new PointerEvent('pointerdown', {...base, buttons: 1, pointerId: 1, pointerType: 'mouse', isPrimary: true})); } catch {}
+    try { element.dispatchEvent(new MouseEvent('mousedown', {...base, buttons: 1})); } catch {}
+    try { element.dispatchEvent(new PointerEvent('pointerup', {...base, buttons: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true})); } catch {}
+    try { element.dispatchEvent(new MouseEvent('mouseup', {...base, buttons: 0})); } catch {}
+    try { element.dispatchEvent(new MouseEvent('click', {...base, buttons: 0})); } catch { element.click(); }
+    return true;
+  }
+
+  async function trustedClick(element) {
+    if (!(element instanceof Element)) return false;
+    element.scrollIntoView({block: 'center', inline: 'center'});
+    try { element.focus({preventScroll: true}); } catch { element.focus?.(); }
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + Math.max(1, rect.width / 2);
+    const y = rect.top + Math.max(1, rect.height / 2);
+    try {
+      const response = await chrome.runtime.sendMessage({type: 'codexpro-trusted-click', x, y});
+      if (response?.ok) return true;
+    } catch {}
+    return pointerClick(element);
+  }
+
+  async function trustedActivate(element) {
+    if (!(element instanceof Element)) return false;
+    element.scrollIntoView({block: 'center', inline: 'center'});
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + Math.max(1, rect.width / 2);
+    const y = rect.top + Math.max(1, rect.height / 2);
+    try {
+      const response = await chrome.runtime.sendMessage({type: 'codexpro-trusted-activate', x, y});
+      if (response?.ok) return true;
+    } catch {}
+    return trustedClick(element);
+  }
+
+  async function trustedSetText(element, value) {
+    if (!(element instanceof Element)) return false;
+    element.scrollIntoView({block: 'center', inline: 'center'});
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + Math.max(1, rect.width / 2);
+    const y = rect.top + Math.max(1, rect.height / 2);
+    try {
+      const response = await chrome.runtime.sendMessage({type: 'codexpro-trusted-set-text', x, y, value: String(value ?? '')});
+      if (response?.ok) return true;
+    } catch {}
+    setNativeValue(element, String(value ?? ''));
+    return true;
+  }
   function clickAction(labels, root = document, exact = true) {
     const element = findAction(labels, root, exact);
     if (!element) return false;
-    element.scrollIntoView({block: 'center', inline: 'center'});
-    element.click();
+    pointerClick(element);
     return true;
   }
 
@@ -101,34 +156,24 @@
     return null;
   }
 
-  function installedConnectorElement() {
+  function installedConnectorAction() {
     return candidates().find(element => {
-      const value = text(element);
       const aria = normalize(element.getAttribute?.('aria-label') || '');
-      return value === 'open codexpro' || value === 'mo codexpro' || aria === 'open codexpro' || aria === 'mo codexpro';
+      return aria === 'actions for codexpro' || aria === 'hanh dong cho codexpro';
     }) || null;
   }
 
   function connectorAlreadyListed() {
-    return Boolean(installedConnectorElement());
+    return Boolean(installedConnectorAction());
   }
 
-  async function openInstalledConnector() {
-    await waitFor(() => document.body, 10000);
-    await preparePluginSearch();
-    const element = await waitFor(installedConnectorElement, 12000);
-    if (!element) throw new Error('Không tìm thấy nút Mở CodexPro trong danh sách Plugins.');
-    const href = element instanceof HTMLAnchorElement ? element.href : element.closest('a')?.href || '';
-    return {ok: true, href, clicked: href ? false : (element.click(), true)};
-  }
-
-  async function openConnectorChat() {
-    await waitFor(() => document.body, 10000);
-    const action = await waitFor(() => findAction(['Try in chat', 'Thử trong đoạn chat']), 15000);
-    if (!action) throw new Error('Không tìm thấy nút Thử trong đoạn chat của CodexPro.');
-    const href = action instanceof HTMLAnchorElement ? action.href : action.closest('a')?.href || '';
-    if (!href) action.click();
-    return {ok: true, href, clicked: !href};
+  function installedConnectorId() {
+    const link = [...document.querySelectorAll('a[href*="/plugins/plugin_"]')]
+      .filter(visible)
+      .find(element => text(element).includes('codexpro') || normalize(element.getAttribute('aria-label') || '').includes('codexpro'));
+    const href = String(link?.getAttribute('href') || '');
+    const match = href.match(/\/(plugin_[^/?#]+)/i);
+    return match?.[1] || '';
   }
 
   async function preparePluginSearch() {
@@ -267,8 +312,8 @@
     if (!urlInput) urlInput = controls.find(element => element !== nameInput && element !== descriptionInput) || controls.at(-1);
     if (!nameInput || !urlInput || nameInput === urlInput) throw new Error('Không tìm thấy đủ ô Name và Server URL trong form ChatGPT.');
 
-    setNativeValue(nameInput, connector.name || 'CodexPro');
-    setNativeValue(urlInput, connector.server_url);
+    await trustedSetText(nameInput, connector.name || 'CodexPro');
+    await trustedSetText(urlInput, connector.server_url);
     if (!(await chooseNoAuth(dialog))) throw new Error('Không chọn được No Auth trong form ChatGPT.');
 
     for (const checkbox of [...dialog.querySelectorAll('input[type="checkbox"]')].filter(visible)) {
@@ -289,7 +334,7 @@
         .find(button => ['create', 'connect', 'add', 'save', 'tao', 'ket noi', 'them', 'luu'].includes(text(button))) || null;
     }, 6000);
     if (!submit) throw new Error('Nút Create/Connect của ChatGPT chưa sẵn sàng.');
-    submit.click();
+    await trustedClick(submit);
 
     let followUpClicks = 0;
     let lastFollowUpAt = 0;
@@ -305,7 +350,7 @@
           .reverse()
           .find(button => ['connect', 'continue', 'done', 'ket noi', 'tiep tuc', 'xong'].includes(text(button)));
         if (followUp) {
-          followUp.click();
+          await trustedActivate(followUp);
           followUpClicks += 1;
           lastFollowUpAt = Date.now();
         }
@@ -313,6 +358,149 @@
       return false;
     }, 35000);
     if (!finished) throw new Error(formError(dialog) || 'ChatGPT không xác nhận kết nối MCP trong thời gian chờ.');
+  }
+
+  function settingsDialog() {
+    return [...document.querySelectorAll('[role="dialog"],dialog')]
+      .filter(visible)
+      .find(dialog => {
+        const value = text(dialog);
+        return value.includes('settings') && value.includes('plugins');
+      }) || null;
+  }
+
+  function settingsCodexProButton(root) {
+    if (!root) return null;
+    return [...root.querySelectorAll('button')]
+      .filter(visible)
+      .find(button => text(button) === 'codexpro') || null;
+  }
+
+  async function deleteConnectorDefinition() {
+    await waitFor(() => document.body, 10000);
+    const root = await waitFor(settingsDialog, 20000, 150);
+    if (!root) throw new Error('ChatGPT chưa mở được Settings > Plugins để cập nhật CodexPro.');
+
+    const pluginButton = settingsCodexProButton(root);
+    if (!pluginButton) return {ok: true, deleted: false, absent: true};
+    await trustedClick(pluginButton);
+
+    const actionButton = await waitFor(() => {
+      const current = settingsDialog();
+      if (!current) return null;
+      return [...current.querySelectorAll('button')].filter(visible).find(button => {
+        const aria = normalize(button.getAttribute('aria-label') || '');
+        return aria === 'plugin actions' || aria === 'hanh dong plugin';
+      }) || null;
+    }, 12000, 120);
+    if (!actionButton) throw new Error('Không tìm thấy menu Plugin actions của CodexPro.');
+    await trustedClick(actionButton);
+
+    const deleteAction = await waitFor(() => [...document.querySelectorAll('[role="menuitem"]')]
+      .filter(visible)
+      .find(item => ['delete', 'xoa'].includes(text(item))) || null, 7000, 100);
+    if (!deleteAction) throw new Error('Không tìm thấy Delete để xóa definition CodexPro cũ.');
+    await trustedClick(deleteAction);
+
+    await sleep(400);
+    const confirm = [...document.querySelectorAll('[role="dialog"],dialog')]
+      .filter(visible)
+      .map(dialog => findAction(['Delete', 'Xóa'], dialog, true))
+      .find(Boolean);
+    if (confirm) await trustedClick(confirm);
+
+    const deleted = await waitFor(() => {
+      const current = settingsDialog();
+      if (!current) return false;
+      return !settingsCodexProButton(current) && !location.hash.toLowerCase().includes('/plugin_');
+    }, 15000, 150);
+    if (!deleted) throw new Error('ChatGPT chưa xóa definition CodexPro cũ.');
+    return {ok: true, deleted: true};
+  }
+
+  async function connectConnectorDefinition() {
+    await waitFor(() => document.body, 10000);
+    let root = await waitFor(settingsDialog, 20000, 150);
+    if (!root) throw new Error('ChatGPT chưa mở được Settings > Plugins để kết nối CodexPro.');
+
+    const initialValue = text(root);
+    const detailAlreadyOpen = location.hash.toLowerCase().includes('/plugin_') || (initialValue.includes('codexpro') && initialValue.includes('connection'));
+    const pluginButton = detailAlreadyOpen ? null : settingsCodexProButton(root);
+    if (pluginButton) {
+      const detailView = () => {
+        const current = settingsDialog();
+        if (!current) return null;
+        const value = text(current);
+        return location.hash.toLowerCase().includes('/plugin_') || (value.includes('codexpro') && value.includes('connection')) ? current : null;
+      };
+      // This row is an ordinary React navigation control, not a protected
+      // submit/consent action. Native click is more reliable than CDP here
+      // because CDP hover/pointer events can make the virtualized row rerender.
+      pluginButton.click();
+      let opened = await waitFor(detailView, 10000, 120);
+      if (!opened) {
+        const currentButton = settingsCodexProButton(settingsDialog());
+        if (currentButton) pointerClick(currentButton);
+        opened = await waitFor(detailView, 10000, 120);
+      }
+      if (!opened) throw new Error('Không mở được trang chi tiết CodexPro trong Settings.');
+    }
+    root = await waitFor(() => {
+      const current = settingsDialog();
+      if (!current) return null;
+      const value = text(current);
+      return value.includes('codexpro') && value.includes('connection') ? current : null;
+    }, 18000, 150);
+    if (!root) throw new Error('Không mở được trang chi tiết CodexPro trong Settings.');
+
+    const connection = await waitFor(() => [...root.querySelectorAll('button')]
+      .filter(visible)
+      .find(button => {
+        const value = text(button);
+        return value.includes('connection') && (value.includes('connect') || value.includes('connected') || value.includes('ket noi'));
+      }) || null, 5000, 100);
+    if (!connection) {
+      const pageText = text(root);
+      if (pageText.includes('connection') && pageText.includes('codexpro')) {
+        return {ok: true, connected: true, alreadyConnected: true};
+      }
+      throw new Error('Không tìm thấy mục Connection của CodexPro.');
+    }
+
+    const connectionText = text(connection);
+    if (connectionText.includes('connected') || connectionText.includes('da ket noi')) {
+      return {ok: true, connected: true, alreadyConnected: true};
+    }
+    await trustedClick(connection);
+
+    const consent = await waitFor(() => [...document.querySelectorAll('[role="dialog"],dialog')]
+      .filter(visible)
+      .reverse()
+      .find(dialog => {
+        const value = text(dialog);
+        return value.includes('add codexpro to chatgpt') || (value.includes('codexpro') && value.includes('permissions always respected'));
+      }) || null, 15000, 120);
+    if (!consent) {
+      const current = settingsDialog();
+      const currentConnection = current ? [...current.querySelectorAll('button')].filter(visible).find(button => text(button).includes('connection')) : null;
+      if (currentConnection && (text(currentConnection).includes('connected') || text(currentConnection).includes('da ket noi'))) {
+        return {ok: true, connected: true, alreadyConnected: true};
+      }
+      throw new Error('ChatGPT không mở hộp xác nhận Connect cho CodexPro.');
+    }
+    // The consent copy can render one frame before its primary action. Wait
+    // for the actual button instead of treating visible dialog text as proof
+    // that the action is already mounted.
+    const finalConnect = await waitFor(() => [...consent.querySelectorAll('button,[role="button"]')]
+      .filter(visible)
+      .reverse()
+      .find(button => ['connect', 'ket noi'].includes(text(button))) || null, 10000, 100);
+    if (!finalConnect) throw new Error('Không tìm thấy nút Connect cuối của CodexPro.');
+    await trustedClick(finalConnect);
+
+    const closed = await waitFor(() => !document.contains(consent) || !visible(consent), 30000, 200);
+    if (!closed) throw new Error('ChatGPT chưa hoàn tất Connect CodexPro.');
+    return {ok: true, connected: true, alreadyConnected: false};
   }
 
   async function install(connector) {
@@ -326,8 +514,7 @@
     }
     await preparePluginSearch();
     if (connectorAlreadyListed()) {
-      status('CodexPro đã có trong profile này. Đang mở chat kiểm tra…', 'ok');
-      return {ok: true, alreadyInstalled: true};
+      return {ok: true, alreadyInstalled: true, migrationRequired: true, connectorId: installedConnectorId()};
     }
 
     await enableDeveloperMode();
@@ -337,8 +524,9 @@
     }
     status('CodexPro: đang nhập MCP URL và chọn No Auth…');
     await fillAndSubmit(connector, dialog);
-    status('Đã thêm CodexPro. Đang mở chat mới để kiểm tra…', 'ok');
-    return {ok: true, alreadyInstalled: false};
+    status('Đã tạo CodexPro theo profile. Đang hoàn tất Connection…', 'ok');
+    await sleep(500);
+    return {ok: true, alreadyInstalled: false, connectorId: installedConnectorId()};
   }
 
   async function checkInstalled() {
@@ -353,85 +541,6 @@
     const settingsReady = Boolean(document.querySelector('button[aria-label="Create app"]') || findAction(createLabels));
     if (!settingsReady) throw new Error('ChatGPT chưa tải xong danh sách Plugins hoặc profile không có quyền tạo app.');
     return {ok: true, installed: false};
-  }
-
-  function composer() {
-    return document.querySelector('#prompt-textarea,textarea[data-id="root"],textarea[placeholder],[contenteditable="true"][data-lexical-editor="true"],[contenteditable="true"]');
-  }
-
-  async function ensureChatMode() {
-    const chatLabels = new Set(['chat', 'tro chuyen']);
-    const workLabels = new Set(['work', 'cong viec']);
-    const chatButton = await waitFor(() => candidates().find(element => chatLabels.has(text(element))), 12000);
-    const workButton = candidates().find(element => workLabels.has(text(element)));
-    if (!chatButton) {
-      if (workButton?.getAttribute('data-state') === 'on') throw new Error('Không tìm thấy nút Trò chuyện để thoát chế độ Công việc.');
-      return;
-    }
-    if (chatButton.getAttribute('data-state') !== 'on') {
-      chatButton.click();
-      const chatReady = await waitFor(() => candidates().find(element => chatLabels.has(text(element)) && element.getAttribute('data-state') === 'on'), 15000);
-      if (!chatReady) throw new Error('Không chuyển được từ Công việc sang Trò chuyện.');
-    }
-    const activeWork = candidates().find(element => workLabels.has(text(element)) && element.getAttribute('data-state') === 'on');
-    if (activeWork) throw new Error('ChatGPT vẫn đang ở Công việc; đã hủy test để không dùng Work.');
-  }
-
-  async function connectionTest() {
-    status('CodexPro: đang tạo chat kiểm tra…');
-    await ensureChatMode();
-    const input = await waitFor(() => {
-      const element = composer();
-      return element || null;
-    }, 45000);
-    if (!input) throw new Error('Không tìm thấy ô nhập chat mới.');
-
-    const prompt = 'Hãy gọi server_config và trả lời “CodexPro READY” nếu kết nối thành công.';
-    if (input.isContentEditable) {
-      input.focus();
-      document.execCommand('insertText', false, ` ${prompt}`);
-      input.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: ` ${prompt}`}));
-    } else {
-      const current = input.value || '';
-      setNativeValue(input, `${current}${current ? ' ' : ''}${prompt}`);
-    }
-    const promptInserted = await waitFor(() => normalize(input.innerText || input.value || '').includes('hay goi server_config'), 3000);
-    if (!promptInserted) throw new Error('ChatGPT không nhận nội dung test vào composer.');
-
-    const send = await waitFor(() => {
-      const selectors = ['button[data-testid="send-button"]', 'button[aria-label*="Send"]', 'button[aria-label*="Gửi"]'];
-      return selectors.map(selector => document.querySelector(selector)).find(element => element && !element.disabled);
-    }, 8000);
-    if (!send) throw new Error('Đã thêm CodexPro nhưng không tìm thấy nút gửi để chạy chat kiểm tra.');
-    send.click();
-    const consent = await waitFor(() => findAction(['Connect', 'Kết nối']), 15000);
-    if (consent) {
-      consent.click();
-      status('CodexPro: đang cấp quyền kết nối lần đầu…');
-      const permissionPage = await waitFor(() => location.hash.includes('add-connector-link') || normalize(document.body?.innerText).includes('add codexpro to chatgpt'), 30000);
-      if (permissionPage) {
-        const finalConsent = await waitFor(() => {
-          const buttons = candidates().filter(element => ['connect', 'ket noi'].includes(text(element)));
-          return buttons.at(-1) || null;
-        }, 30000);
-        if (!finalConsent) throw new Error('Không tìm thấy nút Connect cuối để cấp quyền CodexPro.');
-        finalConsent.click();
-        await waitFor(() => !location.hash.includes('add-connector-link'), 30000);
-      }
-      status('CodexPro: đã xác nhận Connect, đang chờ phản hồi READY…');
-    }
-    status('CodexPro: đã gửi test, đang chờ phản hồi READY…');
-    const ready = await waitFor(() => {
-      const replies = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
-      const reply = normalize(replies.at(-1)?.innerText || '');
-      const page = normalize(document.body?.innerText || '');
-      const connected = page.includes('codexpro da ket noi') || page.includes('da ket noi codexpro') || page.includes('codexpro connected') || page.includes('connected codexpro');
-      const toolCalled = page.includes('called tool') || page.includes('cong cu duoc goi');
-      return reply.includes('codexpro ready') || (toolCalled && (connected || reply.includes('codexpro'))) || reply.includes('da ket noi codexpro') || (reply.includes('server_config') && reply.includes('codexpro'));
-    }, 70000, 500);
-    if (!ready) throw new Error('Đã gửi test nhưng chưa nhận được phản hồi CodexPro READY trong 70 giây.');
-    status('CodexPro READY · cài đặt và kiểm tra hoàn tất.', 'ok');
-    return {ok: true, message: 'CodexPro READY · đã tự thêm và kiểm tra kết nối thành công.'};
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -450,25 +559,16 @@
         });
       return true;
     }
-    if (message?.type === 'codexpro-open-installed-connector') {
-      openInstalledConnector()
+    if (message?.type === 'codexpro-delete-connector-definition') {
+      deleteConnectorDefinition()
         .then(sendResponse)
         .catch(error => sendResponse({ok: false, error: String(error?.message || error)}));
       return true;
     }
-    if (message?.type === 'codexpro-open-connector-chat') {
-      openConnectorChat()
+    if (message?.type === 'codexpro-connect-connector-definition') {
+      connectConnectorDefinition()
         .then(sendResponse)
         .catch(error => sendResponse({ok: false, error: String(error?.message || error)}));
-      return true;
-    }
-    if (message?.type === 'codexpro-run-connection-test') {
-      connectionTest()
-        .then(sendResponse)
-        .catch(error => {
-          status(`CodexPro: ${String(error?.message || error)}`, 'error');
-          sendResponse({ok: false, error: String(error?.message || error)});
-        });
       return true;
     }
     return false;

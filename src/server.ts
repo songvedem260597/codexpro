@@ -19,7 +19,7 @@ import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidg
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { runBrowserControl } from "./browserOps.js";
-import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, runBrowserExtensionCommand } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileWorkspace } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
@@ -935,8 +935,9 @@ const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, des
 const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 
-export function createCodexProServer(config: CodexProConfig): McpServer {
-  const workspaces = new WorkspaceManager(config);
+export function createCodexProServer(config: CodexProConfig, options: { browserProfileId?: string } = {}): McpServer {
+  const browserProfileId = String(options.browserProfileId || "").trim();
+  const workspaces = new WorkspaceManager(config, browserProfileId ? (workspace) => setBrowserExtensionProfileWorkspace(browserProfileId, workspace.root) : undefined);
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
   const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
