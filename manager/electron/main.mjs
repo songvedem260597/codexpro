@@ -23,6 +23,7 @@ const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
+
 const WORKER_EXTENSION_VERSION = "0.5.44";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
@@ -109,22 +110,6 @@ async function chooseRequestFiles() {
   return files;
 }
 
-async function chooseWorkspaceTarget(kind = "directory") {
-  const normalizedKind = String(kind || "directory").toLowerCase();
-  if (!new Set(["directory", "file"]).has(normalizedKind)) throw new Error("Kiểu đường dẫn không hợp lệ.");
-  const result = await dialog.showOpenDialog({
-    title: normalizedKind === "file" ? "Chọn file ngoài repo" : "Chọn thư mục hoặc dự án ngoài repo",
-    properties: normalizedKind === "file" ? ["openFile"] : ["openDirectory"]
-  });
-  if (result.canceled || !result.filePaths[0]) return null;
-  const targetPath = path.resolve(result.filePaths[0]);
-  const stat = fs.statSync(targetPath);
-  if (normalizedKind === "file" && !stat.isFile()) throw new Error("Đường dẫn đã chọn không phải file.");
-  if (normalizedKind === "directory" && !stat.isDirectory()) throw new Error("Đường dẫn đã chọn không phải thư mục.");
-  const root = normalizedKind === "file" ? path.dirname(targetPath) : targetPath;
-  return { kind: normalizedKind, root, path: targetPath, name: path.basename(targetPath) };
-}
-
 const MANAGER_FONT_CHOICES = new Set(["system", "arial", "tahoma", "verdana", "trebuchet", "georgia", "cascadia"]);
 const WORKER_IMAGE_STATES = new Set(["idle", "working", "hung"]);
 const WORKER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
@@ -155,6 +140,8 @@ function normalizeWorkerPacks(value) {
     return [{ id, name, images: normalizeWorkerImages(pack?.images) }];
   }).slice(0, MAX_WORKER_IMAGE_PACKS);
 }
+
+const ALL_ALLOWED_WORKSPACES = "__codexpro_all_allowed__";
 
 function defaultManagerSettings() {
   return {
@@ -194,7 +181,7 @@ function readManagerSettings() {
       repoSelections: Object.fromEntries(Object.entries(parsed?.repoSelections && typeof parsed.repoSelections === "object" ? parsed.repoSelections : {})
         .filter(([profileId, root]) => /^[A-Za-z0-9._-]{1,160}$/.test(profileId) && typeof root === "string" && root.trim())
         .slice(0, 40)
-        .map(([profileId, root]) => [profileId, path.resolve(root)])),
+        .map(([profileId, root]) => [profileId, root === ALL_ALLOWED_WORKSPACES ? ALL_ALLOWED_WORKSPACES : path.resolve(root)])),
       selectedWorkerPackId,
       workerImagePacks,
       workerImages: selectedPack ? { ...selectedPack.images } : emptyWorkerImages()
@@ -272,7 +259,7 @@ function saveManagerSettingsPatch(patch = {}) {
     next.repoSelections = { ...(current.repoSelections || {}) };
     for (const [profileId, root] of Object.entries(patch.repoSelections)) {
       if (!/^[A-Za-z0-9._-]{1,160}$/.test(profileId)) continue;
-      if (typeof root === "string" && root.trim()) next.repoSelections[profileId] = path.resolve(root);
+      if (typeof root === "string" && root.trim()) next.repoSelections[profileId] = root === ALL_ALLOWED_WORKSPACES ? ALL_ALLOWED_WORKSPACES : path.resolve(root);
       else delete next.repoSelections[profileId];
     }
   }
@@ -1474,6 +1461,17 @@ function pathInside(child, parent) {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function allowedWorkspaceRoots(config) {
+  const requested = [config.root, ...(config.allowedRoots || []), ...(config.allowHome ? [os.homedir()] : [])].filter(Boolean);
+  const roots = [];
+  for (const candidate of requested) {
+    const resolved = path.resolve(candidate);
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) continue;
+    if (!roots.some((root) => root.toLowerCase() === resolved.toLowerCase())) roots.push(resolved);
+  }
+  return roots;
+}
+
 function repoScanRoots(config) {
   const home = os.homedir();
   const requested = [config.root, ...(config.allowedRoots || []), ...(config.allowHome ? [home] : [])]
@@ -1559,7 +1557,7 @@ async function listProjects() {
   };
   const activeRoot = taskConfig.root;
   const selectedRoots = new Set(Object.values(readManagerSettings().repoSelections || {})
-    .filter((root) => typeof root === "string" && root.trim())
+    .filter((root) => typeof root === "string" && root.trim() && root !== ALL_ALLOWED_WORKSPACES)
     .map((root) => path.resolve(root).toLowerCase()));
   const sources = new Map();
 
@@ -1934,8 +1932,8 @@ async function sendProfileRequest(payload) {
   const conversationId = String(payload?.conversationId || "").trim();
   const newChat = Boolean(payload?.newChat);
   const text = String(payload?.text || "").trim();
+  const requestScope = payload?.scope === "all_allowed" ? "all_allowed" : "workspace";
   const requestedProjectRoot = String(payload?.projectRoot || "").trim();
-  const requestedTargetPath = String(payload?.targetPath || "").trim();
   const requestedFiles = Array.isArray(payload?.attachments) ? payload.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
   const taskId = `cpt_${randomBytes(12).toString("hex")}`;
   const toolRetry = Boolean(payload?.toolRetry);
@@ -1943,7 +1941,7 @@ async function sendProfileRequest(payload) {
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
-  if (!requestedProjectRoot) throw new Error("Hãy chọn thư mục hoặc dự án cần làm trước khi gửi yêu cầu.");
+  if (requestScope === "workspace" && !requestedProjectRoot) throw new Error("Hãy chọn thư mục hoặc dự án cần làm trước khi gửi yêu cầu.");
   if (text.length > 12000) throw new Error("Yêu cầu dài quá 12.000 ký tự.");
   const files = requestedFiles.map((file) => requestFileSummary(file?.path));
   if (files.some((file) => file.size > MAX_REQUEST_ATTACHMENT_BYTES)) throw new Error("Mỗi file được tối đa 8 MB.");
@@ -1957,14 +1955,15 @@ async function sendProfileRequest(payload) {
   let status = await runtimeStatus();
   if (sendDebug) console.error('[manager-send] after runtimeStatus');
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-  const knownProjects = await listProjects();
-  const selectedProject = knownProjects.find((project) => path.resolve(project.root).toLowerCase() === path.resolve(requestedProjectRoot).toLowerCase());
-  if (!selectedProject) throw new Error("Thư mục đã chọn không còn nằm trong danh sách workspace của CodexPro.");
-  let targetPath = "";
-  if (requestedTargetPath) {
-    targetPath = path.resolve(requestedTargetPath);
-    if (!fs.existsSync(targetPath)) throw new Error("File hoặc thư mục mục tiêu không còn tồn tại.");
-    if (!pathInside(targetPath, selectedProject.root)) throw new Error("File mục tiêu phải nằm trong workspace đã chọn.");
+  const allowedRoots = allowedWorkspaceRoots(status.config);
+  if (!allowedRoots.length) throw new Error("CodexPro chưa có vùng workspace nào được cấp quyền.");
+  let selectedProject = null;
+  let initialWorkspaceRoot = allowedRoots.find((root) => status.config.root && root.toLowerCase() === path.resolve(status.config.root).toLowerCase()) || allowedRoots[0];
+  if (requestScope === "workspace") {
+    const knownProjects = await listProjects();
+    selectedProject = knownProjects.find((project) => path.resolve(project.root).toLowerCase() === path.resolve(requestedProjectRoot).toLowerCase()) || null;
+    if (!selectedProject) throw new Error("Thư mục đã chọn không còn nằm trong danh sách workspace của CodexPro.");
+    initialWorkspaceRoot = selectedProject.root;
   }
   let profile = status.browserProfiles.find((item) => item.profile_id === profileId);
   if (!profile?.connected) throw new Error("Extension của profile này đang mất heartbeat với CodexPro.");
@@ -1996,14 +1995,25 @@ async function sendProfileRequest(payload) {
     if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
   }
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
+  const taskScopeLines = requestScope === "all_allowed"
+    ? [
+        "CodexPro Manager đang ở chế độ TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN. Không có repo hoặc đường dẫn cụ thể bị khóa cho yêu cầu này.",
+        `Các vùng CodexPro hiện được phép truy cập: ${allowedRoots.join(" ; ")}`,
+        `Task ID bắt buộc: ${taskId}`,
+        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","root":"${initialWorkspaceRoot.replace(/\\/g, "\\\\")}","scope":"all_allowed"} trước mọi câu trả lời. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
+        "BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Không được trả lời rằng không có tool/MCP, tool/MCP không sử dụng được hoặc tool/MCP bị disable khi chưa thực hiện một tool-call MCP CodexPro thực tế và nhận lỗi kỹ thuật từ chính lần gọi đó.",
+        "Sau khi begin_repo_task thành công, bạn ĐƯỢC PHÉP dùng open_workspace để chuyển giữa các workspace nằm bên trong những vùng CodexPro đã được cấp quyền ở trên nhằm tìm đúng dự án hoặc file. Không được truy cập đường dẫn nằm ngoài các vùng đó."
+      ]
+    : [
+        `Workspace đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
+        `Task ID bắt buộc: ${taskId}`,
+        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
+        "BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Không được trả lời rằng không có tool/MCP, tool/MCP không sử dụng được hoặc tool/MCP bị disable khi chưa thực hiện một tool-call MCP CodexPro thực tế và nhận lỗi kỹ thuật từ chính lần gọi đó.",
+        "Sau khi begin_repo_task thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác."
+      ];
   const taskText = [
     ...(newChat ? ["@CodexPro"] : ["Hãy sử dụng MCP CodexPro đã được kích hoạt trong đoạn chat này."]),
-    `Workspace đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
-    ...(targetPath && path.resolve(targetPath).toLowerCase() !== path.resolve(selectedProject.root).toLowerCase() ? [`File/thư mục mục tiêu người dùng đã chọn trực tiếp: ${targetPath}`] : []),
-    `Task ID bắt buộc: ${taskId}`,
-    `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
-    "BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Không được trả lời rằng không có tool/MCP, tool/MCP không sử dụng được hoặc tool/MCP bị disable khi chưa thực hiện một tool-call MCP CodexPro thực tế và nhận lỗi kỹ thuật từ chính lần gọi đó.",
-    "Sau khi begin_repo_task thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác. Nếu có file/thư mục mục tiêu được nêu ở trên thì ưu tiên thao tác đúng mục tiêu đó.",
+    ...taskScopeLines,
     ...(toolRetry ? ["Đây là lần gửi lại vì phản hồi trước không có bằng chứng gọi CodexPro. Phải gọi codexpro action=begin_repo_task ngay."] : []),
     "",
     text ? `Yêu cầu của người dùng:\n${text}` : "Yêu cầu của người dùng nằm trong file đính kèm."
@@ -2017,7 +2027,7 @@ async function sendProfileRequest(payload) {
     attachments
   }, 120000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
-  return { ...result, repo_task_id: taskId, repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount };
+  return { ...result, repo_task_id: taskId, repo_task_scope: requestScope, repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount };
 }
 
 async function getRepoTaskStatus(payload) {
@@ -2228,7 +2238,7 @@ ipcMain.handle("codexpro:choose-project", async () => {
   const result = await dialog.showOpenDialog({ properties: ["openDirectory"], title: "Chọn repo hoặc dự án" });
   return result.canceled ? null : result.filePaths[0];
 });
-ipcMain.handle("codexpro:choose-workspace-target", (_event, kind) => chooseWorkspaceTarget(kind));
+
 ipcMain.handle("codexpro:add-project", async (_event, root) => {
   const resolved = path.resolve(String(root || ""));
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) throw new Error("Thư mục dự án không tồn tại.");
