@@ -420,7 +420,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.44";
+const WORKER_EXTENSION_VERSION = "0.5.45";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -1838,7 +1838,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
-          <small>CodexPro Manager 0.2.73</small>
+          <small>CodexPro Manager 0.2.74</small>
         </div>
       </aside>
 

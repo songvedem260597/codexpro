@@ -118,7 +118,7 @@ assert.doesNotMatch(sendBlock, /chrome\.tabs\.update\(tab\.id,\{active:true\}\)/
 assert.doesNotMatch(sendBlock, /restorePreviouslyActiveTab/, "background send must not need to restore tabs because it never activates them");
 assert.match(sendBlock, /SEND_UNCERTAIN:/);
 assert.match(sendBlock, /shouldUseTrustedClickFallback\(attemptState\?\.result,earlyEvidence\)/, "fallback must require an owned draft and no submit lifecycle evidence");
-assert.match(sendBlock, /trustedSubmitError\.startsWith\('TRUSTED_ENTER_PRE_DISPATCH:'\)/, "a pre-dispatch focus failure must be recognized as definitely unsent");
+assert.match(sendBlock, /trustedSubmitError\.startsWith\(attachmentSubmit\?'ATTACHMENT_DOM_CLICK_PRE_DISPATCH:':'TRUSTED_ENTER_PRE_DISPATCH:'\)/, "each submit mechanism must recognize its definitely-unsent pre-dispatch failure");
 assert.match(sendBlock, /trusted-enter-pre-dispatch','trusted-click-fallback'/, "a definitely-unsent focus failure may use one trusted-click fallback");
 assert.match(worker, /expectedText&&normalized\(composerText\)===normalized\(expectedText\)/, "trusted click fallback must recover a React-replaced composer only for an exact owned payload");
 assert.match(sendBlock, /cleanup_skipped:!definitelyUnsent/, "ambiguous attempts must not delete a possibly submitted draft");
@@ -127,6 +127,9 @@ assert.match(sendBlock, /chrome\.tabs\.create\(\{windowId:recoveryWindowId,url:r
 assert.match(sendBlock, /await chrome\.tabs\.reload\(tab\.id\)/, "a soft pre-submit expiry must reload the exact conversation tab once");
 assert.match(sendBlock, /path_attempted:\['prepare',preparationRecovery\.renderer_replaced\?'replace-tab':'reload','prepare'\]/, "pre-submit recovery must expose its bounded recovery path");
 assert.match(sendBlock, /submission_state:'failed'.*PREPARE_FAILED:/s, "a second pre-submit failure is definitely unsent, not SEND_UNCERTAIN");
+assert.match(worker, /const ATTACHMENT_PREPARE_TIMEOUT_MS = 60000;/, "attachment preparation must allow ChatGPT enough time to render and stabilize uploaded files");
+assert.match(sendBlock, /const prepareTimeoutMs=attachments\.length\?ATTACHMENT_PREPARE_TIMEOUT_MS:DOM_PREPARE_TIMEOUT_MS;/, "attachment sends must use the dedicated preparation deadline");
+assert.match(sendBlock, /submitted_by:'prepare-timeout'.*send_uncertain:false.*ATTACHMENT_PREPARE_TIMEOUT/s, "a timeout before trusted input dispatch is definitely unsent and safe to retry");
 assert.match(worker, /normalized\(composerText\(current\)\)===normalized\(expectedText\)/, "trusted Enter must recover a React-replaced composer only when its draft exactly matches the owned payload");
 assert.match(worker, /ok:true,focused:document\.activeElement===composer/, "the first ownership check must not require a background tab to already own keyboard focus");
 assert.match(worker, /refocused\?\.result\?\.focused!==true/, "trusted Enter must require focus after bringing the page to the foreground");
@@ -139,9 +142,11 @@ assert.match(worker, /network_generation_endpoint/, "generation ACK must expose 
 assert.match(worker, /network_recent_posts/, "safe POST path diagnostics must be exposed without request bodies");
 assert.match(worker, /CDP_NETWORK_TRACKER_MAX_MS/, "CDP tracking must have a bounded maximum lifetime");
 assert.match(sendBlock, /waitForAttachmentUploadNetwork\(tab\.id,submitStartedAt-100\)/, "attachment sends must wait for upload network completion before submit");
-assert.match(sendBlock, /trustedSubmitChatSendButtonTab\(tab\.id,attemptId\)/, "attachment sends must use one trusted Send click after upload ACK");
-assert.match(sendBlock, /submitted_by:'trusted-click-attachment'/, "attachment sends must report their dedicated submit path");
-assert.match(worker, /async function trustedSubmitChatSendButtonTab\(tabId,attemptId\)/, "attachment trusted click must install the CDP network tracker before dispatch");
+assert.doesNotMatch(sendBlock, /attachmentSubmit\?trustedSubmitChatSendButtonTab/, "attachment primary submit must not depend on a background mouse click");
+assert.match(sendBlock, /submitted_by:'dom-click-attachment'/, "attachment sends must honestly report their page-context submit path");
+assert.match(sendBlock, /attachmentSubmit\?submitChatAttachmentButtonTab\(tab\.id,attemptId,text\):trustedSubmitChatComposerTab/, "attachment sends must use a scoped background page click after upload ACK while text keeps trusted Enter");
+assert.match(worker, /async function submitChatAttachmentButtonTab\(tabId,attemptId,expectedText=''/, "attachment submit must install the network tracker before invoking the scoped page click");
+assert.match(worker, /func:clickPreparedChatSendButtonPage,args:\[attemptId\]/, "attachment submit must click only the Send button marked for the exact attempt");
 assert.match(sendBlock, /ATTACHMENT_UPLOAD_FAILED:/, "a failed upload must stop before submit and clean only the owned draft");
 assert.match(worker, /const tracker=cdpNetworkTrackersByTab\.get\(tabId\);if\(tracker\)void tracker\.cleanup\(\)/, "closing a tab must detach its CDP tracker");
 assert.doesNotMatch(worker, /body_text:String\(request\.body_text/, "diagnostics must not export captured message bodies");
@@ -152,6 +157,8 @@ assert.doesNotMatch(prepareSource, /composer-submit-button|send-button|aria-labe
 assert.match(prepareSource, /requires_trusted_submit:true/, "prepared composer must request the trusted Enter path");
 assert.match(prepareSource, /internal_submit_found:false/, "runtime result must report that no stable internal submit action was found");
 assert.match(prepareSource, /new DataTransfer\(\)/, "attachment preparation must keep the existing DOM upload path");
+assert.match(prepareSource, /new ClipboardEvent\('paste'/, "attachment preparation must fall back to ChatGPT's paste upload handler when a file input change produces no preview");
+assert.match(prepareSource, /attachmentPreparePath='paste-fallback'/, "attachment diagnostics must expose the paste upload fallback");
 assert.match(prepareSource, /const currentComposer=findComposer\(\)/, "composer verification must survive ChatGPT replacing the React node");
 
 const clickSource = extractFunction("prepareTrustedClickFallbackPage");
@@ -166,6 +173,8 @@ assert.match(enterSource, /Emulation\.setFocusEmulationEnabled/, "trusted Enter 
 assert.match(enterSource, /background_submit:true/, "trusted Enter must report background submission metadata");
 assert.match(enterSource, /const \[refocused\]/, "trusted Enter must re-focus the composer after bringing a background page forward");
 assert.doesNotMatch(enterSource, /dispatchMouseEvent|composer-submit-button|send-button/, "trusted Enter must not depend on mouse or Send DOM");
+const trustedKeySource = extractFunction("trustedKeyTab");
+assert.match(trustedKeySource, /Emulation\.setFocusEmulationEnabled/, "generic trusted keys must work in a background tab without raising its Chrome window");
 
 const evidenceSource = extractFunction("isChatSubmitLifecycleEvidence");
 const isChatSubmitLifecycleEvidence = Function(`${evidenceSource}; return isChatSubmitLifecycleEvidence;`)();
