@@ -1,0 +1,2 @@
+CodexPro attachment smoke fixture.
+This file contains no credentials or user data.
