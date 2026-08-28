@@ -309,7 +309,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.28";
+const WORKER_EXTENSION_VERSION = "0.5.29";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -1420,7 +1420,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.55</small>
+          <small>CodexPro Manager 0.2.56</small>
         </div>
       </aside>
 

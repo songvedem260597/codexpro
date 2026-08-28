@@ -378,6 +378,7 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
   const expired=()=>Boolean(deadlineAt&&Date.now()>Number(deadlineAt));
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const normalizedText=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim();
+  const comparableText=value=>normalizedText(value).replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
   const composerText=element=>element?.isContentEditable?normalizedText(element.innerText||element.textContent||''):normalizedText(element?.value||'');
   if(location.origin!=='https://chatgpt.com'||(!location.pathname.startsWith('/c/')&&location.pathname!=='/'))return {ok:false,error:'Tab đã chọn không phải ChatGPT.'};
   const composerSelectors=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'];
@@ -497,16 +498,18 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
     composer.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:text}));
     composer.dispatchEvent(new Event('change',{bubbles:true}));
     const expectedText=normalizedText(text);
-    while(!expired()){
+    const expectedComparable=comparableText(expectedText);
+    const verifyDeadline=Math.min(Number(deadlineAt)||Date.now()+3000,Date.now()+3000);
+    while(!expired()&&Date.now()<verifyDeadline){
       const currentComposer=findComposer();
-      if(composerText(currentComposer)===expectedText){
+      if(comparableText(composerText(currentComposer))===expectedComparable){
         composer=currentComposer;
         composer.dataset.codexproDraftAttempt=attemptId;
         break;
       }
       await sleep(50);
     }
-    if(composerText(composer)!==expectedText)return await fail('ChatGPT chưa nhận nội dung vào composer; chưa gửi để tránh báo thành công giả.',{expired:expired()});
+    if(comparableText(composerText(composer))!==expectedComparable){const observed=composerText(composer);return await fail('ChatGPT chưa nhận đúng nội dung vào composer; chưa gửi để tránh báo thành công giả.',{expired:expired(),observed_length:observed.length,expected_length:expectedText.length});}
   }
 
   let send;
@@ -526,6 +529,7 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
   send.scrollIntoView({block:'center',inline:'center'});
   const sendRect=send.getBoundingClientRect();
   if(!sendRect.width||!sendRect.height)return await fail('Nút gửi biến mất trước khi CodexPro có thể bấm gửi.');
+  composer.dataset.codexproSubmitAttempt=attemptId;
   send.dataset.codexproSendAttempt=attemptId;
   return {ok:true,title:document.title,url:location.href,length:text.length,attachment_count:attachments.length,attachment_names:attachments.map(file=>file.name),prepared:true,requires_trusted_click:true,send_point:{x:sendRect.left+sendRect.width/2,y:sendRect.top+sendRect.height/2},submitted:false,submitted_by:'prepared',attempt_id:attemptId};
 }
@@ -751,11 +755,9 @@ async function execute(command) {
       throw new Error(injected?.result?.error||'Không gửi được yêu cầu vào ChatGPT.');
     }
     if(injected.result.requires_trusted_click){
-      const sendX=Number(injected.result.send_point?.x);
-      const sendY=Number(injected.result.send_point?.y);
       try{
         await promiseWithTimeout(
-          trustedClickChatSendTab(tab.id,attemptId,sendX,sendY),
+          trustedActivateChatSendButtonTab(tab.id,attemptId),
           DOM_ACTION_TIMEOUT_MS,
           'Chrome không phản hồi khi bấm nút gửi bằng trusted input.'
         );
@@ -1001,7 +1003,7 @@ async function probeConnectorEndpoint(serverUrl) {
     const response=await fetch(serverUrl,{
       method:'POST',
       headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},
-      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.28'}}}),
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.29'}}}),
       signal:controller.signal
     });
     const body=(await response.text()).slice(0,20000);
@@ -1188,18 +1190,15 @@ async function trustedClickTab(tabId,x,y) {
   });
 }
 
-async function trustedClickChatSendTab(tabId,attemptId,fallbackX,fallbackY) {
+async function trustedActivateChatSendButtonTab(tabId,attemptId) {
   if(!attemptId)throw new Error('Trusted send attempt không hợp lệ.');
   await withDebuggerTab(tabId,async target=>{
-    const expression=`(()=>{const el=document.querySelector('[data-codexpro-send-attempt="${String(attemptId).replace(/[\\"\r\n]/g,'')}"]');if(!el)return null;const rect=el.getBoundingClientRect();return {x:rect.left+rect.width/2,y:rect.top+rect.height/2,width:rect.width,height:rect.height};})()`;
+    const safeAttempt=String(attemptId).replace(/[\\"\r\n]/g,'');
+    const expression=`(()=>{const el=document.querySelector('[data-codexpro-send-attempt="${safeAttempt}"]')||document.querySelector('#composer-submit-button,button[data-testid="send-button"]');if(!el)return false;el.focus({preventScroll:true});return document.activeElement===el;})()`;
     const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression,returnByValue:true});
-    const located=evaluated?.result?.value;
-    const x=Number(located?.width)>0?Number(located.x):Number(fallbackX);
-    const y=Number(located?.height)>0?Number(located.y):Number(fallbackY);
-    if(!Number.isFinite(x)||!Number.isFinite(y))throw new Error('Nút gửi không còn ở vị trí có thể bấm.');
-    await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseMoved',x,y,button:'none'});
-    await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mousePressed',x,y,button:'left',buttons:1,clickCount:1});
-    await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseReleased',x,y,button:'left',buttons:0,clickCount:1});
+    if(evaluated?.result?.value!==true)throw new Error('Không focus được nút gửi ChatGPT.');
+    await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',text:'\r',unmodifiedText:'\r',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
+    await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
   });
 }
 
