@@ -9,6 +9,7 @@ const TRUSTED_INPUT_TIMEOUT_MS = 10000;
 const DOM_SEND_TIMEOUT_MS = 35000;
 const NETWORK_START_TIMEOUT_MS = 30000;
 const CDP_NETWORK_TRACKER_MAX_MS = 30 * 60 * 1000;
+const DEBUGGER_SESSION_IDLE_MS = 30000;
 const ATTACHMENT_UPLOAD_TIMEOUT_MS = 30000;
 const ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS = 12000;
 const CONVERSATION_LIMIT_PROBE_TIMEOUT_MS = 1500;
@@ -18,6 +19,7 @@ let installing = false;
 const chatNetworkStateByTab = new Map();
 const chatNetworkPostLogByTab = new Map();
 const cdpNetworkTrackersByTab = new Map();
+const debuggerSessionsByTab = new Map();
 const pendingConversationByTab = new Map();
 let chatNetworkStateLoaded = false;
 let chatNetworkStateLoadPromise = null;
@@ -277,7 +279,7 @@ chrome.webRequest.onBeforeRequest.addListener(details=>{const attributed=attribu
 chrome.webRequest.onCompleted.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'completed',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onErrorOccurred.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'failed',0,details.error);finishChatRequest(attributed,'failed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onBeforeRedirect.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'redirected',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
-chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
+chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
 
 async function profileInfo() {
   const stored = await chrome.storage.local.get(['profileId','active','connectorInstall']);
@@ -469,6 +471,34 @@ function typePage(selector,text) {
     }else el.textContent=text;
   }else{const proto=el instanceof HTMLTextAreaElement?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;const setter=Object.getOwnPropertyDescriptor(proto,'value')?.set;if(setter)setter.call(el,text);else el.value=text;}
   el.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:text}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true,tag:el.tagName.toLowerCase(),length:text.length};
+}
+
+function locateElementPage(selector) {
+  const el=document.querySelector(selector);if(!el)return {ok:false,error:'Element not found'};
+  el.scrollIntoView({block:'center',inline:'center'});const rect=el.getBoundingClientRect();
+  return {ok:true,x:rect.left+rect.width/2,y:rect.top+rect.height/2,tag:el.tagName.toLowerCase(),text:String(el.innerText||el.getAttribute('aria-label')||'').slice(0,300)};
+}
+
+function inspectElementPage(selector) {
+  const el=document.querySelector(selector);if(!el)return {ok:false,error:'Element not found'};
+  const rect=el.getBoundingClientRect(),style=getComputedStyle(el);
+  return {ok:true,tag:el.tagName.toLowerCase(),text:String(el.innerText||el.textContent||'').trim().slice(0,1000),value:typeof el.value==='string'?el.value.slice(0,1000):'',disabled:Boolean(el.disabled),checked:Boolean(el.checked),rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height},style:{display:style.display,visibility:style.visibility,opacity:style.opacity,pointer_events:style.pointerEvents,position:style.position,z_index:style.zIndex},attributes:Object.fromEntries(Array.from(el.attributes||[]).slice(0,40).map(attr=>[attr.name,String(attr.value).slice(0,500)]))};
+}
+
+async function waitForPage(selector='',text='',state='visible',timeoutMs=10000) {
+  const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  const deadline=Date.now()+Math.max(100,Math.min(60000,Number(timeoutMs)||10000));
+  while(Date.now()<=deadline){
+    const el=selector?document.querySelector(selector):null;
+    const attached=Boolean(el);
+    const visible=Boolean(el&&(()=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';})());
+    const haystack=selector?String(el?.innerText||el?.textContent||''):String(document.body?.innerText||'');
+    const textMatched=!text||haystack.includes(text);
+    const matched=state==='attached'?attached&&textMatched:state==='visible'?visible&&textMatched:state==='hidden'?!visible:state==='detached'?!attached:false;
+    if(matched)return {ok:true,matched:true,attached,visible,text_matched:textMatched,state};
+    await sleep(100);
+  }
+  return {ok:false,error:`Timed out waiting for ${state}.`,state};
 }
 
 async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0) {
@@ -1203,20 +1233,65 @@ if(action==='rename_chat'){
   }
   if(action==='close_tab'){await chrome.tabs.remove(tab.id);return {action,target_id:tab.id,ok:true};}
   if(action==='navigate'){const updated=await chrome.tabs.update(tab.id,{url:args.url});return {action,target_id:tab.id,url:updated.url||args.url,title:updated.title||''};}
+  if(action==='batch'){
+    const steps=Array.isArray(args.steps)?args.steps.slice(0,50):[];
+    if(!steps.length)throw new Error('batch requires at least one step.');
+    const allowed=new Set(['snapshot','navigate','click','trusted_click','type','press','hover','scroll','wait_for','inspect_element','evaluate','screenshot']);
+    const results=[];
+    for(let index=0;index<steps.length;index+=1){
+      const step=steps[index]&&typeof steps[index]==='object'?steps[index]:{};
+      const stepAction=String(step.action||'');
+      if(!allowed.has(stepAction))throw new Error(`Unsupported batch step at index ${index}: ${stepAction||'missing'}`);
+      results.push(await execute({action:stepAction,args:{...step,target_id:tab.id}}));
+    }
+    return {action,target_id:tab.id,ok:true,step_count:results.length,results};
+  }
   if(action==='snapshot'){const [result]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:tab.id},func:snapshotPage,args:[Math.max(500,Math.min(50000,args.max_chars||20000))]}),DOM_ACTION_TIMEOUT_MS,'Chrome renderer không phản hồi khi snapshot.');return {action,target_id:tab.id,...result.result};}
   if(action==='click'){const [result]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:tab.id},func:clickPage,args:[args.selector]}),DOM_ACTION_TIMEOUT_MS,'Chrome renderer không phản hồi khi click.');if(!result.result?.ok)throw new Error(result.result?.error||'Click failed');return {action,target_id:tab.id,selector:args.selector,...result.result};}
   if(action==='trusted_click'){
-    const [located]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:tab.id},func:(selector)=>{const el=document.querySelector(selector);if(!el)return null;el.scrollIntoView({block:'center',inline:'center'});const rect=el.getBoundingClientRect();return {x:rect.left+rect.width/2,y:rect.top+rect.height/2,tag:el.tagName.toLowerCase(),text:(el.innerText||el.getAttribute('aria-label')||'').slice(0,300)};},args:[args.selector]}),DOM_ACTION_TIMEOUT_MS,'Chrome renderer không phản hồi khi định vị trusted click.');
-    if(!located?.result)throw new Error('Trusted click element not found');
+    const [located]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:tab.id},func:locateElementPage,args:[args.selector]}),DOM_ACTION_TIMEOUT_MS,'Chrome renderer không phản hồi khi định vị trusted click.');
+    if(!located?.result?.ok)throw new Error(located?.result?.error||'Trusted click element not found');
     await trustedClickTab(tab.id,Number(located.result.x),Number(located.result.y));
     return {action,target_id:tab.id,selector:args.selector,ok:true,tag:located.result.tag,text:located.result.text};
   }
   if(action==='type'){const [result]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:tab.id},func:typePage,args:[args.selector,String(args.text||'')]}),DOM_ACTION_TIMEOUT_MS,'Chrome renderer không phản hồi khi nhập text.');if(!result.result?.ok)throw new Error(result.result?.error||'Type failed');return {action,target_id:tab.id,selector:args.selector,...result.result};}
+  if(action==='hover'){
+    const [located]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:tab.id},func:locateElementPage,args:[args.selector]}),DOM_ACTION_TIMEOUT_MS,'Chrome renderer không phản hồi khi định vị hover.');
+    if(!located?.result?.ok)throw new Error(located?.result?.error||'Hover element not found');
+    await withDebuggerTab(tab.id,target=>chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseMoved',x:Number(located.result.x),y:Number(located.result.y),button:'none'}));
+    return {action,target_id:tab.id,selector:args.selector,ok:true,tag:located.result.tag};
+  }
+  if(action==='scroll'){
+    let point={x:0,y:0};
+    if(args.selector){const [located]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:tab.id},func:locateElementPage,args:[args.selector]}),DOM_ACTION_TIMEOUT_MS,'Chrome renderer không phản hồi khi định vị scroll.');if(!located?.result?.ok)throw new Error(located?.result?.error||'Scroll element not found');point={x:Number(located.result.x),y:Number(located.result.y)};}
+    else{const [viewport]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>({x:innerWidth/2,y:innerHeight/2})});point=viewport.result;}
+    const deltaX=Number.isFinite(Number(args.delta_x))?Number(args.delta_x):0,deltaY=Number.isFinite(Number(args.delta_y))?Number(args.delta_y):600;
+    await withDebuggerTab(tab.id,target=>chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseWheel',x:point.x,y:point.y,deltaX,deltaY}));
+    return {action,target_id:tab.id,selector:args.selector,delta_x:deltaX,delta_y:deltaY,ok:true};
+  }
+  if(action==='wait_for'){
+    const timeoutMs=Math.max(100,Math.min(60000,Number(args.timeout_ms)||10000));
+    const state=['attached','visible','hidden','detached'].includes(String(args.state||''))?String(args.state):'visible';
+    const [result]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:tab.id},func:waitForPage,args:[String(args.selector||''),String(args.text||''),state,timeoutMs]}),timeoutMs+1500,'Chrome renderer không phản hồi khi wait_for.');
+    if(!result?.result?.ok)throw new Error(result?.result?.error||'wait_for failed');
+    return {action,target_id:tab.id,selector:args.selector,text:args.text,state,timeout_ms:timeoutMs,...result.result};
+  }
+  if(action==='inspect_element'){
+    const [result]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:tab.id},func:inspectElementPage,args:[args.selector]}),DOM_ACTION_TIMEOUT_MS,'Chrome renderer không phản hồi khi inspect element.');
+    if(!result?.result?.ok)throw new Error(result?.result?.error||'inspect_element failed');
+    return {action,target_id:tab.id,selector:args.selector,...result.result};
+  }
+  if(action==='evaluate'){
+    const expression=String(args.expression||'').trim();if(!expression)throw new Error('A JavaScript expression is required.');
+    const evaluated=await withDebuggerTab(tab.id,target=>chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true,userGesture:true}));
+    if(evaluated?.exceptionDetails)throw new Error(String(evaluated.exceptionDetails.text||'Runtime.evaluate failed'));
+    return {action,target_id:tab.id,value:evaluated?.result?.value,persistent_debugger:true};
+  }
   if(action==='screenshot'){await chrome.tabs.update(tab.id,{active:true});const dataUrl=await promiseWithTimeout(chrome.tabs.captureVisibleTab(tab.windowId,{format:'png'}),DOM_ACTION_TIMEOUT_MS,'Chrome không phản hồi khi chụp màn hình.');return {action,target_id:tab.id,mime_type:'image/png',image_base64:dataUrl.split(',')[1]};}
   if(action==='press'){
-    const target={tabId:tab.id};await chrome.debugger.attach(target,'1.3');
+    const target=await acquireDebuggerTab(tab.id);
     try{const key=String(args.key||'');await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'keyDown',key});await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'keyUp',key});}
-    finally{await chrome.debugger.detach(target).catch(()=>{});}return {action,target_id:tab.id,key:args.key,ok:true};
+    finally{releaseDebuggerTab(tab.id);}return {action,target_id:tab.id,key:args.key,ok:true,persistent_debugger:true};
   }
   throw new Error(`Unsupported action: ${action}`);
 }
@@ -1494,21 +1569,56 @@ chrome.runtime.onInstalled.addListener(()=>{
 });
 chrome.runtime.onStartup.addListener(()=>{ensureBridgeAlarm();pollLoop();});
 chrome.alarms.onAlarm.addListener(alarm=>{if(alarm.name==='codexpro-bridge'||alarm.name==='codexpro-reconnect'){ensureBridgeAlarm();pollLoop();}});
-async function withDebuggerTab(tabId,callback) {
+async function acquireDebuggerTab(tabId) {
   if(!Number.isInteger(tabId))throw new Error('Trusted input target không hợp lệ.');
+  const existing=debuggerSessionsByTab.get(tabId);
+  if(existing){
+    if(existing.detachTimer)clearTimeout(existing.detachTimer);
+    existing.detachTimer=null;
+    existing.refs+=1;
+    return existing.target;
+  }
   const target={tabId};
   await chrome.debugger.attach(target,'1.3');
-  try{return await callback(target);}
-  finally{await chrome.debugger.detach(target).catch(()=>{});}
+  debuggerSessionsByTab.set(tabId,{target,refs:1,detachTimer:null,attachedAt:Date.now(),lastUsedAt:Date.now()});
+  return target;
 }
+
+function releaseDebuggerTab(tabId) {
+  const session=debuggerSessionsByTab.get(tabId);
+  if(!session)return;
+  session.refs=Math.max(0,Number(session.refs||0)-1);
+  session.lastUsedAt=Date.now();
+  if(session.refs>0)return;
+  if(session.detachTimer)clearTimeout(session.detachTimer);
+  session.detachTimer=setTimeout(()=>{
+    const current=debuggerSessionsByTab.get(tabId);
+    if(!current||current.refs>0)return;
+    debuggerSessionsByTab.delete(tabId);
+    void chrome.debugger.detach(current.target).catch(()=>{});
+  },DEBUGGER_SESSION_IDLE_MS);
+}
+
+async function withDebuggerTab(tabId,callback) {
+  const target=await acquireDebuggerTab(tabId);
+  try{return await callback(target);}
+  finally{releaseDebuggerTab(tabId);}
+}
+
+chrome.debugger.onDetach.addListener(source=>{
+  const tabId=source?.tabId;
+  if(!Number.isInteger(tabId))return;
+  const session=debuggerSessionsByTab.get(tabId);
+  if(session?.detachTimer)clearTimeout(session.detachTimer);
+  debuggerSessionsByTab.delete(tabId);
+});
 
 async function startCdpChatNetworkTracker(tabId) {
   const existing=cdpNetworkTrackersByTab.get(tabId);
   if(existing)return existing;
-  const target={tabId};
-  await chrome.debugger.attach(target,'1.3');
+  const target=await acquireDebuggerTab(tabId);
   try{await chrome.debugger.sendCommand(target,'Network.enable',{});}
-  catch(error){await chrome.debugger.detach(target).catch(()=>{});throw error;}
+  catch(error){releaseDebuggerTab(tabId);throw error;}
   let settled=false,cleaned=false,matchedRequestId='',matchedUrl='',statusCode=0,startTimeoutId=null,maxTimeoutId=null;
   let resolveStarted;
   const started=new Promise(resolve=>{resolveStarted=resolve;});
@@ -1520,11 +1630,14 @@ async function startCdpChatNetworkTracker(tabId) {
     chrome.debugger.onEvent.removeListener(onEvent);
     chrome.debugger.onDetach.removeListener(onDetach);
     cdpNetworkTrackersByTab.delete(tabId);
-    await chrome.debugger.detach(target).catch(()=>{});
+    releaseDebuggerTab(tabId);
   };
   const finishStarted=value=>{if(settled)return;settled=true;resolveStarted(value);};
   const onDetach=source=>{
     if(source.tabId!==tabId)return;
+    const session=debuggerSessionsByTab.get(tabId);
+    if(session?.detachTimer)clearTimeout(session.detachTimer);
+    debuggerSessionsByTab.delete(tabId);
     cleaned=true;
     if(startTimeoutId)clearTimeout(startTimeoutId);
     if(maxTimeoutId)clearTimeout(maxTimeoutId);
