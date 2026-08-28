@@ -373,7 +373,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.42";
+const WORKER_EXTENSION_VERSION = "0.5.43";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -602,7 +602,11 @@ function App() {
     try {
       const next = await api.getHeadlessWorkers();
       setHeadlessState(next || { supported: false, chromePath: "", chromeUserDataRoot: "", sourceProfiles: [], workers: [] });
-      setHeadlessSourceProfile((current) => current || next?.sourceProfiles?.[0]?.profileDirectory || "");
+      setHeadlessSourceProfile((current) => {
+        const eligible = (next?.sourceProfiles || []).filter((profile) => profile.codexProInstalled);
+        if (current && eligible.some((profile) => profile.profileDirectory === current)) return current;
+        return eligible[0]?.profileDirectory || "";
+      });
       return next;
     } catch (err) {
       setError(err?.message || String(err));
@@ -2012,6 +2016,7 @@ function App() {
                   <div className="profile-main">
                     <div className="profile-title">
                       <strong>{profile.email || profile.label}</strong>
+                      {profile.headless && <span className="badge profile-headless">HEADLESS</span>}
                       {profile.active && <span className="badge">ACTIVE</span>}
                       {hung && <span className="badge profile-hung">MẤT KẾT NỐI</span>}
                       {settling && <span className="badge profile-settling">ĐANG HOÀN TẤT</span>}
@@ -2147,12 +2152,12 @@ function App() {
                 <label>Chrome profile nguồn</label>
                 <SettingsDropdown
                   value={headlessSourceProfile}
-                  options={(headlessState.sourceProfiles || []).map((profile) => ({
+                  options={(headlessState.sourceProfiles || []).filter((profile) => profile.codexProInstalled).map((profile) => ({
                     value: profile.profileDirectory,
                     label: profile.userName || profile.name || profile.profileDirectory,
-                    hint: `${profile.name || profile.profileDirectory} · ${profile.profileDirectory}`
+                    hint: `${profile.name || profile.profileDirectory} · ${profile.profileDirectory} · CodexPro ✓`
                   }))}
-                  disabled={Boolean(headlessBusy) || !(headlessState.sourceProfiles || []).length}
+                  disabled={Boolean(headlessBusy) || !(headlessState.sourceProfiles || []).some((profile) => profile.codexProInstalled)}
                   ariaLabel="Chọn Chrome profile để clone session"
                   onChange={setHeadlessSourceProfile}
                 />
@@ -2172,7 +2177,8 @@ function App() {
               <span><b>Chrome</b> {headlessState.chromePath || "Không tìm thấy"}</span>
               <span><b>User data</b> {headlessState.chromeUserDataRoot || "—"}</span>
             </div>
-            {!headlessState.supported && <div className="headless-warning">Cần Google Chrome và CodexPro extension đi kèm app. Có thể đặt <code>CODEXPRO_CHROME_PATH</code> nếu Chrome nằm ở vị trí khác.</div>}
+            {!headlessState.supported && <div className="headless-warning">Không tìm thấy Google Chrome. Có thể đặt <code>CODEXPRO_CHROME_PATH</code> nếu Chrome nằm ở vị trí khác.</div>}
+            {headlessState.supported && !(headlessState.sourceProfiles || []).some((profile) => profile.codexProInstalled) && <div className="headless-warning">Chưa tìm thấy Chrome profile nào đã bật CodexPro extension. Hãy mở profile cần dùng, bật CodexPro rồi quay lại đây.</div>}
             <div className="headless-worker-list">
               {(headlessState.workers || []).length === 0 && <div className="headless-empty">Chưa có headless worker. Chọn profile chính rồi tạo worker đầu tiên.</div>}
               {(headlessState.workers || []).map((worker) => {

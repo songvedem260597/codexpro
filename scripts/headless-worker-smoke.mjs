@@ -18,7 +18,10 @@ try {
   fs.writeFileSync(path.join(chromeRoot, "Local State"), JSON.stringify({
     profile: { info_cache: { "Profile 1": { name: "ChatGPT Worker", user_name: "worker@example.com" } } }
   }));
-  fs.writeFileSync(path.join(profileRoot, "Preferences"), JSON.stringify({ profile: { name: "ChatGPT Worker" } }));
+  fs.writeFileSync(path.join(profileRoot, "Preferences"), JSON.stringify({
+    profile: { name: "ChatGPT Worker" },
+    extensions: { settings: { gndipignbnipohooclcbhjliikamjlpl: { state: 1 } } }
+  }));
   fs.writeFileSync(path.join(profileRoot, "Network", "Cookies"), "session-cookie-snapshot");
   fs.writeFileSync(path.join(profileRoot, "Cache", "skip-me"), "cache");
   fs.writeFileSync(path.join(profileRoot, "Local Extension Settings", "gndipignbnipohooclcbhjliikamjlpl", "000003.log"), "extension-state");
@@ -36,14 +39,16 @@ try {
   assert.equal(initial.sourceProfiles.length, 1);
   assert.equal(initial.sourceProfiles[0].profileDirectory, "Profile 1");
   assert.equal(initial.sourceProfiles[0].userName, "worker@example.com");
+  assert.equal(initial.sourceProfiles[0].codexProInstalled, true);
 
   const created = await manager.createWorker({ sourceProfileDirectory: "Profile 1", autoStart: false });
   assert.equal(created.running, false);
   assert.equal(created.sourceProfileDirectory, "Profile 1");
+  assert.equal(created.sourceHasCodexProExtension, true);
   assert.ok(created.lastSyncedAt);
-  assert.equal(fs.readFileSync(path.join(created.userDataDir, "Default", "Network", "Cookies"), "utf8"), "session-cookie-snapshot");
-  assert.equal(fs.existsSync(path.join(created.userDataDir, "Default", "Cache", "skip-me")), false);
-  assert.equal(fs.readFileSync(path.join(created.userDataDir, "Default", "Local Extension Settings", "gndipignbnipohooclcbhjliikamjlpl", "000003.log"), "utf8"), "extension-state");
+  assert.equal(fs.readFileSync(path.join(created.userDataDir, "Profile 1", "Network", "Cookies"), "utf8"), "session-cookie-snapshot");
+  assert.equal(fs.existsSync(path.join(created.userDataDir, "Profile 1", "Cache", "skip-me")), false);
+  assert.equal(fs.readFileSync(path.join(created.userDataDir, "Profile 1", "Local Extension Settings", "gndipignbnipohooclcbhjliikamjlpl", "000003.log"), "utf8"), "extension-state");
 
   const toggled = await manager.setWorkerAutoStart(created.id, true);
   assert.equal(toggled.autoStart, true);

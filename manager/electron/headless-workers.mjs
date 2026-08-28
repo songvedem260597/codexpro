@@ -118,9 +118,19 @@ export function createHeadlessWorkerManager(options = {}) {
         const meta = cache[profileDirectory] || {};
         const profilePath = path.join(root, profileDirectory);
         const preferences = readJson(path.join(profilePath, "Preferences"), {});
+        const securePreferences = readJson(path.join(profilePath, "Secure Preferences"), {});
         const extensionSettings = preferences?.extensions?.settings && typeof preferences.extensions.settings === "object"
           ? preferences.extensions.settings
           : {};
+        const secureExtensionSettings = securePreferences?.extensions?.settings && typeof securePreferences.extensions.settings === "object"
+          ? securePreferences.extensions.settings
+          : {};
+        const localExtensionState = path.join(profilePath, "Local Extension Settings", CODEXPRO_EXTENSION_ID);
+        const codexProInstalled = Boolean(
+          extensionSettings[CODEXPRO_EXTENSION_ID]
+          || secureExtensionSettings[CODEXPRO_EXTENSION_ID]
+          || fs.existsSync(localExtensionState)
+        );
         return {
           profileDirectory,
           path: profilePath,
@@ -129,7 +139,7 @@ export function createHeadlessWorkerManager(options = {}) {
           gaiaName: String(meta.gaia_name || ""),
           avatarIcon: String(meta.avatar_icon || ""),
           isUsingDefaultName: Boolean(meta.is_using_default_name),
-          codexProInstalled: Boolean(extensionSettings[CODEXPRO_EXTENSION_ID])
+          codexProInstalled
         };
       })
       .sort((left, right) => left.profileDirectory === "Default" ? -1 : right.profileDirectory === "Default" ? 1 : left.profileDirectory.localeCompare(right.profileDirectory));
@@ -160,7 +170,7 @@ export function createHeadlessWorkerManager(options = {}) {
     }
     if (dirty) saveState(state);
     return {
-      supported: Boolean(source.chromePath && extensionRoot && fs.existsSync(extensionRoot)),
+      supported: Boolean(source.chromePath),
       platform: process.platform,
       chromePath: source.chromePath,
       chromeUserDataRoot: source.root,
@@ -173,7 +183,7 @@ export function createHeadlessWorkerManager(options = {}) {
     const sourceUserDataRoot = chromeUserDataRoot();
     const sourceProfileRoot = profileRoot(worker.sourceProfileDirectory);
     const targetUserDataRoot = path.join(workersRoot, worker.id, "user-data");
-    const targetProfileRoot = path.join(targetUserDataRoot, "Default");
+    const targetProfileRoot = path.join(targetUserDataRoot, worker.sourceProfileDirectory);
     await fs.promises.rm(targetUserDataRoot, { recursive: true, force: true });
     await fs.promises.mkdir(targetUserDataRoot, { recursive: true });
     const localState = path.join(sourceUserDataRoot, "Local State");
@@ -189,12 +199,6 @@ export function createHeadlessWorkerManager(options = {}) {
         return true;
       }
     });
-    const preferencesPath = path.join(targetProfileRoot, "Preferences");
-    const preferences = readJson(preferencesPath, {});
-    if (preferences && typeof preferences === "object") {
-      preferences.profile = { ...(preferences.profile || {}), name: worker.label || preferences.profile?.name || "CodexPro Headless" };
-      writeJson(preferencesPath, preferences);
-    }
     return {
       sourceProfileRoot,
       targetUserDataRoot,
@@ -253,9 +257,9 @@ export function createHeadlessWorkerManager(options = {}) {
     if (processAlive(Number(worker.pid) || 0)) return workerPayload(worker);
     const chromePath = chromeExecutable();
     if (!chromePath) throw new Error("Không tìm thấy Google Chrome. Có thể đặt CODEXPRO_CHROME_PATH để chỉ định file Chrome.");
-    if (!extensionRoot || !fs.existsSync(extensionRoot)) throw new Error("Không tìm thấy CodexPro Chrome extension để chạy headless.");
+    if (!worker.sourceHasCodexProExtension) throw new Error("Chrome profile nguồn chưa có CodexPro extension. Hãy bật CodexPro trong profile nguồn rồi Sync session lại.");
     const userDataDir = path.join(workersRoot, worker.id, "user-data");
-    if (!fs.existsSync(path.join(userDataDir, "Default"))) {
+    if (!fs.existsSync(path.join(userDataDir, worker.sourceProfileDirectory))) {
       const synced = await copyProfileSnapshot(worker);
       worker.lastSyncedAt = new Date().toISOString();
       worker.lastSyncWarning = synced.warning;
@@ -266,9 +270,7 @@ export function createHeadlessWorkerManager(options = {}) {
     const args = [
       "--headless=new",
       `--user-data-dir=${userDataDir}`,
-      "--profile-directory=Default",
-      `--disable-extensions-except=${extensionRoot}`,
-      `--load-extension=${extensionRoot}`,
+      `--profile-directory=${worker.sourceProfileDirectory}`,
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-background-mode",
@@ -301,6 +303,7 @@ export function createHeadlessWorkerManager(options = {}) {
     const sourceProfileDirectory = String(payload.sourceProfileDirectory || "").trim();
     const source = listChromeProfiles().profiles.find((profile) => profile.profileDirectory === sourceProfileDirectory);
     if (!source) throw new Error("Chrome profile nguồn không tồn tại.");
+    if (!source.codexProInstalled) throw new Error("Chrome profile nguồn chưa có CodexPro extension. Hãy bật CodexPro trong profile này trước khi tạo headless worker.");
     const state = readState();
     const id = `headless-${randomBytes(6).toString("hex")}`;
     const worker = {
@@ -309,6 +312,7 @@ export function createHeadlessWorkerManager(options = {}) {
       sourceProfileDirectory,
       sourceProfileName: source.name,
       sourceUserName: source.userName,
+      sourceHasCodexProExtension: source.codexProInstalled,
       autoStart: payload.autoStart !== false,
       pid: 0,
       createdAt: new Date().toISOString(),

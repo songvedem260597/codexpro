@@ -149,6 +149,7 @@ section { margin-bottom: 38px; }
 .profile-meta .profile-warning { color: #ffb26c; }
 .badge.connected { color: #9df0bd; border-color: #34734e; background: #163622; }
 .badge.profile-working { color: #b8c4ff; border-color: #5267d8; background: #1b2454; }
+.badge.profile-headless { color: #9dd8ff; border-color: #3a6f98; background: #10283a; }
 .badge.profile-settling { color: #ffd58e; border-color: #77582d; background: #2a2113; }
 .badge.profile-hung { color: #ffadb7; border-color: #85404b; background: #3b1d24; }
 .badge.profile-missing { color: #ffadb7; border-color: #85404b; background: #3b1d24; }

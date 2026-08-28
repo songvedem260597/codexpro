@@ -1613,7 +1613,7 @@ async function probeConnectorEndpoint(serverUrl) {
     const response=await fetch(serverUrl,{
       method:'POST',
       headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},
-      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.42'}}}),
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.43'}}}),
       signal:controller.signal
     });
     const body=(await response.text()).slice(0,20000);
