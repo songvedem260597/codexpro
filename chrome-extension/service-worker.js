@@ -523,8 +523,11 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
   }
   if(!send)return await fail(attachments.length?'ChatGPT chưa tải file xong hoặc không chấp nhận định dạng file này.':'Đã nhập yêu cầu nhưng nút gửi chưa sẵn sàng.',{expired:expired()});
   if(expired())return await fail('Lần gửi đã hết hạn ngay trước khi bấm gửi; CodexPro đã hủy để tránh gửi trùng.',{expired:true});
-  send.click();
-  return {ok:true,title:document.title,url:location.href,length:text.length,attachment_count:attachments.length,attachment_names:attachments.map(file=>file.name),submitted:true,submitted_by:'ui-click',attempt_id:attemptId};
+  send.scrollIntoView({block:'center',inline:'center'});
+  const sendRect=send.getBoundingClientRect();
+  if(!sendRect.width||!sendRect.height)return await fail('Nút gửi biến mất trước khi CodexPro có thể bấm gửi.');
+  send.dataset.codexproSendAttempt=attemptId;
+  return {ok:true,title:document.title,url:location.href,length:text.length,attachment_count:attachments.length,attachment_names:attachments.map(file=>file.name),prepared:true,requires_trusted_click:true,send_point:{x:sendRect.left+sendRect.width/2,y:sendRect.top+sendRect.height/2},submitted:false,submitted_by:'prepared',attempt_id:attemptId};
 }
 
 async function cleanupChatRequestDraftPage(attemptId='') {
@@ -746,6 +749,27 @@ async function execute(command) {
       if(injected?.result?.expired)return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,send_uncertain:true,error:'SEND_UNCERTAIN: '+(injected.result.error||'Lần gửi đã hết hạn.'),attempt_id:attemptId,cleanup:injected.result.cleanup};
       if(newChat)await chrome.tabs.remove(tab.id).catch(()=>{});
       throw new Error(injected?.result?.error||'Không gửi được yêu cầu vào ChatGPT.');
+    }
+    if(injected.result.requires_trusted_click){
+      const sendX=Number(injected.result.send_point?.x);
+      const sendY=Number(injected.result.send_point?.y);
+      try{
+        await promiseWithTimeout(
+          trustedClickChatSendTab(tab.id,attemptId,sendX,sendY),
+          DOM_ACTION_TIMEOUT_MS,
+          'Chrome không phản hồi khi bấm nút gửi bằng trusted input.'
+        );
+        injected.result={...injected.result,submitted:true,submitted_by:'trusted-click'};
+      }catch(error){
+        let networkAck=null;
+        try{networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100,3000);}catch{}
+        if(networkAck)return await resultForNetwork(networkAck,{...injected.result,trusted_click_error:String(error?.message||error).slice(0,300)});
+        pendingConversationByTab.delete(tab.id);
+        await cleanupAttempt();
+        const limit=await probeConversationLimit(tab.id);
+        if(limit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(limit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
+        return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,...injected.result,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,send_uncertain:true,error:'SEND_UNCERTAIN: Trusted click không hoàn tất và chưa thấy generation request; CodexPro không tự gửi lại để tránh duplicate.',trusted_click_error:String(error?.message||error).slice(0,300),attempt_id:attemptId};
+      }
     }
     let networkAck=null;
     try{networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100,NETWORK_START_TIMEOUT_MS);}catch{}
@@ -977,7 +1001,7 @@ async function probeConnectorEndpoint(serverUrl) {
     const response=await fetch(serverUrl,{
       method:'POST',
       headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},
-      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.27'}}}),
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.28'}}}),
       signal:controller.signal
     });
     const body=(await response.text()).slice(0,20000);
@@ -1158,6 +1182,21 @@ async function withDebuggerTab(tabId,callback) {
 async function trustedClickTab(tabId,x,y) {
   if(!Number.isFinite(x)||!Number.isFinite(y))throw new Error('Trusted click target không hợp lệ.');
   await withDebuggerTab(tabId,async target=>{
+    await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseMoved',x,y,button:'none'});
+    await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mousePressed',x,y,button:'left',buttons:1,clickCount:1});
+    await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseReleased',x,y,button:'left',buttons:0,clickCount:1});
+  });
+}
+
+async function trustedClickChatSendTab(tabId,attemptId,fallbackX,fallbackY) {
+  if(!attemptId)throw new Error('Trusted send attempt không hợp lệ.');
+  await withDebuggerTab(tabId,async target=>{
+    const expression=`(()=>{const el=document.querySelector('[data-codexpro-send-attempt="${String(attemptId).replace(/[\\"\r\n]/g,'')}"]');if(!el)return null;const rect=el.getBoundingClientRect();return {x:rect.left+rect.width/2,y:rect.top+rect.height/2,width:rect.width,height:rect.height};})()`;
+    const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression,returnByValue:true});
+    const located=evaluated?.result?.value;
+    const x=Number(located?.width)>0?Number(located.x):Number(fallbackX);
+    const y=Number(located?.height)>0?Number(located.y):Number(fallbackY);
+    if(!Number.isFinite(x)||!Number.isFinite(y))throw new Error('Nút gửi không còn ở vị trí có thể bấm.');
     await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseMoved',x,y,button:'none'});
     await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mousePressed',x,y,button:'left',buttons:1,clickCount:1});
     await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseReleased',x,y,button:'left',buttons:0,clickCount:1});
