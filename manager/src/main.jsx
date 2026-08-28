@@ -241,7 +241,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.17";
+const WORKER_EXTENSION_VERSION = "0.5.26";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -1331,7 +1331,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.44</small>
+          <small>CodexPro Manager 0.2.46</small>
         </div>
       </aside>
 
@@ -1426,6 +1426,13 @@ function App() {
               const working = profile.connected && profile.activity === "working";
               const idle = profile.connected && profile.activity === "idle" && (profile.connector_installed || !ready);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
+              const workspaceRoot = String(profile.current_workspace_root || "").trim();
+              const profileProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
+              const profileRepoLabel = String(profile.current_workspace_repo || profileProject?.githubRepo || profileProject?.name || "").trim();
+              const profileRepository = profileRepoLabel ? {
+                label: profileRepoLabel,
+                title: profileProject?.remoteUrl || workspaceRoot || profileRepoLabel
+              } : null;
               return (
                 <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"}`} key={profile.profile_id}>
                   <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
@@ -1438,7 +1445,7 @@ function App() {
                       {working && <span className="badge profile-working">ĐANG LÀM VIỆC</span>}
                       {idle && <span className="badge connected">ĐANG RẢNH</span>}
                       {!profile.connector_installed && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
-                      {profile.active_chat_title && <span className="active-chat-chip" title={profile.active_chat_title}>{profile.active_chat_title}</span>}
+                      {profile.connected && profileRepository?.label && <span className="active-repo-chip" title={profileRepository.title}>{profileRepository.label}</span>}
                     </div>
                     <code>{profile.email ? profile.label : profile.profile_id}</code>
                     <div className="profile-meta">

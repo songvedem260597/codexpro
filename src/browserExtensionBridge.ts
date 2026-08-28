@@ -30,6 +30,7 @@ export interface ExtensionProfileSummary {
   busy_since: string;
   activity: "working" | "settling" | "idle" | "no_chatgpt";
   active_chat_title: string;
+  current_workspace_root: string;
   conversation_tabs: Array<{
     id: number;
     title: string;
@@ -63,7 +64,7 @@ export interface BrowserExtensionConnectorInfo {
 }
 
 export interface BrowserExtensionBridgeOptions {
-  connectorInfo?: () => BrowserExtensionConnectorInfo;
+  connectorInfo?: (profileId: string) => BrowserExtensionConnectorInfo;
 }
 
 interface ExtensionProfile {
@@ -74,6 +75,7 @@ interface ExtensionProfile {
   connectorInstalled: boolean;
   connectorMessage: string;
   connectorCheckedAt: string;
+  workspaceRoot: string;
   lastSeen: number;
   tabs: unknown[];
   recentConversations: unknown[];
@@ -99,9 +101,10 @@ interface BridgeState {
   profiles: Map<string, ExtensionProfile>;
   pending: Map<string, PendingResult>;
   activeProfileId?: string;
-  connectorInfo?: () => BrowserExtensionConnectorInfo;
+  connectorInfo?: (profileId: string) => BrowserExtensionConnectorInfo;
 }
 
+const profileWorkspaceRoots = new Map<string, string>();
 let singleton: BridgeState | undefined;
 
 function isLoopbackAddress(value: string | undefined): boolean {
@@ -171,6 +174,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     connectorInstalled: false,
     connectorMessage: "",
     connectorCheckedAt: "",
+    workspaceRoot: profileWorkspaceRoots.get(id) || "",
     lastSeen: 0,
     tabs: [],
     recentConversations: [],
@@ -254,7 +258,7 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
       sendJson(req, res, 503, { error: "CodexPro does not have a public MCP URL ready for browser setup." });
       return;
     }
-    const connector = state.connectorInfo();
+    const connector = state.connectorInfo(profile.id);
     sendJson(req, res, 200, {
       ok: true,
       profile_id: profile.id,
@@ -407,11 +411,22 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       busy_since: busySince,
       activity,
       active_chat_title: activeChatTitle,
+      current_workspace_root: profile.workspaceRoot,
       conversation_tabs: conversationSummaries,
       recent_conversations: recentConversations
       };
     })
     .sort((a, b) => Number(b.active) - Number(a.active) || b.last_seen.localeCompare(a.last_seen));
+}
+
+export function setBrowserExtensionProfileWorkspace(profileId: string, root: string): void {
+  const id = String(profileId || "").trim();
+  const workspaceRoot = String(root || "").trim();
+  if (!id) return;
+  if (workspaceRoot) profileWorkspaceRoots.set(id, workspaceRoot);
+  else profileWorkspaceRoots.delete(id);
+  const profile = singleton?.profiles.get(id);
+  if (profile) profile.workspaceRoot = workspaceRoot;
 }
 
 export async function runBrowserExtensionCommand(

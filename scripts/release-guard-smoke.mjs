@@ -6,8 +6,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const npmCli = process.env.npm_execpath;
+// Node 24 on Windows rejects spawning a .cmd file directly with EINVAL. npm
+// itself invokes this smoke with npm_execpath; retain a direct-run fallback
+// for developers launching the file with `node`.
+const npmCli = process.env.npm_execpath || (process.platform === "win32"
+  ? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+  : "");
 const manifest = JSON.parse(await (await import("node:fs/promises")).readFile(join(root, "package.json"), "utf8"));
 
 assert.equal(manifest.scripts.prepublishOnly, "node scripts/release-guard.mjs");
@@ -41,7 +45,7 @@ try {
   const prefixArgs = ["--prefix", root, "run", "release:guard", "--silent"];
   const prefixInvocation = npmCli
     ? run(process.execPath, [npmCli, ...prefixArgs], { cwd: wrongCwd })
-    : run(npm, prefixArgs, { cwd: wrongCwd });
+    : run("npm", prefixArgs, { cwd: wrongCwd });
   assert.notEqual(prefixInvocation.status, 0, prefixInvocation.output);
   assert.match(prefixInvocation.output, /Release commands must run from the CodexPro root/);
 

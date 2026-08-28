@@ -4002,6 +4002,11 @@ async function main() {
     CODEXPRO_TUNNEL_MODE: tunnel === 'none' ? '0' : '1',
     CODEXPRO_ALLOW_NO_HTTP_TOKEN: args.noAuth ? '1' : '0'
   };
+  // The HTTP process starts before the launcher writes its runtime connection
+  // record. Keep the stable public hostname available in the child process so
+  // browser-extension setup can always build the profile-specific MCP URL,
+  // including immediately after a Windows scheduled-task recovery.
+  if (stableHostname) serverEnv.CODEXPRO_PUBLIC_HOSTNAME = stableHostname;
   if (codexDir) serverEnv.CODEXPRO_CODEX_DIR = codexDir;
   if (args.logRequests || process.env.CODEXPRO_LOG_REQUESTS === '1') serverEnv.CODEXPRO_LOG_REQUESTS = '1';
   if (args.allowHome) serverEnv.CODEXPRO_ALLOW_HOME = '1';

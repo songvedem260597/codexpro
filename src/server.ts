@@ -23,7 +23,7 @@ import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges }
 import { CONTROL_PLANE_TOOL_NAMES, controlPlaneToolDefinitions } from "./controlPlaneOps.js";
 import { codexPatchToUnifiedDiff, codexPatchTouchedPaths, isCodexPatchEnvelope } from "./patchOps.js";
 import { runBrowserControl } from "./browserOps.js";
-import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, runBrowserExtensionCommand } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileWorkspace } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
@@ -1017,11 +1017,17 @@ const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, d
 
 export interface CodexProServerContext {
   workerId?: string | null;
+  browserProfileId?: string;
   onWorkspaceSelected?: (workspace: Workspace) => void;
 }
 
 export function createCodexProServer(config: CodexProConfig, context: CodexProServerContext = {}): McpServer {
-  const workspaces = new WorkspaceManager(config, context.onWorkspaceSelected);
+  const browserProfileId = String(context.browserProfileId || "").trim();
+  const workspaces = new WorkspaceManager(
+    config,
+    context.onWorkspaceSelected,
+    browserProfileId ? (workspace) => setBrowserExtensionProfileWorkspace(browserProfileId, workspace.root) : undefined
+  );
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
   const browser = getSharedBrowserAutomation();

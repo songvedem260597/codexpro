@@ -24,7 +24,7 @@ import { ensureBrowserExtensionBridge } from "./browserExtensionBridge.js";
 
 const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
 
-function browserExtensionConnectorInfo(config: CodexProConfig) {
+function browserExtensionConnectorInfo(config: CodexProConfig, profileId = "") {
   const runtime = readRuntimeConnection(config.defaultRoot);
   const profile = readWorkspaceProfile(config.defaultRoot);
   const hostname =
@@ -47,6 +47,8 @@ function browserExtensionConnectorInfo(config: CodexProConfig) {
   if (serverUrl.pathname === "/" || !serverUrl.pathname) serverUrl.pathname = "/mcp";
   if (serverUrl.pathname !== "/mcp") throw new Error("CodexPro public endpoint must use the /mcp path.");
   if (config.authToken) serverUrl.searchParams.set("codexpro_token", config.authToken);
+  const normalizedProfileId = String(profileId || "").trim();
+  if (/^[A-Za-z0-9._-]{1,160}$/.test(normalizedProfileId)) serverUrl.searchParams.set("codexpro_profile", normalizedProfileId);
 
   return {
     name: "CodexPro",
@@ -1481,7 +1483,7 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   if (config.browserControl) {
-    ensureBrowserExtensionBridge({ connectorInfo: () => browserExtensionConnectorInfo(config) });
+    ensureBrowserExtensionBridge({ connectorInfo: (profileId) => browserExtensionConnectorInfo(config, profileId) });
   }
   if (config.requireHttpToken && !config.authToken) {
     throw new Error(
@@ -1918,8 +1920,12 @@ async function main(): Promise<void> {
           });
         };
 
+        const browserProfileId = typeof req.query.codexpro_profile === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(req.query.codexpro_profile)
+          ? req.query.codexpro_profile
+          : "";
         const server = createCodexProServer(config, {
           workerId,
+          browserProfileId,
           onWorkspaceSelected: (workspace) => {
             const activeSessionId = (transport as any).sessionId as string | undefined;
             if (!activeSessionId) return;
