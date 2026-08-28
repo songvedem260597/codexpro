@@ -23,7 +23,7 @@ const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.43";
+const WORKER_EXTENSION_VERSION = "0.5.44";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
@@ -162,6 +162,7 @@ function defaultManagerSettings() {
     chatHeight: 330,
     fontFamily: "system",
     fontSize: 14,
+    profileLayout: "rows",
     repoSelections: {},
     selectedWorkerPackId: DEFAULT_WORKER_PACK_ID,
     workerImagePacks: [],
@@ -189,6 +190,7 @@ function readManagerSettings() {
       chatHeight: Math.max(180, Math.min(700, Number(parsed?.chatHeight) || defaults.chatHeight)),
       fontFamily: MANAGER_FONT_CHOICES.has(String(parsed?.fontFamily || "")) ? String(parsed.fontFamily) : defaults.fontFamily,
       fontSize: Math.max(12, Math.min(18, Number(parsed?.fontSize) || defaults.fontSize)),
+      profileLayout: parsed?.profileLayout === "cards" ? "cards" : defaults.profileLayout,
       repoSelections: Object.fromEntries(Object.entries(parsed?.repoSelections && typeof parsed.repoSelections === "object" ? parsed.repoSelections : {})
         .filter(([profileId, root]) => /^[A-Za-z0-9._-]{1,160}$/.test(profileId) && typeof root === "string" && root.trim())
         .slice(0, 40)
@@ -262,6 +264,9 @@ function saveManagerSettingsPatch(patch = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(patch, "fontSize")) {
     next.fontSize = Math.max(12, Math.min(18, Number(patch.fontSize) || current.fontSize));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "profileLayout")) {
+    next.profileLayout = patch.profileLayout === "cards" ? "cards" : "rows";
   }
   if (patch?.repoSelections && typeof patch.repoSelections === "object") {
     next.repoSelections = { ...(current.repoSelections || {}) };
@@ -519,10 +524,16 @@ function createWindow() {
                 heightRange.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', bubbles: true }));
               }
               await new Promise((resolve) => setTimeout(resolve, 250));
+              const layoutTrigger = document.querySelector('.profile-layout-select .settings-dropdown-trigger');
+              layoutTrigger?.click();
+              await new Promise((resolve) => setTimeout(resolve, 80));
+              const cards = [...document.querySelectorAll('.profile-layout-select .settings-dropdown-option')].find((item) => /Thẻ dọc/i.test(item.textContent || ''));
+              cards?.click();
+              await new Promise((resolve) => setTimeout(resolve, 120));
               const trigger = document.querySelector('.font-setting-row .settings-dropdown-trigger');
               trigger?.click();
               await new Promise((resolve) => setTimeout(resolve, 80));
-              const tahoma = [...document.querySelectorAll('.settings-dropdown-option')].find((item) => /Tahoma/i.test(item.textContent || ''));
+              const tahoma = [...document.querySelectorAll('.font-setting-row .settings-dropdown-option')].find((item) => /Tahoma/i.test(item.textContent || ''));
               tahoma?.click();
             })()`, true);
             await new Promise((resolve) => setTimeout(resolve, 700));
@@ -554,6 +565,8 @@ function createWindow() {
               numberValue: document.querySelectorAll('.settings-number-field input')?.[0]?.value || '',
               heightNumberValue: document.querySelectorAll('.settings-number-field input')?.[1]?.value || '',
               fontValue: document.querySelector('.font-setting-row .settings-dropdown-value strong')?.textContent?.trim() || '',
+              profileLayoutValue: document.querySelector('.profile-layout-select .settings-dropdown-value strong')?.textContent?.trim() || '',
+              profileLayoutClass: document.querySelector('.profile-list')?.className || '',
               workerCards: document.querySelectorAll('.worker-setting-card').length,
               settingsWidth: Math.round(settingsView?.getBoundingClientRect().width || 0),
               mainContentWidth: Math.round((main?.clientWidth || 0) - 100),
@@ -563,16 +576,16 @@ function createWindow() {
             };
           })()`, true);
           settingsProbe = {
-            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "tahoma" && /Tahoma/i.test(uiSettings.fontValue) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
-            before: { chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily },
-            saved: { chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily },
+            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "tahoma" && afterSettings.profileLayout === "cards" && /Tahoma/i.test(uiSettings.fontValue) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
+            before: { chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout },
+            saved: { chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily, profileLayout: afterSettings.profileLayout },
             chatModalWidth,
             chatResponseHeight,
             ui: uiSettings,
             workerPackProbe
           };
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
-            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily })})`, true);
+            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout })})`, true);
           }
         }
         const chatSmokeRequested = [
@@ -1678,7 +1691,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.68" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.73" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -2063,7 +2076,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.68" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.73" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);

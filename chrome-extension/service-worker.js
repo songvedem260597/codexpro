@@ -1043,22 +1043,7 @@ async function execute(command) {
     if(!tab?.id)throw new Error('Profile này không có đoạn chat dự án đang mở.');
     const networkCaptureInstalled=await ensureChatNetworkStreamCapture(tab.id);
     if((await chatRequestState(tab.id,conversationId)).busy)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
-    const previouslyActiveTab=tabs.find(candidate=>candidate.id&&candidate.windowId===tab.windowId&&candidate.active&&candidate.id!==tab.id);
-    let targetTemporarilyActivated=false;
-    if(!tab.active){
-      await chrome.tabs.update(tab.id,{active:true});
-      targetTemporarilyActivated=true;
-      await new Promise(resolve=>setTimeout(resolve,250));
-      tab=await chrome.tabs.get(tab.id);
-    }
-    let activeTabRestored=false;
-    const restorePreviouslyActiveTab=async()=>{
-      if(activeTabRestored||!targetTemporarilyActivated||!previouslyActiveTab?.id)return;
-      activeTabRestored=true;
-      try{await chrome.tabs.update(previouslyActiveTab.id,{active:true});}catch{}
-    };
-
-    try{
+    const targetTemporarilyActivated=false;
     const submitStartedAt=Date.now();
     const attemptId=crypto.randomUUID();
     let deadlineAt=submitStartedAt+DOM_PREPARE_TIMEOUT_MS-1500;
@@ -1279,7 +1264,6 @@ async function execute(command) {
       return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,...submitResult,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,network_evidence:evidence,submitted:false,send_uncertain:true,error:`SEND_UNCERTAIN: ${reason} CodexPro không tự gửi lại để tránh duplicate.`,attempt_id:attemptId,cleanup,cleanup_skipped:!definitelyUnsent,cleanup_reason:definitelyUnsent?'Draft được xác nhận chưa gửi.':'Có dấu hiệu submit hoặc draft đã rời composer.'};
     }
     return await resultForNetwork(networkAck,{...submitResult,target_temporarily_activated:targetTemporarilyActivated});
-    }finally{await restorePreviouslyActiveTab();}
   }
 
 if(action==='rename_chat'){
@@ -1947,7 +1931,7 @@ async function trustedSubmitChatSendButtonTab(tabId,attemptId) {
   try{await trustedActivateChatSendButtonTab(tabId,attemptId);}
   catch(error){await tracker.cleanup();throw new Error('TRUSTED_CLICK_NOT_DISPATCHED: '+String(error?.message||error));}
   const network=await tracker.started;
-  return {dispatched:true,page_brought_to_front:true,focus_emulation_used:false,cdp_network_acknowledged:Boolean(network?.network_acknowledged),cdp_generation_endpoint:String(network?.generation_endpoint||''),cdp_request_id:String(network?.request_id||''),cdp_tracker_timeout:Boolean(network?.timeout)};
+  return {dispatched:true,page_brought_to_front:false,background_submit:true,focus_emulation_used:false,cdp_network_acknowledged:Boolean(network?.network_acknowledged),cdp_generation_endpoint:String(network?.generation_endpoint||''),cdp_request_id:String(network?.request_id||''),cdp_tracker_timeout:Boolean(network?.timeout)};
 }
 
 async function trustedSubmitChatComposerTab(tabId,attemptId,expectedText='') {
@@ -1962,13 +1946,12 @@ async function trustedSubmitChatComposerTab(tabId,attemptId,expectedText='') {
   let keyDispatchStarted=false;
   let refocusedResult=null;
   try{
-    await chrome.debugger.sendCommand(target,'Page.bringToFront',{});
     await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:true});
     focusEmulationEnabled=true;
     await new Promise(resolve=>setTimeout(resolve,250));
     const [refocused]=await chrome.scripting.executeScript({target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
     refocusedResult=refocused?.result||null;
-    if(refocused?.result?.ok!==true||refocused?.result?.focused!==true&&refocused?.result?.selection_inside!==true)throw new Error(refocused?.result?.error||'Composer mất focus sau khi đưa page ra foreground lifecycle.');
+    if(refocused?.result?.ok!==true||refocused?.result?.focused!==true&&refocused?.result?.selection_inside!==true)throw new Error(refocused?.result?.error||'Composer mất focus trong background focus emulation lifecycle.');
     await new Promise(resolve=>setTimeout(resolve,250));
     keyDispatchStarted=true;
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
@@ -1977,7 +1960,7 @@ async function trustedSubmitChatComposerTab(tabId,attemptId,expectedText='') {
   }catch(error){if(focusEmulationEnabled)await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});await tracker.cleanup();throw new Error((keyDispatchStarted?'TRUSTED_ENTER_DISPATCH_UNCERTAIN: ':'TRUSTED_ENTER_PRE_DISPATCH: ')+String(error?.message||error));}
   const network=await tracker.started;
   if(focusEmulationEnabled)await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});
-  return {dispatched:true,page_brought_to_front:true,focus_emulation_used:true,composer_recovered_after_react:Boolean(focused?.result?.composer_recovered_after_react),composer_refocused_after_react:Boolean(refocusedResult?.composer_recovered_after_react),cdp_network_acknowledged:Boolean(network?.network_acknowledged),cdp_generation_endpoint:String(network?.generation_endpoint||''),cdp_request_id:String(network?.request_id||''),cdp_tracker_timeout:Boolean(network?.timeout)};
+  return {dispatched:true,page_brought_to_front:false,background_submit:true,focus_emulation_used:true,composer_recovered_after_react:Boolean(focused?.result?.composer_recovered_after_react),composer_refocused_after_react:Boolean(refocusedResult?.composer_recovered_after_react),cdp_network_acknowledged:Boolean(network?.network_acknowledged),cdp_generation_endpoint:String(network?.generation_endpoint||''),cdp_request_id:String(network?.request_id||''),cdp_tracker_timeout:Boolean(network?.timeout)};
 }
 
 async function trustedKeyTab(tabId,key) {

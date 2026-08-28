@@ -54,6 +54,7 @@ const DEFAULT_MANAGER_SETTINGS = {
   chatHeight: 330,
   fontFamily: "system",
   fontSize: 14,
+  profileLayout: "rows",
   repoSelections: {},
   selectedWorkerPackId: "default",
   workerImagePacks: [],
@@ -69,6 +70,50 @@ function WorkerIcon({ state, customImages }) {
       <img src={customSrc || worker.src} alt={worker.label} />
       <span className="profile-worker-dot" aria-hidden="true" />
     </div>
+  );
+}
+
+function ProfileSummaryIcon({ state, missing }) {
+  if (missing) {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M8 3v5M12 3v5M6 8h8v2a4 4 0 0 1-4 4v3" />
+        <path d="M16 16h6M19 13v6" />
+      </svg>
+    );
+  }
+  if (state === "working") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="m13.5 2-8 12h6l-1 8 8-12h-6l1-8Z" />
+      </svg>
+    );
+  }
+  if (state === "idle") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" />
+        <path d="m8 12 2.6 2.6L16.5 9" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3 2.8 20h18.4L12 3Z" />
+      <path d="M12 9v5M12 17.2v.1" />
+    </svg>
+  );
+}
+
+function ProfileSummaryItem({ state, count, label, missing = false }) {
+  return (
+    <span className={`profile-summary-item is-${state}${missing ? " is-missing" : ""}`}>
+      <span className="profile-summary-icon">
+        <ProfileSummaryIcon state={state} missing={missing} />
+      </span>
+      <strong>{count}</strong>
+      <span>{label}</span>
+    </span>
   );
 }
 
@@ -373,7 +418,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.43";
+const WORKER_EXTENSION_VERSION = "0.5.44";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -1921,7 +1966,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.68</small>
+          <small>CodexPro Manager 0.2.73</small>
         </div>
       </aside>
 
@@ -1965,7 +2010,13 @@ function App() {
               <p className="section-note">Mỗi profile có extension CodexPro sẽ tự xuất hiện tại đây. Chọn đúng profile để app tự thêm và test MCP.</p>
             </div>
             <div className="profile-head-actions">
-              <span className="profile-count">{profileSummary.working} làm việc · {profileSummary.idle} rảnh · {profileSummary.hung} mất kết nối · {profileSummary.missing} chưa cài{profileSummary.reload ? ` · ${profileSummary.reload} cần update worker` : ""}</span>
+              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} rảnh, ${profileSummary.hung} mất kết nối, ${profileSummary.missing} chưa cài`}>
+                <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
+                <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
+                <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
+                <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
+                {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
+              </div>
               <button
                 className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}
                 onClick={reloadProfiles}
@@ -1976,7 +2027,7 @@ function App() {
               </button>
             </div>
           </div>
-          <div className="profile-list">
+          <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout`}>
             {!status?.browserProfiles?.length && (
               <div className="empty">Chưa có Chrome profile nào kết nối. Hãy Load unpacked extension CodexPro trong profile cần dùng.</div>
             )}
@@ -2344,6 +2395,37 @@ function App() {
               <div style={{ height: `${Math.max(34, Math.min(100, managerSettings.chatHeight / 7))}%` }}>
                 <span>Tin nhắn gần nhất</span><small>{managerSettings.chatHeight}px</small>
               </div>
+            </div>
+          </section>
+
+          <section className="settings-panel">
+            <div className="settings-panel-head profile-layout-setting-head">
+              <div>
+                <p className="eyebrow">PROFILE LAYOUT</p>
+                <h2>Bố cục profile đã kết nối</h2>
+                <p className="section-note">Chọn danh sách ngang gọn gàng hoặc thẻ dọc với ảnh worker lớn. Thẻ dọc hiển thị tối đa 4 profile mỗi hàng.</p>
+              </div>
+              <div className="profile-layout-select">
+                <label>Kiểu hiển thị</label>
+                <SettingsDropdown
+                  value={managerSettings.profileLayout}
+                  options={[
+                    { value: "rows", label: "Danh sách ngang", hint: "Gọn, ưu tiên thông tin profile" },
+                    { value: "cards", label: "Thẻ dọc", hint: "Ảnh worker lớn, tối đa 4 thẻ mỗi hàng" }
+                  ]}
+                  disabled={settingsBusy === "save"}
+                  ariaLabel="Chọn bố cục profile"
+                  onChange={(value) => void saveManagerSetting({ profileLayout: value }, value === "cards" ? "Đã chuyển sang thẻ dọc" : "Đã chuyển sang danh sách ngang")}
+                />
+              </div>
+            </div>
+            <div className={`profile-layout-preview is-${managerSettings.profileLayout === "cards" ? "card" : "row"}`} aria-hidden="true">
+              {["idle", "working", "idle", "hung"].map((state, index) => (
+                <span className="profile-layout-preview-item" key={`${state}-${index}`}>
+                  <WorkerIcon state={state} customImages={managerSettings.workerImageDataUrls} />
+                  <i />
+                </span>
+              ))}
             </div>
           </section>
 
