@@ -343,7 +343,13 @@ async function headlessIdentity(stored) {
     const label=String(url.searchParams.get('label')||`Headless ${id.slice(-8)}`).slice(0,120);
     const sourceProfileId=String(stored.profileId||'').slice(0,160);
     await chrome.storage.local.set({headlessWorkerId:id,headlessWorkerLabel:label,headlessSourceProfileId:sourceProfileId});
-    if(Number.isInteger(bootstrap.id))await chrome.tabs.remove(bootstrap.id).catch(()=>{});
+    if(Number.isInteger(bootstrap.id))await chrome.tabs.update(bootstrap.id,{url:'https://chatgpt.com/'}).catch(()=>{});
+    setTimeout(async()=>{
+      try{
+        const visibleTabs=await chrome.tabs.query({});
+        if(!visibleTabs.length)await chrome.windows.create({url:'https://chatgpt.com/',focused:false,type:'normal'});
+      }catch{}
+    },1200);
     headlessIdentityCache={id,label,source_profile_id:sourceProfileId};
     return headlessIdentityCache;
   }catch{return null;}
@@ -1613,7 +1619,7 @@ async function probeConnectorEndpoint(serverUrl) {
     const response=await fetch(serverUrl,{
       method:'POST',
       headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},
-      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.43'}}}),
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.44'}}}),
       signal:controller.signal
     });
     const body=(await response.text()).slice(0,20000);

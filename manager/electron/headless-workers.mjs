@@ -79,6 +79,49 @@ export function createHeadlessWorkerManager(options = {}) {
     return chromeExecutableCandidates().find((candidate) => candidate && fs.existsSync(candidate)) || "";
   }
 
+  async function chromeVersion(chromePath) {
+    try {
+      const { stdout = "", stderr = "" } = await execFileAsync(chromePath, ["--version"], { windowsHide: true, timeout: 5000 });
+      return String(stdout || stderr).match(/\d+\.\d+\.\d+\.\d+/)?.[0] || "";
+    } catch {
+      return "";
+    }
+  }
+
+  function chromeUserAgent(version) {
+    const chromeVersionValue = version || "120.0.0.0";
+    if (process.platform === "win32") {
+      return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersionValue} Safari/537.36`;
+    }
+    if (process.platform === "darwin") {
+      return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersionValue} Safari/537.36`;
+    }
+    return `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersionValue} Safari/537.36`;
+  }
+
+  async function waitForDevToolsPort(userDataDir, timeoutMs = 8000) {
+    const filePath = path.join(userDataDir, "DevToolsActivePort");
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const [portLine] = (await fs.promises.readFile(filePath, "utf8")).trim().split(/\r?\n/);
+        const port = Number(portLine);
+        if (Number.isInteger(port) && port > 0 && port < 65536) return port;
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+    throw new Error("Chrome headless không mở DevTools endpoint đúng thời gian.");
+  }
+
+  async function createDevToolsTarget(port, targetUrl) {
+    const endpoint = `http://127.0.0.1:${port}/json/new?${encodeURIComponent(targetUrl)}`;
+    const response = await fetch(endpoint, { method: "PUT", signal: AbortSignal.timeout(6000) });
+    if (!response.ok) throw new Error(`Không tạo được headless page target (HTTP ${response.status}).`);
+    const payload = await response.json();
+    if (payload?.type !== "page" || !payload?.id) throw new Error("Chrome headless không trả về page target hợp lệ.");
+    return payload;
+  }
+
   function readState() {
     const value = readJson(stateFile, { version: 1, workers: [] });
     return {
@@ -267,17 +310,19 @@ export function createHeadlessWorkerManager(options = {}) {
     const bootstrap = new URL("http://127.0.0.1:9224/headless-bootstrap");
     bootstrap.searchParams.set("worker_id", worker.id);
     bootstrap.searchParams.set("label", worker.label || `Headless ${worker.id.slice(-8)}`);
+    const version = await chromeVersion(chromePath);
+    const userAgent = chromeUserAgent(version);
+    await fs.promises.rm(path.join(userDataDir, "DevToolsActivePort"), { force: true }).catch(() => {});
     const args = [
       "--headless=new",
+      `--user-agent=${userAgent}`,
       `--user-data-dir=${userDataDir}`,
       `--profile-directory=${worker.sourceProfileDirectory}`,
       "--no-first-run",
       "--no-default-browser-check",
       "--disable-background-mode",
       "--window-size=1280,900",
-      "--remote-debugging-port=0",
-      bootstrap.toString(),
-      "https://chatgpt.com/"
+      "--remote-debugging-port=0"
     ];
     const child = spawn(chromePath, args, {
       detached: true,
@@ -289,7 +334,14 @@ export function createHeadlessWorkerManager(options = {}) {
     worker.lastStartedAt = new Date().toISOString();
     worker.lastError = "";
     saveState(state);
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    const debugPort = await waitForDevToolsPort(userDataDir);
+    await createDevToolsTarget(debugPort, bootstrap.toString());
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await createDevToolsTarget(debugPort, "https://chatgpt.com/");
+    worker.debugPort = debugPort;
+    worker.userAgent = userAgent;
+    saveState(state);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
     if (!processAlive(worker.pid)) {
       worker.pid = 0;
       worker.lastError = "Chrome headless đã thoát ngay sau khi khởi động.";
