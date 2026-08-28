@@ -41,7 +41,7 @@ assert.match(server, /timeout_ms: z\.number\(\)\.int\(\)\.min\(100\)\.max\(60000
 assert.match(server, /steps: Array\.isArray\(args\.steps\)/);
 
 const manifest = JSON.parse(manifestText);
-assert.equal(manifest.version, "0.5.40");
+assert.equal(manifest.version, "0.5.41");
 assert.ok(manifest.permissions.includes("debugger"));
 
 console.log("✓ Browser agent persistent-session/batch/wait smoke test passed");

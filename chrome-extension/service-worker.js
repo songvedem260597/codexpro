@@ -823,6 +823,37 @@ async function readCanonicalConversationPage(conversationId) {
   }catch(error){return {ok:false,error:String(error?.message||error)};}
 }
 
+function readChatNetworkStreamCapturePage(conversationId='') {
+  const capture=globalThis.__codexproNetworkStreamCaptureV1;
+  if(!capture||typeof capture.read!=='function')return {available:false,capture_installed:false,conversation_id:String(conversationId||'')};
+  try{return capture.read(String(conversationId||''));}
+  catch(error){return {available:false,capture_installed:true,conversation_id:String(conversationId||''),error:String(error?.message||error).slice(0,500)};}
+}
+
+async function ensureChatNetworkStreamCapture(tabId) {
+  try{
+    await promiseWithTimeout(
+      chrome.scripting.executeScript({target:{tabId},world:'MAIN',files:['network-capture.js']}),
+      DOM_ACTION_TIMEOUT_MS,
+      'ChatGPT network capture install timeout.'
+    );
+    return true;
+  }catch{return false;}
+}
+
+async function chatNetworkStreamCapture(tabId,conversationId) {
+  const installed=await ensureChatNetworkStreamCapture(tabId);
+  if(!installed)return {available:false,capture_installed:false,conversation_id:String(conversationId||'')};
+  try{
+    const [injected]=await promiseWithTimeout(
+      chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:readChatNetworkStreamCapturePage,args:[conversationId]}),
+      DOM_ACTION_TIMEOUT_MS,
+      'ChatGPT network stream read timeout.'
+    );
+    return injected?.result&&typeof injected.result==='object'?injected.result:{available:false,capture_installed:true,conversation_id:String(conversationId||'')};
+  }catch(error){return {available:false,capture_installed:true,conversation_id:String(conversationId||''),error:String(error?.message||error).slice(0,500)};}
+}
+
 async function probeConversationLimitPage() {
   const sleep=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
   const limitPattern=/(?:you(?:'|’)?ve reached the maximum length for this conversation|maximum length for this conversation|đ(?:ã|a) (?:đạt|chạm|tới).*?(?:độ dài|do dai).*?(?:tối đa|toi da).*?(?:cuộc trò chuyện|đoạn chat))/i;
@@ -915,6 +946,7 @@ async function execute(command) {
       tab=await chrome.tabs.create({url:'https://chatgpt.com/c/'+conversationId,active:false});await waitForTab(tab.id,45000);tab=await chrome.tabs.get(tab.id);
     }
     if(!tab?.id)throw new Error('Profile này không có đoạn chat dự án đang mở.');
+    const networkCaptureInstalled=await ensureChatNetworkStreamCapture(tab.id);
     if((await chatRequestState(tab.id,conversationId)).busy)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
     const previouslyActiveTab=tabs.find(candidate=>candidate.id&&candidate.windowId===tab.windowId&&candidate.active&&candidate.id!==tab.id);
     let targetTemporarilyActivated=false;
@@ -945,7 +977,7 @@ async function execute(command) {
       pendingConversationByTab.delete(tab.id);
       const submittedBy=String(injectedResult.submitted_by||'network-observed');
       const networkEvidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
-      const shared={network_tracking:true,network_acknowledged:true,submission_state:'submitted',generation_state:networkAck.network_state,network_state:networkAck.network_state,network_generation_endpoint:networkAck.network_generation_endpoint,network_error:networkAck.network_error,network_status_code:networkAck.network_status_code,network_evidence:networkEvidence,...injectedResult,submitted:true,submitted_by:submittedBy};
+      const shared={network_tracking:true,network_acknowledged:true,network_stream_capture_installed:networkCaptureInstalled,submission_state:'submitted',generation_state:networkAck.network_state,network_state:networkAck.network_state,network_generation_endpoint:networkAck.network_generation_endpoint,network_error:networkAck.network_error,network_status_code:networkAck.network_status_code,network_evidence:networkEvidence,...injectedResult,submitted:true,submitted_by:submittedBy};
       if(networkAck.network_state==='failed'){
         const limit=await probeConversationLimit(tab.id);
         if(limit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(limit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
@@ -1129,8 +1161,19 @@ if(action==='rename_chat'){
       network_error:networkState.network_error,
       network_duration_ms:networkState.network_duration_ms
     };
+    const networkStream=await chatNetworkStreamCapture(tab.id,conversationId);
+    const networkStreamMessages=Array.isArray(networkStream.messages)?networkStream.messages.slice(-20):[];
+    const networkStreamText=String(networkStream.text||'');
+    const networkStreamPayload={
+      network_stream_available:Boolean(networkStream.available&&networkStreamText),
+      network_stream_capture_installed:Boolean(networkStream.capture_installed),
+      network_stream_endpoint:String(networkStream.endpoint||''),
+      network_stream_event_count:Number(networkStream.event_count)||0,
+      network_stream_error:String(networkStream.error||''),
+      network_stream_updated_at:String(networkStream.updated_at||'')
+    };
     if(args.read_dom===false){
-      return {action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:'',text_length:0,truncated:false,incomplete:false,incomplete_reason:'',conversation_limit_reached:false,conversation_limit_message:'',message_count:0,total_message_count:0,messages:[],busy:networkState.busy,dom_available:false,dom_skipped:true,dom_error:'',updated_at:new Date().toISOString(),...networkPayload};
+      return {action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:networkStreamText,text_length:networkStreamText.length,truncated:false,incomplete:Boolean(networkState.busy),incomplete_reason:networkState.busy?(networkStreamText?'network_stream_in_progress':'generation_in_progress'):'',conversation_limit_reached:false,conversation_limit_message:'',message_count:networkStreamMessages.length,total_message_count:networkStreamMessages.length,messages:networkStreamMessages,busy:networkState.busy,dom_available:false,dom_skipped:true,dom_error:'',response_source:networkStreamText?'network_stream':'network_state',updated_at:networkStream.updated_at||new Date().toISOString(),...networkStreamPayload,...networkPayload};
     }
     let canonical={ok:false,error:''};
     try{
@@ -1190,11 +1233,11 @@ if(action==='rename_chat'){
           recovery.dom_recovery_error=String(error?.message||error).slice(0,500);
         }
       }
-      return {action,target_id:tab.id,...domResult,busy:Boolean(networkState.busy||canonical.busy||domResult.busy),dom_available:true,dom_busy:Boolean(domResult.busy),canonical_available:Boolean(canonical.ok),canonical_error:String(canonical.error||''),...recovery,...networkPayload};
+      return {action,target_id:tab.id,...domResult,busy:Boolean(networkState.busy||canonical.busy||domResult.busy),dom_available:true,dom_busy:Boolean(domResult.busy),canonical_available:Boolean(canonical.ok),canonical_error:String(canonical.error||''),...networkStreamPayload,...recovery,...networkPayload};
     }catch(error){
       if(canonical.ok){
         const latestAssistant=[...(canonical.messages||[])].reverse().find(message=>message.role==='assistant');
-        return {action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(canonical.text||''),text_length:String(canonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(canonical.busy),incomplete_reason:canonical.busy?'canonical_generation_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,messages:canonical.messages||[],busy:Boolean(networkState.busy||canonical.busy),dom_available:false,dom_error:String(error?.message||error).slice(0,500),canonical_available:true,response_ready:Boolean(canonical.response_ready),response_source:'canonical_api',updated_at:new Date().toISOString(),...networkPayload};
+        return {action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(canonical.text||''),text_length:String(canonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(canonical.busy),incomplete_reason:canonical.busy?'canonical_generation_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,messages:canonical.messages||[],busy:Boolean(networkState.busy||canonical.busy),dom_available:false,dom_error:String(error?.message||error).slice(0,500),canonical_available:true,response_ready:Boolean(canonical.response_ready),response_source:'canonical_api',updated_at:new Date().toISOString(),...networkStreamPayload,...networkPayload};
       }
       return {
         action,
@@ -1216,6 +1259,7 @@ if(action==='rename_chat'){
         dom_available:false,
         dom_error:String(error?.message||error).slice(0,500),
         updated_at:new Date().toISOString(),
+        ...networkStreamPayload,
         ...networkPayload
       };
     }

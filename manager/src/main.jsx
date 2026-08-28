@@ -313,7 +313,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.39";
+const WORKER_EXTENSION_VERSION = "0.5.41";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -428,6 +428,7 @@ function App() {
   const statusRefreshInFlight = useRef(false);
   const profileCheckTimes = useRef(new Map());
   const responseFetches = useRef(new Set());
+  const networkStreamReads = useRef(new Map());
   const networkCompletionReads = useRef(new Map());
   const repoTaskVerificationReads = useRef(new Map());
   const conversationRollovers = useRef(new Map());
@@ -720,6 +721,15 @@ function App() {
             }
           };
         });
+        if (networkState === "generating") {
+          const streamKey = `${profile.profile_id}:${conversationId}`;
+          const lastStreamRead = Number(networkStreamReads.current.get(streamKey) || 0);
+          if (Date.now() - lastStreamRead >= 850) {
+            networkStreamReads.current.set(streamKey, Date.now());
+            void loadResponse(profile, conversationId, true, false);
+          }
+          continue;
+        }
         if (networkState !== "completed" || !networkCompletedAt) continue;
         const completionKey = `${profile.profile_id}:${conversationId}`;
         if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) continue;
@@ -1351,17 +1361,29 @@ function App() {
     try {
       const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId, readDom, recoverStaleDom });
       const domAvailable = result.dom_available !== false;
+      const networkStreamAvailable = Boolean(result.network_stream_available && (result.text || result.messages?.length));
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         const sameConversation = previous.conversationId === conversationId;
-        const nextMessages = domAvailable && Array.isArray(result.messages)
+        const incomingMessages = Array.isArray(result.messages)
           ? result.messages.slice(-20).map((message, index) => ({
               id: String(message?.id || `${message?.role || "message"}-${index}`),
               role: message?.role === "user" ? "user" : "assistant",
               text: message?.role === "user" ? visibleUserMessageText(message?.text) : String(message?.text || ""),
               truncated: Boolean(message?.truncated)
             })).filter((message) => message.text)
-          : (sameConversation && Array.isArray(previous.messages) ? previous.messages : []);
+          : [];
+        let nextMessages = sameConversation && Array.isArray(previous.messages) ? previous.messages : [];
+        if (domAvailable) nextMessages = incomingMessages;
+        else if (networkStreamAvailable) {
+          const merged = [...nextMessages];
+          for (const message of incomingMessages) {
+            const index = merged.findIndex((candidate) => candidate.id === message.id);
+            if (index >= 0) merged[index] = { ...merged[index], ...message };
+            else merged.push(message);
+          }
+          nextMessages = merged.slice(-20);
+        }
         return {
           ...current,
           [profile.profile_id]: {
@@ -1370,16 +1392,20 @@ function App() {
             loading: false,
             error: "",
             conversationId,
-            text: domAvailable ? (result.text || "") : (sameConversation ? previous.text || "" : ""),
+            text: domAvailable || networkStreamAvailable ? (result.text || "") : (sameConversation ? previous.text || "" : ""),
             messages: nextMessages,
             busy: Boolean(result.busy),
-            truncated: domAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
-            incomplete: domAvailable ? Boolean(result.incomplete) : false,
-            incompleteReason: domAvailable ? (result.incomplete_reason || "") : "",
+            truncated: domAvailable || networkStreamAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
+            incomplete: domAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
+            incompleteReason: domAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
             conversationLimitReached: Boolean(previous.conversationLimitReached),
             conversationLimitMessage: previous.conversationLimitMessage || "",
             domAvailable,
             domSkipped: Boolean(result.dom_skipped),
+            networkStreamAvailable,
+            networkStreamEndpoint: String(result.network_stream_endpoint || previous.networkStreamEndpoint || ""),
+            networkStreamEventCount: Number(result.network_stream_event_count) || Number(previous.networkStreamEventCount) || 0,
+            networkStreamError: String(result.network_stream_error || ""),
             contentNeedsRefresh: result.dom_skipped
               ? String(result.network_state || previous.networkState || "") === "completed"
               : domAvailable
@@ -1393,7 +1419,7 @@ function App() {
             networkStatusCode: Number(result.network_status_code) || Number(previous.networkStatusCode) || 0,
             networkError: String(result.network_error || previous.networkError || ""),
             networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
-            messageCount: domAvailable ? Number(result.message_count) || 0 : Number(previous.messageCount) || 0,
+            messageCount: domAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
             updatedAt: result.updated_at || new Date().toISOString()
           }
         };
@@ -1567,16 +1593,19 @@ function App() {
               )}
               {!profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
                 <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={() => holdResponseAutoScroll(profile.profile_id)} onTouchMove={() => holdResponseAutoScroll(profile.profile_id)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
-                  {(responseMessages.length ? responseMessages : [{ id: "latest-assistant", role: "assistant", text: response.text, truncated: response.truncated }]).map((message) => (
-                    <div className={`chat-transcript-message is-${message.role}`} key={message.id}>
-                      <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
-                      <div className="latest-response-content">
-                        <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
-                        {message.role === "assistant" ? <ResponseText text={message.text} truncated={message.truncated} /> : <div className="chat-message-text user-message-text">{message.text}</div>}
+                  {(responseMessages.length ? responseMessages : [{ id: "latest-assistant", role: "assistant", text: response.text, truncated: response.truncated }]).map((message, messageIndex, allMessages) => {
+                    const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
+                    return (
+                      <div className={`chat-transcript-message is-${message.role}`} key={message.id}>
+                        <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
+                        <div className="latest-response-content">
+                          <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
+                          {message.role === "assistant" ? <><ResponseText text={message.text} truncated={message.truncated} />{response.busy && response.networkStreamAvailable && isLastAssistant && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}</> : <div className="chat-message-text user-message-text">{message.text}</div>}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                  {response.busy && <div className="chat-transcript-message is-assistant is-typing"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">ChatGPT</span><span className="thinking-state latest-response-typing"><span>Thinking</span><span className="typing-dots"><i /><i /><i /></span></span></div></div>}
+                    );
+                  })}
+                  {response.busy && !(response.networkStreamAvailable && hasResponseContent) && <div className="chat-transcript-message is-assistant is-typing"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">ChatGPT</span><span className="thinking-state latest-response-typing"><span>Thinking</span><span className="typing-dots"><i /><i /><i /></span></span></div></div>}
                 </div>
               ) : <div className="response-empty">Đoạn chat này chưa có tin nhắn.</div>}
             </div>
