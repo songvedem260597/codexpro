@@ -411,6 +411,7 @@ function App() {
   const profileCheckTimes = useRef(new Map());
   const responseFetches = useRef(new Set());
   const networkCompletionReads = useRef(new Map());
+  const repoTaskVerificationReads = useRef(new Map());
   const conversationRollovers = useRef(new Map());
   const profilesRef = useRef([]);
   const requestTargetsRef = useRef({});
@@ -646,7 +647,10 @@ function App() {
         const completionKey = `${profile.profile_id}:${conversationId}`;
         if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) continue;
         networkCompletionReads.current.set(completionKey, networkCompletedAt);
-        void loadResponse(profile, conversationId, true, true, true);
+        void (async () => {
+          await loadResponse(profile, conversationId, true, true, true);
+          if (currentResponse?.repoTaskId) await verifyRepoTaskUse(profile, conversationId, currentResponse, networkCompletedAt);
+        })();
         if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
       }
     }
@@ -999,7 +1003,12 @@ function App() {
             sendUncertain: false,
             networkState: generationState,
             networkError: String(result?.network_error || previous.networkError || ""),
-            networkStatusCode: Number(result?.network_status_code) || Number(previous.networkStatusCode) || 0
+            networkStatusCode: Number(result?.network_status_code) || Number(previous.networkStatusCode) || 0,
+            repoTaskId: String(result?.repo_task_id || ""),
+            repoTaskRetryCount: Number(result?.repo_task_retry_count) || 0,
+            repoTaskStatus: "waiting",
+            repoTaskVerified: false,
+            repoTaskRequest: { text, attachments, projectRoot }
           }
         };
       });
@@ -1125,6 +1134,75 @@ function App() {
       });
       setRequestSendErrors((current) => ({ ...current, [profileId]: `Chat đã đầy. Không tạo được chat mới tự động: ${message}` }));
       return null;
+    }
+  }
+
+  async function verifyRepoTaskUse(profile, conversationId, response, networkCompletedAt) {
+    const taskId = String(response?.repoTaskId || "");
+    if (!taskId || response?.conversationId !== conversationId) return;
+    const verificationKey = `${taskId}:${networkCompletedAt}`;
+    if (repoTaskVerificationReads.current.has(verificationKey)) return;
+    repoTaskVerificationReads.current.set(verificationKey, Date.now());
+    setRequestResponses((current) => {
+      const previous = current[profile.profile_id] || {};
+      return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "checking" } } : current;
+    });
+    try {
+      const proof = await api.getRepoTaskStatus({ taskId });
+      if (proof?.verified) {
+        setRequestResponses((current) => {
+          const previous = current[profile.profile_id] || {};
+          return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "verified", repoTaskVerified: true, repoTaskProof: proof } } : current;
+        });
+        return;
+      }
+      const retryCount = Number(response?.repoTaskRetryCount) || 0;
+      const original = response?.repoTaskRequest;
+      if (retryCount >= 1 || !original?.projectRoot) {
+        const message = "ChatGPT đã trả lời nhưng không gọi CodexPro sau 2 lần. Phản hồi này không được coi là đã thực hiện công việc.";
+        setRequestResponses((current) => {
+          const previous = current[profile.profile_id] || {};
+          return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "failed", repoTaskVerified: false } } : current;
+        });
+        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: message }));
+        notify("ChatGPT né gọi CodexPro · đã chặn phản hồi");
+        return;
+      }
+      setRequestResponses((current) => {
+        const previous = current[profile.profile_id] || {};
+        return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "retrying", loading: true } } : current;
+      });
+      const retried = await api.sendProfileRequest({
+        profileId: profile.profile_id,
+        conversationId,
+        newChat: false,
+        projectRoot: original.projectRoot,
+        text: original.text,
+        attachments: Array.isArray(original.attachments) ? original.attachments : [],
+        toolRetry: true,
+        previousTaskId: taskId
+      });
+      if (String(retried?.submission_state || "") === "uncertain") throw new Error("Lần bắt buộc gọi CodexPro có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
+      setRequestResponses((current) => {
+        const previous = current[profile.profile_id] || {};
+        return previous.repoTaskId === taskId ? {
+          ...current,
+          [profile.profile_id]: {
+            ...previous,
+            repoTaskId: String(retried?.repo_task_id || ""),
+            repoTaskRetryCount: 1,
+            repoTaskStatus: "waiting",
+            repoTaskVerified: false,
+            loading: true,
+            networkState: String(retried?.generation_state || retried?.network_state || "generating")
+          }
+        } : current;
+      });
+      notify("ChatGPT chưa gọi CodexPro · đang tự gửi lại bắt buộc");
+      window.setTimeout(() => void refresh(false), 500);
+    } catch (err) {
+      const message = err?.message || String(err);
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Không xác minh được tool call CodexPro: ${message}` }));
     }
   }
 
@@ -1336,6 +1414,12 @@ function App() {
                   <span>{response.rolloverNotice}</span>
                 </div>
               )}
+              {responseCurrent && response?.repoTaskId && (
+                <div className={`network-response-notice is-${response.repoTaskStatus === "verified" ? "completed" : response.repoTaskStatus === "failed" ? "failed" : "generating"}`}>
+                  <strong>{response.repoTaskStatus === "verified" ? "CodexPro: đã xác minh tool call" : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT né tool · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ bằng chứng tool call"}</strong>
+                  <span>{response.repoTaskStatus === "verified" ? `Repo đã được mở thật · task ${response.repoTaskId}` : response.repoTaskStatus === "failed" ? "ChatGPT không gọi CodexPro nên Manager không công nhận phản hồi này." : "Manager chỉ công nhận công việc sau khi server nhận begin_repo_task."}</span>
+                </div>
+              )}
               {responseCurrent && !isNewChat && selectedNetworkState !== "idle" && (
                 <div className={`network-response-notice is-${selectedNetworkState}`}>
                   <strong>{selectedBusy ? "Network: AI đang xử lý" : selectedNetworkFailed ? "Network: request thất bại" : "Network: AI đã hoàn tất phản hồi"}</strong>
@@ -1418,7 +1502,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
-          <small>CodexPro Manager 0.2.57</small>
+          <small>CodexPro Manager 0.2.58</small>
         </div>
       </aside>
 

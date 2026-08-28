@@ -1235,7 +1235,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.57" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.58" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1476,6 +1476,8 @@ async function sendProfileRequest(payload) {
   const text = String(payload?.text || "").trim();
   const requestedProjectRoot = String(payload?.projectRoot || "").trim();
   const requestedFiles = Array.isArray(payload?.attachments) ? payload.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
+  const taskId = `cpt_${randomBytes(12).toString("hex")}`;
+  const toolRetry = Boolean(payload?.toolRetry);
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
@@ -1534,7 +1536,10 @@ async function sendProfileRequest(payload) {
   const taskText = [
     "@CodexPro",
     `Repo đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
-    "Hãy dùng CodexPro để đọc và thao tác đúng repo đã khóa ở trên. Không chuyển sang workspace/repo khác. Tiếp tục từ trạng thái git và công việc hiện có của repo này.",
+    `Task ID bắt buộc: ${taskId}`,
+    `BẮT BUỘC gọi tool CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Không được trả lời suông, không được tự tuyên bố CodexPro bị disable nếu chưa gọi tool.`,
+    "Sau khi begin_repo_task thành công, hãy đọc và thao tác đúng repo đã khóa. Không chuyển sang workspace/repo khác. Tiếp tục từ trạng thái git và công việc hiện có của repo này.",
+    ...(toolRetry ? ["Đây là lần gửi lại vì phản hồi trước không có bằng chứng gọi CodexPro. Phải gọi codexpro action=begin_repo_task ngay."] : []),
     "",
     text ? `Yêu cầu của người dùng:\n${text}` : "Yêu cầu của người dùng nằm trong file đính kèm."
   ].join("\n");
@@ -1547,7 +1552,15 @@ async function sendProfileRequest(payload) {
     attachments
   }, 120000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
-  return result;
+  return { ...result, repo_task_id: taskId, repo_task_retry_count: toolRetry ? 1 : 0 };
+}
+
+async function getRepoTaskStatus(payload) {
+  const taskId = String(payload?.taskId || "").trim();
+  if (!/^cpt_[a-f0-9]{24}$/.test(taskId)) throw new Error("CodexPro task id không hợp lệ.");
+  const base = await runtimeBaseStatus();
+  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  return await localMcpTool(base.config, base.token, "repo_task_status", { task_id: taskId }, 15000);
 }
 
 async function renameProfileChat(payload) {
@@ -1600,7 +1613,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.57" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.58" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
@@ -1690,6 +1703,7 @@ ipcMain.handle("codexpro:capture-clipboard-image", () => captureClipboardImage()
 ipcMain.handle("codexpro:send-profile-request", (_event, payload) => sendProfileRequest(payload));
 ipcMain.handle("codexpro:rename-profile-chat", (_event, payload) => renameProfileChat(payload));
 ipcMain.handle("codexpro:get-profile-response", (_event, payload) => getProfileResponse(payload));
+ipcMain.handle("codexpro:get-repo-task-status", (_event, payload) => getRepoTaskStatus(payload));
 ipcMain.handle("codexpro:choose-project", async () => {
   const result = await dialog.showOpenDialog({ properties: ["openDirectory"], title: "Chọn repo hoặc dự án" });
   return result.canceled ? null : result.filePaths[0];
