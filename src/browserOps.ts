@@ -9,8 +9,15 @@ export type BrowserControlAction =
   | "snapshot"
   | "navigate"
   | "click"
+  | "trusted_click"
   | "type"
   | "press"
+  | "hover"
+  | "scroll"
+  | "wait_for"
+  | "inspect_element"
+  | "evaluate"
+  | "batch"
   | "screenshot";
 
 export interface BrowserControlOptions {
@@ -20,6 +27,12 @@ export interface BrowserControlOptions {
   selector?: string;
   text?: string;
   key?: string;
+  expression?: string;
+  state?: "attached" | "visible" | "hidden" | "detached";
+  timeoutMs?: number;
+  deltaX?: number;
+  deltaY?: number;
+  steps?: BrowserControlOptions[];
   maxChars?: number;
   fullPage?: boolean;
 }
@@ -168,7 +181,12 @@ class CdpClient {
     this.pending.clear();
   }
 
+  isOpen(): boolean {
+    return this.socket.readyState === WebSocket.OPEN;
+  }
+
   send(method: string, params: Record<string, unknown> = {}): Promise<Record<string, any>> {
+    if (!this.isOpen()) return Promise.reject(new CodexProError("Chrome DevTools connection is not open."));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -185,13 +203,48 @@ class CdpClient {
   }
 }
 
+const CDP_SESSION_IDLE_MS = 30_000;
+const persistentClients = new Map<string, { client: CdpClient; timer: NodeJS.Timeout }>();
+
+function dropPersistentClient(webSocketUrl: string): void {
+  const existing = persistentClients.get(webSocketUrl);
+  if (!existing) return;
+  clearTimeout(existing.timer);
+  existing.client.close();
+  persistentClients.delete(webSocketUrl);
+}
+
+function refreshPersistentClient(webSocketUrl: string, client: CdpClient): void {
+  const previous = persistentClients.get(webSocketUrl);
+  if (previous) clearTimeout(previous.timer);
+  const timer = setTimeout(() => dropPersistentClient(webSocketUrl), CDP_SESSION_IDLE_MS);
+  timer.unref?.();
+  persistentClients.set(webSocketUrl, { client, timer });
+}
+
+async function persistentClient(webSocketUrl: string): Promise<CdpClient> {
+  const existing = persistentClients.get(webSocketUrl);
+  if (existing?.client.isOpen()) {
+    refreshPersistentClient(webSocketUrl, existing.client);
+    return existing.client;
+  }
+  if (existing) dropPersistentClient(webSocketUrl);
+  const client = await CdpClient.connect(webSocketUrl);
+  refreshPersistentClient(webSocketUrl, client);
+  return client;
+}
+
 async function withTarget<T>(debugUrl: string, targetId: string | undefined, fn: (client: CdpClient, target: BrowserTarget) => Promise<T>): Promise<T> {
   const target = await targetFor(debugUrl, targetId);
-  const client = await CdpClient.connect(target.webSocketDebuggerUrl!);
+  const webSocketUrl = target.webSocketDebuggerUrl!;
+  const client = await persistentClient(webSocketUrl);
   try {
-    return await fn(client, target);
-  } finally {
-    client.close();
+    const result = await fn(client, target);
+    refreshPersistentClient(webSocketUrl, client);
+    return result;
+  } catch (error) {
+    dropPersistentClient(webSocketUrl);
+    throw error;
   }
 }
 
@@ -230,7 +283,7 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
   if (action === "status") {
     const version = await fetchJson<Record<string, unknown>>(`${debugUrl}/json/version`);
     const tabs = await listTargets(debugUrl);
-    return { action, connected: true, debug_url: debugUrl, browser: version.Browser ?? null, protocol_version: version["Protocol-Version"] ?? null, tab_count: tabs.length };
+    return { action, connected: true, debug_url: debugUrl, browser: version.Browser ?? null, protocol_version: version["Protocol-Version"] ?? null, tab_count: tabs.length, persistent_cdp: true, cdp_idle_ms: CDP_SESSION_IDLE_MS };
   }
 
   if (action === "list_tabs") {
@@ -251,6 +304,20 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
   }
 
   return await withTarget(debugUrl, options.targetId, async (client, target) => {
+    if (action === "batch") {
+      const steps = Array.isArray(options.steps) ? options.steps.slice(0, 50) : [];
+      if (!steps.length) throw new CodexProError("batch requires at least one step.");
+      const results: Record<string, any>[] = [];
+      for (let index = 0; index < steps.length; index += 1) {
+        const step = steps[index];
+        if (!step || step.action === "batch" || ["status", "list_tabs", "open_tab", "activate_tab", "close_tab"].includes(step.action)) {
+          throw new CodexProError(`Unsupported batch step at index ${index}: ${step?.action ?? "missing"}`);
+        }
+        results.push(await runBrowserControl(debugUrl, { ...step, targetId: target.id }));
+      }
+      return { action, target_id: target.id, ok: true, step_count: results.length, results };
+    }
+
     if (action === "snapshot") {
       const maxChars = Math.max(500, Math.min(50_000, Math.floor(options.maxChars ?? 20_000)));
       const snapshot = await evaluate(client, `(() => {
@@ -295,11 +362,19 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
       return { action, target_id: target.id, url: await evaluate(client, "location.href"), title: await evaluate(client, "document.title") };
     }
 
-    if (action === "click") {
+    if (action === "click" || action === "trusted_click") {
       const selector = selectorExpression(options.selector ?? "");
-      const result = await evaluate(client, `(() => { const el = document.querySelector(${selector}); if (!el) return {ok:false,error:'Element not found'}; el.scrollIntoView({block:'center',inline:'center'}); el.click(); return {ok:true,tag:el.tagName.toLowerCase(),text:(el.innerText||el.getAttribute('aria-label')||'').slice(0,300)}; })()`);
-      if (!result?.ok) throw new CodexProError(`Browser click failed: ${result?.error ?? "unknown error"}`);
-      return { action, target_id: target.id, selector: options.selector, ...result };
+      const located = await evaluate(client, `(() => { const el = document.querySelector(${selector}); if (!el) return {ok:false,error:'Element not found'}; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {ok:true,x:r.left+r.width/2,y:r.top+r.height/2,tag:el.tagName.toLowerCase(),text:(el.innerText||el.getAttribute('aria-label')||'').slice(0,300)}; })()`);
+      if (!located?.ok) throw new CodexProError(`Browser ${action} failed: ${located?.error ?? "unknown error"}`);
+      if (action === "click") {
+        const result = await evaluate(client, `(() => { const el = document.querySelector(${selector}); if (!el) return {ok:false,error:'Element not found'}; el.click(); return {ok:true}; })()`);
+        if (!result?.ok) throw new CodexProError(`Browser click failed: ${result?.error ?? "unknown error"}`);
+      } else {
+        await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: located.x, y: located.y, button: "none" });
+        await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: located.x, y: located.y, button: "left", buttons: 1, clickCount: 1 });
+        await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: located.x, y: located.y, button: "left", buttons: 0, clickCount: 1 });
+      }
+      return { action, target_id: target.id, selector: options.selector, ok: true, tag: located.tag, text: located.text };
     }
 
     if (action === "type") {
@@ -324,6 +399,56 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
       await client.send("Input.dispatchKeyEvent", { type: "keyDown", key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
       await client.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
       return { action, target_id: target.id, key, ok: true };
+    }
+
+    if (action === "hover") {
+      const selector = selectorExpression(options.selector ?? "");
+      const point = await evaluate(client, `(() => { const el=document.querySelector(${selector}); if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,tag:el.tagName.toLowerCase()}; })()`);
+      if (!point) throw new CodexProError("Browser hover failed: Element not found");
+      await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none" });
+      return { action, target_id: target.id, selector: options.selector, ok: true, tag: point.tag };
+    }
+
+    if (action === "scroll") {
+      let point = await evaluate(client, "({x:innerWidth/2,y:innerHeight/2})");
+      if (options.selector) {
+        const selector = selectorExpression(options.selector);
+        point = await evaluate(client, `(() => { const el=document.querySelector(${selector}); if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
+        if (!point) throw new CodexProError("Browser scroll failed: Element not found");
+      }
+      const deltaX = Number.isFinite(options.deltaX) ? Number(options.deltaX) : 0;
+      const deltaY = Number.isFinite(options.deltaY) ? Number(options.deltaY) : 600;
+      await client.send("Input.dispatchMouseEvent", { type: "mouseWheel", x: point.x, y: point.y, deltaX, deltaY });
+      return { action, target_id: target.id, selector: options.selector, delta_x: deltaX, delta_y: deltaY, ok: true };
+    }
+
+    if (action === "wait_for") {
+      const state = options.state ?? "visible";
+      const timeoutMs = Math.max(100, Math.min(60_000, Math.floor(options.timeoutMs ?? 10_000)));
+      const selector = options.selector ? JSON.stringify(boundedText(options.selector, 2_000)) : "null";
+      const wantedText = options.text ? JSON.stringify(boundedText(options.text, 10_000)) : "null";
+      const deadline = Date.now() + timeoutMs;
+      let last: any = null;
+      while (Date.now() <= deadline) {
+        last = await evaluate(client, `(() => { const selector=${selector},wanted=${wantedText},state=${JSON.stringify(state)}; const el=selector?document.querySelector(selector):null; const attached=Boolean(el); const visible=Boolean(el&&(()=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';})()); const haystack=selector?(el?.innerText||el?.textContent||''):(document.body?.innerText||''); const textMatched=!wanted||String(haystack).includes(wanted); const matched=state==='attached'?attached&&textMatched:state==='visible'?visible&&textMatched:state==='hidden'?!visible:state==='detached'?!attached:false; return {matched,attached,visible,text_matched:textMatched}; })()`);
+        if (last?.matched) return { action, target_id: target.id, selector: options.selector, text: options.text, state, waited_ms: timeoutMs - Math.max(0, deadline - Date.now()), ...last };
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      throw new CodexProError(`Browser wait_for timed out after ${timeoutMs} ms.`);
+    }
+
+    if (action === "inspect_element") {
+      const selector = selectorExpression(options.selector ?? "");
+      const result = await evaluate(client, `(() => { const el=document.querySelector(${selector}); if(!el)return {ok:false,error:'Element not found'}; const r=el.getBoundingClientRect(),s=getComputedStyle(el); return {ok:true,tag:el.tagName.toLowerCase(),text:(el.innerText||el.textContent||'').trim().slice(0,1000),value:typeof el.value==='string'?el.value.slice(0,1000):'',disabled:Boolean(el.disabled),checked:Boolean(el.checked),rect:{x:r.x,y:r.y,width:r.width,height:r.height},style:{display:s.display,visibility:s.visibility,opacity:s.opacity,pointerEvents:s.pointerEvents,position:s.position,zIndex:s.zIndex},attributes:Object.fromEntries(Array.from(el.attributes||[]).slice(0,40).map(a=>[a.name,String(a.value).slice(0,500)]))}; })()`);
+      if (!result?.ok) throw new CodexProError(`Browser inspect_element failed: ${result?.error ?? "unknown error"}`);
+      return { action, target_id: target.id, selector: options.selector, ...result };
+    }
+
+    if (action === "evaluate") {
+      const expression = boundedText(options.expression, 100_000).trim();
+      if (!expression) throw new CodexProError("A JavaScript expression is required.");
+      const value = await evaluate(client, expression);
+      return { action, target_id: target.id, value };
     }
 
     if (action === "screenshot") {
