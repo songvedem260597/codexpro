@@ -363,6 +363,8 @@ const MINIMAL_TOOL_NAMES = [
   SUPERTOOL_NAME,
   "server_config",
   "codexpro_self_test",
+  "begin_repo_task",
+  "repo_task_status",
   "open_current_workspace",
   "open_workspace",
   "read",
@@ -405,6 +407,8 @@ const FULL_TOOL_NAMES = [
   SUPERTOOL_NAME,
   "server_config",
   "codexpro_self_test",
+  "begin_repo_task",
+  "repo_task_status",
   "codexpro_inventory",
   "load_skill",
   "list_workspaces",
@@ -1014,6 +1018,13 @@ const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructive
 const BROWSER_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true, destructiveHint: false, idempotentHint: false };
 const BROWSER_ACTION_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
+const repoTaskProofs = new Map<string, { taskId: string; root: string; workspaceId: string; startedAt: string }>();
+
+function rememberRepoTaskProof(proof: { taskId: string; root: string; workspaceId: string; startedAt: string }): void {
+  repoTaskProofs.set(proof.taskId, proof);
+  if (repoTaskProofs.size <= 500) return;
+  for (const taskId of [...repoTaskProofs.keys()].slice(0, repoTaskProofs.size - 400)) repoTaskProofs.delete(taskId);
+}
 
 export interface CodexProServerContext {
   workerId?: string | null;
@@ -1598,6 +1609,58 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         bash_mode: config.bashMode,
         write_mode: config.writeMode,
         tool_mode: config.toolMode
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "begin_repo_task",
+    {
+      title: "Begin Manager Repo Task",
+      description: "Mandatory first call for every task sent by CodexPro Manager. Opens the exact locked repo and records server-side proof that CodexPro was actually invoked. Never answer a Manager task before calling this tool with its exact task_id and root.",
+      inputSchema: {
+        task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).describe("Exact task id included by CodexPro Manager."),
+        root: z.string().min(1).describe("Exact locked repository root included by CodexPro Manager.")
+      },
+      annotations: SESSION_READ_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Locking the requested CodexPro repo...",
+        "openai/toolInvocation/invoked": "CodexPro repo task verified"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.openWorkspace(args.root);
+      const proof = { taskId: args.task_id, root: workspace.root, workspaceId: workspace.id, startedAt: new Date().toISOString() };
+      rememberRepoTaskProof(proof);
+      return textResult(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}`, {
+        task_id: proof.taskId,
+        verified: true,
+        root: proof.root,
+        workspace_id: proof.workspaceId,
+        started_at: proof.startedAt
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "repo_task_status",
+    {
+      title: "Repo Task Status",
+      description: "Check server-side proof that begin_repo_task was called for a CodexPro Manager task.",
+      inputSchema: { task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/) },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const proof = repoTaskProofs.get(args.task_id);
+      return textResult(proof ? `# Repo Task Verified\n\n${proof.taskId} opened ${proof.root}.` : `# Repo Task Missing\n\nNo begin_repo_task call was received for ${args.task_id}.`, {
+        task_id: args.task_id,
+        verified: Boolean(proof),
+        ...(proof ? { root: proof.root, workspace_id: proof.workspaceId, started_at: proof.startedAt } : {})
       });
     }
   );

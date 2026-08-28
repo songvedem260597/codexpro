@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   sendProfileRequest: (payload) => invoke("codexpro:send-profile-request", payload),
   renameProfileChat: (payload) => invoke("codexpro:rename-profile-chat", payload),
   getProfileResponse: (payload) => invoke("codexpro:get-profile-response", payload),
+  getRepoTaskStatus: (payload) => invoke("codexpro:get-repo-task-status", payload),
   chooseProject: () => invoke("codexpro:choose-project"),
   addProject: (root) => invoke("codexpro:add-project", root),
   removeProject: (root) => invoke("codexpro:remove-project", root),
