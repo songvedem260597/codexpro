@@ -105,6 +105,7 @@ interface BridgeState {
 }
 
 const profileWorkspaceRoots = new Map<string, string>();
+const profileWorkspaceBindings = new Map<string, string>();
 let singleton: BridgeState | undefined;
 
 function isLoopbackAddress(value: string | undefined): boolean {
@@ -427,6 +428,18 @@ export function setBrowserExtensionProfileWorkspace(profileId: string, root: str
   else profileWorkspaceRoots.delete(id);
   const profile = singleton?.profiles.get(id);
   if (profile) profile.workspaceRoot = workspaceRoot;
+}
+
+export function setBrowserExtensionProfileWorkspaceBinding(profileId: string, root: string): void {
+  const id = String(profileId || "").trim();
+  const workspaceRoot = String(root || "").trim();
+  if (!id) return;
+  if (workspaceRoot) profileWorkspaceBindings.set(id, workspaceRoot);
+  else profileWorkspaceBindings.delete(id);
+}
+
+export function getBrowserExtensionProfileWorkspaceBinding(profileId: string): string {
+  return profileWorkspaceBindings.get(String(profileId || "").trim()) || "";
 }
 
 export async function runBrowserExtensionCommand(
