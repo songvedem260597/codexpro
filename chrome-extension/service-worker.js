@@ -3,6 +3,7 @@ const HEADERS = {'content-type':'application/json','x-codexpro-extension':'profi
 const CHAT_REQUEST_STALE_MS = 30 * 60 * 1000;
 const CHAT_NETWORK_STATE_KEY = 'codexproChatNetworkStateV1';
 const DOM_READ_TIMEOUT_MS = 2500;
+const CANONICAL_READ_TIMEOUT_MS = 15000;
 const DOM_ACTION_TIMEOUT_MS = 5000;
 const DOM_SEND_TIMEOUT_MS = 35000;
 const NETWORK_START_TIMEOUT_MS = 10000;
@@ -607,6 +608,65 @@ async function readChatResponsePage() {
   return {ok:true,title:document.title,url:location.href,text,text_length:text.length,truncated:Boolean(latestAssistant?.truncated),incomplete:false,incomplete_reason:'',conversation_limit_reached:false,conversation_limit_message:'',conversation_limit_button_label:'',message_count:messages.filter(message=>message.role==='assistant').length,total_message_count:messages.length,messages,busy:false,updated_at:new Date().toISOString()};
 }
 
+async function readCanonicalConversationPage(conversationId) {
+  const messageText=message=>{
+    const parts=Array.isArray(message?.content?.parts)?message.content.parts:[];
+    return parts.map(part=>{
+      if(typeof part==='string')return part;
+      if(typeof part?.text==='string')return part.text;
+      if(typeof part?.content==='string')return part.content;
+      return '';
+    }).filter(Boolean).join('\n').replace(/\u200b/g,'').trim();
+  };
+  const messagesFromPayload=payload=>{
+    const mapping=payload?.mapping||payload?.conversation?.mapping;
+    if(!mapping||typeof mapping!=='object')return [];
+    const nodes=[];
+    const currentId=String(payload?.current_node||payload?.conversation?.current_node||'');
+    if(currentId&&mapping[currentId]){
+      const seen=new Set();let cursor=mapping[currentId];
+      while(cursor&&!seen.has(cursor.id)){
+        seen.add(cursor.id);nodes.push(cursor);cursor=mapping[cursor.parent];
+      }
+      nodes.reverse();
+    }else{
+      nodes.push(...Object.values(mapping).sort((left,right)=>Number(left?.message?.create_time||0)-Number(right?.message?.create_time||0)));
+    }
+    return nodes.map((node,index)=>{
+      const message=node?.message;
+      const role=String(message?.author?.role||'');
+      if(!['user','assistant'].includes(role))return null;
+      const text=messageText(message);
+      return text?{id:String(message.id||node.id||`${role}-${index}`),role,text:text.slice(0,40000),truncated:text.length>40000}:null;
+    }).filter(Boolean).slice(-20);
+  };
+  try{
+    const sessionResponse=await fetch('/api/auth/session',{credentials:'include',cache:'no-store'});
+    const session=await sessionResponse.json().catch(()=>({}));
+    const accessToken=String(session?.accessToken||'');
+    if(!accessToken)return {ok:false,error:'ChatGPT session không trả access token.'};
+    const accountId=String(session?.account?.id||session?.accountId||session?.user?.account_id||session?.user?.accountId||session?.accounts?.[0]?.id||'').trim();
+    const headers={authorization:`Bearer ${accessToken}`,...(accountId?{'chatgpt-account-id':accountId}:{})};
+    const endpoints=[
+      `/backend-api/conversation/${encodeURIComponent(conversationId)}`,
+      `/backend-api/conversations/${encodeURIComponent(conversationId)}?include_has_versions=true&num_turns=40`
+    ];
+    let lastError='';
+    for(const endpoint of endpoints){
+      const response=await fetch(endpoint,{credentials:'include',cache:'no-store',headers});
+      const payload=await response.json().catch(()=>({}));
+      if(response.ok){
+        const messages=messagesFromPayload(payload);
+        const latestAssistant=[...messages].reverse().find(message=>message.role==='assistant');
+        if(latestAssistant)return {ok:true,endpoint,messages,text:latestAssistant.text,text_length:latestAssistant.text.length};
+        lastError=`${endpoint}: conversation chưa có assistant message.`;
+      }else lastError=`${endpoint}: ChatGPT HTTP ${response.status}`;
+      if(![404,405].includes(response.status))break;
+    }
+    return {ok:false,error:lastError||'ChatGPT không trả conversation canonical.'};
+  }catch(error){return {ok:false,error:String(error?.message||error)};}
+}
+
 async function probeConversationLimitPage() {
   const sleep=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
   const limitPattern=/(?:you(?:'|’)?ve reached the maximum length for this conversation|maximum length for this conversation|đ(?:ã|a) (?:đạt|chạm|tới).*?(?:độ dài|do dai).*?(?:tối đa|toi da).*?(?:cuộc trò chuyện|đoạn chat))/i;
@@ -845,7 +905,50 @@ if(action==='rename_chat'){
         'Chrome renderer không phản hồi khi đọc DOM.'
       );
       if(!injected?.result?.ok)throw new Error(injected?.result?.error||'Không đọc được phản hồi ChatGPT.');
-      return {action,target_id:tab.id,...injected.result,busy:networkState.busy,dom_available:true,dom_busy:Boolean(injected.result.busy),...networkPayload};
+      let domResult=injected.result;
+      const recovery={dom_recovery_checked:false,dom_recovered:false,dom_reloaded:false,dom_recovery_source:'',dom_recovery_error:''};
+      if(args.recover_stale_dom===true&&networkState.network_state==='completed'&&!networkState.busy){
+        recovery.dom_recovery_checked=true;
+        try{
+          const [canonicalInjection]=await promiseWithTimeout(
+            chrome.scripting.executeScript({target:{tabId:tab.id},world:'MAIN',func:readCanonicalConversationPage,args:[conversationId]}),
+            CANONICAL_READ_TIMEOUT_MS,
+            'ChatGPT không phản hồi khi xác minh conversation canonical.'
+          );
+          const canonical=canonicalInjection?.result||{};
+          const domText=String(domResult.text||'').trim();
+          const canonicalText=String(canonical.text||'').trim();
+          const stale=canonical.ok&&canonicalText.length>domText.length&&(!domText||canonicalText.startsWith(domText)||domText.length<160);
+          if(stale){
+            recovery.dom_recovery_source='canonical_api';
+            await new Promise(resolve=>setTimeout(resolve,900));
+            await chrome.tabs.reload(tab.id);
+            await waitForTab(tab.id,45000);
+            recovery.dom_reloaded=true;
+            const deadline=Date.now()+12000;
+            while(Date.now()<deadline){
+              await new Promise(resolve=>setTimeout(resolve,400));
+              try{
+                const [refreshed]=await promiseWithTimeout(
+                  chrome.scripting.executeScript({target:{tabId:tab.id},func:readChatResponsePage}),
+                  DOM_READ_TIMEOUT_MS,
+                  'Chrome renderer không phản hồi sau khi reload conversation.'
+                );
+                if(refreshed?.result?.ok)domResult=refreshed.result;
+                if(String(domResult.text||'').trim().length>=canonicalText.length)break;
+              }catch{}
+            }
+            if(String(domResult.text||'').trim().length<canonicalText.length){
+              const latestAssistant=[...(canonical.messages||[])].reverse().find(message=>message.role==='assistant');
+              domResult={...domResult,text:canonicalText,text_length:canonicalText.length,messages:canonical.messages||domResult.messages,message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,truncated:Boolean(latestAssistant?.truncated),updated_at:new Date().toISOString()};
+            }
+            recovery.dom_recovered=String(domResult.text||'').trim().length>=canonicalText.length;
+          }else if(!canonical.ok)recovery.dom_recovery_error=String(canonical.error||'Không đọc được conversation canonical.').slice(0,500);
+        }catch(error){
+          recovery.dom_recovery_error=String(error?.message||error).slice(0,500);
+        }
+      }
+      return {action,target_id:tab.id,...domResult,busy:networkState.busy,dom_available:true,dom_busy:Boolean(domResult.busy),...recovery,...networkPayload};
     }catch(error){
       return {
         action,
@@ -1003,7 +1106,7 @@ async function probeConnectorEndpoint(serverUrl) {
     const response=await fetch(serverUrl,{
       method:'POST',
       headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},
-      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.29'}}}),
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.30'}}}),
       signal:controller.signal
     });
     const body=(await response.text()).slice(0,20000);
