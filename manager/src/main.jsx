@@ -1662,9 +1662,9 @@ function App() {
       <main className={activePage === "settings" ? "page-settings" : "page-overview"}>
         <header>
           <div>
-            <p className="eyebrow">{activePage === "settings" ? "PERSONALIZATION" : "WINDOWS CONTROL CENTER"}</p>
-            <h1>{activePage === "settings" ? "Cài đặt giao diện" : "CodexPro của bạn"}</h1>
-            <p className="subtitle">{activePage === "settings" ? "Tùy chỉnh popup chat, ảnh worker và font chữ toàn app." : "Một chỗ để xem server, quản lý link MCP và kiểm tra repo."}</p>
+            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : "WINDOWS CONTROL CENTER"}</p>
+            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : "CodexPro của bạn"}</h1>
+            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ toàn app." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
@@ -1688,23 +1688,6 @@ function App() {
             <StatusCard label="Local MCP" ok={status?.local?.ok} value={status?.local?.ok ? "Online" : "Offline"} detail={status?.local?.ok ? `127.0.0.1:${status.config.port} · ${status.local.latency} ms` : status?.local?.error || "Đang kiểm tra"} />
             <StatusCard label="Public tunnel" ok={status?.tunnel?.ok} value={status?.tunnel?.ok ? "Online" : "Offline"} detail={status?.tunnel?.ok ? `${status.config.hostname} · ${status.tunnel.latency} ms` : status?.tunnel?.error || status?.config?.hostname || "Chưa cấu hình"} />
             <StatusCard label="Processes" ok={status?.processes?.length >= 3} value={`${status?.processes?.length ?? 0} tiến trình`} detail={status?.processes?.length ? status.processes.map((p) => `${p.name} ${p.pid}`).join(" · ") : "Không tìm thấy process"} />
-          </div>
-        </section>
-
-        <section className="connection-card" id="connection">
-          <div className="connection-copy">
-            <p className="eyebrow">MCP SERVER URL</p>
-            <h2>Kết nối ChatGPT</h2>
-            <p>Link đã gắn token riêng của CodexPro. Chọn <b>Server URL</b> và <b>No Auth</b>.</p>
-          </div>
-          <div className="link-box">
-            <code>{status?.mcpLink || "Chưa có link MCP"}</code>
-            <button className="copy-button" onClick={copyLink} disabled={!status?.mcpLink}>Copy</button>
-          </div>
-          <div className="link-actions">
-            <button className="button secondary" onClick={copyLink} disabled={!status?.mcpLink}><Icon>□</Icon>Copy link</button>
-            <button className="button danger-quiet" onClick={rotateLink} disabled={Boolean(busy)}>{busy === "rotate" ? "Đang tạo..." : "Tạo token + link mới"}</button>
-            <button className="text-button" onClick={() => api.openExternal("https://chatgpt.com/plugins?q=CodexPro")}>Mở Plugins ChatGPT ↗</button>
           </div>
         </section>
 
@@ -1865,6 +1848,23 @@ function App() {
         </div>
 
         <div className="settings-view" hidden={activePage !== "settings"}>
+          <section className="connection-card" id="connection">
+            <div className="connection-copy">
+              <p className="eyebrow">MCP SERVER URL</p>
+              <h2>Kết nối ChatGPT</h2>
+              <p>Link đã gắn token riêng của CodexPro. Chọn <b>Server URL</b> và <b>No Auth</b>.</p>
+            </div>
+            <div className="link-box">
+              <code>{status?.mcpLink || "Chưa có link MCP"}</code>
+              <button className="copy-button" onClick={copyLink} disabled={!status?.mcpLink}>Copy</button>
+            </div>
+            <div className="link-actions">
+              <button className="button secondary" onClick={copyLink} disabled={!status?.mcpLink}>Copy link</button>
+              <button className="button danger-quiet" onClick={rotateLink} disabled={Boolean(busy)}>{busy === "rotate" ? "Đang tạo..." : "Tạo token + link mới"}</button>
+              <button className="text-button" onClick={() => api.openExternal("https://chatgpt.com/plugins?q=CodexPro")}>Mở Plugins ChatGPT ↗</button>
+            </div>
+          </section>
+
           <section className="settings-panel">
             <div className="settings-panel-head">
               <div>
