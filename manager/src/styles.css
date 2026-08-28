@@ -324,6 +324,7 @@ section { margin-bottom: 38px; }
 .response-numbered { padding-left: 25px; }
 .response-numbered li { padding-left: 2px; }
 .latest-response-typing { margin-top: 10px; }
+.thinking-state { display: inline-flex; align-items: center; gap: 7px; color: #8794aa; font-size: 12px; font-weight: 650; }
 .typing-dots { display: inline-flex; align-items: center; gap: 4px; min-height: 16px; vertical-align: middle; }
 .typing-dots i { width: 5px; height: 5px; border-radius: 50%; background: #8799d7; animation: typing-dot 1.1s ease-in-out infinite; }
 .typing-dots i:nth-child(2) { animation-delay: .14s; }

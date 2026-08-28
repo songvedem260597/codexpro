@@ -6,7 +6,7 @@ const DOM_READ_TIMEOUT_MS = 2500;
 const CANONICAL_READ_TIMEOUT_MS = 15000;
 const DOM_ACTION_TIMEOUT_MS = 5000;
 const DOM_SEND_TIMEOUT_MS = 35000;
-const NETWORK_START_TIMEOUT_MS = 10000;
+const NETWORK_START_TIMEOUT_MS = 30000;
 const CONVERSATION_LIMIT_PROBE_TIMEOUT_MS = 1500;
 const PENDING_CONVERSATION_TTL_MS = 60 * 1000;
 let polling = false;
@@ -608,6 +608,13 @@ async function readChatResponsePage() {
   return {ok:true,title:document.title,url:location.href,text,text_length:text.length,truncated:Boolean(latestAssistant?.truncated),incomplete:false,incomplete_reason:'',conversation_limit_reached:false,conversation_limit_message:'',conversation_limit_button_label:'',message_count:messages.filter(message=>message.role==='assistant').length,total_message_count:messages.length,messages,busy:false,updated_at:new Date().toISOString()};
 }
 
+function inspectChatSendAttemptPage(attemptId='') {
+  const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
+  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+  const text=String(composer?.isContentEditable?(composer.innerText||composer.textContent||''):(composer?.value||'')).replace(/[\u200B-\u200D\uFEFF]/g,'').trim();
+  return {ok:true,draft_owned:Boolean(composer&&composer.dataset.codexproDraftAttempt===attemptId),draft_present:Boolean(text),draft_length:text.length,composer_found:Boolean(composer)};
+}
+
 async function readCanonicalConversationPage(conversationId) {
   const messageText=message=>{
     const parts=Array.isArray(message?.content?.parts)?message.content.parts:[];
@@ -822,6 +829,22 @@ async function execute(command) {
           'Chrome không phản hồi khi bấm nút gửi bằng trusted input.'
         );
         injected.result={...injected.result,submitted:true,submitted_by:'trusted-click'};
+        let earlyAck=null;
+        try{earlyAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100,2000);}catch{}
+        if(earlyAck)return await resultForNetwork(earlyAck,injected.result);
+        const [attemptState]=await promiseWithTimeout(
+          chrome.scripting.executeScript({target:{tabId:tab.id},func:inspectChatSendAttemptPage,args:[attemptId]}),
+          DOM_ACTION_TIMEOUT_MS,
+          'Chrome không phản hồi khi xác minh nút gửi.'
+        );
+        if(attemptState?.result?.draft_owned&&attemptState.result.draft_present){
+          await promiseWithTimeout(
+            trustedSubmitChatComposerTab(tab.id,attemptId),
+            DOM_ACTION_TIMEOUT_MS,
+            'Chrome không phản hồi khi gửi bằng Enter trusted.'
+          );
+          injected.result={...injected.result,submitted:true,submitted_by:'trusted-composer-enter',trusted_click_fallback:true};
+        }
       }catch(error){
         let networkAck=null;
         try{networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100,3000);}catch{}
@@ -1106,7 +1129,7 @@ async function probeConnectorEndpoint(serverUrl) {
     const response=await fetch(serverUrl,{
       method:'POST',
       headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},
-      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.30'}}}),
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.33'}}}),
       signal:controller.signal
     });
     const body=(await response.text()).slice(0,20000);
@@ -1297,10 +1320,25 @@ async function trustedActivateChatSendButtonTab(tabId,attemptId) {
   if(!attemptId)throw new Error('Trusted send attempt không hợp lệ.');
   await withDebuggerTab(tabId,async target=>{
     const safeAttempt=String(attemptId).replace(/[\\"\r\n]/g,'');
-    const expression=`(()=>{const el=document.querySelector('[data-codexpro-send-attempt="${safeAttempt}"]')||document.querySelector('#composer-submit-button,button[data-testid="send-button"]');if(!el)return false;el.focus({preventScroll:true});return document.activeElement===el;})()`;
+    const expression=`(()=>{const el=document.querySelector('[data-codexpro-send-attempt="${safeAttempt}"]')||document.querySelector('#composer-submit-button,button[data-testid="send-button"]');if(!el||el.disabled||el.getAttribute('aria-disabled')==='true')return null;el.scrollIntoView({block:'center',inline:'center'});const rect=el.getBoundingClientRect();return rect.width&&rect.height?{x:rect.left+rect.width/2,y:rect.top+rect.height/2}:null;})()`;
     const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression,returnByValue:true});
-    if(evaluated?.result?.value!==true)throw new Error('Không focus được nút gửi ChatGPT.');
-    await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',text:'\r',unmodifiedText:'\r',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
+    const point=evaluated?.result?.value;
+    if(!Number.isFinite(point?.x)||!Number.isFinite(point?.y))throw new Error('Không tìm được tọa độ nút gửi ChatGPT.');
+    await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseMoved',x:point.x,y:point.y,button:'none'});
+    await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',buttons:1,clickCount:1});
+    await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',buttons:0,clickCount:1});
+  });
+}
+
+async function trustedSubmitChatComposerTab(tabId,attemptId) {
+  if(!attemptId)throw new Error('Trusted composer attempt không hợp lệ.');
+  await withDebuggerTab(tabId,async target=>{
+    const safeAttempt=String(attemptId).replace(/[\\"\r\n]/g,'');
+    const expression=`(()=>{const el=document.querySelector('[data-codexpro-submit-attempt="${safeAttempt}"]');if(!el)return false;el.focus({preventScroll:true});const selection=getSelection(),range=document.createRange();range.selectNodeContents(el);range.collapse(false);selection.removeAllRanges();selection.addRange(range);return document.activeElement===el;})()`;
+    const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression,returnByValue:true});
+    if(evaluated?.result?.value!==true)throw new Error('Không focus được composer ChatGPT để gửi fallback.');
+    await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
+    await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'char',key:'Enter',code:'Enter',text:'\r',unmodifiedText:'\r',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
   });
 }
