@@ -60,13 +60,28 @@ const isChatGenerationRequest = Function(`${generationSource}; return isChatGene
 assert.equal(isChatGenerationRequest({
   tabId: 9,
   method: "POST",
-  url: "https://chatgpt.com/backend-api/conversation"
+  url: "https://chatgpt.com/backend-api/f/conversation"
 }), true);
 assert.equal(isChatGenerationRequest({
   tabId: 9,
   method: "POST",
   url: "https://chatgpt.com/backend-api/codex/responses"
 }), true);
+assert.equal(isChatGenerationRequest({
+  tabId: 9,
+  method: "POST",
+  url: "https://chatgpt.com/backend-api/f/responses"
+}), true);
+assert.equal(isChatGenerationRequest({
+  tabId: 9,
+  method: "POST",
+  url: "https://chatgpt.com/backend-api/f/conversation/prepare"
+}), false, "prepare is not generation ACK");
+assert.equal(isChatGenerationRequest({
+  tabId: 9,
+  method: "POST",
+  url: "https://chatgpt.com/realtime/wm"
+}), false, "realtime setup/transport is not sufficient generation ACK evidence");
 assert.equal(isChatGenerationRequest({
   tabId: 9,
   method: "GET",
@@ -86,20 +101,67 @@ const timeoutCatch = sendBlock.indexOf("}catch(error){");
 const networkRecovery = sendBlock.indexOf("waitForNetworkGeneration(tab.id,submitStartedAt-100,5000)", timeoutCatch);
 const acknowledgedReturn = sendBlock.indexOf("if(networkAck)return await resultForNetwork", networkRecovery);
 const cleanup = sendBlock.indexOf("await cleanupAttempt()", timeoutCatch);
+const enterPrimary = sendBlock.indexOf("trustedSubmitChatComposerTab(tab.id,attemptId)");
+const earlyAck = sendBlock.indexOf("waitForNetworkGeneration(tab.id,submitStartedAt-100,6000)", enterPrimary);
+const clickFallback = sendBlock.indexOf("trustedActivateChatSendButtonTab(tab.id,attemptId)");
 
 assert.ok(timeoutCatch >= 0, "DOM send timeout must be handled");
 assert.ok(networkRecovery > timeoutCatch, "DOM timeout must check the network tracker");
 assert.ok(acknowledgedReturn > networkRecovery, "a tracked generation must count as submitted");
 assert.ok(cleanup > acknowledgedReturn, "draft cleanup must only happen after network recovery fails");
-assert.match(sendBlock, /SEND_UNCERTAIN: Đã bấm gửi nhưng chưa thấy generation request/);
-assert.match(sendBlock, /submitted_by:'network'/);
-assert.match(sendBlock, /trustedActivateChatSendButtonTab\(tab\.id,attemptId\)/, "prepared sends must use trusted Chrome input");
-assert.match(worker, /requires_trusted_click:true/, "the DOM phase must not use an untrusted element.click for submit");
-assert.match(worker, /data-codexpro-send-attempt/, "trusted send must locate the button again after debugger attachment");
+assert.ok(enterPrimary >= 0, "trusted Enter must exist in the primary send path");
+assert.ok(earlyAck > enterPrimary, "primary Enter must wait for generation ACK before fallback");
+assert.ok(clickFallback > earlyAck, "trusted Send click must only occur after the Enter ACK window");
+assert.match(sendBlock, /submitted_by:'trusted-enter'/);
+assert.match(sendBlock, /submitted_by:'trusted-click-fallback'/);
+assert.match(sendBlock, /chrome\.tabs\.update\(tab\.id,\{active:true\}\)/, "a background target tab must be activated inside its existing window before trusted input");
+assert.match(sendBlock, /finally\{await restorePreviouslyActiveTab\(\);\}/, "the previously selected tab must be restored after a background send attempt");
+assert.match(sendBlock, /SEND_UNCERTAIN:/);
+assert.match(sendBlock, /shouldUseTrustedClickFallback\(attemptState\?\.result,earlyEvidence\)/, "fallback must require an owned draft and no submit lifecycle evidence");
+assert.match(sendBlock, /cleanup_skipped:!definitelyUnsent/, "ambiguous attempts must not delete a possibly submitted draft");
+assert.match(worker, /network_generation_endpoint/, "generation ACK must expose the matched endpoint");
+assert.match(worker, /network_recent_posts/, "safe POST path diagnostics must be exposed without request bodies");
+assert.match(worker, /CDP_NETWORK_TRACKER_MAX_MS/, "CDP tracking must have a bounded maximum lifetime");
+assert.match(sendBlock, /waitForAttachmentUploadNetwork\(tab\.id,submitStartedAt-100\)/, "attachment sends must wait for upload network completion before trusted Enter");
+assert.match(sendBlock, /ATTACHMENT_UPLOAD_FAILED:/, "a failed upload must stop before submit and clean only the owned draft");
+assert.match(worker, /const tracker=cdpNetworkTrackersByTab\.get\(tabId\);if\(tracker\)void tracker\.cleanup\(\)/, "closing a tab must detach its CDP tracker");
+assert.doesNotMatch(worker, /body_text:String\(request\.body_text/, "diagnostics must not export captured message bodies");
 assert.match(worker, /replace\(\/\^@\\s\*\(\?=CodexPro\\b\)\/i,''\)/, "manager mentions must compare semantically after ChatGPT renders them");
 assert.match(worker, /const verifyDeadline=Math\.min\(/, "composer verification must not consume the entire send deadline");
-assert.doesNotMatch(extractFunction("sendChatRequestPage"), /send\.click\(\)/, "the ChatGPT submit button must not be triggered by an untrusted DOM click");
-assert.match(worker, /const currentComposer=findComposer\(\)/, "composer verification must survive ChatGPT replacing the React node");
-assert.match(worker, /const currentRoot=composerRootFor\(currentComposer\)\|\|root/, "send lookup must use the latest composer tree");
+const prepareSource = extractFunction("sendChatRequestPage");
+assert.doesNotMatch(prepareSource, /composer-submit-button|send-button|aria-label\*="Send"|sendRect|send_point/, "primary preparation must not find or measure the Send button");
+assert.match(prepareSource, /requires_trusted_submit:true/, "prepared composer must request the trusted Enter path");
+assert.match(prepareSource, /internal_submit_found:false/, "runtime result must report that no stable internal submit action was found");
+assert.match(prepareSource, /new DataTransfer\(\)/, "attachment preparation must keep the existing DOM upload path");
+assert.match(prepareSource, /const currentComposer=findComposer\(\)/, "composer verification must survive ChatGPT replacing the React node");
 
-console.log("✓ DOM-less ChatGPT send recovery smoke test passed");
+const clickSource = extractFunction("prepareTrustedClickFallbackPage");
+assert.match(clickSource, /composer-submit-button|send-button/, "Send selectors may remain only in the fallback locator");
+assert.match(clickSource, /codexproSendAttempt/, "fallback click must be scoped to the exact send attempt");
+
+const enterSource = extractFunction("trustedSubmitChatComposerTab");
+assert.match(enterSource, /focusChatComposerForSubmitPage/, "trusted Enter must focus the prepared composer without locating Send");
+assert.match(enterSource, /Input\.dispatchKeyEvent/, "trusted Enter must use CDP keyboard input");
+assert.match(enterSource, /Page\.bringToFront/, "trusted Enter must wake a background renderer before keyboard submit");
+assert.match(enterSource, /Emulation\.setFocusEmulationEnabled/, "trusted Enter must emulate focus without depending on the OS foreground window");
+assert.match(enterSource, /const \[refocused\]/, "trusted Enter must re-focus the composer after bringing a background page forward");
+assert.doesNotMatch(enterSource, /dispatchMouseEvent|composer-submit-button|send-button/, "trusted Enter must not depend on mouse or Send DOM");
+
+const evidenceSource = extractFunction("isChatSubmitLifecycleEvidence");
+const isChatSubmitLifecycleEvidence = Function(`${evidenceSource}; return isChatSubmitLifecycleEvidence;`)();
+const fallbackSource = extractFunction("shouldUseTrustedClickFallback");
+const shouldUseTrustedClickFallback = Function(`${evidenceSource}; ${fallbackSource}; return shouldUseTrustedClickFallback;`)();
+assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, []), true, "unchanged owned draft with no network activity can use click fallback");
+assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, [{ endpoint: "/backend-api/sentinel/chat-requirements", matched_generation: false }]), false, "Sentinel activity blocks a duplicate fallback");
+assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, [{ endpoint: "/backend-api/f/conversation", matched_generation: true }]), false, "generation ACK blocks duplicate fallback");
+assert.equal(shouldUseTrustedClickFallback({ draft_owned: false, draft_present: true }, []), false, "a React-replaced/unowned composer cannot be clicked as fallback");
+assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: false }, []), false, "a consumed draft cannot be retried");
+
+assert.match(sendBlock, /const newChat=Boolean\(args\.new_chat\)/, "new chat path must remain supported");
+assert.match(sendBlock, /conversationId/, "existing conversation path must remain supported");
+assert.match(worker, /readCanonicalConversationPage/, "canonical conversation reading must remain available");
+const responseSource = extractFunction("readChatResponsePage");
+assert.match(responseSource, /thinkingPlaceholder/, "DOM fallback must classify the Thinking placeholder as incomplete");
+assert.match(responseSource, /generation_in_progress/, "DOM fallback must expose active generation rather than treating it as a completed answer");
+
+console.log("✓ ChatGPT trusted-Enter primary send smoke test passed");

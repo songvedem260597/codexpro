@@ -22,7 +22,7 @@ const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.33";
+const WORKER_EXTENSION_VERSION = "0.5.39";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
@@ -110,7 +110,7 @@ const WORKER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp
 const MAX_WORKER_IMAGE_BYTES = 10 * 1024 * 1024;
 
 function defaultManagerSettings() {
-  return { chatWidth: 940, chatHeight: 330, fontFamily: "system", repoSelections: {}, workerImages: { idle: "", working: "", hung: "" } };
+  return { chatWidth: 940, chatHeight: 330, fontFamily: "system", fontSize: 14, repoSelections: {}, workerImages: { idle: "", working: "", hung: "" } };
 }
 
 function readManagerSettings() {
@@ -121,6 +121,7 @@ function readManagerSettings() {
       chatWidth: Math.max(720, Math.min(1600, Number(parsed?.chatWidth) || defaults.chatWidth)),
       chatHeight: Math.max(180, Math.min(700, Number(parsed?.chatHeight) || defaults.chatHeight)),
       fontFamily: MANAGER_FONT_CHOICES.has(String(parsed?.fontFamily || "")) ? String(parsed.fontFamily) : defaults.fontFamily,
+      fontSize: Math.max(12, Math.min(18, Number(parsed?.fontSize) || defaults.fontSize)),
       repoSelections: Object.fromEntries(Object.entries(parsed?.repoSelections && typeof parsed.repoSelections === "object" ? parsed.repoSelections : {})
         .filter(([profileId, root]) => /^[A-Za-z0-9._-]{1,160}$/.test(profileId) && typeof root === "string" && root.trim())
         .slice(0, 40)
@@ -179,6 +180,9 @@ function saveManagerSettingsPatch(patch = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(patch, "fontFamily") && MANAGER_FONT_CHOICES.has(String(patch.fontFamily))) {
     next.fontFamily = String(patch.fontFamily);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "fontSize")) {
+    next.fontSize = Math.max(12, Math.min(18, Number(patch.fontSize) || current.fontSize));
   }
   if (patch?.repoSelections && typeof patch.repoSelections === "object") {
     next.repoSelections = { ...(current.repoSelections || {}) };
@@ -1326,6 +1330,9 @@ async function listProjects() {
   const task = await scheduledTask();
   const taskConfig = parseTaskArguments(task.arguments);
   const activeRoot = taskConfig.root;
+  const selectedRoots = new Set(Object.values(readManagerSettings().repoSelections || {})
+    .filter((root) => typeof root === "string" && root.trim())
+    .map((root) => path.resolve(root).toLowerCase()));
   const sources = new Map();
 
   for (const workspace of chatGptWorkspaces) {
@@ -1381,13 +1388,14 @@ async function listProjects() {
         sessionCount: meta.sessionCount || 0,
         lastSeenAt: meta.lastSeenAt || "",
         clients: meta.clients || [],
+        inUse: selectedRoots.has(path.resolve(root).toLowerCase()),
         ...summary
       });
     }
   }));
   return projects.sort((a, b) =>
-    Number(b.activityTimestamp || 0) - Number(a.activityTimestamp || 0)
-    || Number(b.active) - Number(a.active)
+    Number(Boolean(b.active || b.inUse)) - Number(Boolean(a.active || a.inUse))
+    || Number(b.activityTimestamp || 0) - Number(a.activityTimestamp || 0)
     || String(b.lastSeenAt).localeCompare(String(a.lastSeenAt))
     || Number(b.changes > 0) - Number(a.changes > 0)
     || a.name.localeCompare(b.name)
@@ -1457,7 +1465,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.62" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.66" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1839,7 +1847,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.62" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.66" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);

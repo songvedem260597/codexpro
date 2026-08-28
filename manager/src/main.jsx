@@ -13,6 +13,7 @@ const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
 const REALTIME_POLL_MS = 1000;
 const NEW_CHAT_TARGET = "__codexpro_new_chat__";
 const ROLLOVER_CONTEXT_MAX_CHARS = 9000;
+const PROJECTS_PER_PAGE = 8;
 
 function Dot({ ok }) {
   return <span className={`dot ${ok ? "ok" : "bad"}`} aria-hidden="true" />;
@@ -52,6 +53,7 @@ const DEFAULT_MANAGER_SETTINGS = {
   chatWidth: 940,
   chatHeight: 330,
   fontFamily: "system",
+  fontSize: 14,
   repoSelections: {},
   workerImages: { idle: "", working: "", hung: "" },
   workerImageDataUrls: { idle: "", working: "", hung: "" }
@@ -309,7 +311,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.33";
+const WORKER_EXTENSION_VERSION = "0.5.39";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -403,6 +405,7 @@ function App() {
   const [chatProfileId, setChatProfileId] = useState("");
   const [status, setStatus] = useState(null);
   const [projects, setProjects] = useState([]);
+  const [projectPage, setProjectPage] = useState(0);
   const [busy, setBusy] = useState("");
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
@@ -428,6 +431,13 @@ function App() {
   const responseBodyRefs = useRef(new Map());
   const responseScrollPauseUntil = useRef(new Map());
   const responseScrollTimers = useRef(new Map());
+
+  const projectPageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE));
+  const visibleProjects = useMemo(() => projects.slice(projectPage * PROJECTS_PER_PAGE, (projectPage + 1) * PROJECTS_PER_PAGE), [projects, projectPage]);
+
+  useEffect(() => {
+    setProjectPage((current) => Math.min(current, Math.max(0, Math.ceil(projects.length / PROJECTS_PER_PAGE) - 1)));
+  }, [projects.length]);
 
   const notify = useCallback((message) => {
     setToast(message);
@@ -984,7 +994,10 @@ function App() {
             }
           };
         });
-        const uncertainMessage = "Chưa xác định được tin nhắn đã gửi hay chưa. CodexPro không tự gửi lại để tránh duplicate.";
+        const technicalReason = String(result?.error || "Chưa thấy network ACK.").replace(/^SEND_UNCERTAIN:\s*/i, "");
+        const submitPath = String(result?.submitted_by || result?.submit_path || "unknown");
+        const generationEndpoint = String(result?.network_generation_endpoint || "");
+        const uncertainMessage = `Chưa xác định được tin nhắn đã gửi hay chưa. Path: ${submitPath}.${generationEndpoint ? ` Endpoint: ${generationEndpoint}.` : ""} ${technicalReason}`;
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: uncertainMessage }));
         notify("Trạng thái gửi chưa chắc chắn · CodexPro không tự gửi lại");
         window.setTimeout(() => void refresh(false), 500);
@@ -1456,7 +1469,7 @@ function App() {
                 <code>{profile.profile_id}</code>
               </div>
             </div>
-            <button type="button" aria-label="Đóng chat" onClick={() => setChatProfileId("")}>×</button>
+            <button type="button" aria-label="Đóng chat" onClick={() => setChatProfileId("")}><span aria-hidden="true">×</span></button>
           </div>
 
           <article className={`request-card chat-popup-card ${profile.connected ? "is-online" : "is-offline"}`}>
@@ -1546,7 +1559,12 @@ function App() {
   const appStyle = {
     "--chat-modal-width": `${managerSettings.chatWidth}px`,
     "--chat-response-height": `${managerSettings.chatHeight}px`,
-    "--app-font-family": selectedFont.css
+    "--app-font-family": selectedFont.css,
+    "--font-xs": `${Math.max(10, managerSettings.fontSize - 2)}px`,
+    "--font-base": `${managerSettings.fontSize}px`,
+    "--font-brand": `${managerSettings.fontSize + 2}px`,
+    "--font-section": `${managerSettings.fontSize + 6}px`,
+    "--font-page": `${managerSettings.fontSize + 14}px`
   };
   const workerSettingItems = [
     { state: "idle", title: "Đang rảnh", description: "Hiện khi profile online và đang chờ việc." },
@@ -1567,7 +1585,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.62</small>
+          <small>CodexPro Manager 0.2.66</small>
         </div>
       </aside>
 
@@ -1578,7 +1596,16 @@ function App() {
             <h1>{activePage === "settings" ? "Cài đặt giao diện" : "CodexPro của bạn"}</h1>
             <p className="subtitle">{activePage === "settings" ? "Tùy chỉnh popup chat, ảnh worker và font chữ toàn app." : "Một chỗ để xem server, quản lý link MCP và kiểm tra repo."}</p>
           </div>
-          {activePage === "overview" && <div className="live-refresh"><Dot ok={status?.local?.ok} /><span>Realtime ~1 giây</span></div>}
+          {activePage === "overview" && (
+            <div className="header-server-actions">
+              <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>
+                {busy === "start" ? "Đang khởi động..." : "Khởi động"}
+              </button>
+              <button className="button secondary" onClick={() => control("restart")} disabled={Boolean(busy)}>
+                {busy === "restart" ? "Đang restart..." : "Restart server"}
+              </button>
+            </div>
+          )}
         </header>
 
         {error && <div className="alert"><span>!</span>{error}<button onClick={() => setError("")}>×</button></div>}
@@ -1591,10 +1618,6 @@ function App() {
             <StatusCard label="Local MCP" ok={status?.local?.ok} value={status?.local?.ok ? "Online" : "Offline"} detail={status?.local?.ok ? `127.0.0.1:${status.config.port} · ${status.local.latency} ms` : status?.local?.error || "Đang kiểm tra"} />
             <StatusCard label="Public tunnel" ok={status?.tunnel?.ok} value={status?.tunnel?.ok ? "Online" : "Offline"} detail={status?.tunnel?.ok ? `${status.config.hostname} · ${status.tunnel.latency} ms` : status?.tunnel?.error || status?.config?.hostname || "Chưa cấu hình"} />
             <StatusCard label="Processes" ok={status?.processes?.length > 0} value={`${status?.processes?.length ?? 0} tiến trình`} detail={status?.processes?.length ? status.processes.map((p) => `${p.name} ${p.pid}`).join(" · ") : "Không tìm thấy process"} />
-          </div>
-          <div className="action-row">
-            <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>Khởi động</button>
-            <button className="button secondary" onClick={() => control("restart")} disabled={Boolean(busy)}>{busy === "restart" ? "Đang restart..." : "Restart server"}</button>
           </div>
         </section>
 
@@ -1735,11 +1758,11 @@ function App() {
           </div>
           <div className="project-list">
             {projects.length === 0 && <div className="empty">Chưa có repo hoặc dự án nào đang được ChatGPT mở qua CodexPro.</div>}
-            {projects.map((project) => (
+            {visibleProjects.map((project) => (
               <article className="project" key={project.root}>
                 <div className="repo-icon">{project.name.slice(0, 1).toUpperCase()}</div>
                 <div className="project-main">
-                  <div className="project-title"><strong>{project.name}</strong>{project.active && <span className="badge">CHATGPT ĐANG DÙNG</span>}</div>
+                  <div className="project-title"><strong>{project.name}</strong>{project.active ? <span className="badge">ĐANG CHẠY</span> : project.inUse ? <span className="badge">ĐANG CODE</span> : null}</div>
                   <code>{project.root}</code>
                   <div className="project-meta">
                     {project.repoFullName && <span>{project.repoFullName}</span>}
@@ -1760,6 +1783,16 @@ function App() {
               </article>
             ))}
           </div>
+          {projects.length > PROJECTS_PER_PAGE && (
+            <nav className="project-pagination" aria-label="Phân trang repo và dự án">
+              <span>{projectPage * PROJECTS_PER_PAGE + 1}–{Math.min((projectPage + 1) * PROJECTS_PER_PAGE, projects.length)} / {projects.length} repo</span>
+              <div>
+                <button type="button" onClick={() => setProjectPage((page) => Math.max(0, page - 1))} disabled={projectPage === 0}>‹ Trước</button>
+                <strong>Trang {projectPage + 1} / {projectPageCount}</strong>
+                <button type="button" onClick={() => setProjectPage((page) => Math.min(projectPageCount - 1, page + 1))} disabled={projectPage >= projectPageCount - 1}>Sau ›</button>
+              </div>
+            </nav>
+          )}
         </section>
         </div>
 
@@ -1906,7 +1939,38 @@ function App() {
                 disabled={settingsBusy === "save"}
                 onChange={(value) => void saveManagerSetting({ fontFamily: value }, "Đã đổi font toàn app")}
               />
-              <div className="font-preview">Aa Bb Cc · CodexPro đang làm việc · 0123456789</div>
+              <div className="font-preview" style={{ fontFamily: selectedFont.css, fontSize: `${managerSettings.fontSize}px` }}>Aa Bb Cc · CodexPro đang làm việc · 0123456789</div>
+            </div>
+            <div className="font-size-setting-row">
+              <label>Cỡ chữ</label>
+              <div className="width-control">
+                <button
+                  type="button"
+                  className="setting-step-button"
+                  aria-label="Giảm cỡ chữ"
+                  disabled={settingsBusy === "save" || managerSettings.fontSize <= 12}
+                  onClick={() => void saveManagerSetting({ fontSize: Math.max(12, managerSettings.fontSize - 1) }, "Đã giảm cỡ chữ")}
+                >−</button>
+                <input
+                  className="settings-range"
+                  type="range"
+                  min="12"
+                  max="18"
+                  step="1"
+                  value={managerSettings.fontSize}
+                  onChange={(event) => setManagerSettings((current) => ({ ...current, fontSize: Number(event.target.value) }))}
+                  onPointerUp={(event) => void saveManagerSetting({ fontSize: Number(event.currentTarget.value) }, "Đã lưu cỡ chữ")}
+                  onKeyUp={(event) => void saveManagerSetting({ fontSize: Number(event.currentTarget.value) }, "Đã lưu cỡ chữ")}
+                />
+                <button
+                  type="button"
+                  className="setting-step-button"
+                  aria-label="Tăng cỡ chữ"
+                  disabled={settingsBusy === "save" || managerSettings.fontSize >= 18}
+                  onClick={() => void saveManagerSetting({ fontSize: Math.min(18, managerSettings.fontSize + 1) }, "Đã tăng cỡ chữ")}
+                >＋</button>
+              </div>
+              <div className="font-size-value"><strong>{managerSettings.fontSize}</strong><span>px · cỡ chữ cơ bản</span></div>
             </div>
           </section>
 

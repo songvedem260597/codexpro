@@ -365,11 +365,13 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
           settling: tab.settling === true,
           network_state: tab.network_state === "generating" ? "generating" : tab.network_state === "completed" ? "completed" : tab.network_state === "failed" ? "failed" : "idle",
           network_source: String(tab.network_source ?? "").trim().slice(0, 32),
+          network_generation_endpoint: String(tab.network_generation_endpoint ?? "").trim().slice(0, 500),
           network_last_started_at: String(tab.network_last_started_at ?? "").trim().slice(0, 64),
           network_last_completed_at: String(tab.network_last_completed_at ?? "").trim().slice(0, 64),
           network_status_code: Number(tab.network_status_code) || 0,
           network_error: String(tab.network_error ?? "").trim().slice(0, 500),
-          network_duration_ms: Math.max(0, Number(tab.network_duration_ms) || 0)
+          network_duration_ms: Math.max(0, Number(tab.network_duration_ms) || 0),
+          network_recent_posts: Array.isArray(tab.network_recent_posts) ? tab.network_recent_posts.slice(-12) : []
         }))
         .filter((tab) => Number.isInteger(tab.id) && tab.id >= 0);
       const recentConversations = profile.recentConversations
