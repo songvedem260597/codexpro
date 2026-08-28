@@ -17,10 +17,12 @@ const managerProjectsFile = path.join(codexProHome, "manager-projects.json");
 const isWindows = process.platform === "win32";
 const isMac = process.platform === "darwin";
 const platformLabel = isWindows ? "Windows" : isMac ? "macOS" : process.platform;
+const managerSettingsFile = path.join(codexProHome, "manager-settings.json");
+const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.16";
+const WORKER_EXTENSION_VERSION = "0.5.17";
 const RUNTIME_BASE_CACHE_MS = 10000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
@@ -94,6 +96,132 @@ async function chooseRequestFiles() {
   if (files.some((file) => file.size > MAX_REQUEST_ATTACHMENT_BYTES)) throw new Error("Mỗi file được tối đa 8 MB.");
   if (files.reduce((total, file) => total + file.size, 0) > MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES) throw new Error("Tổng file đính kèm được tối đa 10 MB.");
   return files;
+}
+
+const MANAGER_FONT_CHOICES = new Set(["system", "arial", "tahoma", "verdana", "trebuchet", "georgia", "cascadia"]);
+const WORKER_IMAGE_STATES = new Set(["idle", "working", "hung"]);
+const WORKER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+const MAX_WORKER_IMAGE_BYTES = 10 * 1024 * 1024;
+
+function defaultManagerSettings() {
+  return { chatWidth: 940, fontFamily: "system", workerImages: { idle: "", working: "", hung: "" } };
+}
+
+function readManagerSettings() {
+  const defaults = defaultManagerSettings();
+  try {
+    const parsed = JSON.parse(fs.readFileSync(managerSettingsFile, "utf8"));
+    return {
+      chatWidth: Math.max(720, Math.min(1600, Number(parsed?.chatWidth) || defaults.chatWidth)),
+      fontFamily: MANAGER_FONT_CHOICES.has(String(parsed?.fontFamily || "")) ? String(parsed.fontFamily) : defaults.fontFamily,
+      workerImages: {
+        idle: String(parsed?.workerImages?.idle || ""),
+        working: String(parsed?.workerImages?.working || ""),
+        hung: String(parsed?.workerImages?.hung || "")
+      }
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+function writeManagerSettings(settings) {
+  fs.mkdirSync(codexProHome, { recursive: true });
+  fs.writeFileSync(managerSettingsFile, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+function imageDataUrl(filePath) {
+  if (!filePath) return "";
+  try {
+    const resolved = path.resolve(filePath);
+    const extension = path.extname(resolved).toLowerCase();
+    if (!WORKER_IMAGE_EXTENSIONS.has(extension)) return "";
+    const stat = fs.statSync(resolved);
+    if (!stat.isFile() || stat.size > MAX_WORKER_IMAGE_BYTES) return "";
+    const mimeType = mimeTypeForFile(resolved);
+    return `data:${mimeType};base64,${fs.readFileSync(resolved).toString("base64")}`;
+  } catch {
+    return "";
+  }
+}
+
+function managerSettingsPayload() {
+  const settings = readManagerSettings();
+  return {
+    ...settings,
+    workerImageDataUrls: {
+      idle: imageDataUrl(settings.workerImages.idle),
+      working: imageDataUrl(settings.workerImages.working),
+      hung: imageDataUrl(settings.workerImages.hung)
+    }
+  };
+}
+
+function saveManagerSettingsPatch(patch = {}) {
+  const current = readManagerSettings();
+  const next = { ...current, workerImages: { ...current.workerImages } };
+  if (Object.prototype.hasOwnProperty.call(patch, "chatWidth")) {
+    next.chatWidth = Math.max(720, Math.min(1600, Number(patch.chatWidth) || current.chatWidth));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "fontFamily") && MANAGER_FONT_CHOICES.has(String(patch.fontFamily))) {
+    next.fontFamily = String(patch.fontFamily);
+  }
+  writeManagerSettings(next);
+  return managerSettingsPayload();
+}
+
+async function chooseWorkerImage(state) {
+  const normalizedState = String(state || "");
+  if (!WORKER_IMAGE_STATES.has(normalizedState)) throw new Error("Trạng thái worker không hợp lệ.");
+  const result = await dialog.showOpenDialog({
+    title: `Chọn ảnh worker ${normalizedState}`,
+    properties: ["openFile"],
+    filters: [{ name: "Ảnh worker", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }]
+  });
+  if (result.canceled || !result.filePaths[0]) return managerSettingsPayload();
+  const source = path.resolve(result.filePaths[0]);
+  const stat = fs.statSync(source);
+  if (!stat.isFile()) throw new Error("Ảnh worker không hợp lệ.");
+  if (stat.size > MAX_WORKER_IMAGE_BYTES) throw new Error("Ảnh worker được tối đa 10 MB.");
+  const extension = path.extname(source).toLowerCase();
+  if (!WORKER_IMAGE_EXTENSIONS.has(extension)) throw new Error("Chỉ hỗ trợ PNG, JPG, GIF hoặc WEBP.");
+  fs.mkdirSync(managerAssetsDir, { recursive: true });
+  const destination = path.join(managerAssetsDir, `worker-${normalizedState}${extension}`);
+  if (path.resolve(source) !== path.resolve(destination)) {
+    for (const candidate of fs.readdirSync(managerAssetsDir, { withFileTypes: true })) {
+      if (candidate.isFile() && candidate.name.startsWith(`worker-${normalizedState}.`)) {
+        fs.rmSync(path.join(managerAssetsDir, candidate.name), { force: true });
+      }
+    }
+    fs.copyFileSync(source, destination);
+  }
+  const settings = readManagerSettings();
+  settings.workerImages[normalizedState] = destination;
+  writeManagerSettings(settings);
+  return managerSettingsPayload();
+}
+
+function resetWorkerImage(state) {
+  const normalizedState = String(state || "");
+  if (!WORKER_IMAGE_STATES.has(normalizedState)) throw new Error("Trạng thái worker không hợp lệ.");
+  const settings = readManagerSettings();
+  const currentPath = settings.workerImages[normalizedState];
+  settings.workerImages[normalizedState] = "";
+  writeManagerSettings(settings);
+  if (currentPath && path.dirname(path.resolve(currentPath)) === path.resolve(managerAssetsDir)) {
+    fs.rmSync(path.resolve(currentPath), { force: true });
+  }
+  return managerSettingsPayload();
+}
+
+function resetManagerSettings() {
+  const current = readManagerSettings();
+  for (const workerPath of Object.values(current.workerImages || {})) {
+    if (workerPath && path.dirname(path.resolve(workerPath)) === path.resolve(managerAssetsDir)) fs.rmSync(path.resolve(workerPath), { force: true });
+  }
+  const defaults = defaultManagerSettings();
+  writeManagerSettings(defaults);
+  return managerSettingsPayload();
 }
 
 async function clipboardImagePng() {
@@ -184,6 +312,75 @@ function createWindow() {
         let inspection = null;
         if (status.local?.ok && projects[0]?.root) {
           inspection = await win.webContents.executeJavaScript(`window.codexpro.inspectProject(${JSON.stringify(projects[0].root)})`, true);
+        }
+        let settingsProbe = null;
+        const settingsSmokeRequested = process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1" || process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "settings";
+        if (settingsSmokeRequested) {
+          const beforeSettings = await win.webContents.executeJavaScript("window.codexpro.getManagerSettings().then((value) => JSON.parse(JSON.stringify(value)))", true);
+          await win.webContents.executeJavaScript(`(() => {
+            const button = [...document.querySelectorAll('nav button')].find((item) => /cài đặt/i.test(item.textContent || ''));
+            button?.click();
+            return Boolean(button);
+          })()`, true);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
+            await win.webContents.executeJavaScript(`(async () => {
+              const range = document.querySelector('.settings-range');
+              if (range) {
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+                setter?.call(range, '1180');
+                range.dispatchEvent(new Event('input', { bubbles: true }));
+                range.dispatchEvent(new Event('change', { bubbles: true }));
+                range.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', bubbles: true }));
+              }
+              const trigger = document.querySelector('.settings-dropdown-trigger');
+              trigger?.click();
+              await new Promise((resolve) => setTimeout(resolve, 80));
+              const tahoma = [...document.querySelectorAll('.settings-dropdown-option')].find((item) => /Tahoma/i.test(item.textContent || ''));
+              tahoma?.click();
+            })()`, true);
+            await new Promise((resolve) => setTimeout(resolve, 700));
+          }
+          const afterSettings = await win.webContents.executeJavaScript("window.codexpro.getManagerSettings().then((value) => JSON.parse(JSON.stringify(value)))", true);
+          let chatModalWidth = 0;
+          if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
+            const chatButtonFound = await win.webContents.executeJavaScript(`(() => {
+              const button = document.querySelector('.profile-chat:not(:disabled)');
+              button?.click();
+              return Boolean(button);
+            })()`, true);
+            if (chatButtonFound) {
+              await new Promise((resolve) => setTimeout(resolve, 350));
+              chatModalWidth = await win.webContents.executeJavaScript("Math.round(document.querySelector('.chat-modal')?.getBoundingClientRect().width || 0)", true);
+              await win.webContents.executeJavaScript("document.querySelector('.chat-modal-head > button')?.click()", true);
+              await new Promise((resolve) => setTimeout(resolve, 120));
+            }
+          }
+          const uiSettings = await win.webContents.executeJavaScript(`(() => {
+            const settingsView = document.querySelector('.settings-view');
+            const main = document.querySelector('main');
+            return {
+              settingsVisible: !settingsView?.hidden,
+              rangeValue: document.querySelector('.settings-range')?.value || '',
+              numberValue: document.querySelector('.settings-number-field input')?.value || '',
+              fontValue: document.querySelector('.settings-dropdown-value strong')?.textContent?.trim() || '',
+              workerCards: document.querySelectorAll('.worker-setting-card').length,
+              settingsWidth: Math.round(settingsView?.getBoundingClientRect().width || 0),
+              mainContentWidth: Math.round((main?.clientWidth || 0) - 100),
+              chatWidthVar: document.querySelector('.app-shell')?.style.getPropertyValue('--chat-modal-width') || '',
+              fontVar: document.querySelector('.app-shell')?.style.getPropertyValue('--app-font-family') || ''
+            };
+          })()`, true);
+          settingsProbe = {
+            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (afterSettings.chatWidth === 1180 && afterSettings.fontFamily === "tahoma" && /Tahoma/i.test(uiSettings.fontValue) && uiSettings.numberValue === "1180" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3))),
+            before: { chatWidth: beforeSettings.chatWidth, fontFamily: beforeSettings.fontFamily },
+            saved: { chatWidth: afterSettings.chatWidth, fontFamily: afterSettings.fontFamily },
+            chatModalWidth,
+            ui: uiSettings
+          };
+          if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
+            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ chatWidth: beforeSettings.chatWidth, fontFamily: beforeSettings.fontFamily })})`, true);
+          }
         }
         const chatSmokeRequested = [
           process.env.CODEXPRO_MANAGER_SMOKE_CHAT_MODAL,
@@ -457,7 +654,7 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         }
         const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, chatModalProbe, renameProbe, sendProbe, pasteProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe }));
+        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe }));
       } catch (error) {
         console.error(error instanceof Error ? error.stack || error.message : String(error));
         process.exitCode = 1;
@@ -951,7 +1148,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.42" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.44" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1283,7 +1480,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.42" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.44" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
@@ -1330,8 +1527,22 @@ async function controlServer(action) {
     await new Promise((resolve) => setTimeout(resolve, 3000));
     return runtimeStatus();
   }
+  const current = await runtimeStatus();
+  if (action === "start" && current.local.ok) return current;
   if (action === "restart") {
-    await runPowerShell("Stop-ScheduledTask -TaskName 'CodexPro' -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName 'CodexPro' -ErrorAction Stop");
+    const task = await scheduledTask();
+    const config = parseTaskArguments(task.arguments);
+    const rootLiteral = String(config.root || "").replace(/'/g, "''");
+    const stopTree = [
+      "Stop-ScheduledTask -TaskName 'CodexPro' -ErrorAction SilentlyContinue",
+      "Start-Sleep -Milliseconds 500",
+      `$root='${rootLiteral}'`,
+      "$targets=Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -match 'codexpro\\.mjs' -and (!$root -or $_.CommandLine -like ('*'+$root+'*')) }",
+      "$targets | ForEach-Object { & taskkill.exe /pid $_.ProcessId /t /f 2>$null | Out-Null }",
+      "Start-Sleep -Seconds 1",
+      "Start-ScheduledTask -TaskName 'CodexPro' -ErrorAction Stop"
+    ].join("; ");
+    await runPowerShell(stopTree);
   } else {
     await runPowerShell("Start-ScheduledTask -TaskName 'CodexPro' -ErrorAction Stop");
   }
@@ -1392,6 +1603,11 @@ ipcMain.handle("codexpro:open-profile-chat", async (event, payload) => {
   return result;
 });
 ipcMain.handle("codexpro:reload-profiles", () => reloadChromeProfiles());
+ipcMain.handle("codexpro:get-manager-settings", () => managerSettingsPayload());
+ipcMain.handle("codexpro:save-manager-settings", (_event, patch) => saveManagerSettingsPatch(patch));
+ipcMain.handle("codexpro:choose-worker-image", (_event, state) => chooseWorkerImage(state));
+ipcMain.handle("codexpro:reset-worker-image", (_event, state) => resetWorkerImage(state));
+ipcMain.handle("codexpro:reset-manager-settings", () => resetManagerSettings());
 ipcMain.handle("codexpro:choose-request-files", () => chooseRequestFiles());
 ipcMain.handle("codexpro:capture-clipboard-image", () => captureClipboardImage());
 ipcMain.handle("codexpro:send-profile-request", (_event, payload) => sendProfileRequest(payload));

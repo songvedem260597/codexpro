@@ -38,12 +38,88 @@ const workerIcons = {
   working: { src: workerWorking, label: "CodexPro đang làm việc" }
 };
 
-function WorkerIcon({ state }) {
+const FONT_OPTIONS = [
+  { value: "system", label: "Segoe UI / mặc định Windows", css: '"Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", sans-serif' },
+  { value: "arial", label: "Arial", css: 'Arial, sans-serif' },
+  { value: "tahoma", label: "Tahoma", css: 'Tahoma, sans-serif' },
+  { value: "verdana", label: "Verdana", css: 'Verdana, sans-serif' },
+  { value: "trebuchet", label: "Trebuchet MS", css: '"Trebuchet MS", sans-serif' },
+  { value: "georgia", label: "Georgia", css: 'Georgia, serif' },
+  { value: "cascadia", label: "Cascadia Code", css: '"Cascadia Code", Consolas, monospace' }
+];
+
+const DEFAULT_MANAGER_SETTINGS = {
+  chatWidth: 940,
+  fontFamily: "system",
+  workerImages: { idle: "", working: "", hung: "" },
+  workerImageDataUrls: { idle: "", working: "", hung: "" }
+};
+
+function WorkerIcon({ state, customImages }) {
   const worker = workerIcons[state] || workerIcons.hung;
+  const customSrc = customImages?.[state] || "";
   return (
     <div className={`profile-worker is-${state}`} title={worker.label}>
-      <img src={worker.src} alt={worker.label} />
+      <img src={customSrc || worker.src} alt={worker.label} />
       <span className="profile-worker-dot" aria-hidden="true" />
+    </div>
+  );
+}
+
+function SettingsDropdown({ value, options, disabled, onChange }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef(null);
+  const selected = options.find((option) => option.value === value) || options[0];
+
+  useEffect(() => {
+    const close = (event) => {
+      if (!root.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, []);
+
+  return (
+    <div className={`settings-dropdown ${open ? "is-open" : ""} ${disabled ? "is-disabled" : ""}`} ref={root}>
+      <button
+        type="button"
+        className="settings-dropdown-trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
+          if (["ArrowDown", "Enter", " "].includes(event.key) && !open) {
+            event.preventDefault();
+            setOpen(true);
+          }
+        }}
+      >
+        <span className="settings-dropdown-value">
+          <strong>{selected?.label || "Chọn giá trị"}</strong>
+          <small>{selected?.value === "system" ? "Theo giao diện Windows" : "Áp dụng cho toàn bộ CodexPro"}</small>
+        </span>
+        <svg className="settings-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+      </button>
+      {open && (
+        <div className="settings-dropdown-menu" role="listbox" aria-label="Chọn font chữ">
+          {options.map((option) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              className={`settings-dropdown-option ${option.value === value ? "is-selected" : ""}`}
+              key={option.value}
+              onClick={() => { onChange(option.value); setOpen(false); }}
+              style={{ fontFamily: option.css }}
+            >
+              <span>{option.label}</span>
+              {option.value === value && <span className="settings-dropdown-check">✓</span>}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -165,7 +241,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.16";
+const WORKER_EXTENSION_VERSION = "0.5.17";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -240,6 +316,10 @@ function buildConversationRolloverPrompt(result) {
 }
 
 function App() {
+  const [activePage, setActivePage] = useState("overview");
+  const [managerSettings, setManagerSettings] = useState(DEFAULT_MANAGER_SETTINGS);
+  const [chatWidthInput, setChatWidthInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatWidth));
+  const [settingsBusy, setSettingsBusy] = useState("");
   const [chatProfileId, setChatProfileId] = useState("");
   const [status, setStatus] = useState(null);
   const [projects, setProjects] = useState([]);
@@ -271,6 +351,82 @@ function App() {
     setToast(message);
     window.setTimeout(() => setToast(""), 2600);
   }, []);
+
+  const applyManagerSettings = useCallback((next) => {
+    setManagerSettings({
+      ...DEFAULT_MANAGER_SETTINGS,
+      ...(next || {}),
+      workerImages: { ...DEFAULT_MANAGER_SETTINGS.workerImages, ...(next?.workerImages || {}) },
+      workerImageDataUrls: { ...DEFAULT_MANAGER_SETTINGS.workerImageDataUrls, ...(next?.workerImageDataUrls || {}) }
+    });
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getManagerSettings()
+      .then((next) => { if (!cancelled) applyManagerSettings(next); })
+      .catch((err) => { if (!cancelled) setError(err?.message || String(err)); });
+    return () => { cancelled = true; };
+  }, [applyManagerSettings]);
+
+  const saveManagerSetting = useCallback(async (patch, message = "Đã lưu cài đặt") => {
+    setSettingsBusy("save");
+    try {
+      applyManagerSettings(await api.saveManagerSettings(patch));
+      if (message) notify(message);
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setSettingsBusy("");
+    }
+  }, [applyManagerSettings, notify]);
+
+  useEffect(() => {
+    setChatWidthInput(String(managerSettings.chatWidth));
+  }, [managerSettings.chatWidth]);
+
+  const commitChatWidthInput = useCallback(() => {
+    const parsed = Number(chatWidthInput);
+    const nextWidth = Math.max(720, Math.min(1600, Number.isFinite(parsed) ? Math.round(parsed / 20) * 20 : managerSettings.chatWidth));
+    setChatWidthInput(String(nextWidth));
+    if (nextWidth !== managerSettings.chatWidth) void saveManagerSetting({ chatWidth: nextWidth }, "Đã lưu độ rộng popup");
+  }, [chatWidthInput, managerSettings.chatWidth, saveManagerSetting]);
+
+  const changeWorkerImage = useCallback(async (state) => {
+    setSettingsBusy(`worker:${state}`);
+    try {
+      applyManagerSettings(await api.chooseWorkerImage(state));
+      notify(`Đã đổi ảnh worker ${state}`);
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setSettingsBusy("");
+    }
+  }, [applyManagerSettings, notify]);
+
+  const restoreWorkerImage = useCallback(async (state) => {
+    setSettingsBusy(`worker:${state}`);
+    try {
+      applyManagerSettings(await api.resetWorkerImage(state));
+      notify(`Đã khôi phục ảnh worker ${state}`);
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setSettingsBusy("");
+    }
+  }, [applyManagerSettings, notify]);
+
+  const restoreManagerSettings = useCallback(async () => {
+    setSettingsBusy("reset");
+    try {
+      applyManagerSettings(await api.resetManagerSettings());
+      notify("Đã khôi phục giao diện mặc định");
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setSettingsBusy("");
+    }
+  }, [applyManagerSettings, notify]);
 
   const scrollResponseToBottom = useCallback((profileId) => {
     const container = responseBodyRefs.current.get(profileId);
@@ -1033,7 +1189,7 @@ function App() {
         <div className="modal chat-modal">
           <div className="modal-head chat-modal-head">
             <div className="chat-modal-profile">
-              <WorkerIcon state={workerState} />
+              <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
               <div>
                 <p className="eyebrow">CHATGPT · {profile.label}</p>
                 <div className="profile-title"><strong>{profile.email || profile.label}</strong>{selectedSettling ? <span className="badge profile-settling">ĐANG HOÀN TẤT</span> : working ? <span className="badge profile-working">ĐANG LÀM VIỆC</span> : profile.connected ? <span className="badge connected">ĐANG RẢNH</span> : <span className="badge profile-hung">MẤT KẾT NỐI</span>}</div>
@@ -1151,35 +1307,47 @@ function App() {
     );
   }
 
+  const selectedFont = FONT_OPTIONS.find((option) => option.value === managerSettings.fontFamily) || FONT_OPTIONS[0];
+  const appStyle = {
+    "--chat-modal-width": `${managerSettings.chatWidth}px`,
+    "--app-font-family": selectedFont.css
+  };
+  const workerSettingItems = [
+    { state: "idle", title: "Đang rảnh", description: "Hiện khi profile online và đang chờ việc." },
+    { state: "working", title: "Đang làm việc", description: "Hiện khi ChatGPT đang xử lý hoặc hoàn tất turn." },
+    { state: "hung", title: "Mất kết nối", description: "Hiện khi extension/profile mất heartbeat." }
+  ];
+
   return (
-    <div className="app-shell">
+    <div className="app-shell" style={appStyle}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">C</div>
           <div><strong>CodexPro</strong><span>Manager</span></div>
         </div>
         <nav>
-          <button className="active"><Icon>⌁</Icon>Tổng quan</button>
+          <button type="button" className={activePage === "overview" ? "active" : ""} onClick={() => setActivePage("overview")}><Icon>⌁</Icon>Tổng quan</button>
+          <button type="button" className={activePage === "settings" ? "active" : ""} onClick={() => setActivePage("settings")}><Icon>⚙</Icon>Cài đặt</button>
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.42</small>
+          <small>CodexPro Manager 0.2.44</small>
         </div>
       </aside>
 
-      <main className="page-overview">
+      <main className={activePage === "settings" ? "page-settings" : "page-overview"}>
         <header>
           <div>
-            <p className="eyebrow">{platform.toUpperCase()} CONTROL CENTER</p>
-            <h1>CodexPro của bạn</h1>
-            <p className="subtitle">Một chỗ để xem server, quản lý link MCP và kiểm tra repo.</p>
+            <p className="eyebrow">{activePage === "settings" ? "PERSONALIZATION" : `${platform.toUpperCase()} CONTROL CENTER`}</p>
+            <h1>{activePage === "settings" ? "Cài đặt giao diện" : "CodexPro của bạn"}</h1>
+            <p className="subtitle">{activePage === "settings" ? "Tùy chỉnh popup chat, ảnh worker và font chữ toàn app." : "Một chỗ để xem server, quản lý link MCP và kiểm tra repo."}</p>
           </div>
-          <div className="live-refresh"><Dot ok={status?.local?.ok} /><span>Realtime ~1 giây</span></div>
+          {activePage === "overview" && <div className="live-refresh"><Dot ok={status?.local?.ok} /><span>Realtime ~1 giây</span></div>}
         </header>
 
         {error && <div className="alert"><span>!</span>{error}<button onClick={() => setError("")}>×</button></div>}
 
-        <div className="page-view">
+        <div className="page-view" hidden={activePage !== "overview"}>
         <section id="overview">
           <div className="section-head"><div><p className="eyebrow">LIVE STATUS</p><h2>Trạng thái hệ thống</h2></div><span className="last-check">{status ? `Cập nhật ${new Date(status.checkedAt).toLocaleTimeString("vi-VN")}` : "Đang kiểm tra..."}</span></div>
           <div className="status-grid">
@@ -1260,7 +1428,7 @@ function App() {
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
               return (
                 <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"}`} key={profile.profile_id}>
-                  <WorkerIcon state={workerState} />
+                  <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
                   <div className="profile-main">
                     <div className="profile-title">
                       <strong>{profile.email || profile.label}</strong>
@@ -1348,6 +1516,123 @@ function App() {
             ))}
           </div>
         </section>
+        </div>
+
+        <div className="settings-view" hidden={activePage !== "settings"}>
+          <section className="settings-panel">
+            <div className="settings-panel-head">
+              <div>
+                <p className="eyebrow">CHAT POPUP</p>
+                <h2>Độ rộng popup chat</h2>
+                <p className="section-note">Tăng hoặc giảm chiều rộng cửa sổ Chat. Giá trị vẫn tự co theo màn hình nhỏ.</p>
+              </div>
+              <div className="settings-number-field">
+                <input
+                  type="number"
+                  min="720"
+                  max="1600"
+                  step="20"
+                  inputMode="numeric"
+                  aria-label="Độ rộng popup chat"
+                  value={chatWidthInput}
+                  disabled={settingsBusy === "save"}
+                  onChange={(event) => setChatWidthInput(event.target.value.replace(/[^0-9]/g, ""))}
+                  onBlur={commitChatWidthInput}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                    if (event.key === "Escape") {
+                      setChatWidthInput(String(managerSettings.chatWidth));
+                      event.currentTarget.blur();
+                    }
+                  }}
+                />
+                <span>px</span>
+              </div>
+            </div>
+            <div className="width-control">
+              <button
+                type="button"
+                className="setting-step-button"
+                aria-label="Giảm độ rộng popup"
+                disabled={settingsBusy === "save" || managerSettings.chatWidth <= 720}
+                onClick={() => void saveManagerSetting({ chatWidth: Math.max(720, managerSettings.chatWidth - 40) }, "Đã giảm độ rộng popup")}
+              >−</button>
+              <input
+                className="settings-range"
+                type="range"
+                min="720"
+                max="1600"
+                step="20"
+                value={managerSettings.chatWidth}
+                onChange={(event) => setManagerSettings((current) => ({ ...current, chatWidth: Number(event.target.value) }))}
+                onPointerUp={(event) => void saveManagerSetting({ chatWidth: Number(event.currentTarget.value) }, "Đã lưu độ rộng popup")}
+                onKeyUp={(event) => void saveManagerSetting({ chatWidth: Number(event.currentTarget.value) }, "Đã lưu độ rộng popup")}
+              />
+              <button
+                type="button"
+                className="setting-step-button"
+                aria-label="Tăng độ rộng popup"
+                disabled={settingsBusy === "save" || managerSettings.chatWidth >= 1600}
+                onClick={() => void saveManagerSetting({ chatWidth: Math.min(1600, managerSettings.chatWidth + 40) }, "Đã tăng độ rộng popup")}
+              >＋</button>
+            </div>
+            <div className="width-scale"><span>720px</span><span>Mặc định 940px</span><span>1600px</span></div>
+            <div className="chat-width-preview"><div style={{ width: `${Math.max(42, Math.min(100, managerSettings.chatWidth / 16))}%` }}><span>Chat popup</span><small>{managerSettings.chatWidth}px</small></div></div>
+          </section>
+
+          <section className="settings-panel">
+            <div className="settings-panel-head">
+              <div>
+                <p className="eyebrow">TYPOGRAPHY</p>
+                <h2>Font chữ toàn app</h2>
+                <p className="section-note">Áp dụng ngay cho sidebar, popup chat, nội dung phản hồi và các control.</p>
+              </div>
+            </div>
+            <div className="font-setting-row">
+              <label>Font đang dùng</label>
+              <SettingsDropdown
+                value={managerSettings.fontFamily}
+                options={FONT_OPTIONS}
+                disabled={settingsBusy === "save"}
+                onChange={(value) => void saveManagerSetting({ fontFamily: value }, "Đã đổi font toàn app")}
+              />
+              <div className="font-preview">Aa Bb Cc · CodexPro đang làm việc · 0123456789</div>
+            </div>
+          </section>
+
+          <section className="settings-panel">
+            <div className="settings-panel-head">
+              <div>
+                <p className="eyebrow">WORKER APPEARANCE</p>
+                <h2>Ảnh cho từng trạng thái worker</h2>
+                <p className="section-note">Hỗ trợ PNG, JPG, GIF, WEBP tối đa 10 MB. Ảnh được copy vào dữ liệu CodexPro nên không phụ thuộc file gốc.</p>
+              </div>
+            </div>
+            <div className="worker-settings-grid">
+              {workerSettingItems.map((item) => {
+                const customized = Boolean(managerSettings.workerImageDataUrls?.[item.state]);
+                const loading = settingsBusy === `worker:${item.state}`;
+                return (
+                  <article className="worker-setting-card" key={item.state}>
+                    <WorkerIcon state={item.state} customImages={managerSettings.workerImageDataUrls} />
+                    <div className="worker-setting-copy">
+                      <div><strong>{item.title}</strong>{customized && <span className="customized-badge">TÙY CHỈNH</span>}</div>
+                      <p>{item.description}</p>
+                    </div>
+                    <div className="worker-setting-actions">
+                      <button type="button" className="button secondary" onClick={() => void changeWorkerImage(item.state)} disabled={Boolean(settingsBusy)}>{loading ? "Đang chọn…" : "Chọn ảnh"}</button>
+                      <button type="button" className="button ghost" onClick={() => void restoreWorkerImage(item.state)} disabled={Boolean(settingsBusy) || !customized}>Mặc định</button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+
+          <div className="settings-footer">
+            <span>Cài đặt được lưu trong dữ liệu CodexPro trên máy này.</span>
+            <button type="button" className="button danger-quiet" onClick={() => void restoreManagerSettings()} disabled={Boolean(settingsBusy)}>{settingsBusy === "reset" ? "Đang khôi phục…" : "Khôi phục tất cả mặc định"}</button>
+          </div>
         </div>
 
       </main>

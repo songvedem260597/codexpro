@@ -382,10 +382,12 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
   const composerRootFor=element=>element?.closest('form')||element?.closest('[data-type="unified-composer"]')||element?.parentElement;
   const attachmentButtons=root=>Array.from((root||document).querySelectorAll('button[aria-label*="Remove file" i],button[aria-label*="Remove attachment" i],button[aria-label*="Xóa tệp" i],button[aria-label*="Xóa file" i]')).filter(visible);
   const attachmentLabel=button=>String(button?.getAttribute?.('aria-label')||button?.innerText||button?.textContent||'').trim();
+  const markedRootForAttempt=()=>attemptId?document.querySelector(`[data-codexpro-attachment-attempt="${CSS.escape(attemptId)}"]`):null;
+  let initialRoot=null;
   const clearOwnedDraft=async()=>{
     let textCleared=false,attachmentsRemoved=0;
     const current=findComposer();
-    const root=composerRootFor(current);
+    const root=composerRootFor(current)||markedRootForAttempt()||initialRoot;
     if(current&&current.dataset.codexproDraftAttempt===attemptId){
       current.focus();
       if(current.isContentEditable){
@@ -420,7 +422,8 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
   const fail=async(error,extra={})=>({ok:false,error,...extra,cleanup:await clearOwnedDraft()});
   let composer=findComposer();
   if(!composer)return {ok:false,error:'Không tìm thấy ô nhập đang hiển thị trong đoạn chat.'};
-  const root=composerRootFor(composer);
+  initialRoot=composerRootFor(composer);
+  const root=initialRoot;
   const contentEditableEmpty=Boolean(composer.isContentEditable&&composer.querySelector('[data-empty-paragraph="true"]')&&!Array.from(composer.querySelectorAll('p')).some(node=>!node.hasAttribute('data-empty-paragraph')&&String(node.textContent||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim()));
   const rawDraft=composer.isContentEditable?String(composer.innerText||''):String(composer.value||'');
   const normalizedDraft=rawDraft.replace(/[\u200B-\u200D\uFEFF]/g,'').trim();
@@ -452,15 +455,13 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
     let readyButtons=[];
     while(!expired()){
       readyButtons=attachmentButtons(root);
+      const ownedButtons=readyButtons.slice(0,attachments.length);
+      ownedButtons.forEach(button=>{button.dataset.codexproAttachmentAttempt=attemptId;});
+      if(root)root.dataset.codexproAttachmentLabels=JSON.stringify(ownedButtons.map(attachmentLabel));
       if(readyButtons.length>=attachments.length)break;
       await sleep(100);
     }
     if(readyButtons.length<attachments.length)return await fail('ChatGPT chưa xác nhận file đính kèm đã sẵn sàng để gửi.',{expired:expired()});
-    const ownedButtons=readyButtons.slice(0,attachments.length);
-    ownedButtons.forEach(button=>{button.dataset.codexproAttachmentAttempt=attemptId;});
-    if(root){
-      root.dataset.codexproAttachmentLabels=JSON.stringify(ownedButtons.map(attachmentLabel));
-    }
     const stableUntil=Math.min(Number(deadlineAt)||Date.now()+2500,Date.now()+2500);
     while(Date.now()<stableUntil){
       if(expired())return await fail('Lần gửi đã hết hạn trong lúc chờ file ổn định.',{expired:true});
@@ -517,7 +518,8 @@ async function cleanupChatRequestDraftPage(attemptId='') {
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const composerSelectors=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'];
   const composer=composerSelectors.map(selector=>document.querySelector(selector)).find(element=>visible(element));
-  const root=composer?.closest('form')||composer?.closest('[data-type="unified-composer"]')||composer?.parentElement;
+  const markedRoot=attemptId?document.querySelector(`[data-codexpro-attachment-attempt="${CSS.escape(attemptId)}"]`):null;
+  const root=composer?.closest('form')||composer?.closest('[data-type="unified-composer"]')||markedRoot||composer?.parentElement;
   let textCleared=false,attachmentsRemoved=0;
   if(composer&&composer.dataset.codexproDraftAttempt===attemptId){
     composer.focus();
