@@ -1116,7 +1116,8 @@ function spawnLogged(name, command, args, options = {}) {
   const child = spawn(invocation.command, invocation.args, {
     ...spawnOptions,
     stdio: ['ignore', 'pipe', 'pipe'],
-    windowsVerbatimArguments: invocation.windowsVerbatimArguments
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+    ...(process.platform === 'win32' ? { windowsHide: true } : {})
   });
   child.codexproKillTree = Boolean(invocation.killTree);
   const logLines = [];
@@ -1271,6 +1272,21 @@ function killProcess(child) {
 
 function cleanupChildren() {
   for (const child of spawnedChildren) killProcess(child);
+}
+
+function watchHiddenLauncherParent() {
+  if (process.platform !== 'win32' || process.env.CODEXPRO_HIDDEN_LAUNCHER !== '1') return;
+  const launcherPid = process.ppid;
+  const timer = setInterval(() => {
+    try {
+      process.kill(launcherPid, 0);
+    } catch {
+      clearInterval(timer);
+      cleanupChildren();
+      process.exit(0);
+    }
+  }, 500);
+  timer.unref();
 }
 
 function endpointWithToken(endpoint, token) {
@@ -1633,7 +1649,8 @@ function spawnSyncPortable(command, args, options = {}) {
   return spawnSync(invocation.command, invocation.args, {
     ...options,
     shell: false,
-    windowsVerbatimArguments: invocation.windowsVerbatimArguments
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+    ...(process.platform === 'win32' ? { windowsHide: true } : {})
   });
 }
 
@@ -3799,6 +3816,7 @@ function holdRuntime(server, details, cleanup, headless, tunnelChild = null) {
 }
 
 async function main() {
+  watchHiddenLauncherParent();
   let argv = process.argv.slice(2);
   let connectionTest = false;
   if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
