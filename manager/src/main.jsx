@@ -309,7 +309,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.29";
+const WORKER_EXTENSION_VERSION = "0.5.30";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -648,7 +648,7 @@ function App() {
         const completionKey = `${profile.profile_id}:${conversationId}`;
         if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) continue;
         networkCompletionReads.current.set(completionKey, networkCompletedAt);
-        void loadResponse(profile, conversationId, true, true);
+        void loadResponse(profile, conversationId, true, true, true);
         if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
       }
     }
@@ -1130,7 +1130,7 @@ function App() {
     }
   }
 
-  async function loadResponse(profile, explicitConversationId, silent = false, readDom = false) {
+  async function loadResponse(profile, explicitConversationId, silent = false, readDom = false, recoverStaleDom = false) {
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const conversationId = String(explicitConversationId || requestTargets[profile.profile_id] || defaultTarget || "");
@@ -1140,7 +1140,7 @@ function App() {
       setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
     }
     try {
-      const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId, readDom });
+      const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId, readDom, recoverStaleDom });
       const domAvailable = result.dom_available !== false;
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
@@ -1420,7 +1420,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.56</small>
+          <small>CodexPro Manager 0.2.57</small>
         </div>
       </aside>
 
