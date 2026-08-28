@@ -496,13 +496,24 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
     }
     composer.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'insertText',data:text}));
     composer.dispatchEvent(new Event('change',{bubbles:true}));
-    while(!expired()&&composerText(composer)!==normalizedText(text))await sleep(50);
-    if(composerText(composer)!==normalizedText(text))return await fail('ChatGPT chưa nhận nội dung vào composer; chưa gửi để tránh báo thành công giả.',{expired:expired()});
+    const expectedText=normalizedText(text);
+    while(!expired()){
+      const currentComposer=findComposer();
+      if(composerText(currentComposer)===expectedText){
+        composer=currentComposer;
+        composer.dataset.codexproDraftAttempt=attemptId;
+        break;
+      }
+      await sleep(50);
+    }
+    if(composerText(composer)!==expectedText)return await fail('ChatGPT chưa nhận nội dung vào composer; chưa gửi để tránh báo thành công giả.',{expired:expired()});
   }
 
   let send;
   while(!expired()){
-    send=['#composer-submit-button','button[data-testid="send-button"]','button[aria-label*="Send" i]','button[aria-label*="Gửi" i]'].map(selector=>(root||document).querySelector(selector)||document.querySelector(selector)).find(element=>{
+    const currentComposer=findComposer();
+    const currentRoot=composerRootFor(currentComposer)||root;
+    send=['#composer-submit-button','button[data-testid="send-button"]','button[aria-label*="Send" i]','button[aria-label*="Gửi" i]'].flatMap(selector=>[currentRoot?.querySelector(selector),document.querySelector(selector)]).filter(Boolean).find(element=>{
       if(!visible(element)||element.disabled||element.getAttribute?.('aria-disabled')==='true'||element.hasAttribute?.('data-visually-disabled'))return false;
       const label=String(element.innerText||element.textContent||element.getAttribute?.('aria-label')||'').trim();
       return !/(?:stop\s+(?:answering|generating|streaming)|dừng(?:\s+trả\s+lời)?)/i.test(label);
@@ -966,7 +977,7 @@ async function probeConnectorEndpoint(serverUrl) {
     const response=await fetch(serverUrl,{
       method:'POST',
       headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},
-      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.26'}}}),
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.27'}}}),
       signal:controller.signal
     });
     const body=(await response.text()).slice(0,20000);
