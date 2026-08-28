@@ -19,7 +19,7 @@ const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.27";
+const WORKER_EXTENSION_VERSION = "0.5.28";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
@@ -1158,7 +1158,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.54" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.55" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1522,7 +1522,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.54" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.55" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
