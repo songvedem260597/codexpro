@@ -19,7 +19,7 @@ const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.28";
+const WORKER_EXTENSION_VERSION = "0.5.29";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
@@ -495,6 +495,8 @@ function createWindow() {
         if (process.env.CODEXPRO_MANAGER_SMOKE_SEND === "1") {
           const sendConversationId = String(process.env.CODEXPRO_MANAGER_SMOKE_SEND_CONVERSATION_ID || "").trim();
           const sendText = String(process.env.CODEXPRO_MANAGER_SMOKE_SEND_TEXT || "CodexPro Manager UI send probe — trả lời OK.").trim();
+          const sendAttachmentPath = String(process.env.CODEXPRO_MANAGER_SMOKE_SEND_ATTACHMENT_PATH || "").trim();
+          let expectedAttachmentName = "";
           if (sendConversationId) {
             await win.webContents.executeJavaScript(`(async () => {
               const trigger = document.querySelector('.chat-dropdown-trigger:not(:disabled)');
@@ -508,13 +510,48 @@ function createWindow() {
             })()`, true);
             await new Promise((resolve) => setTimeout(resolve, 1400));
           }
-          sendProbe = await win.webContents.executeJavaScript(`(async () => {
-            const cards = [...document.querySelectorAll('.request-card')];
-            const card = cards.find((item) => {
-              const textarea = item.querySelector('textarea');
-              const button = item.querySelector('.request-card-actions .button.primary');
-              return textarea && !textarea.disabled && button && !/đang trả lời/i.test(button.textContent || '');
-            });
+          if (sendAttachmentPath) {
+            const resolvedAttachment = path.resolve(sendAttachmentPath);
+            if (!fs.existsSync(resolvedAttachment)) throw new Error(`Không tìm thấy file smoke gửi kèm: ${resolvedAttachment}`);
+            const attachmentImage = nativeImage.createFromPath(resolvedAttachment);
+            if (attachmentImage.isEmpty()) throw new Error(`File smoke gửi kèm không phải ảnh hợp lệ: ${resolvedAttachment}`);
+            expectedAttachmentName = path.basename(resolvedAttachment);
+            const previousImage = typeof clipboard.readImage === "function" ? await Promise.resolve(clipboard.readImage()) : null;
+            const previousText = typeof clipboard.readText === "function" ? String(await Promise.resolve(clipboard.readText()) || "") : "";
+            try {
+              if (typeof clipboard.writeImage === "function") await Promise.resolve(clipboard.writeImage(attachmentImage));
+              else await clipboard.write([new ClipboardItem({ "image/png": new Blob([attachmentImage.toPNG()], { type: "image/png" }) })]);
+              const pasteTargetReady = await win.webContents.executeJavaScript(`(() => {
+                const scope = document.querySelector('.chat-modal') || document;
+                const card = [...scope.querySelectorAll('.request-card')].find((item) => {
+                  const textarea = item.querySelector('textarea');
+                  const button = item.querySelector('.request-card-actions .button.primary');
+                  return textarea && !textarea.disabled && button && !/đang trả lời/i.test(button.textContent || '');
+                });
+                const textarea = card?.querySelector('textarea');
+                textarea?.focus();
+                return Boolean(textarea);
+              })()`, true);
+              if (!pasteTargetReady) throw new Error("Không có textarea rảnh để dán ảnh smoke trước khi gửi.");
+              win.webContents.sendInputEvent({ type: "keyDown", keyCode: "V", modifiers: ["control"] });
+              win.webContents.sendInputEvent({ type: "keyUp", keyCode: "V", modifiers: ["control"] });
+              await new Promise((resolve) => setTimeout(resolve, 1400));
+            } finally {
+              if (previousImage && !previousImage.isEmpty() && typeof clipboard.writeImage === "function") clipboard.writeImage(previousImage);
+              else if (typeof clipboard.writeText === "function") clipboard.writeText(previousText);
+            }
+          }
+          await win.webContents.executeJavaScript("window.__codexproSmokeSendTarget = null", true);
+          const sendProbePromise = win.webContents.executeJavaScript(`(async () => {
+            const findCurrentCard = () => {
+              const scope = document.querySelector('.chat-modal') || document;
+              return [...scope.querySelectorAll('.request-card')].find((item) => {
+                const textarea = item.querySelector('textarea');
+                const button = item.querySelector('.request-card-actions .button.primary');
+                return textarea && !textarea.disabled && button && !/đang trả lời/i.test(button.textContent || '');
+              });
+            };
+            const card = findCurrentCard();
             if (!card) return { ok: false, error: 'Không có card rảnh để test gửi.' };
             const textarea = card.querySelector('textarea');
             const oldValue = textarea.value;
@@ -524,26 +561,66 @@ function createWindow() {
             textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(sendText)} }));
             textarea.dispatchEvent(new Event('change', { bubbles: true }));
             await new Promise((resolve) => setTimeout(resolve, 350));
-            const currentButton = card.querySelector('.request-card-actions .button.primary');
-            if (!currentButton || currentButton.disabled) return { ok: false, error: 'Nút Gửi tin nhắn chưa sẵn sàng sau khi nhập.', textarea: card.querySelector('textarea')?.value || '' };
-            currentButton.click();
-            await new Promise((resolve) => setTimeout(resolve, 16000));
-            const currentTextarea = card.querySelector('textarea');
+            let activeCard = findCurrentCard();
+            const currentButton = activeCard?.querySelector('.request-card-actions .button.primary');
+            if (!currentButton || currentButton.disabled) return { ok: false, error: 'Nút Gửi tin nhắn chưa sẵn sàng sau khi nhập.', textarea: activeCard?.querySelector('textarea')?.value || '' };
+            const attachmentsBeforeSend = [...activeCard.querySelectorAll('.request-file-copy strong')].map((node) => node.textContent?.trim() || '').filter(Boolean);
+            const buttonRect = currentButton.getBoundingClientRect();
+            window.__codexproSmokeSendTarget = { x: buttonRect.left + buttonRect.width / 2, y: buttonRect.top + buttonRect.height / 2 };
+            const sendDeadline = Date.now() + 45000;
+            let sendStarted = false;
+            while (Date.now() < sendDeadline) {
+              activeCard = findCurrentCard() || activeCard;
+              const activeButton = activeCard?.querySelector('.request-card-actions .button.primary');
+              const loading = Boolean(activeButton && (activeButton.disabled || /(?:đang tải|đang gửi|đang tạo)/i.test(activeButton.textContent || '')));
+              if (loading) sendStarted = true;
+              if (sendStarted && activeButton && !activeButton.disabled && !/(?:đang tải|đang gửi|đang tạo)/i.test(activeButton.textContent || '')) break;
+              await new Promise((resolve) => setTimeout(resolve, 250));
+            }
+            const finalCard = findCurrentCard() || activeCard;
+            const currentTextarea = finalCard?.querySelector('textarea');
             const toast = document.querySelector('.toast')?.textContent?.trim() || '';
-            const error = card.querySelector('.request-send-error')?.textContent?.trim() || document.querySelector('.error-banner')?.textContent?.trim() || document.querySelector('.error')?.textContent?.trim() || '';
-            const userMessages = [...card.querySelectorAll('.chat-transcript-message.is-user .user-message-text')].map((node) => node.textContent?.trim() || '').filter(Boolean);
-            const userMessageVisible = userMessages.includes(${JSON.stringify(sendText)});
+            const error = finalCard?.querySelector('.request-send-error')?.textContent?.trim() || document.querySelector('.error-banner')?.textContent?.trim() || document.querySelector('.error')?.textContent?.trim() || '';
+            const userMessages = [...(finalCard?.querySelectorAll('.chat-transcript-message.is-user .user-message-text') || [])].map((node) => node.textContent?.trim() || '').filter(Boolean);
+            const userMessageVisible = userMessages.some((message) => message.includes(${JSON.stringify(sendText)}));
+            const attachmentExpected = ${JSON.stringify(Boolean(sendAttachmentPath))};
+            const attachmentPrepared = !attachmentExpected || attachmentsBeforeSend.length > 0;
+            const attachmentCleared = (finalCard?.querySelectorAll('.request-file').length || 0) === 0;
             return {
-              ok: (currentTextarea?.value || '') === '' && !error && userMessageVisible,
+              ok: (currentTextarea?.value || '') === '' && !error && userMessageVisible && attachmentPrepared && attachmentCleared,
               textarea: currentTextarea?.value || '',
-              buttonText: card.querySelector('.request-card-actions .button.primary')?.textContent?.trim() || '',
+              buttonText: finalCard?.querySelector('.request-card-actions .button.primary')?.textContent?.trim() || '',
               toast,
               error,
               userMessageVisible,
               userMessages: userMessages.slice(-5),
-              conversationTitle: card.querySelector('.chat-dropdown-value strong')?.textContent?.trim() || ''
+              attachmentExpected,
+              expectedAttachmentName: ${JSON.stringify(expectedAttachmentName)},
+              attachmentsBeforeSend,
+              attachmentPrepared,
+              attachmentCleared,
+              conversationTitle: finalCard?.querySelector('.chat-dropdown-value strong')?.textContent?.trim() || ''
             };
           })()`, true);
+          let smokeSendTarget = null;
+          for (let attempt = 0; attempt < 80 && !smokeSendTarget; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            smokeSendTarget = await win.webContents.executeJavaScript("window.__codexproSmokeSendTarget", true);
+          }
+          if (!smokeSendTarget || !Number.isFinite(smokeSendTarget.x) || !Number.isFinite(smokeSendTarget.y)) throw new Error("Smoke không định vị được nút Gửi tin nhắn hiện hành.");
+          win.webContents.sendInputEvent({ type: "mouseDown", x: Math.round(smokeSendTarget.x), y: Math.round(smokeSendTarget.y), button: "left", clickCount: 1 });
+          win.webContents.sendInputEvent({ type: "mouseUp", x: Math.round(smokeSendTarget.x), y: Math.round(smokeSendTarget.y), button: "left", clickCount: 1 });
+          sendProbe = await sendProbePromise;
+          if (sendConversationId && chatModalProbe?.profile) {
+            await new Promise((resolve) => setTimeout(resolve, 800));
+            const actual = await win.webContents.executeJavaScript(`window.codexpro.getProfileResponse(${JSON.stringify({ profileId: chatModalProbe.profile, conversationId: sendConversationId, readDom: true })}).then((value) => JSON.parse(JSON.stringify(value)))`, true);
+            const actualUserMessage = [...(actual?.messages || [])].reverse().find((message) => message?.role === "user" && String(message?.text || "").includes(sendText));
+            sendProbe.actualUserMessageVisible = Boolean(actualUserMessage);
+            sendProbe.actualUserMessageTail = String(actualUserMessage?.text || "").slice(-300);
+            sendProbe.actualNetworkState = String(actual?.network_state || "");
+            sendProbe.actualBusy = Boolean(actual?.busy);
+            sendProbe.ok = Boolean(sendProbe.ok && sendProbe.actualUserMessageVisible);
+          }
         }
         let pasteProbe = null;
         if (process.env.CODEXPRO_MANAGER_SMOKE_PASTE_IMAGE === "1") {
@@ -1158,7 +1235,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.55" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.56" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1522,7 +1599,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.55" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.56" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);

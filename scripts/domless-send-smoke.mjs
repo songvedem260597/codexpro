@@ -93,9 +93,11 @@ assert.ok(acknowledgedReturn > networkRecovery, "a tracked generation must count
 assert.ok(cleanup > acknowledgedReturn, "draft cleanup must only happen after network recovery fails");
 assert.match(sendBlock, /SEND_UNCERTAIN: Đã bấm gửi nhưng chưa thấy generation request/);
 assert.match(sendBlock, /submitted_by:'network'/);
-assert.match(sendBlock, /trustedClickChatSendTab\(tab\.id,attemptId,sendX,sendY\)/, "prepared sends must use trusted Chrome input");
+assert.match(sendBlock, /trustedActivateChatSendButtonTab\(tab\.id,attemptId\)/, "prepared sends must use trusted Chrome input");
 assert.match(worker, /requires_trusted_click:true/, "the DOM phase must not use an untrusted element.click for submit");
 assert.match(worker, /data-codexpro-send-attempt/, "trusted send must locate the button again after debugger attachment");
+assert.match(worker, /replace\(\/\^@\\s\*\(\?=CodexPro\\b\)\/i,''\)/, "manager mentions must compare semantically after ChatGPT renders them");
+assert.match(worker, /const verifyDeadline=Math\.min\(/, "composer verification must not consume the entire send deadline");
 assert.doesNotMatch(extractFunction("sendChatRequestPage"), /send\.click\(\)/, "the ChatGPT submit button must not be triggered by an untrusted DOM click");
 assert.match(worker, /const currentComposer=findComposer\(\)/, "composer verification must survive ChatGPT replacing the React node");
 assert.match(worker, /const currentRoot=composerRootFor\(currentComposer\)\|\|root/, "send lookup must use the latest composer tree");
