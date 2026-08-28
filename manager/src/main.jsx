@@ -12,6 +12,7 @@ const RESPONSE_AUTO_SCROLL_RESUME_MS = 3000;
 const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
 const REALTIME_POLL_MS = 1000;
 const NEW_CHAT_TARGET = "__codexpro_new_chat__";
+const ALL_ALLOWED_WORKSPACES = "__codexpro_all_allowed__";
 const ROLLOVER_CONTEXT_MAX_CHARS = 9000;
 const PROJECTS_PER_PAGE = 8;
 
@@ -235,12 +236,12 @@ function ChatDropdown({ value, conversations, disabled, onChange }) {
   );
 }
 
-function ProjectDropdown({ value, projects, disabled, onChange, workspaceTarget, onBrowseDirectory, onBrowseFile }) {
+function ProjectDropdown({ value, projects, disabled, onChange }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const root = useRef(null);
   const selected = projects.find((project) => project.root === value);
-  const targetMatches = Boolean(workspaceTarget?.root && value && String(workspaceTarget.root).toLowerCase() === String(value).toLowerCase());
+  const allAllowed = value === ALL_ALLOWED_WORKSPACES;
   const normalizedQuery = query.trim().toLocaleLowerCase("vi-VN");
   const filteredProjects = normalizedQuery
     ? projects.filter((project) => [project.name, project.repoFullName, project.branch, project.root].some((field) => String(field || "").toLocaleLowerCase("vi-VN").includes(normalizedQuery)))
@@ -257,10 +258,10 @@ function ProjectDropdown({ value, projects, disabled, onChange, workspaceTarget,
   return (
     <div className={`project-dropdown ${open ? "is-open" : ""} ${disabled ? "is-disabled" : ""}`} ref={root}>
       <button type="button" className="project-dropdown-trigger" aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { setOpen((current) => !current); if (open) setQuery(""); }}>
-        <span className="project-dropdown-mark">⌘</span>
+        <span className="project-dropdown-mark">{allAllowed ? "⌕" : "⌘"}</span>
         <span className="project-dropdown-value">
-          <strong>{targetMatches && workspaceTarget?.kind === "file" ? workspaceTarget.name : selected?.name || "Chọn dự án, thư mục hoặc file"}</strong>
-          <small>{targetMatches && workspaceTarget?.kind === "file" ? `File ngoài repo · ${workspaceTarget.path}` : selected ? `${selected.repoFullName ? `${selected.repoFullName} · ` : ""}${selected.isGit ? (selected.branch || "git") : "thư mục"} · ${selected.root}` : "Có thể chọn Git repo hoặc duyệt file/thư mục bất kỳ"}</small>
+          <strong>{allAllowed ? "Tất cả vùng được cấp quyền" : selected?.name || "Chọn dự án hoặc đường dẫn"}</strong>
+          <small>{allAllowed ? "Không khóa repo/đường dẫn · CodexPro có thể tìm trong toàn bộ vùng đã cấp quyền" : selected ? `${selected.repoFullName ? `${selected.repoFullName} · ` : ""}${selected.isGit ? (selected.branch || "git") : "thư mục"} · ${selected.root}` : "Chọn một workspace cụ thể hoặc tìm trên toàn bộ vùng được cấp quyền"}</small>
         </span>
         <svg className="project-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
       </button>
@@ -271,6 +272,11 @@ function ProjectDropdown({ value, projects, disabled, onChange, workspaceTarget,
             <input autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm dự án, thư mục hoặc đường dẫn…" aria-label="Tìm dự án hoặc đường dẫn" />
             {query && <button type="button" aria-label="Xóa từ khóa" onClick={() => setQuery("")}>×</button>}
           </div>
+          <button type="button" role="option" aria-selected={allAllowed} className={`project-dropdown-option project-dropdown-option-all ${allAllowed ? "is-selected" : ""}`} onClick={() => { onChange(ALL_ALLOWED_WORKSPACES); setOpen(false); setQuery(""); }}>
+            <span className="project-dropdown-mark">⌕</span>
+            <span className="project-dropdown-copy"><strong>Tất cả vùng CodexPro được cấp quyền</strong><small>Không chọn repo/đường dẫn cụ thể · cho phép tìm trên mọi workspace được phép truy cập</small></span>
+            {allAllowed && <span className="project-dropdown-check">✓</span>}
+          </button>
           {filteredProjects.map((project) => (
             <button type="button" role="option" aria-selected={project.root === value} className={`project-dropdown-option ${project.root === value ? "is-selected" : ""}`} key={project.root} onClick={() => { onChange(project.root); setOpen(false); }}>
               <span className="project-dropdown-mark">⌘</span>
@@ -281,10 +287,6 @@ function ProjectDropdown({ value, projects, disabled, onChange, workspaceTarget,
             </button>
           ))}
           {!filteredProjects.length && <div className="project-dropdown-empty">Không tìm thấy trong danh sách đã lưu.</div>}
-          <div className="project-dropdown-browse">
-            <button type="button" onClick={() => { setOpen(false); setQuery(""); onBrowseDirectory?.(); }}><span>▣</span> Chọn thư mục ngoài danh sách</button>
-            <button type="button" onClick={() => { setOpen(false); setQuery(""); onBrowseFile?.(); }}><span>▤</span> Chọn file ngoài repo</button>
-          </div>
         </div>
       )}
     </div>
@@ -524,7 +526,6 @@ function App() {
   const [requestDrafts, setRequestDrafts] = useState({});
   const [requestTargets, setRequestTargets] = useState({});
   const [requestProjectRoots, setRequestProjectRoots] = useState({});
-  const [requestWorkspaceTargets, setRequestWorkspaceTargets] = useState({});
   const [requestFiles, setRequestFiles] = useState({});
   const [requestResponses, setRequestResponses] = useState({});
   const [clearedResponseTargets, setClearedResponseTargets] = useState({});
@@ -970,6 +971,7 @@ function App() {
   function projectRootForProfile(profile) {
     const workspaceProjects = projects;
     const requested = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
+    if (requested === ALL_ALLOWED_WORKSPACES) return ALL_ALLOWED_WORKSPACES;
     const exact = workspaceProjects.find((project) => project.root.toLowerCase() === requested.toLowerCase());
     if (exact) return exact.root;
     const currentWorkspace = String(profile.current_workspace_root || "");
@@ -979,29 +981,12 @@ function App() {
       || "";
   }
 
-  function selectProjectForProfile(profileId, root, workspaceTarget = null) {
+  function selectProjectForProfile(profileId, root) {
     setRequestProjectRoots((current) => ({ ...current, [profileId]: root }));
-    setRequestWorkspaceTargets((current) => {
-      if (workspaceTarget) return { ...current, [profileId]: workspaceTarget };
-      const { [profileId]: _removed, ...next } = current;
-      return next;
-    });
     setManagerSettings((current) => ({ ...current, repoSelections: { ...(current.repoSelections || {}), [profileId]: root } }));
     void api.saveManagerSettings({ repoSelections: { [profileId]: root } })
       .then(applyManagerSettings)
       .catch((err) => setRequestSendErrors((current) => ({ ...current, [profileId]: err?.message || String(err) })));
-  }
-
-  async function browseWorkspaceTarget(profile, kind) {
-    try {
-      const target = await api.chooseWorkspaceTarget(kind);
-      if (!target?.root) return;
-      setProjects(await api.addProject(target.root));
-      selectProjectForProfile(profile.profile_id, target.root, target);
-      notify(target.kind === "file" ? `Đã chọn file ${target.name}` : `Đã chọn thư mục ${target.name}`);
-    } catch (err) {
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: err?.message || String(err) }));
-    }
   }
 
   async function setupProfile(profile) {
@@ -1133,9 +1118,8 @@ function App() {
     const text = String(requestDrafts[profile.profile_id] || "").trim();
     const attachments = requestFiles[profile.profile_id] || [];
     const projectRoot = projectRootForProfile(profile);
-    const workspaceTarget = requestWorkspaceTargets[profile.profile_id];
     if (!projectRoot) {
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có workspace nào được chọn. Hãy chọn repo, thư mục hoặc file trước." }));
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có workspace nào được chọn." }));
       return;
     }
     setBusy(`request:${profile.profile_id}`);
@@ -1165,7 +1149,8 @@ function App() {
       });
     }
     try {
-      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, projectRoot, targetPath: workspaceTarget?.path || "", text, attachments });
+      const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
+      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, text, attachments });
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
       const resolvedConversationId = String(result?.conversation_id || conversationId);
@@ -1232,11 +1217,12 @@ function App() {
             networkError: String(result?.network_error || previous.networkError || ""),
             networkStatusCode: Number(result?.network_status_code) || Number(previous.networkStatusCode) || 0,
             repoTaskId: String(result?.repo_task_id || ""),
+            repoTaskScope: String(result?.repo_task_scope || (allAllowedScope ? "all_allowed" : "workspace")),
             repoTaskRetryCount: Number(result?.repo_task_retry_count) || 0,
             repoTaskRolloverCount: Number(result?.repo_task_rollover_count) || 0,
             repoTaskStatus: "waiting",
             repoTaskVerified: false,
-            repoTaskRequest: { text, attachments, projectRoot }
+            repoTaskRequest: { text, attachments, projectRoot, scope: allAllowedScope ? "all_allowed" : "workspace" }
           }
         };
       });
@@ -1380,13 +1366,14 @@ function App() {
       if (proof?.verified) {
         setRequestResponses((current) => {
           const previous = current[profile.profile_id] || {};
-          return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "verified", repoTaskVerified: true, repoTaskProof: proof } } : current;
+          return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskScope: String(proof?.scope || previous.repoTaskScope || "workspace"), repoTaskStatus: "verified", repoTaskVerified: true, repoTaskProof: proof } } : current;
         });
         return;
       }
       const retryCount = Number(response?.repoTaskRetryCount) || 0;
       const rolloverCount = Number(response?.repoTaskRolloverCount) || 0;
       const original = response?.repoTaskRequest;
+      const originalScope = original?.scope === "all_allowed" || original?.projectRoot === ALL_ALLOWED_WORKSPACES ? "all_allowed" : "workspace";
       if (retryCount >= 1 || !original?.projectRoot) {
         if (retryCount >= 1 && rolloverCount < 1 && original?.projectRoot) {
           setRequestResponses((current) => {
@@ -1398,7 +1385,8 @@ function App() {
             profileId: profile.profile_id,
             conversationId: "",
             newChat: true,
-            projectRoot: original.projectRoot,
+            scope: originalScope,
+            projectRoot: originalScope === "all_allowed" ? "" : original.projectRoot,
             text: original.text,
             attachments: Array.isArray(original.attachments) ? original.attachments : [],
             toolRetry: false,
@@ -1423,6 +1411,7 @@ function App() {
               sendUncertain: false,
               networkState: String(created?.generation_state || created?.network_state || "generating"),
               repoTaskId: String(created?.repo_task_id || ""),
+              repoTaskScope: String(created?.repo_task_scope || originalScope),
               repoTaskRetryCount: 0,
               repoTaskRolloverCount: rolloverCount + 1,
               repoTaskStatus: "waiting",
@@ -1451,7 +1440,8 @@ function App() {
         profileId: profile.profile_id,
         conversationId,
         newChat: false,
-        projectRoot: original.projectRoot,
+        scope: originalScope,
+        projectRoot: originalScope === "all_allowed" ? "" : original.projectRoot,
         text: original.text,
         attachments: Array.isArray(original.attachments) ? original.attachments : [],
         toolRetry: true,
@@ -1466,6 +1456,7 @@ function App() {
           [profile.profile_id]: {
             ...previous,
             repoTaskId: String(retried?.repo_task_id || ""),
+            repoTaskScope: String(retried?.repo_task_scope || originalScope),
             repoTaskRetryCount: 1,
             repoTaskRolloverCount: rolloverCount,
             repoTaskStatus: "waiting",
@@ -1698,9 +1689,9 @@ function App() {
           </div>
 
           <article className={`request-card chat-popup-card ${profile.connected ? "is-online" : "is-offline"}`}>
-            <label className="request-label">Dự án / đường dẫn cần làm <small>khóa cho profile/chat hiện tại</small></label>
-            <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} workspaceTarget={requestWorkspaceTargets[profile.profile_id]} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} onBrowseDirectory={() => void browseWorkspaceTarget(profile, "directory")} onBrowseFile={() => void browseWorkspaceTarget(profile, "file")} disabled={!profile.connected || sending || selectedBusy || rolloverCreating} />
-            {!workspaceProjects.length && <div className="request-send-error">Chưa có workspace đã lưu. Dùng nút chọn thư mục/file ngay trong danh sách phía trên.</div>}
+            <label className="request-label">Dự án / đường dẫn cần làm <small>chọn phạm vi cho profile/chat hiện tại</small></label>
+            <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} disabled={!profile.connected || sending || selectedBusy || rolloverCreating} />
+            {!workspaceProjects.length && selectedProjectRoot !== ALL_ALLOWED_WORKSPACES && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
             <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
               <div className="chat-response-head">
@@ -1721,7 +1712,7 @@ function App() {
               {responseCurrent && !responseCleared && response?.repoTaskId && (
                 <div className={`network-response-notice is-${response.repoTaskStatus === "verified" ? "completed" : response.repoTaskStatus === "failed" ? "failed" : "generating"}`}>
                   <strong>{response.repoTaskStatus === "verified" ? "CodexPro: đã xác minh tool call" : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT né tool · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ bằng chứng tool call"}</strong>
-                  <span>{response.repoTaskStatus === "verified" ? `Repo đã được mở thật · task ${response.repoTaskId}` : response.repoTaskStatus === "failed" ? "ChatGPT không gọi CodexPro nên Manager không công nhận phản hồi này." : "Manager chỉ công nhận công việc sau khi server nhận begin_repo_task."}</span>
+                  <span>{response.repoTaskStatus === "verified" ? (response.repoTaskScope === "all_allowed" ? `Đã xác minh phạm vi toàn bộ vùng được cấp quyền · task ${response.repoTaskId}` : `Workspace đã được mở thật · task ${response.repoTaskId}`) : response.repoTaskStatus === "failed" ? "ChatGPT không gọi CodexPro nên Manager không công nhận phản hồi này." : "Manager chỉ công nhận công việc sau khi server nhận begin_repo_task."}</span>
                 </div>
               )}
               {responseCurrent && !responseCleared && !isNewChat && selectedNetworkState !== "idle" && !selectedNetworkCompleted && (
