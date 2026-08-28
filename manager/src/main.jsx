@@ -1755,10 +1755,10 @@ function App() {
                   <span>{response.repoTaskStatus === "verified" ? `Repo đã được mở thật · task ${response.repoTaskId}` : response.repoTaskStatus === "failed" ? "ChatGPT không gọi CodexPro nên Manager không công nhận phản hồi này." : "Manager chỉ công nhận công việc sau khi server nhận begin_repo_task."}</span>
                 </div>
               )}
-              {responseCurrent && !isNewChat && selectedNetworkState !== "idle" && (
+              {responseCurrent && !isNewChat && selectedNetworkState !== "idle" && !selectedNetworkCompleted && (
                 <div className={`network-response-notice is-${selectedNetworkState}`}>
-                  <strong>{selectedBusy ? "Network: AI đang xử lý" : selectedNetworkFailed ? "Network: request thất bại" : "Network: AI đã hoàn tất phản hồi"}</strong>
-                  <span>{selectedBusy ? "Theo dõi trực tiếp vòng đời request của ChatGPT." : selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : selectedNetworkCompleted ? `Không cần DOM để xác nhận hoàn tất${response?.networkDurationMs || selectedTab?.network_duration_ms ? ` · ${Math.round((response?.networkDurationMs || selectedTab?.network_duration_ms) / 1000)}s` : ""}.` : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
+                  <strong>{selectedBusy ? "Network: AI đang xử lý" : "Network: request thất bại"}</strong>
+                  <span>{selectedBusy ? "Theo dõi trực tiếp vòng đời request của ChatGPT." : (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`)}</span>
                 </div>
               )}
               {sending && (
