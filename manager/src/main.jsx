@@ -426,7 +426,7 @@ function App() {
   }, [applyManagerSettings]);
 
   useEffect(() => {
-    setRequestProjectRoots((current) => ({ ...(managerSettings.repoSelections || {}), ...current }));
+    setRequestProjectRoots((current) => ({ ...current, ...(managerSettings.repoSelections || {}) }));
   }, [managerSettings.repoSelections]);
 
   const saveManagerSetting = useCallback(async (patch, message = "Đã lưu cài đặt") => {
@@ -789,7 +789,9 @@ function App() {
     const conversationId = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
     if (conversationId) setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
     const projectRoot = projectRootForProfile(profile);
-    if (projectRoot) setRequestProjectRoots((current) => ({ ...current, [profile.profile_id]: projectRoot }));
+    const rememberedRoot = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
+    if (projectRoot && projectRoot.toLowerCase() !== rememberedRoot.toLowerCase()) selectProjectForProfile(profile.profile_id, projectRoot);
+    else if (projectRoot) setRequestProjectRoots((current) => ({ ...current, [profile.profile_id]: projectRoot }));
     setChatProfileId(profile.profile_id);
     if (profile.connected && conversationId && conversationId !== NEW_CHAT_TARGET) {
       setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
@@ -1400,7 +1402,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
-          <small>CodexPro Manager 0.2.52</small>
+          <small>CodexPro Manager 0.2.53</small>
         </div>
       </aside>
 

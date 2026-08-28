@@ -444,6 +444,13 @@ function createWindow() {
           await win.webContents.executeJavaScript("document.querySelector('.project-dropdown-trigger:not(:disabled)')?.click()", true);
           await new Promise((resolve) => setTimeout(resolve, 150));
           chatModalProbe.hasProjectSearch = await win.webContents.executeJavaScript("Boolean(document.querySelector('.project-dropdown-search input[type=search]'))", true);
+          chatModalProbe.projectSearchStyle = await win.webContents.executeJavaScript(`(() => {
+            const input = document.querySelector('.project-dropdown-search input[type=search]');
+            if (!input) return null;
+            input.focus();
+            const style = getComputedStyle(input);
+            return { borderWidth: style.borderWidth, boxShadow: style.boxShadow, outlineWidth: style.outlineWidth, backgroundColor: style.backgroundColor };
+          })()`, true);
         }
         let renameProbe = null;
         if (process.env.CODEXPRO_MANAGER_SMOKE_RENAME === "1") {
@@ -1122,7 +1129,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.52" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.53" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1486,7 +1493,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.52" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.53" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
