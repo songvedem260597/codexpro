@@ -131,7 +131,7 @@ function trustedConnectorRequest(req: IncomingMessage): boolean {
 function setCors(req: IncomingMessage, res: ServerResponse): void {
   const origin = extensionOrigin(req);
   if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "POST, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CodexPro-Extension");
   res.setHeader("Access-Control-Allow-Private-Network", "true");
   res.setHeader("Cache-Control", "no-store");
@@ -230,6 +230,31 @@ function syncWaiters(state: BridgeState): void {
   for (const profile of state.profiles.values()) deliver(state, profile, null);
 }
 
+function forgetHeadlessProfile(state: BridgeState, profileId: string): boolean {
+  const profile = state.profiles.get(profileId);
+  if (!profile || !profile.headless) return false;
+  if (profile.waiter) deliver(state, profile, null);
+  for (const command of profile.queued) {
+    const pending = state.pending.get(command.id);
+    if (!pending) continue;
+    clearTimeout(pending.timer);
+    state.pending.delete(command.id);
+    pending.reject(new CodexProError("Headless Chrome profile " + (profile.label || profile.id) + " was removed."));
+  }
+  profile.queued = [];
+  state.profiles.delete(profile.id);
+  profileWorkspaceRoots.delete(profile.id);
+  profileWorkspaceBindings.delete(profile.id);
+  if (state.activeProfileId === profile.id) state.activeProfileId = undefined;
+  return true;
+}
+
+function pruneExpiredHeadlessProfiles(state: BridgeState, now = Date.now()): void {
+  for (const profile of [...state.profiles.values()]) {
+    if (profile.headless && now - profile.lastSeen > PROFILE_TTL_MS) forgetHeadlessProfile(state, profile.id);
+  }
+}
+
 async function handleRequest(state: BridgeState, req: IncomingMessage, res: ServerResponse): Promise<void> {
   setCors(req, res);
   if (req.method === "GET" && String(req.url || "").startsWith("/headless-bootstrap")) {
@@ -242,6 +267,17 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
     res.end("<!doctype html><meta charset=\"utf-8\"><title>CodexPro Headless</title><body>CodexPro headless worker bootstrap.</body>");
+    return;
+  }
+  if (req.method === "DELETE" && String(req.url || "").startsWith("/headless-profile/")) {
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      res.statusCode = 403;
+      res.end("Forbidden");
+      return;
+    }
+    const profileId = decodeURIComponent(String(req.url || "").slice("/headless-profile/".length)).trim().slice(0, 160);
+    const removed = profileId ? forgetHeadlessProfile(state, profileId) : false;
+    sendJson(req, res, removed ? 200 : 404, { ok: removed, profile_id: profileId });
     return;
   }
   if (req.method === "OPTIONS") {
@@ -356,6 +392,7 @@ export function ensureBrowserExtensionBridge(options: BrowserExtensionBridgeOpti
 export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
   const state = ensureBrowserExtensionBridge();
   const now = Date.now();
+  pruneExpiredHeadlessProfiles(state, now);
   return [...state.profiles.values()]
     .map((profile) => {
       const tabs = profile.tabs

@@ -1308,7 +1308,11 @@ async function runtimeStatus() {
   const browserProfilesRaw = base.local.ok
     ? await listBrowserProfilesThroughMcp(base.config, base.token).catch(() => [])
     : [];
-  const browserProfiles = await Promise.all(browserProfilesRaw.map(async (profile) => {
+  const browserProfilesVisible = browserProfilesRaw.filter((profile) => {
+    const headless = profile.headless === true || String(profile.profile_id || "").startsWith("headless-");
+    return profile.connected || !headless;
+  });
+  const browserProfiles = await Promise.all(browserProfilesVisible.map(async (profile) => {
     const workspaceRoot = String(profile.current_workspace_root || "").trim();
     if (!workspaceRoot) return { ...profile, current_workspace_repo: "" };
     return { ...profile, current_workspace_repo: await githubRepoForRoot(workspaceRoot) };

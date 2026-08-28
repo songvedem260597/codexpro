@@ -391,6 +391,10 @@ export function createHeadlessWorkerManager(options = {}) {
     next.workers = next.workers.filter((item) => item.id !== id);
     saveState(next);
     fs.rmSync(path.join(workersRoot, id), { recursive: true, force: true });
+    await fetch(`http://127.0.0.1:9224/headless-profile/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      signal: AbortSignal.timeout(3000)
+    }).catch(() => {});
     return { ok: true, removed: true, id };
   }
 
