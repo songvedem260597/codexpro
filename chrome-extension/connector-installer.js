@@ -1,6 +1,7 @@
 (() => {
-  const INSTALLER_REVISION = '2026-08-28-23';
+  const INSTALLER_REVISION = '2026-08-28-25';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
+  document.querySelector('#codexpro-setup-status')?.remove();
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -35,15 +36,21 @@
       element = document.createElement('div');
       element.id = 'codexpro-setup-status';
       Object.assign(element.style, {
-        position: 'fixed', right: '18px', bottom: '18px', zIndex: '2147483647',
-        maxWidth: '360px', padding: '12px 14px', borderRadius: '12px',
+        position: 'fixed', top: '18px', right: '18px', bottom: 'auto', zIndex: '2147483647',
+        maxWidth: 'min(320px, calc(100vw - 36px))', padding: '10px 12px', borderRadius: '12px',
         background: '#17191f', color: '#f7f7f8', border: '1px solid #3b404b',
-        boxShadow: '0 14px 40px rgba(0,0,0,.35)', font: '600 13px/1.45 system-ui,sans-serif'
+        boxShadow: '0 14px 40px rgba(0,0,0,.35)', font: '600 13px/1.45 system-ui,sans-serif',
+        boxSizing: 'border-box', pointerEvents: 'none'
       });
       document.documentElement.appendChild(element);
     }
     element.style.borderColor = tone === 'error' ? '#e5484d' : tone === 'ok' ? '#39d98a' : '#ffb020';
     element.textContent = message;
+    if (element.__codexProDismissTimer) clearTimeout(element.__codexProDismissTimer);
+    const dismissDelay = tone === 'ok' ? 3500 : tone === 'error' ? 8000 : 10000;
+    element.__codexProDismissTimer = setTimeout(() => {
+      if (element.isConnected && element.textContent === message) element.remove();
+    }, dismissDelay);
   }
 
   function candidates(root = document) {

@@ -154,6 +154,8 @@ section { margin-bottom: 38px; }
 .badge.profile-missing { color: #ffadb7; border-color: #85404b; background: #3b1d24; }
 .active-repo-chip { min-width: 0; max-width: min(520px, 44vw); display: inline-flex; align-items: center; gap: 6px; color: #aebbd0; font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .active-repo-chip::before { content: "↗"; flex: 0 0 auto; color: #6b8cff; font-size: 12px; font-weight: 800; }
+.active-repo-chip.is-empty { color: #66758d; font-weight: 500; }
+.active-repo-chip.is-empty::before { content: "·"; color: #66758d; }
 .profile-head-actions { display: flex; align-items: flex-end; flex-direction: column; gap: 9px; }
 .reload-all { min-width: 142px; }
 .profile-actions { width: 244px; flex: 0 0 244px; display: flex; align-items: stretch; flex-direction: column; gap: 8px; }
@@ -362,7 +364,7 @@ section { margin-bottom: 38px; }
 .alert { display: flex; align-items: center; gap: 10px; margin: -20px 0 24px; padding: 11px 13px; color: #ffb1bb; border: 1px solid #502832; background: #251318; border-radius: var(--radius-control); font-size: 15px; }
 .alert > span { display: grid; place-items: center; border: 1px solid currentColor; border-radius: 50%; width: 18px; height: 18px; font-weight: 800; }
 .alert button { margin-left: auto; border: 0; background: none; color: inherit; font-size: 20px; }
-.toast { position: fixed; right: 28px; bottom: 24px; z-index: 30; color: #0d1711; background: var(--green); padding: 11px 16px; border-radius: var(--radius-control); font-weight: 800; box-shadow: 0 14px 35px #0008; }
+.toast { position: fixed; top: 22px; right: 28px; bottom: auto; z-index: 30; max-width: min(560px, calc(100vw - 40px)); color: #0d1711; background: var(--green); padding: 11px 16px; border-radius: var(--radius-control); font-weight: 800; box-shadow: 0 14px 35px #0008; pointer-events: none; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 30px; background: #05070bdc; backdrop-filter: blur(5px); }
 .modal { width: min(820px, 90vw); max-height: 84vh; overflow: auto; padding: 24px; border: 1px solid #30394a; border-radius: var(--radius-panel); background: #11151d; box-shadow: 0 25px 80px #000a; }
 .modal-head { display: flex; justify-content: space-between; align-items: flex-start; }

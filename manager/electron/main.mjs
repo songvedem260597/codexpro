@@ -761,12 +761,27 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
           const button = document.querySelector('.reload-all');
           return button ? { text: button.textContent?.trim() || '', disabled: Boolean(button.disabled), primary: button.classList.contains('primary'), title: button.getAttribute('title') || '' } : null;
         })()`, true);
-        const activeChatTitleProbe = await win.webContents.executeJavaScript(`(() => [...document.querySelectorAll('.browser-profile')].map((card) => ({
+        const activeRepoProbe = await win.webContents.executeJavaScript(`(() => [...document.querySelectorAll('.browser-profile')].map((card) => ({
           profile: card.querySelector('code')?.textContent?.trim() || '',
           repo: card.querySelector('.active-repo-chip')?.textContent?.trim() || '',
           hasLegacyChatTitle: Boolean(card.querySelector('.active-chat-chip')),
+          stillHasChatTitleChip: Boolean(card.querySelector('.active-chat-chip')),
           metaStillHasChat: /(?:^|\\s)Chat:/i.test(card.querySelector('.profile-meta')?.textContent || '')
         })))()`, true);
+        let toastProbe = null;
+        if (process.env.CODEXPRO_MANAGER_SMOKE_TOAST === "1") {
+          await win.webContents.executeJavaScript("document.querySelector('.copy-button')?.click()", true);
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          toastProbe = await win.webContents.executeJavaScript(`(() => {
+            const toast = document.querySelector('.toast');
+            const send = document.querySelector('.chat-modal .request-card-actions .button.primary');
+            const rect = (element) => element ? element.getBoundingClientRect().toJSON() : null;
+            const a = toast?.getBoundingClientRect();
+            const b = send?.getBoundingClientRect();
+            const overlapsSend = Boolean(a && b && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top);
+            return { text: toast?.textContent?.trim() || '', toast: rect(toast), send: rect(send), overlapsSend };
+          })()`, true);
+        }
         const scrollProfile = String(process.env.CODEXPRO_MANAGER_SMOKE_SCROLL_PROFILE || "").trim();
         if (scrollProfile) {
           await win.webContents.executeJavaScript(`(() => {
@@ -782,7 +797,7 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         }
         const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe }));
+        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeRepoProbe, toastProbe }));
       } catch (error) {
         console.error(error instanceof Error ? error.stack || error.message : String(error));
         process.exitCode = 1;
@@ -1162,11 +1177,29 @@ function saveManagerProjects(roots) {
   fs.writeFileSync(managerProjectsFile, `${JSON.stringify({ version: 1, roots }, null, 2)}\n`, { mode: 0o600 });
 }
 
-function githubRepoFromRemote(remoteUrl) {
+function githubRemoteInfo(remoteUrl) {
   const value = String(remoteUrl || "").trim().replace(/\\/g, "/");
-  if (!value) return "";
-  const match = value.match(/github\.com[/:]([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i);
-  return match ? `${match[1]}/${match[2].replace(/\.git$/i, "")}` : "";
+  if (!value) return { githubRepo: "", githubUrl: "" };
+  let ownerRepo = "";
+  const scpMatch = value.match(/^git@github\.com:([^/]+\/[^\s]+)$/i);
+  if (scpMatch) {
+    ownerRepo = scpMatch[1];
+  } else {
+    try {
+      const parsed = new URL(value);
+      if (parsed.hostname.toLowerCase() === "github.com") ownerRepo = parsed.pathname.replace(/^\/+|\/+$/g, "");
+    } catch {
+      const sshMatch = value.match(/^ssh:\/\/git@github\.com\/([^/]+\/[^\s]+)$/i);
+      if (sshMatch) ownerRepo = sshMatch[1];
+    }
+  }
+  ownerRepo = ownerRepo.replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
+  if (!/^[^/\s]+\/[^/\s]+$/.test(ownerRepo)) return { githubRepo: "", githubUrl: "" };
+  return { githubRepo: ownerRepo, githubUrl: `https://github.com/${ownerRepo}` };
+}
+
+function githubRepoFromRemote(remoteUrl) {
+  return githubRemoteInfo(remoteUrl).githubRepo;
 }
 
 function repoIdentityFromRemote(remoteUrl) {
@@ -1188,7 +1221,8 @@ async function githubRepoForRoot(root) {
   if (cached && Date.now() - cached.at < 15_000) return cached.value;
   let value = "";
   try {
-    const remote = await execFileAsync("git.exe", ["-C", normalizedRoot, "remote", "get-url", "origin"], { windowsHide: true });
+    const git = isWindows ? "git.exe" : "git";
+    const remote = await execFileAsync(git, ["-C", normalizedRoot, "remote", "get-url", "origin"], { windowsHide: true });
     value = githubRepoFromRemote(remote.stdout.trim());
   } catch {}
   githubRepoCache.set(normalizedRoot.toLowerCase(), { at: Date.now(), value });
@@ -1210,17 +1244,18 @@ async function gitSummary(root) {
       remoteUrl = remote.stdout.trim();
     } catch {}
     try {
-      const upstreamResult = await execFileAsync("git.exe", ["-C", root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], { windowsHide: true });
+      const upstreamResult = await execFileAsync(git, ["-C", root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], { windowsHide: true });
       upstream = upstreamResult.stdout.trim();
       const [remoteCommit, pushReflog] = await Promise.allSettled([
-        execFileAsync("git.exe", ["-C", root, "log", "-1", "--pretty=format:%cI", upstream], { windowsHide: true }),
-        execFileAsync("git.exe", ["-C", root, "reflog", "show", "-1", "--format=%gI", upstream], { windowsHide: true })
+        execFileAsync(git, ["-C", root, "log", "-1", "--pretty=format:%cI", upstream], { windowsHide: true }),
+        execFileAsync(git, ["-C", root, "reflog", "show", "-1", "--format=%gI", upstream], { windowsHide: true })
       ]);
       if (remoteCommit.status === "fulfilled") remoteCommitAt = remoteCommit.value.stdout.trim();
       if (pushReflog.status === "fulfilled") pushedAt = pushReflog.value.stdout.trim();
     } catch {}
     const [hash = "", subject = "", date = ""] = commitText.trim().split("\t");
     const identity = repoIdentityFromRemote(remoteUrl);
+    const github = githubRemoteInfo(remoteUrl);
     const latestActivity = [
       { kind: "commit", value: date, timestamp: Date.parse(date) || 0 },
       { kind: "push", value: pushedAt, timestamp: Date.parse(pushedAt) || 0 },
@@ -1238,11 +1273,12 @@ async function gitSummary(root) {
       activityAt: latestActivity?.value || date,
       activityTimestamp: latestActivity?.timestamp || 0,
       activityKind: latestActivity?.kind || "commit",
-      githubRepo: githubRepoFromRemote(remoteUrl),
+      ...github,
       ...identity
     };
   } catch {
-    return { isGit: false, branch: "", changes: 0, commit: null, remoteUrl: "", upstream: "", pushedAt: "", remoteCommitAt: "", activityAt: "", activityTimestamp: 0, activityKind: "", githubRepo: "", officialName: "", repoFullName: "" };
+    return { isGit: false, branch: "", changes: 0, commit: null, remoteUrl: "", upstream: "", pushedAt: "", remoteCommitAt: "", activityAt: "", activityTimestamp: 0, activityKind: "", githubRepo: "", githubUrl: "", officialName: "", repoFullName: "" };
+
   }
 }
 
@@ -1343,14 +1379,15 @@ async function listProjects() {
       active: Number(workspace.sessionCount) > 0,
       sessionCount: Number(workspace.sessionCount) || 0,
       lastSeenAt: workspace.lastSeenAt || "",
-      clients: Array.isArray(workspace.clients) ? workspace.clients : []
+      clients: Array.isArray(workspace.clients) ? workspace.clients : [],
+      workers: Array.isArray(workspace.workers) ? workspace.workers : []
     });
   }
 
   for (const savedRoot of managerProjects()) {
     const root = path.resolve(savedRoot);
     if (!sources.has(root)) {
-      sources.set(root, { source: "Đã ghim", active: false, sessionCount: 0, lastSeenAt: "", clients: [] });
+      sources.set(root, { source: "Đã ghim", active: false, sessionCount: 0, lastSeenAt: "", clients: [], workers: [] });
     }
   }
 
@@ -1359,13 +1396,13 @@ async function listProjects() {
     const current = sources.get(root);
     sources.set(root, current
       ? { ...current, active: true }
-      : { source: "Đang chạy", active: true, sessionCount: 0, lastSeenAt: "", clients: [] });
+      : { source: "Đang chạy", active: true, sessionCount: 0, lastSeenAt: "", clients: [], workers: [] });
   }
   const discoveredRoots = await discoverGitRepositories(repoScanRoots(taskConfig));
   for (const discoveredRoot of discoveredRoots) {
     const root = path.resolve(discoveredRoot);
     if (![...sources.keys()].some((known) => known.toLowerCase() === root.toLowerCase())) {
-      sources.set(root, { source: "Tự quét", active: false, sessionCount: 0, lastSeenAt: "", clients: [] });
+      sources.set(root, { source: "Tự quét", active: false, sessionCount: 0, lastSeenAt: "", clients: [], workers: [] });
     }
   }
 
@@ -1389,6 +1426,7 @@ async function listProjects() {
         lastSeenAt: meta.lastSeenAt || "",
         clients: meta.clients || [],
         inUse: selectedRoots.has(path.resolve(root).toLowerCase()),
+        workers: meta.workers || [],
         ...summary
       });
     }

@@ -24,6 +24,11 @@ import { ensureBrowserExtensionBridge } from "./browserExtensionBridge.js";
 
 const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
 
+function browserProfileWorkerId(profileId: string): string {
+  const safe = String(profileId || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
+  return safe ? `chrome-${safe}` : "";
+}
+
 function browserExtensionConnectorInfo(config: CodexProConfig, profileId = "") {
   const runtime = readRuntimeConnection(config.defaultRoot);
   const profile = readWorkspaceProfile(config.defaultRoot);
@@ -49,12 +54,15 @@ function browserExtensionConnectorInfo(config: CodexProConfig, profileId = "") {
   if (config.authToken) serverUrl.searchParams.set("codexpro_token", config.authToken);
   const normalizedProfileId = String(profileId || "").trim();
   if (/^[A-Za-z0-9._-]{1,160}$/.test(normalizedProfileId)) serverUrl.searchParams.set("codexpro_profile", normalizedProfileId);
+  const workerId = browserProfileWorkerId(profileId);
+  if (workerId) serverUrl.searchParams.set("codexpro_worker_id", workerId);
 
   return {
     name: "CodexPro",
     server_url: serverUrl.toString(),
     settings_url: CHATGPT_CONNECTOR_SETTINGS_URL,
-    authentication: "none" as const
+    authentication: "none" as const,
+    worker_id: workerId
   };
 }
 

@@ -1423,7 +1423,8 @@ async function installConnector() {
     const probe=await probeConnectorEndpoint(connector.server_url);
     if(!probe.ok)throw new Error('Không xác minh được MCP endpoint của profile.');
 
-    const saved={ok:true,message:'CodexPro READY · đã gắn đúng MCP theo profile và xác minh endpoint.',at:new Date().toISOString()};
+    const workerId=result?.alreadyInstalled?String(profile.connector_install?.worker_id||''):String(connector.worker_id||'');
+    const saved={ok:true,message:'CodexPro READY · đã gắn đúng MCP theo profile và xác minh endpoint.',at:new Date().toISOString(),...(workerId?{worker_id:workerId}:{})};
     await chrome.storage.local.set({connectorInstall:saved,connectorServerFingerprint:fingerprint});
     await chrome.action.setBadgeBackgroundColor({color:'#39d98a'});
     await chrome.action.setBadgeText({text:'OK'});
@@ -1450,7 +1451,8 @@ async function checkConnectorInstalled() {
     const saved={
       ok:Boolean(result.installed),
       message:result.installed?'CodexPro đã có trong ChatGPT.':'Profile này chưa thêm CodexPro.',
-      at:new Date().toISOString()
+      at:new Date().toISOString(),
+      ...(profile.connector_install?.worker_id?{worker_id:String(profile.connector_install.worker_id)}:{})
     };
     await chrome.storage.local.set({connectorInstall:saved});
     return {ok:true,installed:saved.ok,message:saved.message};

@@ -40,7 +40,7 @@ const workerIcons = {
 };
 
 const FONT_OPTIONS = [
-  { value: "system", label: "Segoe UI / mặc định Windows", css: '"Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", sans-serif' },
+  { value: "system", label: "System / mặc định", css: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif' },
   { value: "arial", label: "Arial", css: 'Arial, sans-serif' },
   { value: "tahoma", label: "Tahoma", css: 'Tahoma, sans-serif' },
   { value: "verdana", label: "Verdana", css: 'Verdana, sans-serif' },
@@ -102,7 +102,7 @@ function SettingsDropdown({ value, options, disabled, onChange }) {
       >
         <span className="settings-dropdown-value">
           <strong>{selected?.label || "Chọn giá trị"}</strong>
-          <small>{selected?.value === "system" ? "Theo giao diện Windows" : "Áp dụng cho toàn bộ CodexPro"}</small>
+          <small>{selected?.value === "system" ? "Theo giao diện hệ thống" : "Áp dụng cho toàn bộ CodexPro"}</small>
         </span>
         <svg className="settings-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
       </button>
@@ -312,6 +312,58 @@ function ResponseText({ text, truncated }) {
 }
 
 const WORKER_EXTENSION_VERSION = "0.5.39";
+const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
+
+function dateMs(value) {
+  const timestamp = Date.parse(String(value || ""));
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function latestProfileNetworkAt(profile) {
+  return Math.max(0, ...(profile?.conversation_tabs || []).flatMap((tab) => [
+    dateMs(tab.network_last_started_at),
+    dateMs(tab.network_last_completed_at)
+  ]));
+}
+
+function strongProfileRepoMatch(profile, projects) {
+  const workerId = String(profile?.worker_id || "").trim();
+  if (workerId) {
+    const exact = projects
+      .filter((project) => (project.workers || []).includes(workerId))
+      .sort((left, right) => dateMs(right.lastSeenAt) - dateMs(left.lastSeenAt))[0];
+    if (exact) return exact;
+  }
+
+  const busySince = profile?.activity === "working" ? dateMs(profile.busy_since) : 0;
+  if (busySince) {
+    const now = Date.now();
+    const activeDuringWork = projects
+      .filter((project) => project.active)
+      .map((project) => ({ project, seenAt: dateMs(project.lastSeenAt) }))
+      .filter((candidate) => candidate.seenAt >= busySince - 10000 && candidate.seenAt <= now + 5000)
+      .sort((left, right) => right.seenAt - left.seenAt);
+    if (activeDuringWork.length === 1) return activeDuringWork[0].project;
+    if (activeDuringWork.length > 1 && activeDuringWork[0].seenAt - activeDuringWork[1].seenAt > 15000) return activeDuringWork[0].project;
+  }
+
+  const activityAt = latestProfileNetworkAt(profile);
+  if (!activityAt) return null;
+  const candidates = projects
+    .filter((project) => project.active && dateMs(project.lastSeenAt))
+    .map((project) => ({ project, distance: Math.abs(dateMs(project.lastSeenAt) - activityAt) }))
+    .filter((candidate) => candidate.distance <= 120000)
+    .sort((left, right) => left.distance - right.distance);
+  if (!candidates.length) return null;
+  if (candidates.length > 1 && candidates[1].distance - candidates[0].distance < 15000) return null;
+  return candidates[0].project;
+}
+
+function profileRepoProject(profile, projects, cachedRoot) {
+  return strongProfileRepoMatch(profile, projects)
+    || projects.find((project) => cachedRoot && project.root === cachedRoot)
+    || null;
+}
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -406,6 +458,14 @@ function App() {
   const [status, setStatus] = useState(null);
   const [projects, setProjects] = useState([]);
   const [projectPage, setProjectPage] = useState(0);
+  const [profileRepoRoots, setProfileRepoRoots] = useState(() => {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(PROFILE_REPO_CACHE_KEY) || "{}");
+      return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    } catch {
+      return {};
+    }
+  });
   const [busy, setBusy] = useState("");
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
@@ -629,6 +689,21 @@ function App() {
   useEffect(() => {
     profilesRef.current = status?.browserProfiles || [];
   }, [status?.browserProfiles]);
+
+  useEffect(() => {
+    if (!projects.length || !status?.browserProfiles?.length) return;
+    const next = { ...profileRepoRoots };
+    let changed = false;
+    for (const profile of status.browserProfiles) {
+      const project = strongProfileRepoMatch(profile, projects);
+      if (!project?.root || next[profile.profile_id] === project.root) continue;
+      next[profile.profile_id] = project.root;
+      changed = true;
+    }
+    if (!changed) return;
+    setProfileRepoRoots(next);
+    try { window.localStorage.setItem(PROFILE_REPO_CACHE_KEY, JSON.stringify(next)); } catch {}
+  }, [projects, status?.browserProfiles, profileRepoRoots]);
 
   useEffect(() => {
     for (const profile of status?.browserProfiles || []) {
@@ -1686,12 +1761,11 @@ function App() {
               const idle = profile.connected && profile.activity === "idle" && (profile.connector_installed || !ready);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
-              const profileProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
-              const profileRepoLabel = String(profile.current_workspace_repo || profileProject?.githubRepo || profileProject?.name || "").trim();
-              const profileRepository = profileRepoLabel ? {
-                label: profileRepoLabel,
-                title: profileProject?.remoteUrl || workspaceRoot || profileRepoLabel
-              } : null;
+              const directProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
+              const fallbackProject = profileRepoProject(profile, projects, profileRepoRoots[profile.profile_id]);
+              const repoProject = directProject || fallbackProject;
+              const repoLabel = String(profile.current_workspace_repo || repoProject?.githubRepo || (repoProject ? `Local · ${repoProject.name}` : "")).trim();
+              const repoTitle = repoProject?.githubUrl || repoProject?.remoteUrl || workspaceRoot || repoProject?.root || "Worker chưa xác định được repo GitHub";
               return (
                 <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"}`} key={profile.profile_id}>
                   <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
@@ -1704,7 +1778,12 @@ function App() {
                       {working && <span className="badge profile-working">ĐANG LÀM VIỆC</span>}
                       {idle && <span className="badge connected">ĐANG RẢNH</span>}
                       {!profile.connector_installed && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
-                      {profile.connected && profileRepository?.label && <span className="active-repo-chip" title={profileRepository.title}>{profileRepository.label}</span>}
+                      <span
+                        className={`active-repo-chip ${repoLabel ? "" : "is-empty"}`}
+                        title={repoTitle}
+                      >
+                        {repoLabel || "Chưa xác định repo"}
+                      </span>
                     </div>
                     <code>{profile.email ? profile.label : profile.profile_id}</code>
                     <div className="profile-meta">

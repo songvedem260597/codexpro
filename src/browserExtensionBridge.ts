@@ -21,6 +21,7 @@ export interface ExtensionProfileSummary {
   connector_installed: boolean;
   connector_message: string;
   connector_checked_at: string;
+  worker_id: string;
   active: boolean;
   connected: boolean;
   last_seen: string;
@@ -61,6 +62,7 @@ export interface BrowserExtensionConnectorInfo {
   server_url: string;
   settings_url: string;
   authentication: "none";
+  worker_id?: string;
 }
 
 export interface BrowserExtensionBridgeOptions {
@@ -76,6 +78,7 @@ interface ExtensionProfile {
   connectorMessage: string;
   connectorCheckedAt: string;
   workspaceRoot: string;
+  connectorWorkerId: string;
   lastSeen: number;
   tabs: unknown[];
   recentConversations: unknown[];
@@ -176,6 +179,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     connectorMessage: "",
     connectorCheckedAt: "",
     workspaceRoot: profileWorkspaceRoots.get(id) || "",
+    connectorWorkerId: "",
     lastSeen: 0,
     tabs: [],
     recentConversations: [],
@@ -188,6 +192,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     profile.connectorInstalled = source.connector_install.ok === true;
     profile.connectorMessage = String(source.connector_install.message ?? "").trim().slice(0, 500);
     profile.connectorCheckedAt = String(source.connector_install.at ?? "").trim().slice(0, 64);
+    profile.connectorWorkerId = String(source.connector_install.worker_id ?? profile.connectorWorkerId ?? "").trim().slice(0, 80);
   }
   profile.lastSeen = Date.now();
   if (Array.isArray(body.tabs)) profile.tabs = body.tabs.slice(0, 500);
@@ -405,6 +410,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       connector_installed: profile.connectorInstalled,
       connector_message: profile.connectorMessage,
       connector_checked_at: profile.connectorCheckedAt,
+      worker_id: profile.connectorWorkerId,
       active: state.activeProfileId === profile.id,
       connected: now - profile.lastSeen <= PROFILE_TTL_MS,
       last_seen: new Date(profile.lastSeen).toISOString(),
