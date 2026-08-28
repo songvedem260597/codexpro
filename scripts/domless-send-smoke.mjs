@@ -114,8 +114,8 @@ assert.ok(earlyAck > enterPrimary, "primary Enter must wait for generation ACK b
 assert.ok(clickFallback > earlyAck, "trusted Send click must only occur after the Enter ACK window");
 assert.match(sendBlock, /submitted_by:'trusted-enter'/);
 assert.match(sendBlock, /submitted_by:'trusted-click-fallback'/);
-assert.match(sendBlock, /chrome\.tabs\.update\(tab\.id,\{active:true\}\)/, "a background target tab must be activated inside its existing window before trusted input");
-assert.match(sendBlock, /finally\{await restorePreviouslyActiveTab\(\);\}/, "the previously selected tab must be restored after a background send attempt");
+assert.doesNotMatch(sendBlock, /chrome\.tabs\.update\(tab\.id,\{active:true\}\)/, "background send must not activate the target tab");
+assert.doesNotMatch(sendBlock, /restorePreviouslyActiveTab/, "background send must not need to restore tabs because it never activates them");
 assert.match(sendBlock, /SEND_UNCERTAIN:/);
 assert.match(sendBlock, /shouldUseTrustedClickFallback\(attemptState\?\.result,earlyEvidence\)/, "fallback must require an owned draft and no submit lifecycle evidence");
 assert.match(sendBlock, /trustedSubmitError\.startsWith\('TRUSTED_ENTER_PRE_DISPATCH:'\)/, "a pre-dispatch focus failure must be recognized as definitely unsent");
@@ -161,8 +161,9 @@ assert.match(clickSource, /codexproSendAttempt/, "fallback click must be scoped 
 const enterSource = extractFunction("trustedSubmitChatComposerTab");
 assert.match(enterSource, /focusChatComposerForSubmitPage/, "trusted Enter must focus the prepared composer without locating Send");
 assert.match(enterSource, /Input\.dispatchKeyEvent/, "trusted Enter must use CDP keyboard input");
-assert.match(enterSource, /Page\.bringToFront/, "trusted Enter must wake a background renderer before keyboard submit");
+assert.doesNotMatch(enterSource, /Page\.bringToFront/, "trusted Enter must not bring the Chrome profile to the foreground");
 assert.match(enterSource, /Emulation\.setFocusEmulationEnabled/, "trusted Enter must emulate focus without depending on the OS foreground window");
+assert.match(enterSource, /background_submit:true/, "trusted Enter must report background submission metadata");
 assert.match(enterSource, /const \[refocused\]/, "trusted Enter must re-focus the composer after bringing a background page forward");
 assert.doesNotMatch(enterSource, /dispatchMouseEvent|composer-submit-button|send-button/, "trusted Enter must not depend on mouse or Send DOM");
 
