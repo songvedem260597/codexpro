@@ -1239,6 +1239,9 @@ function App() {
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
       const resolvedConversationId = String(result?.conversation_id || conversationId);
+      if (submissionState === "failed") {
+        throw new Error(String(result?.error || "ChatGPT không chuẩn bị được tin nhắn để gửi."));
+      }
       if (submissionState === "uncertain") {
         setRequestResponses((current) => {
           const previous = current[profile.profile_id] || {};
