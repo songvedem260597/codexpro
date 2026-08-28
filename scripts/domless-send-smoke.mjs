@@ -122,7 +122,10 @@ assert.match(sendBlock, /cleanup_skipped:!definitelyUnsent/, "ambiguous attempts
 assert.match(worker, /network_generation_endpoint/, "generation ACK must expose the matched endpoint");
 assert.match(worker, /network_recent_posts/, "safe POST path diagnostics must be exposed without request bodies");
 assert.match(worker, /CDP_NETWORK_TRACKER_MAX_MS/, "CDP tracking must have a bounded maximum lifetime");
-assert.match(sendBlock, /waitForAttachmentUploadNetwork\(tab\.id,submitStartedAt-100\)/, "attachment sends must wait for upload network completion before trusted Enter");
+assert.match(sendBlock, /waitForAttachmentUploadNetwork\(tab\.id,submitStartedAt-100\)/, "attachment sends must wait for upload network completion before submit");
+assert.match(sendBlock, /trustedSubmitChatSendButtonTab\(tab\.id,attemptId\)/, "attachment sends must use one trusted Send click after upload ACK");
+assert.match(sendBlock, /submitted_by:'trusted-click-attachment'/, "attachment sends must report their dedicated submit path");
+assert.match(worker, /async function trustedSubmitChatSendButtonTab\(tabId,attemptId\)/, "attachment trusted click must install the CDP network tracker before dispatch");
 assert.match(sendBlock, /ATTACHMENT_UPLOAD_FAILED:/, "a failed upload must stop before submit and clean only the owned draft");
 assert.match(worker, /const tracker=cdpNetworkTrackersByTab\.get\(tabId\);if\(tracker\)void tracker\.cleanup\(\)/, "closing a tab must detach its CDP tracker");
 assert.doesNotMatch(worker, /body_text:String\(request\.body_text/, "diagnostics must not export captured message bodies");
