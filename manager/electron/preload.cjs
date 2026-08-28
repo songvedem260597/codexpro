@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   getProfileResponse: (payload) => invoke("codexpro:get-profile-response", payload),
   getRepoTaskStatus: (payload) => invoke("codexpro:get-repo-task-status", payload),
   chooseProject: () => invoke("codexpro:choose-project"),
+  chooseWorkspaceTarget: (kind) => invoke("codexpro:choose-workspace-target", kind),
   addProject: (root) => invoke("codexpro:add-project", root),
   removeProject: (root) => invoke("codexpro:remove-project", root),
   inspectProject: (root) => invoke("codexpro:inspect-project", root),
