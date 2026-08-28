@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CodexPro Profile Bridge",
-  "version": "0.5.42",
+  "version": "0.5.43",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0t6J3TPG+l3/mx0VfgvdnLSpVn1AuQK73KOpryhZYC87yZL6BPez7IO0ZwV0ey7myZAbfV9FhTIydFBz85kw+LYpEy8en2UEt6LH9OE6V/X+DJ82LnkkrbC40gLRVUP/Ui7WUWWC5Nuic+K9imE4MKxMQS2DpKJVH/Xrl3/WEH9ha89QBfbSLuduCS1OBz/OuhxRPktOFdzBE299ifIz0SRHzIZAXuYTHf/bm2i0rTscFx0yK0OJM45+EuYnznY4ZlhxFsEBbZjpDcSa6DJGT2kmi/vCkGThT4+giQtHjwTwxhVk/67CwchQKwLh6pK7lMO5LM/tfCl61ERTk5KhAQIDAQAB",
   "description": "Adds CodexPro to ChatGPT automatically and controls only the Chrome profile marked ACTIVE.",
   "permissions": ["tabs", "scripting", "identity", "identity.email", "storage", "alarms", "webRequest", "debugger"],

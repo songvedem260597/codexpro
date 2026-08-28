@@ -6,7 +6,7 @@ const DOM_READ_TIMEOUT_MS = 2500;
 const CANONICAL_READ_TIMEOUT_MS = 15000;
 const DOM_ACTION_TIMEOUT_MS = 5000;
 const TRUSTED_INPUT_TIMEOUT_MS = 10000;
-const DOM_SEND_TIMEOUT_MS = 35000;
+const DOM_PREPARE_TIMEOUT_MS = 15000;
 const NETWORK_START_TIMEOUT_MS = 30000;
 const CDP_NETWORK_TRACKER_MAX_MS = 30 * 60 * 1000;
 const DEBUGGER_SESSION_IDLE_MS = 30000;
@@ -734,20 +734,37 @@ function inspectChatSendAttemptPage(attemptId='') {
   return {ok:true,draft_owned:Boolean(composer&&composer.dataset.codexproDraftAttempt===attemptId),draft_present:Boolean(text),draft_length:text.length,composer_found:Boolean(composer)};
 }
 
-function focusChatComposerForSubmitPage(attemptId='') {
-  const composer=document.querySelector(`[data-codexpro-submit-attempt="${CSS.escape(attemptId)}"]`);
-  if(!composer)return {ok:false,error:'Composer của attempt đã bị React thay thế trước khi gửi.'};
+async function focusChatComposerForSubmitPage(attemptId='',expectedText='') {
+  const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
+  const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
+  const composerText=element=>element?.isContentEditable?String(element.innerText||element.textContent||''):String(element?.value||'');
+  const marked=document.querySelector(`[data-codexpro-submit-attempt="${CSS.escape(attemptId)}"]`);
+  const current=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+  const recovered=Boolean(!marked&&current&&normalized(composerText(current))===normalized(expectedText));
+  const composer=marked||recovered&&current;
+  if(!composer)return {ok:false,error:'Composer của attempt đã bị React thay thế và draft hiện tại không còn khớp payload.'};
+  composer.dataset.codexproDraftAttempt=attemptId;
+  composer.dataset.codexproSubmitAttempt=attemptId;
   composer.scrollIntoView({block:'center',inline:'center'});
   composer.focus({preventScroll:true});
   const selection=getSelection(),range=document.createRange();
   range.selectNodeContents(composer);range.collapse(false);selection.removeAllRanges();selection.addRange(range);
-  return {ok:document.activeElement===composer};
+  for(let focusAttempt=0;focusAttempt<15;focusAttempt+=1){
+    if(document.activeElement===composer)return {ok:true,focused:true,focus_wait_ms:focusAttempt*50,composer_recovered_after_react:recovered};
+    await new Promise(resolve=>setTimeout(resolve,50));
+    composer.focus({preventScroll:true});
+  }
+  return {ok:true,focused:document.activeElement===composer,selection_inside:Boolean(getSelection()?.anchorNode&&composer.contains(getSelection().anchorNode)),focus_wait_ms:750,composer_recovered_after_react:recovered};
 }
 
-function prepareTrustedClickFallbackPage(attemptId='') {
+function prepareTrustedClickFallbackPage(attemptId='',expectedText='') {
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
-  if(!composer||composer.dataset.codexproDraftAttempt!==attemptId)return {ok:false,error:'Composer không còn giữ đúng draft của attempt này.'};
+  const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
+  const composerText=composer?.isContentEditable?String(composer.innerText||composer.textContent||''):String(composer?.value||'');
+  const recovered=Boolean(composer&&composer.dataset.codexproDraftAttempt!==attemptId&&expectedText&&normalized(composerText)===normalized(expectedText));
+  if(!composer||composer.dataset.codexproDraftAttempt!==attemptId&&!recovered)return {ok:false,error:'Composer không còn giữ đúng draft của attempt này.'};
+  composer.dataset.codexproDraftAttempt=attemptId;
   const root=composer.closest('form')||composer.closest('[data-type="unified-composer"]')||composer.parentElement;
   const send=['#composer-submit-button','button[data-testid="send-button"]','button[aria-label*="Send" i]','button[aria-label*="Gửi" i]'].flatMap(selector=>[root?.querySelector(selector),document.querySelector(selector)]).filter(Boolean).find(element=>{
     if(!visible(element)||element.disabled||element.getAttribute?.('aria-disabled')==='true'||element.hasAttribute?.('data-visually-disabled'))return false;
@@ -756,7 +773,7 @@ function prepareTrustedClickFallbackPage(attemptId='') {
   });
   if(!send)return {ok:false,error:'Không tìm thấy nút Send khả dụng cho fallback cuối cùng.'};
   send.dataset.codexproSendAttempt=attemptId;
-  return {ok:true,send_found:true};
+  return {ok:true,send_found:true,composer_recovered_after_react:recovered};
 }
 
 async function readCanonicalConversationPage(conversationId) {
@@ -966,7 +983,7 @@ async function execute(command) {
     try{
     const submitStartedAt=Date.now();
     const attemptId=crypto.randomUUID();
-    const deadlineAt=submitStartedAt+DOM_SEND_TIMEOUT_MS-1500;
+    let deadlineAt=submitStartedAt+DOM_PREPARE_TIMEOUT_MS-1500;
     pendingConversationByTab.set(tab.id,{conversation_id:newChat?'':conversationId||conversationIdFromUrl(tab.url),source:'codexpro',at:submitStartedAt});
     const cleanupAttempt=async()=>{
       try{
@@ -996,21 +1013,58 @@ async function execute(command) {
       return {action,target_id:tab.id,conversation_id:conversationId,...shared};
     };
     let injected;
-    try{
-      [injected]=await promiseWithTimeout(
-        chrome.scripting.executeScript({target:{tabId:tab.id},func:sendChatRequestPage,args:[text,attachments,attemptId,deadlineAt]}),
-        DOM_SEND_TIMEOUT_MS,
-        'Chrome renderer không phản hồi khi chuẩn bị/gửi tin nhắn.'
-      );
-    }catch(error){
-      let networkAck=null;
-      try{networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100,5000);}catch{}
-      if(networkAck)return await resultForNetwork(networkAck,{dom_timeout:true,dom_error:String(error?.message||error).slice(0,300)});
-      pendingConversationByTab.delete(tab.id);
-      await cleanupAttempt();
-      const limit=await probeConversationLimit(tab.id);
-      if(limit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(limit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
-      return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'prepare-timeout',submit_path:'prepare-timeout',path_attempted:['prepare'],send_uncertain:true,error:'SEND_UNCERTAIN: '+String(error?.message||error),attempt_id:attemptId};
+    let preparationRecovery={prepare_attempts:1,renderer_reloaded:false};
+    const prepareErrors=[];
+    for(let prepareAttempt=0;prepareAttempt<2;prepareAttempt+=1){
+      try{
+        [injected]=await promiseWithTimeout(
+          chrome.scripting.executeScript({target:{tabId:tab.id},func:sendChatRequestPage,args:[text,attachments,attemptId,deadlineAt]}),
+          DOM_PREPARE_TIMEOUT_MS,
+          'Chrome renderer không phản hồi khi chuẩn bị tin nhắn.'
+        );
+        const prepareResult=injected?.result;
+        const recoverablePrepareFailure=prepareResult?.ok===false&&(prepareResult.expired||/không tìm thấy ô nhập|ô nhập chatgpt.*biến mất|renderer/i.test(String(prepareResult.error||'')));
+        if(recoverablePrepareFailure)throw new Error('PREPARE_RECOVERABLE: '+String(prepareResult.error||'ChatGPT chưa sẵn sàng để nhập tin nhắn.'));
+        preparationRecovery={...preparationRecovery,prepare_attempts:prepareAttempt+1,prepare_recovered:prepareAttempt>0};
+        break;
+      }catch(error){
+        const prepareError=String(error?.message||error).slice(0,500);
+        prepareErrors.push(prepareError);
+        const hardRendererHang=/Chrome renderer không phản hồi/i.test(prepareError);
+        let networkAck=null;
+        try{networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100,5000);}catch{}
+        if(networkAck)return await resultForNetwork(networkAck,{dom_timeout:true,dom_error:prepareError,prepare_attempts:prepareAttempt+1});
+        if(!hardRendererHang)await cleanupAttempt();
+        if(prepareAttempt===0){
+          try{
+            if(hardRendererHang){
+              const hungTabId=tab.id;
+              const recoveryUrl=String(tab.url||(newChat?'https://chatgpt.com/':`https://chatgpt.com/c/${conversationId}`));
+              const recoveryWindowId=tab.windowId;
+              const recoveryActive=Boolean(tab.active);
+              pendingConversationByTab.delete(hungTabId);
+              await chrome.tabs.remove(hungTabId);
+              tab=await chrome.tabs.create({windowId:recoveryWindowId,url:recoveryUrl,active:recoveryActive});
+              await waitForTab(tab.id,45000);
+              preparationRecovery={prepare_attempts:2,renderer_reloaded:true,renderer_replaced:true,replaced_tab_id:hungTabId,recovery_tab_id:tab.id,prepare_recovery_reason:prepareError};
+            }else{
+              await chrome.tabs.reload(tab.id);
+              await new Promise(resolve=>setTimeout(resolve,500));
+              await waitForTab(tab.id,45000);
+              tab=await chrome.tabs.get(tab.id);
+              preparationRecovery={prepare_attempts:2,renderer_reloaded:true,renderer_replaced:false,prepare_recovery_reason:prepareError};
+            }
+            await ensureChatNetworkStreamCapture(tab.id);
+            deadlineAt=Date.now()+DOM_PREPARE_TIMEOUT_MS-1500;
+            pendingConversationByTab.set(tab.id,{conversation_id:newChat?'':conversationId||conversationIdFromUrl(tab.url),source:'codexpro',at:Date.now()});
+            continue;
+          }catch(reloadError){prepareErrors.push('Reload recovery: '+String(reloadError?.message||reloadError).slice(0,500));}
+        }
+        pendingConversationByTab.delete(tab.id);
+        const limit=await probeConversationLimit(tab.id);
+        if(limit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(limit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
+        return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'failed',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'prepare-recovery-retry',submit_path:'prepare-recovery-retry',path_attempted:['prepare',preparationRecovery.renderer_replaced?'replace-tab':'reload','prepare'],send_uncertain:false,error:'PREPARE_FAILED: '+prepareErrors.join(' | '),attempt_id:attemptId,prepare_attempts:prepareAttempt+1,renderer_reloaded:preparationRecovery.renderer_reloaded,renderer_replaced:Boolean(preparationRecovery.renderer_replaced)};
+      }
     }
     if(!injected?.result?.ok){
       pendingConversationByTab.delete(tab.id);
@@ -1020,7 +1074,8 @@ async function execute(command) {
       if(newChat)await chrome.tabs.remove(tab.id).catch(()=>{});
       throw new Error(injected?.result?.error||'Không gửi được yêu cầu vào ChatGPT.');
     }
-    let submitResult={...injected.result,submit_path:'trusted-enter',path_attempted:['trusted-enter'],trusted_enter_dispatched:false,trusted_click_dispatched:false,submitted_by:'trusted-enter'};
+    const preparationPath=preparationRecovery.renderer_reloaded?['prepare',preparationRecovery.renderer_replaced?'replace-tab':'reload','prepare']:[];
+    let submitResult={...injected.result,...preparationRecovery,submit_path:'trusted-enter',path_attempted:[...preparationPath,'trusted-enter'],trusted_enter_dispatched:false,trusted_click_dispatched:false,submitted_by:'trusted-enter'};
     if(injected.result.requires_trusted_submit){
       if(attachments.length){
         try{
@@ -1044,11 +1099,11 @@ async function execute(command) {
           const cleanup=await cleanupAttempt();
           return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,...submitResult,ok:true,submission_state:'failed',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'trusted-click-attachment',submit_path:'trusted-click-attachment',path_attempted:['trusted-click-attachment'],send_uncertain:false,error:'ATTACHMENT_SUBMIT_FAILED: '+String(attachmentSendReady?.result?.error||'Không tìm thấy nút Send khả dụng sau khi upload.'),attempt_id:attemptId,cleanup};
         }
-        submitResult={...submitResult,submit_path:'trusted-click-attachment',path_attempted:['trusted-click-attachment'],submitted_by:'trusted-click-attachment'};
+        submitResult={...submitResult,submit_path:'trusted-click-attachment',path_attempted:[...preparationPath,'trusted-click-attachment'],submitted_by:'trusted-click-attachment'};
       }
       try{
         const trustedSubmit=await promiseWithTimeout(
-          attachmentSubmit?trustedSubmitChatSendButtonTab(tab.id,attemptId):trustedSubmitChatComposerTab(tab.id,attemptId),
+          attachmentSubmit?trustedSubmitChatSendButtonTab(tab.id,attemptId):trustedSubmitChatComposerTab(tab.id,attemptId,text),
           TRUSTED_INPUT_TIMEOUT_MS,
           attachmentSubmit?'Chrome không phản hồi khi bấm Send cho attachment.':'Chrome không phản hồi khi gửi bằng Enter trusted.'
         );
@@ -1060,11 +1115,34 @@ async function execute(command) {
         try{networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100,3000);}catch{}
         const trustedSubmitError=String(error?.message||error).slice(0,300);
         if(networkAck)return await resultForNetwork(networkAck,{...submitResult,...(attachmentSubmit?{trusted_click_error:trustedSubmitError}:{trusted_enter_error:trustedSubmitError})});
+        const definitelyNotDispatched=!attachmentSubmit&&trustedSubmitError.startsWith('TRUSTED_ENTER_PRE_DISPATCH:');
+        if(definitelyNotDispatched){
+          try{
+            const [fallbackReady]=await promiseWithTimeout(
+              chrome.scripting.executeScript({target:{tabId:tab.id},func:prepareTrustedClickFallbackPage,args:[attemptId,text]}),
+              DOM_ACTION_TIMEOUT_MS,
+              'Chrome không phản hồi khi chuẩn bị trusted click sau lỗi focus pre-dispatch.'
+            );
+            if(!fallbackReady?.result?.ok)throw new Error(fallbackReady?.result?.error||'Không tìm thấy nút Send sau lỗi focus pre-dispatch.');
+            await promiseWithTimeout(
+              trustedActivateChatSendButtonTab(tab.id,attemptId),
+              TRUSTED_INPUT_TIMEOUT_MS,
+              'Chrome không phản hồi khi bấm Send sau lỗi focus pre-dispatch.'
+            );
+            submitResult={...submitResult,submit_path:'trusted-click-fallback',path_attempted:[...preparationPath,'trusted-enter-pre-dispatch','trusted-click-fallback'],submitted_by:'trusted-click-fallback',trusted_click_dispatched:true,trusted_enter_error:trustedSubmitError,fallback_reason:'Enter chưa dispatch vì không xác lập được focus; draft vẫn đúng attempt nên dùng trusted click.'};
+          }catch(fallbackError){
+            submitResult={...submitResult,trusted_enter_error:trustedSubmitError,trusted_click_error:String(fallbackError?.message||fallbackError).slice(0,300)};
+          }
+        }
+        if(submitResult.trusted_click_dispatched) {
+          // The safe pre-dispatch fallback was sent; continue to the existing network ACK path.
+        } else {
         const evidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
         pendingConversationByTab.delete(tab.id);
         const limit=await probeConversationLimit(tab.id);
         if(limit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(limit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
         return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,...submitResult,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,network_evidence:evidence,submitted:false,send_uncertain:true,error:`SEND_UNCERTAIN: ${attachmentSubmit?'Trusted click attachment':'Trusted Enter'} không hoàn tất và chưa thấy generation request. Không tự gửi lại vì trạng thái dispatch chưa chắc chắn, tránh duplicate.`,...(attachmentSubmit?{trusted_click_error:trustedSubmitError}:{trusted_enter_error:trustedSubmitError}),attempt_id:attemptId,cleanup_skipped:true,cleanup_reason:`${attachmentSubmit?'Click attachment':'Enter'} dispatch không chắc chắn.`};
+        }
       }
 
       let earlyAck=null;
@@ -1082,7 +1160,7 @@ async function execute(command) {
       if(!attachmentSubmit&&safeClickFallback){
         const fallbackReason='Trusted Enter đã dispatch nhưng draft vẫn nguyên và không có request submit nào; dùng trusted click cuối cùng.';
         const [fallbackReady]=await promiseWithTimeout(
-          chrome.scripting.executeScript({target:{tabId:tab.id},func:prepareTrustedClickFallbackPage,args:[attemptId]}),
+          chrome.scripting.executeScript({target:{tabId:tab.id},func:prepareTrustedClickFallbackPage,args:[attemptId,text]}),
           DOM_ACTION_TIMEOUT_MS,
           'Chrome không phản hồi khi chuẩn bị trusted click fallback.'
         );
@@ -1607,7 +1685,12 @@ async function pollLoop() {
         const message=await response.json();
         const isActive=message.active_profile_id===profile.id;
         if(profile.active!==isActive)await chrome.storage.local.set({active:isActive});
-        if(message.command){try{await postResult(profile,message.command,await execute(message.command));}catch(error){await postResult(profile,message.command,null,error);}}
+        if(message.command){
+          const heartbeat=setInterval(()=>{void fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile})}).catch(()=>{});},10000);
+          try{await postResult(profile,message.command,await execute(message.command));}
+          catch(error){await postResult(profile,message.command,null,error);}
+          finally{clearInterval(heartbeat);}
+        }
       }catch{await new Promise(resolve=>setTimeout(resolve,2000));}
     }
   }finally{polling=false;}
@@ -1787,29 +1870,34 @@ async function trustedSubmitChatSendButtonTab(tabId,attemptId) {
   return {dispatched:true,page_brought_to_front:true,focus_emulation_used:false,cdp_network_acknowledged:Boolean(network?.network_acknowledged),cdp_generation_endpoint:String(network?.generation_endpoint||''),cdp_request_id:String(network?.request_id||''),cdp_tracker_timeout:Boolean(network?.timeout)};
 }
 
-async function trustedSubmitChatComposerTab(tabId,attemptId) {
+async function trustedSubmitChatComposerTab(tabId,attemptId,expectedText='') {
   if(!attemptId)throw new Error('Trusted composer attempt không hợp lệ.');
-  const [focused]=await chrome.scripting.executeScript({target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId]});
-  if(focused?.result?.ok!==true)throw new Error(focused?.result?.error||'Không focus được composer ChatGPT để gửi bằng Enter.');
+  const [focused]=await chrome.scripting.executeScript({target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
+  if(focused?.result?.ok!==true)throw new Error('TRUSTED_ENTER_PRE_DISPATCH: '+(focused?.result?.error||'Không xác minh được composer ChatGPT trước khi gửi bằng Enter.'));
   let tracker;
   try{tracker=await startCdpChatNetworkTracker(tabId);}
-  catch(error){throw new Error('TRUSTED_ENTER_NOT_DISPATCHED: '+String(error?.message||error));}
+  catch(error){throw new Error('TRUSTED_ENTER_PRE_DISPATCH: '+String(error?.message||error));}
   const target={tabId};
   let focusEmulationEnabled=false;
+  let keyDispatchStarted=false;
+  let refocusedResult=null;
   try{
     await chrome.debugger.sendCommand(target,'Page.bringToFront',{});
     await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:true});
     focusEmulationEnabled=true;
     await new Promise(resolve=>setTimeout(resolve,250));
-    const [refocused]=await chrome.scripting.executeScript({target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId]});
-    if(refocused?.result?.ok!==true)throw new Error(refocused?.result?.error||'Composer mất focus sau khi đưa page ra foreground lifecycle.');
+    const [refocused]=await chrome.scripting.executeScript({target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
+    refocusedResult=refocused?.result||null;
+    if(refocused?.result?.ok!==true||refocused?.result?.focused!==true&&refocused?.result?.selection_inside!==true)throw new Error(refocused?.result?.error||'Composer mất focus sau khi đưa page ra foreground lifecycle.');
+    await new Promise(resolve=>setTimeout(resolve,250));
+    keyDispatchStarted=true;
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'char',key:'Enter',code:'Enter',text:'\r',unmodifiedText:'\r',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
-  }catch(error){if(focusEmulationEnabled)await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});await tracker.cleanup();throw new Error('TRUSTED_ENTER_NOT_DISPATCHED: '+String(error?.message||error));}
+  }catch(error){if(focusEmulationEnabled)await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});await tracker.cleanup();throw new Error((keyDispatchStarted?'TRUSTED_ENTER_DISPATCH_UNCERTAIN: ':'TRUSTED_ENTER_PRE_DISPATCH: ')+String(error?.message||error));}
   const network=await tracker.started;
   if(focusEmulationEnabled)await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});
-  return {dispatched:true,page_brought_to_front:true,focus_emulation_used:true,cdp_network_acknowledged:Boolean(network?.network_acknowledged),cdp_generation_endpoint:String(network?.generation_endpoint||''),cdp_request_id:String(network?.request_id||''),cdp_tracker_timeout:Boolean(network?.timeout)};
+  return {dispatched:true,page_brought_to_front:true,focus_emulation_used:true,composer_recovered_after_react:Boolean(focused?.result?.composer_recovered_after_react),composer_refocused_after_react:Boolean(refocusedResult?.composer_recovered_after_react),cdp_network_acknowledged:Boolean(network?.network_acknowledged),cdp_generation_endpoint:String(network?.generation_endpoint||''),cdp_request_id:String(network?.request_id||''),cdp_tracker_timeout:Boolean(network?.timeout)};
 }
 
 async function trustedKeyTab(tabId,key) {
