@@ -313,6 +313,9 @@ section { margin-bottom: 38px; }
 .chat-transcript-message.is-user .chat-message-avatar { color: #dbe4ff; border-color: #4b5d8a; background: #202b49; }
 .user-message-text { color: #eef3fb; text-align: left; }
 .chat-transcript-message.is-typing { padding-bottom: 3px; }
+.chat-transcript-message.is-tool-activity { align-items: center; padding: 6px 0; }
+.chat-transcript-message.is-tool-activity .chat-message-avatar { margin-top: 0; }
+.tool-activity-live { display: inline-flex; align-items: center; gap: 8px; color: #aebcff; }
 .chat-message-avatar { width: 28px; height: 28px; flex: 0 0 auto; display: grid; place-items: center; margin-top: 2px; color: #c9d4ff; border: 1px solid #3e4d79; border-radius: var(--radius-control); background: #1b2440; font-size: 13px; }
 .latest-response-content { min-width: 0; min-height: 0; flex: 1; }
 .chat-message-role { display: block; margin-bottom: 5px; color: #77869b; font-size: 10px; font-weight: 800; letter-spacing: .35px; text-transform: uppercase; }

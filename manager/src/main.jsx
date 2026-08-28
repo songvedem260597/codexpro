@@ -262,6 +262,61 @@ function formatRepoActivity(project) {
   return `${label} ${new Date(timestamp).toLocaleDateString("vi-VN")}`;
 }
 
+function toolActivityFromText(text) {
+  const source = String(text || "").trim();
+  if (!source.includes("/CodexPro/") || !source.includes("args")) return null;
+  const normalized = source.replace(/\\"/g, '"');
+  let toolPath = "";
+  let args = {};
+  try {
+    const payload = JSON.parse(normalized);
+    toolPath = String(payload?.path || "");
+    args = payload?.args && typeof payload.args === "object" ? payload.args : {};
+  } catch {
+    toolPath = normalized.match(/"path"\s*:\s*"(\/CodexPro\/[^"\s]+)"/)?.[1] || "";
+    args = {
+      path: normalized.match(/"args"\s*:\s*\{[\s\S]*?"path"\s*:\s*"([^"]+)"/)?.[1] || "",
+      cwd: normalized.match(/"args"\s*:\s*\{[\s\S]*?"cwd"\s*:\s*"([^"]+)"/)?.[1] || "",
+      root: normalized.match(/"args"\s*:\s*\{[\s\S]*?"root"\s*:\s*"([^"]+)"/)?.[1] || ""
+    };
+  }
+  if (!toolPath.includes("/CodexPro/")) return null;
+  const action = toolPath.split("/").filter(Boolean).pop() || "tool";
+  const target = String(args.path || args.cwd || args.root || "").trim();
+  const shortTarget = target ? target.replace(/\\+/g, "/").split("/").slice(-3).join("/") : "";
+  const labels = {
+    begin_repo_task: "Đang xác minh repo",
+    open_workspace: "Đang mở repo",
+    open_current_workspace: "Đang mở workspace",
+    search: shortTarget ? `Đang tìm trong ${shortTarget}` : "Đang tìm trong repo",
+    read: shortTarget ? `Đang đọc ${shortTarget}` : "Đang đọc file",
+    edit: shortTarget ? `Đang sửa ${shortTarget}` : "Đang sửa code",
+    write: shortTarget ? `Đang ghi ${shortTarget}` : "Đang ghi file",
+    apply_patch: "Đang áp dụng thay đổi",
+    show_changes: "Đang kiểm tra thay đổi",
+    bash: "Đang chạy kiểm tra",
+    view_image: shortTarget ? `Đang kiểm tra ${shortTarget}` : "Đang kiểm tra ảnh",
+    inspect_workspace: "Đang phân tích repo"
+  };
+  return labels[action] || `Đang chạy ${action}`;
+}
+
+function compactToolActivityMessages(messages) {
+  const output = [];
+  let pendingActivity = null;
+  for (const message of Array.isArray(messages) ? messages : []) {
+    const activity = message?.role === "assistant" ? toolActivityFromText(message.text) : null;
+    if (activity) {
+      pendingActivity = { ...message, id: "codexpro-live-tool-activity", text: activity, toolActivity: true };
+      continue;
+    }
+    pendingActivity = null;
+    output.push(message);
+  }
+  if (pendingActivity) output.push(pendingActivity);
+  return output;
+}
+
 function ResponseText({ text, truncated }) {
   const source = `${String(text || "")}${truncated ? "\n\n[Đã rút gọn khi hiển thị]" : ""}`;
   const lines = source.split(/\r?\n/);
@@ -1587,7 +1642,12 @@ function App() {
     const sendError = requestSendErrors[profile.profile_id] || "";
     const responseCurrent = response?.conversationId === selectedTarget;
     const responseMessages = responseCurrent && Array.isArray(response?.messages) ? response.messages : [];
-    const hasResponseContent = Boolean(response?.text || responseMessages.length);
+    const displayResponseMessages = compactToolActivityMessages(responseMessages);
+    const fallbackToolActivity = toolActivityFromText(response?.text);
+    const fallbackResponseMessage = fallbackToolActivity
+      ? { id: "codexpro-live-tool-activity", role: "assistant", text: fallbackToolActivity, truncated: false, toolActivity: true }
+      : { id: "latest-assistant", role: "assistant", text: response?.text || "", truncated: response?.truncated };
+    const hasResponseContent = Boolean(fallbackResponseMessage.text || displayResponseMessages.length);
     const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${selectedTarget}`));
     const selectedNetworkState = String(selectedTab?.network_state || (responseCurrent ? response?.networkState : "") || (selectedTab?.busy ? "generating" : "idle"));
     const selectedNetworkCompleted = selectedNetworkState === "completed";
@@ -1671,8 +1731,11 @@ function App() {
               )}
               {!profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
                 <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={() => holdResponseAutoScroll(profile.profile_id)} onTouchMove={() => holdResponseAutoScroll(profile.profile_id)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
-                  {(responseMessages.length ? responseMessages : [{ id: "latest-assistant", role: "assistant", text: response.text, truncated: response.truncated }]).map((message, messageIndex, allMessages) => {
+                  {(displayResponseMessages.length ? displayResponseMessages : [fallbackResponseMessage]).map((message, messageIndex, allMessages) => {
                     const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
+                    if (message.toolActivity) {
+                      return <div className="chat-transcript-message is-tool-activity" key={message.id}><div className="tool-activity-live"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{message.text}</span></div></div>;
+                    }
                     return (
                       <div className={`chat-transcript-message is-${message.role}`} key={message.id}>
                         <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
