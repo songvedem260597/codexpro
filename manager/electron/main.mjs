@@ -105,15 +105,61 @@ const MANAGER_FONT_CHOICES = new Set(["system", "arial", "tahoma", "verdana", "t
 const WORKER_IMAGE_STATES = new Set(["idle", "working", "hung"]);
 const WORKER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const MAX_WORKER_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_WORKER_IMAGE_PACKS = 20;
+const DEFAULT_WORKER_PACK_ID = "default";
+
+function emptyWorkerImages() {
+  return { idle: "", working: "", hung: "" };
+}
+
+function normalizeWorkerImages(value) {
+  return {
+    idle: String(value?.idle || ""),
+    working: String(value?.working || ""),
+    hung: String(value?.hung || "")
+  };
+}
+
+function normalizeWorkerPacks(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  return value.flatMap((pack) => {
+    const id = String(pack?.id || "").trim();
+    const name = String(pack?.name || "").trim().slice(0, 60);
+    if (!/^[A-Za-z0-9._-]{1,80}$/.test(id) || id === DEFAULT_WORKER_PACK_ID || !name || seen.has(id)) return [];
+    seen.add(id);
+    return [{ id, name, images: normalizeWorkerImages(pack?.images) }];
+  }).slice(0, MAX_WORKER_IMAGE_PACKS);
+}
 
 function defaultManagerSettings() {
-  return { chatWidth: 940, chatHeight: 330, fontFamily: "system", fontSize: 14, repoSelections: {}, workerImages: { idle: "", working: "", hung: "" } };
+  return {
+    chatWidth: 940,
+    chatHeight: 330,
+    fontFamily: "system",
+    fontSize: 14,
+    repoSelections: {},
+    selectedWorkerPackId: DEFAULT_WORKER_PACK_ID,
+    workerImagePacks: [],
+    workerImages: emptyWorkerImages()
+  };
 }
 
 function readManagerSettings() {
   const defaults = defaultManagerSettings();
   try {
     const parsed = JSON.parse(fs.readFileSync(managerSettingsFile, "utf8"));
+    const legacyImages = normalizeWorkerImages(parsed?.workerImages);
+    const hasLegacyImages = Object.values(legacyImages).some(Boolean);
+    const workerImagePacks = normalizeWorkerPacks(parsed?.workerImagePacks);
+    if (!workerImagePacks.length && hasLegacyImages) {
+      workerImagePacks.push({ id: "legacy-custom", name: "Bộ tùy chỉnh hiện tại", images: legacyImages });
+    }
+    const requestedPackId = String(parsed?.selectedWorkerPackId || "");
+    const selectedWorkerPackId = requestedPackId === DEFAULT_WORKER_PACK_ID || workerImagePacks.some((pack) => pack.id === requestedPackId)
+      ? requestedPackId
+      : (workerImagePacks[0]?.id || DEFAULT_WORKER_PACK_ID);
+    const selectedPack = workerImagePacks.find((pack) => pack.id === selectedWorkerPackId);
     return {
       chatWidth: Math.max(720, Math.min(1600, Number(parsed?.chatWidth) || defaults.chatWidth)),
       chatHeight: Math.max(180, Math.min(700, Number(parsed?.chatHeight) || defaults.chatHeight)),
@@ -123,11 +169,9 @@ function readManagerSettings() {
         .filter(([profileId, root]) => /^[A-Za-z0-9._-]{1,160}$/.test(profileId) && typeof root === "string" && root.trim())
         .slice(0, 40)
         .map(([profileId, root]) => [profileId, path.resolve(root)])),
-      workerImages: {
-        idle: String(parsed?.workerImages?.idle || ""),
-        working: String(parsed?.workerImages?.working || ""),
-        hung: String(parsed?.workerImages?.hung || "")
-      }
+      selectedWorkerPackId,
+      workerImagePacks,
+      workerImages: selectedPack ? { ...selectedPack.images } : emptyWorkerImages()
     };
   } catch {
     return defaults;
@@ -156,8 +200,18 @@ function imageDataUrl(filePath) {
 
 function managerSettingsPayload() {
   const settings = readManagerSettings();
+  const workerImagePacks = settings.workerImagePacks.map((pack) => ({
+    ...pack,
+    images: { ...pack.images },
+    imageDataUrls: {
+      idle: imageDataUrl(pack.images.idle),
+      working: imageDataUrl(pack.images.working),
+      hung: imageDataUrl(pack.images.hung)
+    }
+  }));
   return {
     ...settings,
+    workerImagePacks,
     workerImageDataUrls: {
       idle: imageDataUrl(settings.workerImages.idle),
       working: imageDataUrl(settings.workerImages.working),
@@ -168,7 +222,11 @@ function managerSettingsPayload() {
 
 function saveManagerSettingsPatch(patch = {}) {
   const current = readManagerSettings();
-  const next = { ...current, workerImages: { ...current.workerImages } };
+  const next = {
+    ...current,
+    workerImages: { ...current.workerImages },
+    workerImagePacks: current.workerImagePacks.map((pack) => ({ ...pack, images: { ...pack.images } }))
+  };
   if (Object.prototype.hasOwnProperty.call(patch, "chatWidth")) {
     next.chatWidth = Math.max(720, Math.min(1600, Number(patch.chatWidth) || current.chatWidth));
   }
@@ -193,9 +251,66 @@ function saveManagerSettingsPatch(patch = {}) {
   return managerSettingsPayload();
 }
 
-async function chooseWorkerImage(state) {
+function findWorkerPack(settings, packId) {
+  const normalizedPackId = String(packId || "");
+  if (normalizedPackId === DEFAULT_WORKER_PACK_ID) throw new Error("Hãy tạo một bộ ảnh riêng trước khi tải ảnh lên.");
+  const pack = settings.workerImagePacks.find((item) => item.id === normalizedPackId);
+  if (!pack) throw new Error("Không tìm thấy bộ ảnh worker.");
+  return pack;
+}
+
+function createWorkerImagePack(name) {
+  const normalizedName = String(name || "").trim().slice(0, 60);
+  if (!normalizedName) throw new Error("Tên bộ ảnh không được để trống.");
+  const settings = readManagerSettings();
+  if (settings.workerImagePacks.length >= MAX_WORKER_IMAGE_PACKS) throw new Error(`Chỉ được tạo tối đa ${MAX_WORKER_IMAGE_PACKS} bộ ảnh worker.`);
+  const id = `pack-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+  settings.workerImagePacks.push({ id, name: normalizedName, images: emptyWorkerImages() });
+  settings.selectedWorkerPackId = id;
+  settings.workerImages = emptyWorkerImages();
+  writeManagerSettings(settings);
+  return managerSettingsPayload();
+}
+
+function selectWorkerImagePack(packId) {
+  const settings = readManagerSettings();
+  const normalizedPackId = String(packId || "");
+  const pack = normalizedPackId === DEFAULT_WORKER_PACK_ID
+    ? null
+    : settings.workerImagePacks.find((item) => item.id === normalizedPackId);
+  if (normalizedPackId !== DEFAULT_WORKER_PACK_ID && !pack) throw new Error("Không tìm thấy bộ ảnh worker.");
+  settings.selectedWorkerPackId = normalizedPackId;
+  settings.workerImages = pack ? { ...pack.images } : emptyWorkerImages();
+  writeManagerSettings(settings);
+  return managerSettingsPayload();
+}
+
+function removeManagedWorkerImage(filePath) {
+  if (!filePath) return;
+  const resolved = path.resolve(filePath);
+  if (path.dirname(resolved) === path.resolve(managerAssetsDir)) fs.rmSync(resolved, { force: true });
+}
+
+function deleteWorkerImagePack(packId) {
+  const settings = readManagerSettings();
+  const normalizedPackId = String(packId || "");
+  const index = settings.workerImagePacks.findIndex((pack) => pack.id === normalizedPackId);
+  if (index < 0) throw new Error("Không tìm thấy bộ ảnh worker.");
+  const [removed] = settings.workerImagePacks.splice(index, 1);
+  Object.values(removed.images).forEach(removeManagedWorkerImage);
+  if (settings.selectedWorkerPackId === normalizedPackId) {
+    settings.selectedWorkerPackId = DEFAULT_WORKER_PACK_ID;
+    settings.workerImages = emptyWorkerImages();
+  }
+  writeManagerSettings(settings);
+  return managerSettingsPayload();
+}
+
+async function chooseWorkerImage(packId, state) {
   const normalizedState = String(state || "");
   if (!WORKER_IMAGE_STATES.has(normalizedState)) throw new Error("Trạng thái worker không hợp lệ.");
+  const settings = readManagerSettings();
+  const pack = findWorkerPack(settings, packId);
   const result = await dialog.showOpenDialog({
     title: `Chọn ảnh worker ${normalizedState}`,
     properties: ["openFile"],
@@ -209,39 +324,41 @@ async function chooseWorkerImage(state) {
   const extension = path.extname(source).toLowerCase();
   if (!WORKER_IMAGE_EXTENSIONS.has(extension)) throw new Error("Chỉ hỗ trợ PNG, JPG, GIF hoặc WEBP.");
   fs.mkdirSync(managerAssetsDir, { recursive: true });
-  const destination = path.join(managerAssetsDir, `worker-${normalizedState}${extension}`);
+  const previousPath = pack.images[normalizedState];
+  const destination = path.join(managerAssetsDir, `worker-${pack.id}-${normalizedState}${extension}`);
   if (path.resolve(source) !== path.resolve(destination)) {
     for (const candidate of fs.readdirSync(managerAssetsDir, { withFileTypes: true })) {
-      if (candidate.isFile() && candidate.name.startsWith(`worker-${normalizedState}.`)) {
+      if (candidate.isFile() && candidate.name.startsWith(`worker-${pack.id}-${normalizedState}.`)) {
         fs.rmSync(path.join(managerAssetsDir, candidate.name), { force: true });
       }
     }
     fs.copyFileSync(source, destination);
   }
-  const settings = readManagerSettings();
-  settings.workerImages[normalizedState] = destination;
+  if (previousPath && path.resolve(previousPath) !== path.resolve(destination)) removeManagedWorkerImage(previousPath);
+  pack.images[normalizedState] = destination;
+  settings.selectedWorkerPackId = pack.id;
+  settings.workerImages = { ...pack.images };
   writeManagerSettings(settings);
   return managerSettingsPayload();
 }
 
-function resetWorkerImage(state) {
+function resetWorkerImage(packId, state) {
   const normalizedState = String(state || "");
   if (!WORKER_IMAGE_STATES.has(normalizedState)) throw new Error("Trạng thái worker không hợp lệ.");
   const settings = readManagerSettings();
-  const currentPath = settings.workerImages[normalizedState];
-  settings.workerImages[normalizedState] = "";
+  const pack = findWorkerPack(settings, packId);
+  const currentPath = pack.images[normalizedState];
+  pack.images[normalizedState] = "";
+  settings.selectedWorkerPackId = pack.id;
+  settings.workerImages = { ...pack.images };
   writeManagerSettings(settings);
-  if (currentPath && path.dirname(path.resolve(currentPath)) === path.resolve(managerAssetsDir)) {
-    fs.rmSync(path.resolve(currentPath), { force: true });
-  }
+  removeManagedWorkerImage(currentPath);
   return managerSettingsPayload();
 }
 
 function resetManagerSettings() {
   const current = readManagerSettings();
-  for (const workerPath of Object.values(current.workerImages || {})) {
-    if (workerPath && path.dirname(path.resolve(workerPath)) === path.resolve(managerAssetsDir)) fs.rmSync(path.resolve(workerPath), { force: true });
-  }
+  for (const pack of current.workerImagePacks || []) Object.values(pack.images || {}).forEach(removeManagedWorkerImage);
   const defaults = { ...defaultManagerSettings(), repoSelections: { ...(current.repoSelections || {}) } };
   writeManagerSettings(defaults);
   return managerSettingsPayload();
@@ -340,6 +457,7 @@ function createWindow() {
         const settingsSmokeRequested = process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1" || process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "settings";
         if (settingsSmokeRequested) {
           const beforeSettings = await win.webContents.executeJavaScript("window.codexpro.getManagerSettings().then((value) => JSON.parse(JSON.stringify(value)))", true);
+          let workerPackProbe = null;
           await win.webContents.executeJavaScript(`(() => {
             const button = [...document.querySelectorAll('nav button')].find((item) => /cài đặt/i.test(item.textContent || ''));
             button?.click();
@@ -347,6 +465,19 @@ function createWindow() {
           })()`, true);
           await new Promise((resolve) => setTimeout(resolve, 300));
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
+            workerPackProbe = await win.webContents.executeJavaScript(`(async () => {
+              const created = await window.codexpro.createWorkerImagePack('CodexPro smoke pack');
+              const pack = created.workerImagePacks.find((item) => item.name === 'CodexPro smoke pack');
+              if (!pack || created.selectedWorkerPackId !== pack.id) throw new Error('Không tạo/chọn được worker pack');
+              const selectedDefault = await window.codexpro.selectWorkerImagePack('default');
+              if (selectedDefault.selectedWorkerPackId !== 'default') throw new Error('Không đổi về worker pack mặc định');
+              const removed = await window.codexpro.deleteWorkerImagePack(pack.id);
+              return {
+                ok: removed.selectedWorkerPackId === 'default' && !removed.workerImagePacks.some((item) => item.id === pack.id),
+                createdId: pack.id,
+                finalCount: removed.workerImagePacks.length
+              };
+            })()`, true);
             await win.webContents.executeJavaScript(`(async () => {
               const range = document.querySelector('.settings-range:not(.chat-height-range)');
               const heightRange = document.querySelector('.chat-height-range');
@@ -408,12 +539,13 @@ function createWindow() {
             };
           })()`, true);
           settingsProbe = {
-            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "tahoma" && /Tahoma/i.test(uiSettings.fontValue) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
+            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "tahoma" && /Tahoma/i.test(uiSettings.fontValue) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
             before: { chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily },
             saved: { chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily },
             chatModalWidth,
             chatResponseHeight,
-            ui: uiSettings
+            ui: uiSettings,
+            workerPackProbe
           };
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
             await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily })})`, true);
@@ -770,6 +902,10 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
             const card = [...document.querySelectorAll('.request-card')].find((item) => item.querySelector('code')?.textContent?.includes(${JSON.stringify(scrollProfile)}));
             card?.scrollIntoView({ block: 'center' });
           })()`, true);
+          await new Promise((resolve) => setTimeout(resolve, 350));
+        }
+        if (process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT_WORKER === "1") {
+          await win.webContents.executeJavaScript("document.querySelector('.worker-pack-toolbar')?.scrollIntoView({ block: 'center' })", true);
           await new Promise((resolve) => setTimeout(resolve, 350));
         }
         const screenshot = process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT;
@@ -1243,7 +1379,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.67" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.68" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1623,7 +1759,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.67" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.68" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
@@ -1705,8 +1841,11 @@ ipcMain.handle("codexpro:open-profile-chat", async (event, payload) => {
 ipcMain.handle("codexpro:reload-profiles", () => reloadChromeProfiles());
 ipcMain.handle("codexpro:get-manager-settings", () => managerSettingsPayload());
 ipcMain.handle("codexpro:save-manager-settings", (_event, patch) => saveManagerSettingsPatch(patch));
-ipcMain.handle("codexpro:choose-worker-image", (_event, state) => chooseWorkerImage(state));
-ipcMain.handle("codexpro:reset-worker-image", (_event, state) => resetWorkerImage(state));
+ipcMain.handle("codexpro:create-worker-image-pack", (_event, name) => createWorkerImagePack(name));
+ipcMain.handle("codexpro:select-worker-image-pack", (_event, packId) => selectWorkerImagePack(packId));
+ipcMain.handle("codexpro:delete-worker-image-pack", (_event, packId) => deleteWorkerImagePack(packId));
+ipcMain.handle("codexpro:choose-worker-image", (_event, payload) => chooseWorkerImage(payload?.packId, payload?.state));
+ipcMain.handle("codexpro:reset-worker-image", (_event, payload) => resetWorkerImage(payload?.packId, payload?.state));
 ipcMain.handle("codexpro:reset-manager-settings", () => resetManagerSettings());
 ipcMain.handle("codexpro:choose-request-files", () => chooseRequestFiles());
 ipcMain.handle("codexpro:capture-clipboard-image", () => captureClipboardImage());

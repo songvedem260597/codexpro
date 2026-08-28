@@ -494,12 +494,28 @@ textarea::placeholder { font-family: inherit; font-size: inherit; line-height: i
 .settings-dropdown-value small { margin-top: 2px; color: #738097; font-size: 10px; font-weight: 500; }
 .settings-dropdown-chevron { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: #91a0b8; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transition: transform .16s ease, stroke .16s ease; }
 .settings-dropdown.is-open .settings-dropdown-chevron { transform: rotate(180deg); stroke: #cdd8ef; }
-.settings-dropdown-menu { position: absolute; inset: calc(100% + 8px) 0 auto; display: grid; gap: 4px; padding: 7px; border: 1px solid #3b4a65; border-radius: 9px; background: #101722; box-shadow: 0 18px 42px #000c, inset 0 1px 0 #ffffff08; }
+.settings-dropdown-menu { position: absolute; inset: calc(100% + 8px) 0 auto; max-height: 340px; display: grid; gap: 4px; padding: 7px; overflow-y: auto; border: 1px solid #3b4a65; border-radius: 9px; background: #101722; box-shadow: 0 18px 42px #000c, inset 0 1px 0 #ffffff08; }
 .settings-dropdown-option { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 12px; color: #cdd6e6; border: 1px solid transparent; border-radius: 6px; background: transparent; text-align: left; }
 .settings-dropdown-option:hover { color: #fff; background: #1a2434; }
 .settings-dropdown-option.is-selected { color: #fff; border-color: #3c558c; background: #19243b; }
+.settings-dropdown-option-copy { min-width: 0; display: block; }
+.settings-dropdown-option-copy strong, .settings-dropdown-option-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-dropdown-option-copy strong { font-size: 13px; font-weight: 700; }
+.settings-dropdown-option-copy small { margin-top: 3px; color: #738097; font-size: 10px; font-weight: 500; }
 .settings-dropdown-check { color: #7fa0ff; font-family: inherit; font-weight: 800; }
 .font-preview { min-width: 0; min-height: 54px; display: flex; align-items: center; padding: 11px 15px; color: #cbd4e3; border: 1px solid #303b4f; border-radius: 8px; background: #0b1017; box-shadow: inset 0 1px 0 #ffffff04; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.worker-pack-toolbar { display: grid; grid-template-columns: minmax(300px, 520px) auto minmax(230px, 1fr); align-items: end; gap: 16px; margin-bottom: 12px; padding: 15px; border: 1px solid #2d3a50; border-radius: 8px; background: #0a1018; }
+.worker-pack-select { min-width: 0; }
+.worker-pack-select > label { display: block; margin-bottom: 7px; color: #9da9bb; font-size: 11px; font-weight: 700; }
+.worker-pack-preview-strip { display: flex; align-items: center; gap: 7px; min-height: 54px; }
+.worker-pack-preview-strip .profile-worker { width: 48px; height: 48px; }
+.worker-pack-preview-strip .profile-worker img { width: 44px; height: 44px; }
+.worker-pack-actions { display: flex; justify-content: flex-end; gap: 8px; min-height: 54px; align-items: center; }
+.worker-pack-actions .danger-quiet.is-armed { color: #fff; border-color: #d65261; background: #7a2430; }
+.worker-pack-creator { display: grid; grid-template-columns: minmax(240px, 1fr) auto auto; gap: 8px; margin-bottom: 12px; padding: 10px; border: 1px solid #3c4f70; border-radius: 8px; background: #111927; }
+.worker-pack-creator input { min-width: 0; height: 40px; }
+.worker-pack-help { margin: 0 0 12px; padding: 9px 12px; color: #8d99ad; border-left: 3px solid #5775bc; background: #111927; font-size: 12px; }
+.worker-pack-help strong { color: #cdd8ef; }
 .worker-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .worker-setting-card { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; padding: 15px; border: 1px solid #293241; border-radius: var(--radius-panel); background: #0d1118; }
 .worker-setting-card .profile-worker { width: 60px; height: 60px; }
@@ -522,6 +538,9 @@ textarea::placeholder { font-family: inherit; font-size: inherit; line-height: i
   .profile-actions { align-items: stretch; }
   .request-grid { grid-template-columns: 1fr; }
   .worker-settings-grid { grid-template-columns: 1fr; }
+  .worker-pack-toolbar { grid-template-columns: 1fr; align-items: stretch; }
+  .worker-pack-actions { justify-content: flex-start; }
+  .worker-pack-creator { grid-template-columns: 1fr; }
   .font-setting-row, .font-size-setting-row { grid-template-columns: 1fr; }
   .settings-view { max-width: none; }
 }
