@@ -19,7 +19,7 @@ const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.26";
+const WORKER_EXTENSION_VERSION = "0.5.27";
 const RUNTIME_BASE_CACHE_MS = 10000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
@@ -974,7 +974,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.46" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.48" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1227,11 +1227,29 @@ async function sendProfileRequest(payload) {
     data_base64: (await fs.promises.readFile(file.path)).toString("base64")
   })));
   if (sendDebug) console.error('[manager-send] before runtimeStatus');
-  const status = await runtimeStatus();
+  let status = await runtimeStatus();
   if (sendDebug) console.error('[manager-send] after runtimeStatus');
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-  const profile = status.browserProfiles.find((item) => item.profile_id === profileId);
+  let profile = status.browserProfiles.find((item) => item.profile_id === profileId);
   if (!profile?.connected) throw new Error("Extension của profile này đang mất heartbeat với CodexPro.");
+  const token = readToken(status.config.tokenFile);
+  if (!versionAtLeast(profile.extension_version)) {
+    if (sendDebug) console.error(`[manager-send] updating worker ${profile.extension_version || "unknown"} -> ${WORKER_EXTENSION_VERSION}`);
+    await localMcpTool(status.config, token, "browser_control", {
+      action: "reload_extension",
+      profile_id: profileId
+    }, 20000);
+    const updateDeadline = Date.now() + 15000;
+    while (Date.now() < updateDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      status = await runtimeStatus();
+      profile = status.browserProfiles.find((item) => item.profile_id === profileId);
+      if (profile?.connected && versionAtLeast(profile.extension_version)) break;
+    }
+    if (!profile?.connected || !versionAtLeast(profile.extension_version)) {
+      throw new Error(`Không thể tự update worker extension lên ${WORKER_EXTENSION_VERSION}. Hãy mở chrome://extensions và reload CodexPro.`);
+    }
+  }
   const selectedConversationTab = newChat ? null : (profile.conversation_tabs || []).find((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] === conversationId);
   if (selectedConversationTab?.busy) throw new Error("Đoạn chat này đang xử lý yêu cầu khác. Hãy chờ phản hồi hiện tại hoàn tất.");
   if (!newChat) {
@@ -1241,7 +1259,6 @@ async function sendProfileRequest(payload) {
     ]);
     if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
   }
-  const token = readToken(status.config.tokenFile);
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
   const result = await localMcpTool(status.config, token, "browser_control", {
     action: "send_chat_request",
@@ -1304,7 +1321,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.46" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.48" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);

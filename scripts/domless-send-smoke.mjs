@@ -93,5 +93,7 @@ assert.ok(acknowledgedReturn > networkRecovery, "a tracked generation must count
 assert.ok(cleanup > acknowledgedReturn, "draft cleanup must only happen after network recovery fails");
 assert.match(sendBlock, /SEND_UNCERTAIN: Đã bấm gửi nhưng chưa thấy generation request/);
 assert.match(sendBlock, /submitted_by:'network'/);
+assert.match(worker, /const currentComposer=findComposer\(\)/, "composer verification must survive ChatGPT replacing the React node");
+assert.match(worker, /const currentRoot=composerRootFor\(currentComposer\)\|\|root/, "send lookup must use the latest composer tree");
 
 console.log("✓ DOM-less ChatGPT send recovery smoke test passed");

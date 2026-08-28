@@ -241,7 +241,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.26";
+const WORKER_EXTENSION_VERSION = "0.5.27";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -559,6 +559,7 @@ function App() {
         const completionKey = `${profile.profile_id}:${conversationId}`;
         if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) continue;
         networkCompletionReads.current.set(completionKey, networkCompletedAt);
+        void loadResponse(profile, conversationId, true, true);
         if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
       }
     }
@@ -579,7 +580,7 @@ function App() {
       setRequestTargets((current) => ({ ...current, [chatProfileId]: initialTarget }));
     }
     const response = requestResponses[chatProfileId];
-    if (profile.connected && (!response || response.conversationId !== initialTarget)) void loadResponse(profile, initialTarget, true);
+    if (profile.connected && (!response || response.conversationId !== initialTarget)) void loadResponse(profile, initialTarget, true, true);
   }, [chatProfileId, status?.browserProfiles, requestResponses]);
 
   useEffect(() => {
@@ -700,7 +701,7 @@ function App() {
     setChatProfileId(profile.profile_id);
     if (profile.connected && conversationId && conversationId !== NEW_CHAT_TARGET) {
       setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
-      void loadResponse(profile, conversationId, true);
+      void loadResponse(profile, conversationId, true, true);
     }
   }
 
@@ -1229,7 +1230,7 @@ function App() {
               setRenameChat(null);
               setRequestTargets((current) => ({ ...current, [profile.profile_id]: id }));
               setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: true, error: "", conversationId: id, text: "", messages: [] } }));
-              void loadResponse(profile, id, true);
+              void loadResponse(profile, id, true, true);
             }} disabled={!profile.connected || !conversations.length || sending} />
 
             <label className="request-label">Tin nhắn gần nhất</label>
@@ -1329,7 +1330,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
-          <small>CodexPro Manager 0.2.46</small>
+          <small>CodexPro Manager 0.2.48</small>
         </div>
       </aside>
 
