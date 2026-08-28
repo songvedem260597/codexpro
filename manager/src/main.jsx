@@ -551,7 +551,7 @@ function App() {
   useEffect(() => {
     void refresh(true);
     const statusTimer = window.setInterval(() => void refreshStatus(), REALTIME_POLL_MS);
-    const projectsTimer = window.setInterval(() => void refresh(false), 10000);
+    const projectsTimer = window.setInterval(() => void refresh(false), 30000);
     return () => {
       window.clearInterval(statusTimer);
       window.clearInterval(projectsTimer);
@@ -636,13 +636,12 @@ function App() {
     const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
     if (!profile) return;
     const conversations = profileRequestChats(profile);
-    const initialTarget = requestTargetsRef.current[chatProfileId] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "";
-    if (!initialTarget) return;
+    const initialTarget = requestTargetsRef.current[chatProfileId] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET;
     if (!requestTargetsRef.current[chatProfileId]) {
       setRequestTargets((current) => ({ ...current, [chatProfileId]: initialTarget }));
     }
     const response = requestResponses[chatProfileId];
-    if (profile.connected && (!response || response.conversationId !== initialTarget)) void loadResponse(profile, initialTarget, true, true);
+    if (profile.connected && initialTarget !== NEW_CHAT_TARGET && (!response || response.conversationId !== initialTarget)) void loadResponse(profile, initialTarget, true, true);
   }, [chatProfileId, status?.browserProfiles, requestResponses]);
 
   useEffect(() => {
@@ -778,7 +777,7 @@ function App() {
 
   function openChat(profile) {
     const conversations = profileRequestChats(profile);
-    const conversationId = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "");
+    const conversationId = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
     if (conversationId) setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
     const projectRoot = projectRootForProfile(profile);
     if (projectRoot) setRequestProjectRoots((current) => ({ ...current, [profile.profile_id]: projectRoot }));
@@ -884,7 +883,7 @@ function App() {
   async function sendRequest(profile) {
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
-    const conversationId = String(requestTargets[profile.profile_id] ?? defaultTarget ?? "");
+    const conversationId = String(requestTargets[profile.profile_id] ?? defaultTarget ?? NEW_CHAT_TARGET);
     const newChat = conversationId === NEW_CHAT_TARGET;
     const text = String(requestDrafts[profile.profile_id] || "").trim();
     const attachments = requestFiles[profile.profile_id] || [];
@@ -1238,10 +1237,8 @@ function App() {
     const conversations = profileRequestChats(profile);
     const gitProjects = projects.filter((project) => project.isGit);
     const selectedProjectRoot = projectRootForProfile(profile);
-    const selectedTarget = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "");
+    const selectedTarget = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
     const isNewChat = selectedTarget === NEW_CHAT_TARGET;
-    const selectedConversation = conversations.find((chat) => chat.id === selectedTarget);
-    const renameOpen = Boolean(renameChat && renameChat.profileId === profile.profile_id && renameChat.conversationId === selectedTarget);
     const sending = busy === `request:${profile.profile_id}`;
     const draft = requestDrafts[profile.profile_id] || "";
     const attachments = requestFiles[profile.profile_id] || [];
@@ -1296,40 +1293,6 @@ function App() {
             <label className="request-label">Repo cần code <small>khóa cho profile/chat hiện tại</small></label>
             <ProjectDropdown value={selectedProjectRoot} projects={gitProjects} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} disabled={!profile.connected || !gitProjects.length || sending || selectedBusy || rolloverCreating} />
             {!gitProjects.length && <div className="request-send-error">Chưa có Git repo nào. Thêm repo ở tab Dự án trước.</div>}
-            <div className="request-label-row">
-              <label className="request-label">Đoạn chat <small>tối đa 3 gần nhất</small></label>
-              <div className="chat-manage-actions">
-                <button type="button" onClick={() => beginRenameSelectedChat(profile, selectedTarget, selectedConversation?.title || "")} disabled={!profile.connected || isNewChat || !selectedConversation || Boolean(busy)}>Đổi tên</button>
-                <button type="button" onClick={() => startNewChat(profile)} disabled={!profile.connected || Boolean(busy)}>＋ Chat mới</button>
-              </div>
-            </div>
-            {renameOpen && (
-              <div className="chat-rename-editor">
-                <input
-                  className="chat-rename-input"
-                  type="text"
-                  value={renameChat.title}
-                  maxLength={120}
-                  autoFocus
-                  aria-label="Tên đoạn chat mới"
-                  onChange={(event) => setRenameChat((current) => current ? { ...current, title: event.target.value } : current)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") { event.preventDefault(); void saveRenamedChat(profile); }
-                    if (event.key === "Escape") { event.preventDefault(); setRenameChat(null); }
-                  }}
-                  disabled={Boolean(busy)}
-                />
-                <button type="button" className="chat-rename-cancel" onClick={() => setRenameChat(null)} disabled={Boolean(busy)}>Hủy</button>
-                <button type="button" className="chat-rename-save" onClick={() => void saveRenamedChat(profile)} disabled={Boolean(busy) || !String(renameChat.title || "").trim()}>Lưu</button>
-              </div>
-            )}
-            <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => {
-              setRenameChat(null);
-              setRequestTargets((current) => ({ ...current, [profile.profile_id]: id }));
-              setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: true, error: "", conversationId: id, text: "", messages: [] } }));
-              void loadResponse(profile, id, true, true);
-            }} disabled={!profile.connected || !conversations.length || sending} />
-
             <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
               <div className="chat-response-head">
@@ -1428,7 +1391,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.50</small>
+          <small>CodexPro Manager 0.2.51</small>
         </div>
       </aside>
 
@@ -1591,8 +1554,8 @@ function App() {
 
         <section id="projects">
           <div className="section-head">
-            <div><p className="eyebrow">CHATGPT WORKSPACES</p><h2>Repo và dự án</h2><p className="section-note">Các repo/thư mục mà ChatGPT đang mở qua CodexPro. Dự án thêm tay chỉ được ghim vào danh sách này.</p></div>
-            <button className="button secondary" onClick={addProject} disabled={Boolean(busy)}>+ Ghim repo</button>
+            <div><p className="eyebrow">WORKSPACES</p><h2>Repo và dự án</h2><p className="section-note">Tự quét Git repo trong các thư mục đã cấp quyền, đồng thời ưu tiên repo ChatGPT đang dùng và repo đã ghim.</p></div>
+            <button className="button secondary" onClick={addProject} disabled={Boolean(busy)}>+ Thêm dự án</button>
           </div>
           <div className="project-list">
             {projects.length === 0 && <div className="empty">Chưa có repo hoặc dự án nào đang được ChatGPT mở qua CodexPro.</div>}

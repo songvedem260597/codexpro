@@ -24,8 +24,14 @@ const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
 const WORKER_EXTENSION_VERSION = "0.5.27";
 const RUNTIME_BASE_CACHE_MS = 10000;
+const REPO_SCAN_CACHE_MS = 60000;
+const REPO_SCAN_MAX_DIRECTORIES = 50000;
+const REPO_SCAN_MAX_DEPTH = 12;
+const REPO_SCAN_TIMEOUT_MS = 12000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
+let repoScanCache = null;
+let repoScanPromise = null;
 
 function versionAtLeast(version, target = WORKER_EXTENSION_VERSION) {
   const current = String(version || "").split(".").map(Number);
@@ -435,7 +441,7 @@ function createWindow() {
           await new Promise((resolve) => setTimeout(resolve, 1400));
           chatModalProbe = await win.webContents.executeJavaScript(`(() => {
             const modal = document.querySelector('.chat-modal');
-            return { open: Boolean(modal), profile: modal?.querySelector('.chat-modal-profile code')?.textContent || '', hasProjectDropdown: Boolean(modal?.querySelector('.project-dropdown')), selectedProject: modal?.querySelector('.project-dropdown-value strong')?.textContent?.trim() || '', hasResponse: Boolean(modal?.querySelector('.chat-response')), hasTextarea: Boolean(modal?.querySelector('textarea')) };
+            return { open: Boolean(modal), profile: modal?.querySelector('.chat-modal-profile code')?.textContent || '', hasProjectDropdown: Boolean(modal?.querySelector('.project-dropdown')), selectedProject: modal?.querySelector('.project-dropdown-value strong')?.textContent?.trim() || '', hasChatSelector: Boolean(modal?.querySelector('.chat-dropdown, .chat-manage-actions')), hasResponse: Boolean(modal?.querySelector('.chat-response')), hasTextarea: Boolean(modal?.querySelector('textarea')) };
           })()`, true);
           chatModalProbe.click = clickProbe;
         }
@@ -711,12 +717,17 @@ function parseTaskArguments(args = "") {
     const match = value.match(new RegExp(`--${name}\\s+(?:\"([^\"]+)\"|'([^']+)'|([^\\s]+))`, "i"));
     return match?.[1] || match?.[2] || match?.[3] || "";
   };
+  const readAll = (name) => [...value.matchAll(new RegExp(`--${name}\\s+(?:"([^"]+)"|'([^']+)'|([^\\s]+))`, "gi"))]
+    .map((match) => match[1] || match[2] || match[3] || "")
+    .filter(Boolean);
   return {
     root: read("root"),
     port: Number(read("port")) || 8793,
     hostname: read("hostname"),
     tokenFile: read("token-file") || tokenFileDefault,
-    tunnel: read("tunnel") || "none"
+    tunnel: read("tunnel") || "none",
+    allowedRoots: readAll("allow-root"),
+    allowHome: /(?:^|\s)--allow-home(?:\s|$)/i.test(value)
   };
 }
 
@@ -1106,11 +1117,90 @@ async function gitSummary(root) {
   }
 }
 
+const REPO_SCAN_SKIPPED_DIRECTORIES = new Set([
+  "$recycle.bin", "system volume information", "windows", "program files", "program files (x86)", "programdata",
+  "appdata", "node_modules", ".git", ".cache", ".gradle", ".idea", ".next", "dist", "build", "coverage", "vendor"
+]);
+
+function pathInside(child, parent) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function repoScanRoots(config) {
+  const home = os.homedir();
+  const requested = [config.root, ...(config.allowedRoots || []), ...(config.allowHome ? [home] : [])]
+    .filter(Boolean)
+    .map((root) => path.resolve(root));
+  const roots = new Set();
+  for (const root of requested) {
+    if (!fs.existsSync(root)) continue;
+    const parsed = path.parse(root);
+    if (root.toLowerCase() === parsed.root.toLowerCase() && parsed.root.toLowerCase() === path.parse(home).root.toLowerCase()) {
+      roots.add(root);
+      roots.add(home);
+      continue;
+    }
+    roots.add(root);
+  }
+  for (const folder of ["Desktop", "Documents", "Downloads", "Pictures", "Videos"]) {
+    const candidate = path.join(home, folder);
+    if (requested.some((allowed) => pathInside(candidate, allowed)) && fs.existsSync(candidate)) roots.add(candidate);
+  }
+  return [...roots];
+}
+
+async function discoverGitRepositories(scanRoots) {
+  const cacheKey = [...scanRoots].map((root) => path.resolve(root).toLowerCase()).sort().join("|");
+  if (repoScanCache?.key === cacheKey && Date.now() - repoScanCache.at < REPO_SCAN_CACHE_MS) return repoScanCache.roots;
+  if (repoScanPromise?.key === cacheKey) return repoScanPromise.promise;
+  const promise = (async () => {
+    const started = Date.now();
+    const queue = scanRoots.map((root) => ({ root: path.resolve(root), depth: 0 }));
+    const visited = new Set();
+    const repositories = new Set();
+    let scanned = 0;
+    while (queue.length && scanned < REPO_SCAN_MAX_DIRECTORIES && Date.now() - started < REPO_SCAN_TIMEOUT_MS) {
+      const batch = queue.splice(0, 32).filter((item) => {
+        const key = item.root.toLowerCase();
+        if (visited.has(key)) return false;
+        visited.add(key);
+        return true;
+      });
+      const entriesByRoot = await Promise.all(batch.map(async (item) => {
+        try { return { item, entries: await fs.promises.readdir(item.root, { withFileTypes: true }) }; }
+        catch { return { item, entries: [] }; }
+      }));
+      for (const { item, entries } of entriesByRoot) {
+        scanned += 1;
+        if (entries.some((entry) => entry.name.toLowerCase() === ".git" && (entry.isDirectory() || entry.isFile()))) {
+          repositories.add(item.root);
+          continue;
+        }
+        if (item.depth >= REPO_SCAN_MAX_DEPTH) continue;
+        for (const entry of entries) {
+          if (!entry.isDirectory() || entry.isSymbolicLink() || REPO_SCAN_SKIPPED_DIRECTORIES.has(entry.name.toLowerCase())) continue;
+          queue.push({ root: path.join(item.root, entry.name), depth: item.depth + 1 });
+        }
+      }
+    }
+    const roots = [...repositories];
+    repoScanCache = { key: cacheKey, at: Date.now(), roots };
+    return roots;
+  })();
+  repoScanPromise = { key: cacheKey, promise };
+  try { return await promise; }
+  finally { if (repoScanPromise?.promise === promise) repoScanPromise = null; }
+}
+
 async function listProjects() {
   const status = await runtimeStatus();
   const chatGptWorkspaces = Array.isArray(status?.local?.data?.mcpSessions?.projectWorkspaces)
     ? status.local.data.mcpSessions.projectWorkspaces
     : [];
+  const task = await scheduledTask();
+  const taskConfig = parseTaskArguments(task.arguments);
+  const activeRoot = taskConfig.root;
   const sources = new Map();
 
   for (const workspace of chatGptWorkspaces) {
@@ -1132,20 +1222,41 @@ async function listProjects() {
     }
   }
 
-  const projects = [];
-  for (const [root, meta] of sources) {
-    if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) continue;
-    projects.push({
-      root,
-      name: path.basename(root),
-      source: meta.source,
-      active: meta.active,
-      sessionCount: meta.sessionCount,
-      lastSeenAt: meta.lastSeenAt,
-      clients: meta.clients,
-      ...(await gitSummary(root))
-    });
+  if (activeRoot) {
+    const root = path.resolve(activeRoot);
+    const current = sources.get(root);
+    sources.set(root, current
+      ? { ...current, active: true }
+      : { source: "Đang chạy", active: true, sessionCount: 0, lastSeenAt: "", clients: [] });
   }
+  const discoveredRoots = await discoverGitRepositories(repoScanRoots(taskConfig));
+  for (const discoveredRoot of discoveredRoots) {
+    const root = path.resolve(discoveredRoot);
+    if (![...sources.keys()].some((known) => known.toLowerCase() === root.toLowerCase())) {
+      sources.set(root, { source: "Tự quét", active: false, sessionCount: 0, lastSeenAt: "", clients: [] });
+    }
+  }
+
+  const entries = [...sources];
+  const projects = [];
+  let nextIndex = 0;
+  await Promise.all(Array.from({ length: Math.min(8, entries.length) }, async () => {
+    while (nextIndex < entries.length) {
+      const [root, meta] = entries[nextIndex++];
+      if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) continue;
+      const activeByRuntime = Boolean(activeRoot && path.resolve(activeRoot).toLowerCase() === root.toLowerCase());
+      projects.push({
+        root,
+        name: path.basename(root),
+        source: meta.source,
+        active: Boolean(meta.active || activeByRuntime),
+        sessionCount: meta.sessionCount || 0,
+        lastSeenAt: meta.lastSeenAt || "",
+        clients: meta.clients || [],
+        ...(await gitSummary(root))
+      });
+    }
+  }));
   return projects.sort((a, b) => Number(b.active) - Number(a.active) || String(b.lastSeenAt).localeCompare(String(a.lastSeenAt)) || a.name.localeCompare(b.name));
 }
 
@@ -1212,7 +1323,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.50" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.51" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1578,7 +1689,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.50" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.51" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
