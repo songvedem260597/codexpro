@@ -22,7 +22,7 @@ const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.30";
+const WORKER_EXTENSION_VERSION = "0.5.33";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
@@ -1457,7 +1457,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.58" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.62" } }
   });
   const sessionId = initialized.sessionId;
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
@@ -1700,6 +1700,7 @@ async function sendProfileRequest(payload) {
   const requestedFiles = Array.isArray(payload?.attachments) ? payload.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
   const taskId = `cpt_${randomBytes(12).toString("hex")}`;
   const toolRetry = Boolean(payload?.toolRetry);
+  const toolRolloverCount = Math.max(0, Math.min(1, Number(payload?.toolRolloverCount) || 0));
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
@@ -1756,10 +1757,11 @@ async function sendProfileRequest(payload) {
     root: selectedProject.root
   }, 20000);
   const taskText = [
-    "@CodexPro",
+    ...(newChat ? ["@CodexPro"] : ["Hãy sử dụng MCP CodexPro đã được kích hoạt trong đoạn chat này."]),
     `Repo đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
     `Task ID bắt buộc: ${taskId}`,
-    `BẮT BUỘC gọi tool CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Không được trả lời suông, không được tự tuyên bố CodexPro bị disable nếu chưa gọi tool.`,
+    `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
+    "BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Không được trả lời rằng không có tool/MCP, tool/MCP không sử dụng được hoặc tool/MCP bị disable khi chưa thực hiện một tool-call MCP CodexPro thực tế và nhận lỗi kỹ thuật từ chính lần gọi đó.",
     "Sau khi begin_repo_task thành công, hãy đọc và thao tác đúng repo đã khóa. Không chuyển sang workspace/repo khác. Tiếp tục từ trạng thái git và công việc hiện có của repo này.",
     ...(toolRetry ? ["Đây là lần gửi lại vì phản hồi trước không có bằng chứng gọi CodexPro. Phải gọi codexpro action=begin_repo_task ngay."] : []),
     "",
@@ -1774,7 +1776,7 @@ async function sendProfileRequest(payload) {
     attachments
   }, 120000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
-  return { ...result, repo_task_id: taskId, repo_task_retry_count: toolRetry ? 1 : 0 };
+  return { ...result, repo_task_id: taskId, repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount };
 }
 
 async function getRepoTaskStatus(payload) {
@@ -1837,7 +1839,7 @@ async function inspectThroughMcp(root) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.58" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.62" } }
   });
   const sessionId = initialized.sessionId;
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);

@@ -309,7 +309,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.30";
+const WORKER_EXTENSION_VERSION = "0.5.33";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -355,6 +355,15 @@ function applyConversationTitleOverrides(status, overrides) {
   };
 }
 
+function visibleUserMessageText(value) {
+  const text = String(value || "").trim();
+  const marker = "Yêu cầu của người dùng:";
+  const markerIndex = text.lastIndexOf(marker);
+  if (markerIndex >= 0) return text.slice(markerIndex + marker.length).trim();
+  if (text.includes("Yêu cầu của người dùng nằm trong file đính kèm.")) return "Yêu cầu nằm trong file đính kèm.";
+  return text;
+}
+
 function buildConversationRolloverPrompt(result) {
   const prefix = [
     "Đoạn chat trước vừa đạt giới hạn độ dài nên CodexPro đã tự tạo cuộc chat mới này.",
@@ -370,7 +379,8 @@ function buildConversationRolloverPrompt(result) {
   for (let index = messages.length - 1; index >= 0 && remaining > 200; index -= 1) {
     const message = messages[index];
     const role = message?.role === "user" ? "Bạn" : "ChatGPT";
-    const fullChunk = `${role}:\n${String(message.text || "").trim()}`;
+    const messageText = message?.role === "user" ? visibleUserMessageText(message.text) : String(message.text || "").trim();
+    const fullChunk = `${role}:\n${messageText}`;
     if (fullChunk.length <= remaining) {
       chunks.unshift(fullChunk);
       remaining -= fullChunk.length + 2;
@@ -678,9 +688,12 @@ function App() {
   useEffect(() => {
     if (!chatProfileId) return;
     const response = requestResponses[chatProfileId];
-    if (!response?.text) return;
+    const thinking = Boolean(response?.busy || response?.loading || response?.networkState === "generating");
+    if (!response?.text && !thinking) return;
+    if (thinking) responseScrollPauseUntil.current.delete(chatProfileId);
     if ((responseScrollPauseUntil.current.get(chatProfileId) || 0) > Date.now()) return;
-    scrollResponseToBottom(chatProfileId);
+    const frame = window.requestAnimationFrame(() => scrollResponseToBottom(chatProfileId));
+    return () => window.cancelAnimationFrame(frame);
   }, [chatProfileId, requestResponses, scrollResponseToBottom]);
 
   useEffect(() => {
@@ -1008,6 +1021,7 @@ function App() {
             networkStatusCode: Number(result?.network_status_code) || Number(previous.networkStatusCode) || 0,
             repoTaskId: String(result?.repo_task_id || ""),
             repoTaskRetryCount: Number(result?.repo_task_retry_count) || 0,
+            repoTaskRolloverCount: Number(result?.repo_task_rollover_count) || 0,
             repoTaskStatus: "waiting",
             repoTaskVerified: false,
             repoTaskRequest: { text, attachments, projectRoot }
@@ -1159,8 +1173,55 @@ function App() {
         return;
       }
       const retryCount = Number(response?.repoTaskRetryCount) || 0;
+      const rolloverCount = Number(response?.repoTaskRolloverCount) || 0;
       const original = response?.repoTaskRequest;
       if (retryCount >= 1 || !original?.projectRoot) {
+        if (retryCount >= 1 && rolloverCount < 1 && original?.projectRoot) {
+          setRequestResponses((current) => {
+            const previous = current[profile.profile_id] || {};
+            return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "rolling-over", loading: true } } : current;
+          });
+          notify("Chat cũ né CodexPro 2 lần · đang tạo chat mới");
+          const created = await api.sendProfileRequest({
+            profileId: profile.profile_id,
+            conversationId: "",
+            newChat: true,
+            projectRoot: original.projectRoot,
+            text: original.text,
+            attachments: Array.isArray(original.attachments) ? original.attachments : [],
+            toolRetry: false,
+            toolRolloverCount: rolloverCount + 1,
+            previousTaskId: taskId
+          });
+          if (String(created?.submission_state || "") === "uncertain") throw new Error("Chat mới có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
+          const newConversationId = String(created?.conversation_id || "").trim();
+          if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT chưa trả conversation id cho chat mới bắt buộc dùng CodexPro.");
+          requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: newConversationId };
+          setRequestTargets((current) => ({ ...current, [profile.profile_id]: newConversationId }));
+          setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+          setRequestResponses((current) => ({
+            ...current,
+            [profile.profile_id]: {
+              visible: true,
+              loading: true,
+              error: "",
+              conversationId: newConversationId,
+              messages: [],
+              submissionState: "submitted",
+              sendUncertain: false,
+              networkState: String(created?.generation_state || created?.network_state || "generating"),
+              repoTaskId: String(created?.repo_task_id || ""),
+              repoTaskRetryCount: 0,
+              repoTaskRolloverCount: rolloverCount + 1,
+              repoTaskStatus: "waiting",
+              repoTaskVerified: false,
+              repoTaskRequest: original
+            }
+          }));
+          notify("Đã tạo chat mới · @CodexPro được gọi lại đúng một lần");
+          window.setTimeout(() => void refresh(false), 500);
+          return;
+        }
         const message = "ChatGPT đã trả lời nhưng không gọi CodexPro sau 2 lần. Phản hồi này không được coi là đã thực hiện công việc.";
         setRequestResponses((current) => {
           const previous = current[profile.profile_id] || {};
@@ -1182,6 +1243,7 @@ function App() {
         text: original.text,
         attachments: Array.isArray(original.attachments) ? original.attachments : [],
         toolRetry: true,
+        toolRolloverCount: rolloverCount,
         previousTaskId: taskId
       });
       if (String(retried?.submission_state || "") === "uncertain") throw new Error("Lần bắt buộc gọi CodexPro có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
@@ -1193,6 +1255,7 @@ function App() {
             ...previous,
             repoTaskId: String(retried?.repo_task_id || ""),
             repoTaskRetryCount: 1,
+            repoTaskRolloverCount: rolloverCount,
             repoTaskStatus: "waiting",
             repoTaskVerified: false,
             loading: true,
@@ -1227,7 +1290,7 @@ function App() {
           ? result.messages.slice(-20).map((message, index) => ({
               id: String(message?.id || `${message?.role || "message"}-${index}`),
               role: message?.role === "user" ? "user" : "assistant",
-              text: String(message?.text || ""),
+              text: message?.role === "user" ? visibleUserMessageText(message?.text) : String(message?.text || ""),
               truncated: Boolean(message?.truncated)
             })).filter((message) => message.text)
           : (sameConversation && Array.isArray(previous.messages) ? previous.messages : []);
@@ -1439,7 +1502,7 @@ function App() {
                       </div>
                     </div>
                   ))}
-                  {response.busy && <div className="chat-transcript-message is-assistant is-typing"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">ChatGPT</span><span className="typing-dots latest-response-typing"><i /><i /><i /></span></div></div>}
+                  {response.busy && <div className="chat-transcript-message is-assistant is-typing"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">ChatGPT</span><span className="thinking-state latest-response-typing"><span>Thinking</span><span className="typing-dots"><i /><i /><i /></span></span></div></div>}
                 </div>
               ) : <div className="response-empty">Đoạn chat này chưa có tin nhắn.</div>}
             </div>
@@ -1504,7 +1567,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.58</small>
+          <small>CodexPro Manager 0.2.62</small>
         </div>
       </aside>
 
