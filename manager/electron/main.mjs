@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { createHeadlessWorkerManager } from "./headless-workers.mjs";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -22,7 +23,7 @@ const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
-const WORKER_EXTENSION_VERSION = "0.5.41";
+const WORKER_EXTENSION_VERSION = "0.5.42";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
@@ -32,6 +33,10 @@ let runtimeBaseCache = null;
 let runtimeBasePromise = null;
 let repoScanCache = null;
 let repoScanPromise = null;
+const headlessExtensionRoot = app.isPackaged
+  ? path.join(process.resourcesPath, "chrome-extension")
+  : path.resolve(here, "..", "..", "chrome-extension");
+const headlessWorkers = createHeadlessWorkerManager({ codexProHome, extensionRoot: headlessExtensionRoot });
 
 function versionAtLeast(version, target = WORKER_EXTENSION_VERSION) {
   const current = String(version || "").split(".").map(Number);
@@ -498,7 +503,7 @@ function createWindow() {
                 heightRange.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', bubbles: true }));
               }
               await new Promise((resolve) => setTimeout(resolve, 250));
-              const trigger = document.querySelector('.settings-dropdown-trigger');
+              const trigger = document.querySelector('.font-setting-row .settings-dropdown-trigger');
               trigger?.click();
               await new Promise((resolve) => setTimeout(resolve, 80));
               const tahoma = [...document.querySelectorAll('.settings-dropdown-option')].find((item) => /Tahoma/i.test(item.textContent || ''));
@@ -532,7 +537,7 @@ function createWindow() {
               heightRangeValue: document.querySelector('.chat-height-range')?.value || '',
               numberValue: document.querySelectorAll('.settings-number-field input')?.[0]?.value || '',
               heightNumberValue: document.querySelectorAll('.settings-number-field input')?.[1]?.value || '',
-              fontValue: document.querySelector('.settings-dropdown-value strong')?.textContent?.trim() || '',
+              fontValue: document.querySelector('.font-setting-row .settings-dropdown-value strong')?.textContent?.trim() || '',
               workerCards: document.querySelectorAll('.worker-setting-card').length,
               settingsWidth: Math.round(settingsView?.getBoundingClientRect().width || 0),
               mainContentWidth: Math.round((main?.clientWidth || 0) - 100),
@@ -1200,12 +1205,20 @@ async function runtimeBaseStatus() {
         { pid: runtime?.runtimePid, name: "node" },
         { pid: runtime?.tunnelPid, name: "cloudflared" }
       ].filter((item) => processAlive(item.pid));
+      const fallbackAllowedRoots = [...new Set([
+        root,
+        ...processOptions(processCommand, "allow-root"),
+        ...(Array.isArray(profile?.allowedRoots) ? profile.allowedRoots : [])
+      ].filter((value) => typeof value === "string" && value.trim()).map((value) => path.resolve(value)))];
       const config = {
         root,
         port,
         hostname,
         tokenFile: resolvedTokenFile,
-        tunnel: processOption(processCommand, "tunnel") || runtime?.tunnel || profile?.tunnel || "none"
+        tunnel: processOption(processCommand, "tunnel") || runtime?.tunnel || profile?.tunnel || "none",
+        allowedRoots: Array.isArray(local?.data?.allowedRoots) && local.data.allowedRoots.length
+          ? local.data.allowedRoots.map((value) => path.resolve(value))
+          : fallbackAllowedRoots
       };
       const value = {
         task,
@@ -1500,7 +1513,17 @@ async function listProjects() {
     ? status.local.data.mcpSessions.projectWorkspaces
     : [];
   const task = await scheduledTask();
-  const taskConfig = parseTaskArguments(task.arguments);
+  const parsedTaskConfig = parseTaskArguments(task.arguments);
+  const liveConfig = status?.local?.data && typeof status.local.data === "object" ? status.local.data : {};
+  const taskConfig = {
+    ...parsedTaskConfig,
+    root: parsedTaskConfig.root || liveConfig.defaultRoot || status?.config?.root || task?.root || "",
+    allowedRoots: [...new Set([
+      ...(parsedTaskConfig.allowedRoots || []),
+      ...(Array.isArray(status?.config?.allowedRoots) ? status.config.allowedRoots : []),
+      ...(Array.isArray(liveConfig.allowedRoots) ? liveConfig.allowedRoots : [])
+    ].filter((value) => typeof value === "string" && value.trim()).map((value) => path.resolve(value)))]
+  };
   const activeRoot = taskConfig.root;
   const selectedRoots = new Set(Object.values(readManagerSettings().repoSelections || {})
     .filter((root) => typeof root === "string" && root.trim())
@@ -1933,11 +1956,6 @@ async function sendProfileRequest(payload) {
     if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
   }
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
-  await localMcpTool(status.config, token, "browser_control", {
-    action: "select_workspace",
-    profile_id: profileId,
-    root: selectedProject.root
-  }, 20000);
   const taskText = [
     ...(newChat ? ["@CodexPro"] : ["Hãy sử dụng MCP CodexPro đã được kích hoạt trong đoạn chat này."]),
     `Repo đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
@@ -2152,6 +2170,13 @@ ipcMain.handle("codexpro:delete-worker-image-pack", (_event, packId) => deleteWo
 ipcMain.handle("codexpro:choose-worker-image", (_event, payload) => chooseWorkerImage(payload?.packId, payload?.state));
 ipcMain.handle("codexpro:reset-worker-image", (_event, payload) => resetWorkerImage(payload?.packId, payload?.state));
 ipcMain.handle("codexpro:reset-manager-settings", () => resetManagerSettings());
+ipcMain.handle("codexpro:headless-workers", () => headlessWorkers.listWorkers());
+ipcMain.handle("codexpro:create-headless-worker", (_event, payload) => headlessWorkers.createWorker(payload));
+ipcMain.handle("codexpro:sync-headless-worker", (_event, workerId) => headlessWorkers.syncWorker(workerId));
+ipcMain.handle("codexpro:start-headless-worker", (_event, workerId) => headlessWorkers.startWorker(workerId));
+ipcMain.handle("codexpro:stop-headless-worker", (_event, workerId) => headlessWorkers.stopWorker(workerId));
+ipcMain.handle("codexpro:delete-headless-worker", (_event, workerId) => headlessWorkers.deleteWorker(workerId));
+ipcMain.handle("codexpro:set-headless-worker-autostart", (_event, payload) => headlessWorkers.setWorkerAutoStart(payload?.workerId, payload?.autoStart));
 ipcMain.handle("codexpro:choose-request-files", () => chooseRequestFiles());
 ipcMain.handle("codexpro:capture-clipboard-image", () => captureClipboardImage());
 ipcMain.handle("codexpro:send-profile-request", (_event, payload) => sendProfileRequest(payload));
@@ -2199,6 +2224,9 @@ app.whenReady().then(() => {
     });
   }
   createWindow();
+  void headlessWorkers.startAutoWorkers().catch((error) => {
+    console.warn("Không thể tự khởi động headless worker:", error instanceof Error ? error.message : String(error));
+  });
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

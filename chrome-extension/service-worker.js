@@ -2,6 +2,7 @@ const BRIDGE = 'http://127.0.0.1:9224';
 const HEADERS = {'content-type':'application/json','x-codexpro-extension':'profile-bridge-v1'};
 const CHAT_REQUEST_STALE_MS = 30 * 60 * 1000;
 const CHAT_NETWORK_STATE_KEY = 'codexproChatNetworkStateV1';
+const TRANSIENT_CHAT_NETWORK_GRACE_MS = 8000;
 const DOM_READ_TIMEOUT_MS = 2500;
 const CANONICAL_READ_TIMEOUT_MS = 15000;
 const DOM_ACTION_TIMEOUT_MS = 5000;
@@ -26,6 +27,7 @@ let chatNetworkStateLoadPromise = null;
 let recentConversationCache = {at:0,items:[]};
 const TITLE_OVERRIDE_TTL_MS = 10 * 60 * 1000;
 let conversationTitleOverrides = null;
+let headlessIdentityCache = null;
 
 function conversationIdFromUrl(value) {
   try{return new URL(String(value||'')).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1]||'';}catch{return '';}
@@ -189,6 +191,14 @@ function beginChatRequest(details) {
   })();
 }
 
+function isTransientChatNetworkError(error) {
+  const value=String(error||'').toUpperCase();
+  return value.includes('ERR_NETWORK_CHANGED')
+    || value.includes('ERR_NETWORK_IO_SUSPENDED')
+    || value.includes('ERR_CONNECTION_RESET')
+    || value.includes('ERR_CONNECTION_CLOSED');
+}
+
 function finishChatRequest(details,state) {
   if(!isChatGenerationRequest(details))return;
   void (async()=>{
@@ -198,6 +208,38 @@ function finishChatRequest(details,state) {
     const now=Date.now();
     const startedAt=Number(current?.started_at_ms||now);
     const statusCode=Number(details.statusCode)||0;
+    const errorText=String(details.error||'').slice(0,300);
+    if(state==='failed'&&statusCode===0&&isTransientChatNetworkError(errorText)){
+      const requestId=String(details.requestId||current?.request_id||'');
+      chatNetworkStateByTab.set(details.tabId,{
+        ...(current||{}),
+        state:'generating',
+        request_id:requestId,
+        started_at_ms:startedAt,
+        completed_at_ms:0,
+        status_code:0,
+        error:''
+      });
+      await persistChatNetworkState();
+      scheduleRealtimeProfilePush();
+      setTimeout(()=>{
+        void (async()=>{
+          await ensureChatNetworkStateLoaded();
+          const latest=chatNetworkStateByTab.get(details.tabId);
+          if(!latest||String(latest.request_id||'')!==requestId||latest.state!=='generating')return;
+          chatNetworkStateByTab.set(details.tabId,{
+            ...latest,
+            state:'failed',
+            completed_at_ms:Date.now(),
+            status_code:0,
+            error:errorText||'Transient network error did not recover'
+          });
+          await persistChatNetworkState();
+          scheduleRealtimeProfilePush();
+        })();
+      },TRANSIENT_CHAT_NETWORK_GRACE_MS);
+      return;
+    }
     const failed=state==='failed'||statusCode>=400;
     chatNetworkStateByTab.set(details.tabId,{
       ...(current||{}),
@@ -281,13 +323,49 @@ chrome.webRequest.onErrorOccurred.addListener(details=>{const attributed=attribu
 chrome.webRequest.onBeforeRedirect.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'redirected',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
 chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
 
+async function headlessIdentity(stored) {
+  if(headlessIdentityCache)return headlessIdentityCache;
+  if(stored.headlessWorkerId){
+    headlessIdentityCache={
+      id:String(stored.headlessWorkerId),
+      label:String(stored.headlessWorkerLabel||'CodexPro Headless'),
+      source_profile_id:String(stored.headlessSourceProfileId||stored.profileId||'')
+    };
+    return headlessIdentityCache;
+  }
+  const tabs=await chrome.tabs.query({});
+  const bootstrap=tabs.find(tab=>String(tab.url||'').startsWith('http://127.0.0.1:9224/headless-bootstrap'));
+  if(!bootstrap?.url)return null;
+  try{
+    const url=new URL(bootstrap.url);
+    const id=String(url.searchParams.get('worker_id')||'').replace(/[^A-Za-z0-9_-]/g,'').slice(0,80);
+    if(!id)return null;
+    const label=String(url.searchParams.get('label')||`Headless ${id.slice(-8)}`).slice(0,120);
+    const sourceProfileId=String(stored.profileId||'').slice(0,160);
+    await chrome.storage.local.set({headlessWorkerId:id,headlessWorkerLabel:label,headlessSourceProfileId:sourceProfileId});
+    if(Number.isInteger(bootstrap.id))await chrome.tabs.remove(bootstrap.id).catch(()=>{});
+    headlessIdentityCache={id,label,source_profile_id:sourceProfileId};
+    return headlessIdentityCache;
+  }catch{return null;}
+}
+
 async function profileInfo() {
-  const stored = await chrome.storage.local.get(['profileId','active','connectorInstall']);
-  const profileId = stored.profileId || crypto.randomUUID();
-  if (!stored.profileId) await chrome.storage.local.set({profileId});
+  const stored = await chrome.storage.local.get(['profileId','active','connectorInstall','headlessWorkerId','headlessWorkerLabel','headlessSourceProfileId']);
+  const headless=await headlessIdentity(stored);
+  const profileId = headless?.id || stored.profileId || crypto.randomUUID();
+  if (!headless && !stored.profileId) await chrome.storage.local.set({profileId});
   let email = '';
   try { email = (await chrome.identity.getProfileUserInfo({accountStatus:'ANY'})).email || ''; } catch {}
-  return {id:profileId,email,label:email || `Chrome ${profileId.slice(0,8)}`,version:chrome.runtime.getManifest().version,connector_install:stored.connectorInstall||null,active:Boolean(stored.active)};
+  return {
+    id:profileId,
+    email,
+    label:headless?.label || email || `Chrome ${profileId.slice(0,8)}`,
+    version:chrome.runtime.getManifest().version,
+    connector_install:stored.connectorInstall||null,
+    active:Boolean(stored.active),
+    headless:Boolean(headless),
+    source_profile_id:headless?.source_profile_id||''
+  };
 }
 
 async function getConversationTitleOverrides() {
@@ -1441,7 +1519,7 @@ async function probeConnectorEndpoint(serverUrl) {
     const response=await fetch(serverUrl,{
       method:'POST',
       headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},
-      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.39'}}}),
+      body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.42'}}}),
       signal:controller.signal
     });
     const body=(await response.text()).slice(0,20000);

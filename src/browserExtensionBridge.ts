@@ -22,6 +22,8 @@ export interface ExtensionProfileSummary {
   connector_message: string;
   connector_checked_at: string;
   worker_id: string;
+  headless: boolean;
+  source_profile_id: string;
   active: boolean;
   connected: boolean;
   last_seen: string;
@@ -79,6 +81,8 @@ interface ExtensionProfile {
   connectorCheckedAt: string;
   workspaceRoot: string;
   connectorWorkerId: string;
+  headless: boolean;
+  sourceProfileId: string;
   lastSeen: number;
   tabs: unknown[];
   recentConversations: unknown[];
@@ -180,6 +184,8 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     connectorCheckedAt: "",
     workspaceRoot: profileWorkspaceRoots.get(id) || "",
     connectorWorkerId: "",
+    headless: false,
+    sourceProfileId: "",
     lastSeen: 0,
     tabs: [],
     recentConversations: [],
@@ -188,6 +194,8 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   profile.email = String(source.email ?? profile.email ?? "").trim().slice(0, 320);
   profile.label = String(source.label ?? profile.label ?? profile.email ?? `Chrome ${id.slice(0, 8)}`).trim().slice(0, 320);
   profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
+  profile.headless = source.headless === true;
+  profile.sourceProfileId = String(source.source_profile_id ?? profile.sourceProfileId ?? "").trim().slice(0, 160);
   if (source.connector_install && typeof source.connector_install === "object") {
     profile.connectorInstalled = source.connector_install.ok === true;
     profile.connectorMessage = String(source.connector_install.message ?? "").trim().slice(0, 500);
@@ -224,6 +232,18 @@ function syncWaiters(state: BridgeState): void {
 
 async function handleRequest(state: BridgeState, req: IncomingMessage, res: ServerResponse): Promise<void> {
   setCors(req, res);
+  if (req.method === "GET" && String(req.url || "").startsWith("/headless-bootstrap")) {
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      res.statusCode = 403;
+      res.end("Forbidden");
+      return;
+    }
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    res.end("<!doctype html><meta charset=\"utf-8\"><title>CodexPro Headless</title><body>CodexPro headless worker bootstrap.</body>");
+    return;
+  }
   if (req.method === "OPTIONS") {
     if (!extensionOrigin(req)) {
       res.statusCode = 403;
@@ -411,6 +431,8 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       connector_message: profile.connectorMessage,
       connector_checked_at: profile.connectorCheckedAt,
       worker_id: profile.connectorWorkerId,
+      headless: profile.headless,
+      source_profile_id: profile.sourceProfileId,
       active: state.activeProfileId === profile.id,
       connected: now - profile.lastSeen <= PROFILE_TTL_MS,
       last_seen: new Date(profile.lastSeen).toISOString(),

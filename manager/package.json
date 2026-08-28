@@ -39,6 +39,13 @@
       "electron/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "../chrome-extension",
+        "to": "chrome-extension",
+        "filter": ["**/*"]
+      }
+    ],
     "asar": true,
     "win": {
       "icon": "../docs/favicon.svg",

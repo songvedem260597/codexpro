@@ -368,7 +368,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.41";
+const WORKER_EXTENSION_VERSION = "0.5.42";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -511,6 +511,9 @@ function App() {
   const [chatWidthInput, setChatWidthInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatWidth));
   const [chatHeightInput, setChatHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatHeight));
   const [settingsBusy, setSettingsBusy] = useState("");
+  const [headlessState, setHeadlessState] = useState({ supported: false, chromePath: "", chromeUserDataRoot: "", sourceProfiles: [], workers: [] });
+  const [headlessBusy, setHeadlessBusy] = useState("");
+  const [headlessSourceProfile, setHeadlessSourceProfile] = useState("");
   const [workerPackDraft, setWorkerPackDraft] = useState("");
   const [showWorkerPackCreator, setShowWorkerPackCreator] = useState(false);
   const [workerPackDeleteArmed, setWorkerPackDeleteArmed] = useState("");
@@ -587,6 +590,41 @@ function App() {
   useEffect(() => {
     setRequestProjectRoots((current) => ({ ...current, ...(managerSettings.repoSelections || {}) }));
   }, [managerSettings.repoSelections]);
+
+  const refreshHeadlessWorkers = useCallback(async () => {
+    try {
+      const next = await api.getHeadlessWorkers();
+      setHeadlessState(next || { supported: false, chromePath: "", chromeUserDataRoot: "", sourceProfiles: [], workers: [] });
+      setHeadlessSourceProfile((current) => current || next?.sourceProfiles?.[0]?.profileDirectory || "");
+      return next;
+    } catch (err) {
+      setError(err?.message || String(err));
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshHeadlessWorkers();
+    if (activePage !== "settings") return undefined;
+    const timer = window.setInterval(() => void refreshHeadlessWorkers(), 4000);
+    return () => window.clearInterval(timer);
+  }, [activePage, refreshHeadlessWorkers]);
+
+  const runHeadlessAction = useCallback(async (key, action, successMessage) => {
+    setHeadlessBusy(key);
+    try {
+      const result = await action();
+      await refreshHeadlessWorkers();
+      if (successMessage) notify(successMessage);
+      if (result?.warning) notify(result.warning);
+      return result;
+    } catch (err) {
+      setError(err?.message || String(err));
+      return null;
+    } finally {
+      setHeadlessBusy("");
+    }
+  }, [notify, refreshHeadlessWorkers]);
 
   const saveManagerSetting = useCallback(async (patch, message = "Đã lưu cài đặt") => {
     setSettingsBusy("save");
@@ -1720,7 +1758,7 @@ function App() {
               {responseCurrent && !isNewChat && selectedNetworkState !== "idle" && (
                 <div className={`network-response-notice is-${selectedNetworkState}`}>
                   <strong>{selectedBusy ? "Network: AI đang xử lý" : selectedNetworkFailed ? "Network: request thất bại" : "Network: AI đã hoàn tất phản hồi"}</strong>
-                  <span>{selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : selectedNetworkCompleted ? `Không cần DOM để xác nhận hoàn tất${response?.networkDurationMs || selectedTab?.network_duration_ms ? ` · ${Math.round((response?.networkDurationMs || selectedTab?.network_duration_ms) / 1000)}s` : ""}.` : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
+                  <span>{selectedBusy ? "Theo dõi trực tiếp vòng đời request của ChatGPT." : selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : selectedNetworkCompleted ? `Không cần DOM để xác nhận hoàn tất${response?.networkDurationMs || selectedTab?.network_duration_ms ? ` · ${Math.round((response?.networkDurationMs || selectedTab?.network_duration_ms) / 1000)}s` : ""}.` : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
                 </div>
               )}
               {sending && (
@@ -2053,6 +2091,88 @@ function App() {
               <button className="button secondary" onClick={copyLink} disabled={!status?.mcpLink}>Copy link</button>
               <button className="button danger-quiet" onClick={rotateLink} disabled={Boolean(busy)}>{busy === "rotate" ? "Đang tạo..." : "Tạo token + link mới"}</button>
               <button className="text-button" onClick={() => api.openExternal("https://chatgpt.com/plugins?q=CodexPro")}>Mở Plugins ChatGPT ↗</button>
+            </div>
+          </section>
+
+          <section className="settings-panel headless-workers-panel">
+            <div className="settings-panel-head">
+              <div>
+                <p className="eyebrow">HEADLESS WORKERS</p>
+                <h2>Chrome worker chạy nền</h2>
+                <p className="section-note">Clone session từ Chrome profile chính sang profile riêng của CodexPro rồi chạy Chrome <code>--headless=new</code>. Dùng chung trên macOS và Windows.</p>
+              </div>
+              <span className={`headless-support-badge ${headlessState.supported ? "is-ready" : "is-offline"}`}>{headlessState.supported ? "SẴN SÀNG" : "CHƯA SẴN SÀNG"}</span>
+            </div>
+            <div className="headless-create-row">
+              <div className="headless-source-select">
+                <label>Chrome profile nguồn</label>
+                <SettingsDropdown
+                  value={headlessSourceProfile}
+                  options={(headlessState.sourceProfiles || []).map((profile) => ({
+                    value: profile.profileDirectory,
+                    label: profile.userName || profile.name || profile.profileDirectory,
+                    hint: `${profile.name || profile.profileDirectory} · ${profile.profileDirectory}`
+                  }))}
+                  disabled={Boolean(headlessBusy) || !(headlessState.sourceProfiles || []).length}
+                  ariaLabel="Chọn Chrome profile để clone session"
+                  onChange={setHeadlessSourceProfile}
+                />
+              </div>
+              <button
+                type="button"
+                className="button primary headless-create-button"
+                disabled={Boolean(headlessBusy) || !headlessState.supported || !headlessSourceProfile}
+                onClick={() => void runHeadlessAction(
+                  "create",
+                  () => api.createHeadlessWorker({ sourceProfileDirectory: headlessSourceProfile, autoStart: true }),
+                  "Đã tạo headless worker và clone session"
+                )}
+              >{headlessBusy === "create" ? "Đang tạo…" : "＋ Tạo headless worker"}</button>
+            </div>
+            <div className="headless-runtime-meta">
+              <span><b>Chrome</b> {headlessState.chromePath || "Không tìm thấy"}</span>
+              <span><b>User data</b> {headlessState.chromeUserDataRoot || "—"}</span>
+            </div>
+            {!headlessState.supported && <div className="headless-warning">Cần Google Chrome và CodexPro extension đi kèm app. Có thể đặt <code>CODEXPRO_CHROME_PATH</code> nếu Chrome nằm ở vị trí khác.</div>}
+            <div className="headless-worker-list">
+              {(headlessState.workers || []).length === 0 && <div className="headless-empty">Chưa có headless worker. Chọn profile chính rồi tạo worker đầu tiên.</div>}
+              {(headlessState.workers || []).map((worker) => {
+                const workerBusy = headlessBusy === worker.id;
+                return (
+                  <article className="headless-worker-card" key={worker.id}>
+                    <div className={`headless-worker-status ${worker.running ? "is-running" : "is-stopped"}`}><span />{worker.running ? "RUNNING" : "STOPPED"}</div>
+                    <div className="headless-worker-main">
+                      <div className="headless-worker-title"><strong>{worker.label}</strong><code>{worker.id}</code></div>
+                      <div className="headless-worker-details">
+                        <span>Nguồn: <b>{worker.sourceUserName || worker.sourceProfileName || worker.sourceProfileDirectory}</b></span>
+                        <span>Profile: <code>{worker.sourceProfileDirectory}</code></span>
+                        <span>{worker.running ? `PID ${worker.pid}` : "Không chạy"}</span>
+                        <span>{worker.lastSyncedAt ? `Sync ${new Date(worker.lastSyncedAt).toLocaleString("vi-VN")}` : "Chưa sync"}</span>
+                      </div>
+                      {worker.lastSyncWarning && <div className="headless-worker-warning">{worker.lastSyncWarning}</div>}
+                      {worker.lastError && <div className="headless-worker-error">{worker.lastError}</div>}
+                    </div>
+                    <div className="headless-worker-controls">
+                      <label className="headless-autostart-toggle">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(worker.autoStart)}
+                          disabled={workerBusy}
+                          onChange={(event) => void runHeadlessAction(
+                            worker.id,
+                            () => api.setHeadlessWorkerAutoStart({ workerId: worker.id, autoStart: event.target.checked }),
+                            event.target.checked ? "Đã bật tự chạy headless worker" : "Đã tắt tự chạy headless worker"
+                          )}
+                        />
+                        <span>Tự chạy</span>
+                      </label>
+                      <button type="button" className="button secondary" disabled={workerBusy} onClick={() => void runHeadlessAction(worker.id, () => api.syncHeadlessWorker(worker.id), "Đã sync lại session từ Chrome chính")}>{workerBusy ? "Đang xử lý…" : "Sync session"}</button>
+                      <button type="button" className={worker.running ? "button danger-quiet" : "button primary"} disabled={workerBusy} onClick={() => void runHeadlessAction(worker.id, () => worker.running ? api.stopHeadlessWorker(worker.id) : api.startHeadlessWorker(worker.id), worker.running ? "Đã dừng headless worker" : "Đã chạy headless worker")}>{worker.running ? "Dừng" : "Chạy"}</button>
+                      <button type="button" className="button ghost" disabled={workerBusy} onClick={() => void runHeadlessAction(worker.id, () => api.deleteHeadlessWorker(worker.id), "Đã xóa headless worker")}>Xóa</button>
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           </section>
 
