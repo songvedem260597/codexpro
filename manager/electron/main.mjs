@@ -2484,7 +2484,10 @@ async function getProfileResponse(payload) {
     action: "get_chat_response",
     profile_id: profileId,
     conversation_id: conversationId,
-    read_dom: payload?.readDom !== false,
+    // Keep canonical recovery compatible with an already-running pre-canonical_only server.
+    // New workers return before touching DOM when canonical_only is present; old servers strip
+    // the unknown flag but still perform the existing canonical + DOM response read.
+    read_dom: payload?.canonicalOnly === true || payload?.readDom !== false,
     canonical_only: payload?.canonicalOnly === true,
     recover_stale_dom: payload?.recoverStaleDom === true
   }, 80000);
