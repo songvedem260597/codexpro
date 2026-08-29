@@ -49,7 +49,7 @@ const DEFAULT_GLOBAL_RULES = `# CodexPro Global Rules
 - Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
 `;
 
-const WORKER_EXTENSION_VERSION = "0.5.67";
+const WORKER_EXTENSION_VERSION = "0.5.73";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
 const GIT_SUMMARY_CACHE_MS = 2 * 60 * 1000;
@@ -352,6 +352,8 @@ function normalizeChatCacheMessage(message, index) {
     truncated: Boolean(message?.truncated),
     pending: Boolean(message?.pending),
     uncertain: Boolean(message?.uncertain),
+    provisional: Boolean(message?.provisional),
+    endTurn: message?.endTurn === true ? true : message?.endTurn === false ? false : null,
     submissionState: ["pending", "submitted", "uncertain"].includes(String(message?.submissionState || "")) ? String(message.submissionState) : "",
     createdAt: String(message?.createdAt || "").slice(0, 80)
   };
@@ -653,6 +655,12 @@ async function captureClipboardImage() {
 }
 
 const browserProfileStreamControllers = new WeakMap();
+let latestBrowserProfileStream = { connected: false, checkedAt: "", profiles: [] };
+
+function cachedBrowserProfileForSend(profileId) {
+  if (!latestBrowserProfileStream.connected) return null;
+  return latestBrowserProfileStream.profiles.find((profile) => profile?.profile_id === profileId && profile?.connected) || null;
+}
 
 function startBrowserProfileEventStream(win) {
   browserProfileStreamControllers.get(win)?.abort();
@@ -669,6 +677,7 @@ function startBrowserProfileEventStream(win) {
           signal: controller.signal
         });
         if (!response.ok || !response.body) throw new Error(`Browser event stream HTTP ${response.status}`);
+        latestBrowserProfileStream = { ...latestBrowserProfileStream, connected: true };
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
@@ -683,10 +692,14 @@ function startBrowserProfileEventStream(win) {
             const data = frame.split("\n").filter((line) => line.startsWith("data:" )).map((line) => line.slice(5).trim()).join("\n");
             if (!data) continue;
             const payload = JSON.parse(data);
+            if (Array.isArray(payload?.profiles)) {
+              latestBrowserProfileStream = { connected: true, checkedAt: String(payload.checked_at || ""), profiles: payload.profiles };
+            }
             if (!win.isDestroyed()) win.webContents.send("codexpro:browser-profiles", payload);
           }
         }
       } catch (error) {
+        latestBrowserProfileStream = { ...latestBrowserProfileStream, connected: false };
         if (controller.signal.aborted || win.isDestroyed()) break;
       }
       await new Promise((resolve) => setTimeout(resolve, 2_000));
@@ -737,6 +750,46 @@ function createWindow() {
         let inspection = null;
         if (status.local?.ok && projects[0]?.root) {
           inspection = await win.webContents.executeJavaScript(`window.codexpro.inspectProject(${JSON.stringify(projects[0].root)})`, true);
+        }
+        let inspectionUiProbe = null;
+        if (process.env.CODEXPRO_MANAGER_SMOKE_INSPECTION === "1" && projects[0]?.root) {
+          const inspectionClicked = await win.webContents.executeJavaScript(`(() => {
+            const button = [...document.querySelectorAll('button')].find((item) => /Kiểm tra qua MCP/i.test(item.textContent || ''));
+            button?.scrollIntoView({ block: 'center' });
+            button?.click();
+            return Boolean(button);
+          })()`, true);
+          if (!inspectionClicked) throw new Error("Smoke không tìm thấy nút Kiểm tra qua MCP.");
+          const inspectionDeadline = Date.now() + 30000;
+          while (Date.now() < inspectionDeadline) {
+            inspectionUiProbe = await win.webContents.executeJavaScript(`(() => {
+              const modal = document.querySelector('.codexgraph-modal');
+              const shell = modal?.querySelector('.codexgraph-shell');
+              const stage = modal?.querySelector('.codexgraph-stage');
+              const sigma = modal?.querySelector('.codexgraph-sigma');
+              const canvas = sigma?.querySelector('canvas');
+              const metrics = [...(modal?.querySelectorAll('.codexgraph-metrics strong') || [])].map((node) => node.textContent?.trim() || '');
+              const rect = (node) => node ? { width: Math.round(node.getBoundingClientRect().width), height: Math.round(node.getBoundingClientRect().height) } : null;
+              return {
+                open: Boolean(modal),
+                shell: Boolean(shell),
+                canvas: Boolean(canvas),
+                modal: rect(modal),
+                stage: rect(stage),
+                sigma: rect(sigma),
+                metrics,
+                warning: modal?.querySelector('.codexgraph-warning')?.textContent?.trim() || '',
+                title: modal?.querySelector('.codexgraph-summary h3')?.textContent?.trim() || '',
+                toolbar: Boolean(modal?.querySelector('.codexgraph-toolbar')),
+                detail: Boolean(modal?.querySelector('.codexgraph-detail'))
+              };
+            })()`, true);
+            if (inspectionUiProbe?.open && inspectionUiProbe?.shell && inspectionUiProbe?.canvas) break;
+            await new Promise((resolve) => setTimeout(resolve, 150));
+          }
+          if (!inspectionUiProbe?.open || !inspectionUiProbe?.shell || !inspectionUiProbe?.canvas) {
+            throw new Error(`CodexGraph modal chưa render đầy đủ: ${JSON.stringify(inspectionUiProbe)}`);
+          }
         }
         let settingsProbe = null;
         const settingsSmokeRequested = process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1" || process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "settings";
@@ -885,6 +938,8 @@ function createWindow() {
             const style = getComputedStyle(input);
             return { borderWidth: style.borderWidth, boxShadow: style.boxShadow, outlineWidth: style.outlineWidth, backgroundColor: style.backgroundColor };
           })()`, true);
+          await win.webContents.executeJavaScript("document.querySelector('.project-dropdown-trigger:not(:disabled)')?.click()", true);
+          await new Promise((resolve) => setTimeout(resolve, 120));
         }
         let renameProbe = null;
         if (process.env.CODEXPRO_MANAGER_SMOKE_RENAME === "1") {
@@ -999,17 +1054,21 @@ function createWindow() {
             const currentButton = activeCard?.querySelector('.request-card-actions .button.primary');
             if (!currentButton || currentButton.disabled) return { ok: false, error: 'Nút Gửi tin nhắn chưa sẵn sàng sau khi nhập.', textarea: activeCard?.querySelector('textarea')?.value || '' };
             const attachmentsBeforeSend = [...activeCard.querySelectorAll('.request-file-copy strong')].map((node) => node.textContent?.trim() || '').filter(Boolean);
-            const buttonRect = currentButton.getBoundingClientRect();
-            window.__codexproSmokeSendTarget = { x: buttonRect.left + buttonRect.width / 2, y: buttonRect.top + buttonRect.height / 2 };
             const sendDeadline = Date.now() + 45000;
+            const probeStartedAt = Date.now();
             let sendStarted = false;
+            let inputClearedAt = 0;
+            currentButton.click();
             while (Date.now() < sendDeadline) {
               activeCard = findCurrentCard() || activeCard;
               const activeButton = activeCard?.querySelector('.request-card-actions .button.primary');
+              const activeTextarea = activeCard?.querySelector('textarea');
+              const attachmentCount = activeCard?.querySelectorAll('.request-file').length || 0;
+              if (!inputClearedAt && (activeTextarea?.value || '') === '' && attachmentCount === 0) inputClearedAt = Date.now();
               const loading = Boolean(activeButton && (activeButton.disabled || /(?:đang tải|đang gửi|đang tạo)/i.test(activeButton.textContent || '')));
               if (loading) sendStarted = true;
               if (sendStarted && activeButton && !activeButton.disabled && !/(?:đang tải|đang gửi|đang tạo)/i.test(activeButton.textContent || '')) break;
-              await new Promise((resolve) => setTimeout(resolve, 250));
+              await new Promise((resolve) => setTimeout(resolve, 50));
             }
             const finalCard = findCurrentCard() || activeCard;
             const currentTextarea = finalCard?.querySelector('textarea');
@@ -1033,17 +1092,13 @@ function createWindow() {
               attachmentsBeforeSend,
               attachmentPrepared,
               attachmentCleared,
+              sendStarted,
+              probeStartedAt,
+              inputClearedMs: inputClearedAt ? inputClearedAt - probeStartedAt : null,
+              probeDurationMs: Date.now() - probeStartedAt,
               conversationTitle: finalCard?.querySelector('.chat-dropdown-value strong')?.textContent?.trim() || ''
             };
           })()`, true);
-          let smokeSendTarget = null;
-          for (let attempt = 0; attempt < 80 && !smokeSendTarget; attempt += 1) {
-            await new Promise((resolve) => setTimeout(resolve, 50));
-            smokeSendTarget = await win.webContents.executeJavaScript("window.__codexproSmokeSendTarget", true);
-          }
-          if (!smokeSendTarget || !Number.isFinite(smokeSendTarget.x) || !Number.isFinite(smokeSendTarget.y)) throw new Error("Smoke không định vị được nút Gửi tin nhắn hiện hành.");
-          win.webContents.sendInputEvent({ type: "mouseDown", x: Math.round(smokeSendTarget.x), y: Math.round(smokeSendTarget.y), button: "left", clickCount: 1 });
-          win.webContents.sendInputEvent({ type: "mouseUp", x: Math.round(smokeSendTarget.x), y: Math.round(smokeSendTarget.y), button: "left", clickCount: 1 });
           sendProbe = await sendProbePromise;
           if (sendConversationId && chatModalProbe?.profile) {
             await new Promise((resolve) => setTimeout(resolve, 800));
@@ -1052,6 +1107,9 @@ function createWindow() {
             sendProbe.actualUserMessageVisible = Boolean(actualUserMessage);
             sendProbe.actualUserMessageTail = String(actualUserMessage?.text || "").slice(-300);
             sendProbe.actualNetworkState = String(actual?.network_state || "");
+            sendProbe.actualNetworkStartedAt = String(actual?.network_last_started_at || "");
+            const actualNetworkStartedMs = Date.parse(sendProbe.actualNetworkStartedAt) || 0;
+            sendProbe.clickToNetworkMs = actualNetworkStartedMs && sendProbe.probeStartedAt ? Math.max(0, actualNetworkStartedMs - sendProbe.probeStartedAt) : null;
             sendProbe.actualBusy = Boolean(actual?.busy);
             sendProbe.ok = Boolean(sendProbe.ok && sendProbe.actualUserMessageVisible);
           }
@@ -1248,7 +1306,7 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         }
         const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeRepoProbe, toastProbe }));
+        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, inspectionUiProbe, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeRepoProbe, toastProbe }));
       } catch (error) {
         console.error(error instanceof Error ? error.stack || error.message : String(error));
         process.exitCode = 1;
@@ -1666,6 +1724,17 @@ async function readyRuntimeBaseStatus() {
   return base;
 }
 
+async function runtimeConnectionForSend() {
+  const cached = runtimeBaseCache?.value;
+  if (cached?.config?.port && cached?.token) {
+    return { config: cached.config, token: cached.token, source: "runtime-cache" };
+  }
+  const task = await scheduledTask();
+  const config = parseTaskArguments(task.arguments);
+  const token = readToken(config.tokenFile);
+  return { config, token, source: "scheduled-task" };
+}
+
 async function readyRuntimeStatus() {
   let status = await runtimeStatus();
   if (status.local.ok) return status;
@@ -2068,6 +2137,19 @@ async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
   return { payload, sessionId: nextSessionId };
 }
 
+async function openLocalMcpSession(config, token) {
+  const url = `http://127.0.0.1:${config.port}/mcp`;
+  const initialized = await mcpRequest(url, token, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.78" } }
+  });
+  const session = { url, token, sessionId: initialized.sessionId, nextId: 2 };
+  await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, session.sessionId);
+  return session;
+}
+
 async function closeLocalMcpSession(session) {
   if (!session?.url || !session?.sessionId) return;
   try {
@@ -2088,6 +2170,27 @@ async function closeLocalMcpSession(session) {
   }
 }
 
+async function localMcpToolInSession(session, toolName, args, timeoutMs = 15000) {
+  const called = await mcpRequest(session.url, session.token, {
+    jsonrpc: "2.0",
+    id: session.nextId++,
+    method: "tools/call",
+    params: { name: toolName, arguments: args }
+  }, session.sessionId, timeoutMs);
+  const result = called.payload.result;
+  if (result?.isError) {
+    const message = result.content?.find((item) => item.type === "text")?.text || "CodexPro MCP trả về lỗi.";
+    const structured = result.structuredContent?.error;
+    const envelope = structured && typeof structured === "object" && !Array.isArray(structured) ? structured : { name: "CodexProMcpError", message };
+    const error = new Error(String(envelope.message || message));
+    error.name = String(envelope.name || "CodexProMcpError");
+    error.code = String(envelope.code || "MCP_TOOL_ERROR");
+    error.details = envelope.details && typeof envelope.details === "object" ? envelope.details : envelope;
+    throw error;
+  }
+  return result?.structuredContent || {};
+}
+
 async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
   const url = `http://127.0.0.1:${config.port}/mcp`;
   const debug = process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1";
@@ -2096,7 +2199,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.74" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.78" } }
   });
   const sessionId = initialized.sessionId;
   try {
@@ -2460,46 +2563,78 @@ async function sendProfileRequestUnlocked(payload) {
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
   if (requestScope === "workspace" && !requestedProjectRoot) throw new Error("Hãy chọn thư mục hoặc dự án cần làm trước khi gửi yêu cầu.");
   if (text.length > 12000) throw new Error("Yêu cầu dài quá 12.000 ký tự.");
+  const sendStartedAt = Date.now();
   const files = requestedFiles.map((file) => requestFileSummary(file?.path));
   if (files.some((file) => file.size > MAX_REQUEST_ATTACHMENT_BYTES)) throw new Error("Mỗi file được tối đa 8 MB.");
   if (files.reduce((total, file) => total + file.size, 0) > MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES) throw new Error("Tổng file đính kèm được tối đa 10 MB.");
-  const attachments = await Promise.all(files.map(async (file) => ({
+  const attachmentsPromise = Promise.all(files.map(async (file) => ({
     name: file.name,
     mime_type: file.mimeType,
     data_base64: (await fs.promises.readFile(file.path)).toString("base64")
   })));
-  if (sendDebug) console.error('[manager-send] before readyRuntimeStatus');
-  let status = await readyRuntimeStatus();
-  if (sendDebug) console.error('[manager-send] after readyRuntimeStatus');
-  if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-  const allowedRoots = allowedWorkspaceRoots(status.config);
+  if (sendDebug) console.error('[manager-send] before runtimeConnectionForSend');
+  let base = await runtimeConnectionForSend();
+  if (sendDebug) console.error(`[manager-send] runtime source=${base.source}`);
+  if (!base.token) throw new Error("CodexPro chưa có token local MCP.");
+  let allowedRoots = allowedWorkspaceRoots(base.config);
   if (!allowedRoots.length) throw new Error("CodexPro chưa có vùng workspace nào được cấp quyền.");
   let selectedProject = null;
-  let initialWorkspaceRoot = allowedRoots.find((root) => status.config.root && root.toLowerCase() === path.resolve(status.config.root).toLowerCase()) || allowedRoots[0];
+  let initialWorkspaceRoot = allowedRoots.find((root) => base.config.root && root.toLowerCase() === path.resolve(base.config.root).toLowerCase()) || allowedRoots[0];
   if (requestScope === "workspace") {
-    const knownProjects = await listProjects();
-    selectedProject = knownProjects.find((project) => path.resolve(project.root).toLowerCase() === path.resolve(requestedProjectRoot).toLowerCase()) || null;
-    if (!selectedProject) throw new Error("Thư mục đã chọn không còn nằm trong danh sách workspace của CodexPro.");
-    initialWorkspaceRoot = selectedProject.root;
+    const resolvedProjectRoot = path.resolve(requestedProjectRoot);
+    if (!fs.existsSync(resolvedProjectRoot) || !fs.statSync(resolvedProjectRoot).isDirectory()) throw new Error("Thư mục đã chọn không còn tồn tại.");
+    if (!allowedRoots.some((root) => pathInside(resolvedProjectRoot, root))) throw new Error("Thư mục đã chọn nằm ngoài vùng workspace được CodexPro cấp quyền.");
+    selectedProject = { root: resolvedProjectRoot };
+    initialWorkspaceRoot = resolvedProjectRoot;
   }
-  let profile = status.browserProfiles.find((item) => item.profile_id === profileId);
+  let session;
+  try {
+    session = await openLocalMcpSession(base.config, base.token);
+  } catch (fastError) {
+    if (sendDebug) console.error('[manager-send] fast MCP connect failed; falling back to full runtime health');
+    const refreshed = await readyRuntimeBaseStatus();
+    if (!refreshed.local.ok) throw new Error("Local MCP chưa sẵn sàng.", { cause: fastError });
+    base = { config: refreshed.config, token: refreshed.token, source: "health-fallback" };
+    allowedRoots = allowedWorkspaceRoots(base.config);
+    if (!allowedRoots.length) throw new Error("CodexPro chưa có vùng workspace nào được cấp quyền.");
+    if (requestScope === "workspace") {
+      const resolvedProjectRoot = path.resolve(requestedProjectRoot);
+      if (!allowedRoots.some((root) => pathInside(resolvedProjectRoot, root))) throw new Error("Thư mục đã chọn nằm ngoài vùng workspace được CodexPro cấp quyền.");
+      selectedProject = { root: resolvedProjectRoot };
+      initialWorkspaceRoot = resolvedProjectRoot;
+    } else {
+      initialWorkspaceRoot = allowedRoots.find((root) => base.config.root && root.toLowerCase() === path.resolve(base.config.root).toLowerCase()) || allowedRoots[0];
+    }
+    session = await openLocalMcpSession(base.config, base.token);
+  }
+  try {
+  const streamedProfile = cachedBrowserProfileForSend(profileId);
+  const [attachments, profileResult] = await Promise.all([
+    attachmentsPromise,
+    streamedProfile ? Promise.resolve(null) : localMcpToolInSession(session, "browser_control", { action: "list_profiles" })
+  ]);
+  let profiles = Array.isArray(profileResult?.profiles) ? profileResult.profiles : [];
+  let profile = streamedProfile || profiles.find((item) => item.profile_id === profileId);
+  let profilePreflightSource = streamedProfile ? "browser-event-stream" : "list-profiles";
   if (!profile?.connected) {
-    status = await runtimeStatus({ forceRefresh: true });
-    profile = status.browserProfiles.find((item) => item.profile_id === profileId);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    const refreshedProfiles = await localMcpToolInSession(session, "browser_control", { action: "list_profiles" });
+    profiles = Array.isArray(refreshedProfiles.profiles) ? refreshedProfiles.profiles : [];
+    profile = profiles.find((item) => item.profile_id === profileId);
+    profilePreflightSource = "list-profiles-refresh";
   }
   if (!profile) throw new Error("Profile Chrome này không còn được CodexPro nhận diện.");
-  const token = readToken(status.config.tokenFile);
   if (!versionAtLeast(profile.extension_version)) {
     if (sendDebug) console.error(`[manager-send] updating worker ${profile.extension_version || "unknown"} -> ${WORKER_EXTENSION_VERSION}`);
-    await localMcpTool(status.config, token, "browser_control", {
+    await localMcpToolInSession(session, "browser_control", {
       action: "reload_extension",
       profile_id: profileId
     }, 75000);
     const updateDeadline = Date.now() + 15000;
     while (Date.now() < updateDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 500));
-      status = await runtimeStatus();
-      profile = status.browserProfiles.find((item) => item.profile_id === profileId);
+      const updateProfiles = await localMcpToolInSession(session, "browser_control", { action: "list_profiles" });
+      profile = (Array.isArray(updateProfiles.profiles) ? updateProfiles.profiles : []).find((item) => item.profile_id === profileId);
       if (profile?.connected && versionAtLeast(profile.extension_version)) break;
     }
     if (!profile?.connected || !versionAtLeast(profile.extension_version)) {
@@ -2517,11 +2652,24 @@ async function sendProfileRequestUnlocked(payload) {
     if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
   }
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
-  await localMcpTool(status.config, token, "browser_control", {
-    action: "select_workspace",
+  const currentWorkspaceRoot = String(profile.current_workspace_root || "").trim();
+  const workspaceSelectSkipped = Boolean(currentWorkspaceRoot && path.resolve(currentWorkspaceRoot).toLowerCase() === path.resolve(initialWorkspaceRoot).toLowerCase());
+  if (!workspaceSelectSkipped) {
+    await localMcpToolInSession(session, "browser_control", {
+      action: "select_workspace",
+      profile_id: profileId,
+      root: initialWorkspaceRoot
+    }, 75000);
+  }
+  const preparedTask = await localMcpToolInSession(session, "prepare_repo_task", {
     profile_id: profileId,
-    root: initialWorkspaceRoot
-  }, 75000);
+    task_id: taskId,
+    root: initialWorkspaceRoot,
+    scope: requestScope
+  }, 15000);
+  if (preparedTask?.prepared !== true || String(preparedTask?.task_id || "") !== taskId) {
+    throw new Error("CodexPro server không xác nhận task gate trước khi gửi request.");
+  }
   const taskScopeLines = requestScope === "all_allowed"
     ? [
         "CodexPro Manager đang ở chế độ TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN. Không có repo hoặc đường dẫn cụ thể bị khóa cho yêu cầu này.",
@@ -2547,7 +2695,8 @@ async function sendProfileRequestUnlocked(payload) {
     "",
     text ? `Yêu cầu của người dùng:\n${text}` : "Yêu cầu của người dùng nằm trong file đính kèm."
   ].join("\n");
-  const result = await localMcpTool(status.config, token, "browser_control", {
+  const dispatchStartedAt = Date.now();
+  const result = await localMcpToolInSession(session, "browser_control", {
     action: "send_chat_request",
     profile_id: profileId,
     conversation_id: newChat ? undefined : conversationId,
@@ -2556,7 +2705,10 @@ async function sendProfileRequestUnlocked(payload) {
     attachments
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
-  return { ...result, repo_task_id: taskId, repo_task_scope: requestScope, repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount };
+  return { ...result, repo_task_id: taskId, repo_task_scope: requestScope, repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource };
+  } finally {
+    await closeLocalMcpSession(session);
+  }
 }
 
 async function sendProfileRequest(payload) {
@@ -2627,29 +2779,40 @@ async function inspectThroughMcp(root) {
   const profile = profileForRoot(status.config.root);
   const fileToken = readToken(status.config.tokenFile);
   const token = fileToken || (typeof profile?.token === "string" && profile.token ? profile.token : "");
-  const url = `http://127.0.0.1:${status.config.port}/mcp`;
-  const initialized = await mcpRequest(url, token, {
-    jsonrpc: "2.0",
-    id: 1,
-    method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.74" } }
-  });
-  const sessionId = initialized.sessionId;
-  await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
-  const opened = await mcpRequest(url, token, {
-    jsonrpc: "2.0",
-    id: 2,
-    method: "tools/call",
-    params: { name: "open_workspace", arguments: { root } }
-  }, sessionId);
-  const workspaceId = opened.payload.result?.structuredContent?.workspace_id;
-  const snapshot = await mcpRequest(url, token, {
-    jsonrpc: "2.0",
-    id: 3,
-    method: "tools/call",
-    params: { name: "workspace_snapshot", arguments: { workspace_id: workspaceId, max_depth: 2, max_files: 300 } }
-  }, sessionId);
-  return snapshot.payload.result?.structuredContent || opened.payload.result?.structuredContent || {};
+  let session;
+  try {
+    session = await openLocalMcpSession(status.config, token);
+    const openedContent = await localMcpToolInSession(session, "open_workspace", {
+      root,
+      include_tree: true,
+      max_depth: 2,
+      max_files: 300
+    }, 30000);
+    const workspaceId = openedContent.workspace_id;
+    if (!workspaceId) throw new Error("CodexPro không trả về workspace_id khi mở dự án.");
+    const graphContent = await localMcpToolInSession(session, "code_graph", {
+      workspace_id: workspaceId,
+      max_nodes: 15000,
+      max_edges: 40000
+    }, 30000);
+    return {
+      ...openedContent,
+      codexgraph: {
+        schema_version: graphContent.schema_version,
+        source: graphContent.source || "CodexGraph",
+        nodes: graphContent.nodes || [],
+        edges: graphContent.edges || [],
+        coverage: graphContent.coverage || {},
+        warnings: graphContent.warnings || [],
+        output_limited: Boolean(graphContent.output_limited),
+        returned: graphContent.returned || {},
+        limits: graphContent.limits || {},
+        cache: graphContent.cache || {}
+      }
+    };
+  } finally {
+    await closeLocalMcpSession(session);
+  }
 }
 
 async function controlServer(action) {

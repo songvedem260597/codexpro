@@ -1,0 +1,274 @@
+.codexgraph-shell {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.codexgraph-summary {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 18px;
+  border: 1px solid #293442;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #111923 0%, #0d141c 55%, #101b17 100%);
+  box-shadow: inset 0 1px 0 #ffffff08;
+}
+
+.codexgraph-summary-copy { min-width: 0; }
+.codexgraph-summary-copy .eyebrow { margin: 0 0 5px; color: #65d69a; letter-spacing: .09em; }
+.codexgraph-summary-copy h3 { margin: 0; color: #edf5f0; font-size: 20px; font-weight: 670; }
+.codexgraph-summary-copy p:last-child { margin: 6px 0 0; color: #8290a1; font-size: 12px; line-height: 1.45; }
+.codexgraph-summary-copy code { color: #8bd7b0; font-family: "Cascadia Code", Consolas, monospace; }
+
+.codexgraph-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(86px, 1fr));
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.codexgraph-metrics > div {
+  display: grid;
+  gap: 2px;
+  min-width: 86px;
+  padding: 10px 12px;
+  border: 1px solid #2a3542;
+  border-radius: 8px;
+  background: #0b1118cc;
+}
+
+.codexgraph-metrics strong { color: #e8f0f5; font-size: 16px; line-height: 1.1; font-weight: 650; }
+.codexgraph-metrics span { color: #6f7e91; font-size: 11px; text-transform: uppercase; letter-spacing: .055em; }
+
+.codexgraph-toolbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) 180px 220px auto;
+  align-items: end;
+  gap: 9px;
+}
+
+.codexgraph-toolbar > label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: #7f8b9b;
+  font-size: 11px;
+}
+
+.codexgraph-toolbar > label > span { padding-left: 2px; }
+.codexgraph-toolbar input,
+.codexgraph-toolbar select {
+  width: 100%;
+  height: 38px;
+  padding: 0 11px;
+  border: 1px solid #2b3543;
+  border-radius: 8px;
+  outline: none;
+  background: #0b1017;
+  color: #d7e0ea;
+  font: inherit;
+  font-size: 12px;
+}
+.codexgraph-toolbar input:focus,
+.codexgraph-toolbar select:focus { border-color: #4b8065; box-shadow: 0 0 0 3px #56d18c12; }
+
+.codexgraph-search { position: relative; align-self: end; }
+.codexgraph-search > span {
+  position: absolute;
+  left: 11px;
+  bottom: 8px;
+  z-index: 1;
+  padding: 0 !important;
+  color: #7f8c9e;
+  font-size: 19px;
+  line-height: 1;
+  pointer-events: none;
+}
+.codexgraph-search input { padding-left: 35px; padding-right: 36px; }
+.codexgraph-search button {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #768398;
+  font-size: 18px;
+  cursor: pointer;
+}
+.codexgraph-search button:hover { color: #d7e0ea; background: #1a222d; }
+
+.codexgraph-live {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid #28523f;
+  border-radius: 8px;
+  background: #102019;
+  color: #8cdfae;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.codexgraph-live i { width: 7px; height: 7px; border-radius: 50%; background: #55df91; box-shadow: 0 0 12px #55df9190; }
+
+.codexgraph-stage-grid {
+  min-height: 560px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  gap: 12px;
+}
+
+.codexgraph-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 560px;
+  overflow: hidden;
+  border: 1px solid #27313e;
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 50% 45%, #16312542 0, #0c131b 34%, #080c12 74%),
+    #080c12;
+}
+.codexgraph-stage::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(#ffffff06 1px, transparent 1px), linear-gradient(90deg, #ffffff06 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(circle at center, #000 20%, transparent 84%);
+}
+
+.codexgraph-sigma { width: 100%; height: 100%; min-height: 560px; background: transparent !important; }
+.codexgraph-sigma .sigma-container { background: transparent !important; }
+.codexgraph-stage canvas { z-index: 1; }
+
+.codexgraph-stage .react-sigma-controls {
+  z-index: 5;
+  overflow: hidden;
+  border: 1px solid #2b3745;
+  border-radius: 8px;
+  background: #101721e8;
+  box-shadow: 0 10px 30px #0008;
+}
+.codexgraph-stage .react-sigma-control {
+  border: 0 !important;
+  border-bottom: 1px solid #28323f !important;
+  background: #101721 !important;
+  color: #b8c4d2 !important;
+}
+.codexgraph-stage .react-sigma-control:last-child { border-bottom: 0 !important; }
+.codexgraph-stage .react-sigma-control:hover { background: #17212d !important; color: #fff !important; }
+.codexgraph-stage .react-sigma-controls button {
+  border: 0 !important;
+  border-bottom: 1px solid #28323f !important;
+  background: #101721 !important;
+  color: #b8c4d2 !important;
+}
+.codexgraph-stage .react-sigma-controls button:last-child { border-bottom: 0 !important; }
+.codexgraph-stage .react-sigma-controls button:hover { background: #17212d !important; color: #fff !important; }
+.codexgraph-stage .react-sigma-controls button svg { fill: currentColor !important; stroke: currentColor !important; }
+
+.codexgraph-hint {
+  position: absolute;
+  left: 12px;
+  bottom: 11px;
+  z-index: 4;
+  max-width: calc(100% - 110px);
+  padding: 7px 10px;
+  border: 1px solid #28323f;
+  border-radius: 7px;
+  background: #080d14d9;
+  color: #6f7c8d;
+  font-size: 11px;
+  line-height: 1.35;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+
+.codexgraph-detail {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 15px;
+  border: 1px solid #293442;
+  border-radius: 10px;
+  background: #0b1017;
+}
+.codexgraph-detail.is-empty { align-items: center; justify-content: center; gap: 8px; padding: 28px; color: #6f7d8f; text-align: center; }
+.codexgraph-detail.is-empty strong { color: #cfd8e3; font-size: 14px; }
+.codexgraph-detail.is-empty span { max-width: 220px; font-size: 12px; line-height: 1.5; }
+.codexgraph-detail-icon { display: grid; place-items: center; width: 42px; height: 42px; margin-bottom: 3px; border: 1px solid #315441; border-radius: 50%; color: #6fd19c; background: #14231c; font-size: 23px; }
+.codexgraph-detail-head { display: flex; align-items: center; gap: 7px; }
+.codexgraph-kind,
+.codexgraph-virtual { display: inline-flex; align-items: center; min-height: 23px; padding: 0 8px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: .055em; text-transform: uppercase; }
+.codexgraph-kind { color: #9bdbb6; background: #183126; }
+.codexgraph-virtual { color: #7ddccb; background: #14302e; }
+.codexgraph-detail h3 { margin: 11px 0 7px; color: #e7eef5; font-size: 16px; line-height: 1.3; overflow-wrap: anywhere; }
+.codexgraph-path { display: block; padding: 8px 9px; border-radius: 7px; background: #080d13; color: #7e8ea1; font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.codexgraph-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin: 11px 0 13px; }
+.codexgraph-meta > div { min-width: 0; padding: 8px 9px; border: 1px solid #252f3a; border-radius: 7px; background: #0d141c; }
+.codexgraph-meta small { display: block; margin-bottom: 3px; color: #677587; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
+.codexgraph-meta strong { display: block; overflow: hidden; color: #b8c3d0; font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.codexgraph-related-head { display: flex; align-items: center; justify-content: space-between; padding: 0 1px 8px; border-bottom: 1px solid #222b36; color: #8b98a9; font-size: 11px; }
+.codexgraph-related-head strong { color: #6ecf9a; font-size: 11px; }
+.codexgraph-related-list { min-height: 0; overflow: auto; margin-top: 5px; padding-right: 2px; }
+.codexgraph-related-row { display: grid; grid-template-columns: 64px 16px minmax(0, 1fr); gap: 5px; align-items: start; padding: 8px 3px; border-bottom: 1px solid #1e2731; }
+.codexgraph-related-kind { overflow: hidden; color: #7b8da3; font-size: 9px; font-weight: 650; text-transform: uppercase; text-overflow: ellipsis; white-space: nowrap; }
+.codexgraph-related-direction { color: #66d49b; font-size: 12px; }
+.codexgraph-related-copy { min-width: 0; }
+.codexgraph-related-copy strong { display: block; overflow: hidden; color: #c8d2de; font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.codexgraph-related-copy small { display: block; margin-top: 2px; overflow: hidden; color: #5f6b7b; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.codexgraph-related-empty { padding: 14px 4px; color: #667384; font-size: 11px; line-height: 1.45; }
+
+.codexgraph-warning,
+.codexgraph-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid #5c4b2e;
+  border-radius: 8px;
+  background: #211b12;
+  color: #bda87f;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.codexgraph-warning strong { flex: 0 0 auto; color: #d9bd82; }
+.codexgraph-empty { display: grid; gap: 5px; margin-top: 16px; border-color: #314153; background: #101720; color: #7f8da0; }
+.codexgraph-empty strong { color: #cbd5df; }
+
+.modal.codexgraph-modal { width: min(1600px, 98vw); height: min(940px, 96vh); max-height: 96vh; overflow: auto; padding: 18px; }
+.codexgraph-modal .modal-head { position: sticky; top: -18px; z-index: 12; margin: -18px -18px 0; padding: 16px 18px 13px; border-bottom: 1px solid #252f3a; background: #11151df4; backdrop-filter: blur(12px); }
+.codexgraph-modal .modal-head h2 { margin-bottom: 0; }
+.codexgraph-modal .inspection-grid { margin-top: 14px; }
+.codexgraph-raw-details { margin-top: 14px; border-top: 1px solid #252e39; padding-top: 12px; }
+.codexgraph-raw-details summary { color: #8290a2; font-size: 12px; cursor: pointer; user-select: none; }
+.codexgraph-raw-details h3 { margin: 14px 0 8px; color: #b9c4d1; font-size: 12px; }
+
+@media (max-width: 1050px) {
+  .codexgraph-summary { align-items: stretch; flex-direction: column; }
+  .codexgraph-metrics { grid-template-columns: repeat(4, 1fr); width: 100%; }
+  .codexgraph-toolbar { grid-template-columns: 1fr 1fr; }
+  .codexgraph-live { justify-self: stretch; }
+  .codexgraph-stage-grid { grid-template-columns: 1fr; }
+  .codexgraph-detail { min-height: 220px; max-height: 320px; }
+}
+
+@media (max-width: 720px) {
+  .codexgraph-toolbar { grid-template-columns: 1fr; }
+  .codexgraph-metrics { grid-template-columns: 1fr 1fr; }
+  .codexgraph-stage,
+  .codexgraph-sigma { min-height: 460px; }
+}

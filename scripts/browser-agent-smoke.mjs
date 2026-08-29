@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
-import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant } from "../manager/src/chat-transcript.js";
+import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant } from "../manager/src/chat-transcript.js";
 import { projectSelectionChanged } from "../manager/src/chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "../manager/src/chat-response-audit.js";
 
@@ -56,6 +56,7 @@ const updatedStreamTranscript = mergeNetworkStreamTranscript(firstStreamTranscri
 });
 assert.equal(updatedStreamTranscript.filter((message) => message.id === "network-stream-assistant:conversation-1").length, 1, "network events must update one live response instead of flooding the transcript");
 assert.equal(updatedStreamTranscript.at(-1).text, "Đã xử lý gần xong");
+assert.equal(updatedStreamTranscript.at(-1).provisional, true, "network stream text must remain explicitly provisional until ChatGPT exposes a final response");
 assert.ok(updatedStreamTranscript.some((message) => message.text === "Phản hồi cũ vẫn phải còn"), "network streaming must preserve the previous response");
 assert.ok(updatedStreamTranscript.some((message) => message.text === "Yêu cầu mới"), "network streaming must preserve the optimistic user message");
 assert.deepEqual(replaceCanonicalTranscript(updatedStreamTranscript, []), updatedStreamTranscript, "an empty transient canonical read must not erase the visible transcript");
@@ -76,6 +77,8 @@ const materializedCanonicalTranscript = replaceCanonicalTranscript(updatedStream
   { id: "canonical-assistant-1", role: "assistant", text: "Đã nhận" }
 ]);
 assert.deepEqual(materializedCanonicalTranscript.map((message) => message.id), ["canonical-user-1", "network-stream-assistant:conversation-1"], "canonical materialization must preserve the live assistant identity so React does not remount the response");
+assert.equal(materializedCanonicalTranscript.at(-1).text, "Đã nhận", "a final canonical response must replace rather than merge an unrelated progress fragment");
+assert.notEqual(materializedCanonicalTranscript.at(-1).provisional, true, "canonical finalization must clear the provisional stream marker");
 const reloadRegressedTranscript = replaceCanonicalTranscript([
   { id: "checkpoint-user", role: "user", text: "Sửa lỗi reload" },
   { id: "checkpoint-assistant", role: "assistant", text: "Phần phản hồi đã được lưu trước reload" }
@@ -94,7 +97,7 @@ const previousCompleteTranscript = [
   { id: "previous-user-1", role: "user", text: "Yêu cầu cũ" },
   { id: "previous-assistant-1", role: "assistant", text: "Phản hồi cũ phải còn" },
   { id: "optimistic-user-2", role: "user", text: "Yêu cầu đang xử lý", submissionState: "submitted", createdAt: "2026-08-29T00:00:00.000Z" },
-  { id: "network-stream-assistant:conversation-1", role: "assistant", text: "Đang gọi tool" }
+  { id: "network-stream-assistant:conversation-1", role: "assistant", text: "Đang gọi tool", provisional: true, endTurn: false }
 ];
 const partialCanonicalTranscript = replaceCanonicalTranscript(previousCompleteTranscript, [
   { id: "canonical-user-1", role: "user", text: "Yêu cầu cũ" },
@@ -102,7 +105,11 @@ const partialCanonicalTranscript = replaceCanonicalTranscript(previousCompleteTr
   { id: "canonical-user-2", role: "user", text: "Yêu cầu đang xử lý" }
 ], { nowMs: Date.parse("2026-08-29T00:01:00.000Z") });
 assert.deepEqual(partialCanonicalTranscript, previousCompleteTranscript, "a canonical snapshot ending at the latest user must not erase prior or streaming assistant responses while ChatGPT is still working");
-assert.equal(transcriptAwaitingAssistant(partialCanonicalTranscript), false, "an existing live stream assistant counts as the response for the latest user");
+assert.equal(transcriptAwaitingAssistant(partialCanonicalTranscript), true, "a live stream fragment must not count as the final response for the latest user");
+assert.equal(completedResponseNeedsDomFallback({ network_state: "completed", response_ready: false, messages: partialCanonicalTranscript }), true, "a completed request with only a provisional assistant must recover canonical/DOM final content");
+assert.equal(completedResponseNeedsDomFallback({ network_state: "generating", busy: true, response_ready: false, messages: partialCanonicalTranscript }), false, "live generation must keep streaming without unnecessary DOM fallback reads");
+const terminalTranscript = discardProvisionalAssistantAfterLatestUser(partialCanonicalTranscript, { includeUnverified: true });
+assert.deepEqual(terminalTranscript.map((message) => message.id), ["previous-user-1", "previous-assistant-1", "optimistic-user-2"], "terminal cleanup must keep prior verified exchanges and the latest user while removing the false progress response");
 const missingLatestResponse = [
   { id: "cached-user", role: "user", text: "Yêu cầu cũ" },
   { id: "cached-assistant", role: "assistant", text: "Phản hồi cũ" },
@@ -198,6 +205,43 @@ const [browserOps, worker, server, httpSource, bridge, managerMain, managerPrelo
   readFile(join(root, "chrome-extension", "manifest.json"), "utf8")
 ]);
 
+const probeChatActivitySource = worker.slice(worker.indexOf("function probeChatActivityPage()"), worker.indexOf("async function chatDomActivityState"));
+const runChatActivityProbe = ({ assistantText, controls = [], turnControls = [] }) => Function("document", "getComputedStyle", `${probeChatActivitySource}; return probeChatActivityPage();`)(
+  {
+    querySelectorAll(selector) {
+      if (selector === 'button,[role="button"]') return controls;
+      if (selector === '[data-message-author-role="assistant"]') return [{ innerText: assistantText, textContent: assistantText }];
+      if (selector === '[data-testid^="conversation-turn-"]') return [{ querySelectorAll: () => turnControls }];
+      return [];
+    },
+    body: { innerText: assistantText, textContent: assistantText }
+  },
+  () => ({ display: "block", visibility: "visible" })
+);
+const visibleStopControl = {
+  getBoundingClientRect: () => ({ width: 20, height: 20 }),
+  getAttribute: (name) => name === "data-testid" ? "stop-button" : "",
+  innerText: "",
+  textContent: ""
+};
+const visibleCalledToolControl = {
+  getBoundingClientRect: () => ({ width: 100, height: 20 }),
+  getAttribute: () => "",
+  innerText: "Called tool",
+  textContent: "Called tool"
+};
+const domToolActivity = runChatActivityProbe({
+  assistantText: "Khi connector hồi, tao sẽ tiếp tục ngay từ Bước 2.",
+  controls: [visibleStopControl, visibleCalledToolControl],
+  turnControls: [visibleCalledToolControl]
+});
+assert.equal(domToolActivity.busy, true, "a visible stop control must keep a tool turn busy after the initial request completes");
+assert.equal(domToolActivity.source, "dom_tool", "visible ChatGPT tool calls must be classified separately from generic DOM settling");
+assert.equal(domToolActivity.activity_text, "CodexPro đang gọi tool", "DOM tool status must not reuse stale assistant prose as live activity");
+const domGenericActivity = runChatActivityProbe({ assistantText: "Phản hồi tạm chưa hoàn tất", controls: [visibleStopControl] });
+assert.equal(domGenericActivity.source, "dom_stop");
+assert.equal(domGenericActivity.activity_text, "ChatGPT đang tiếp tục xử lý", "generic DOM work must use a stable status instead of assistant response text");
+
 for (const action of ["trusted_click", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch"]) {
   assert.match(browserOps, new RegExp(`\\| \\"${action}\\"`), `dedicated browser action ${action} must be exposed`);
   assert.match(server, new RegExp(`\\"${action}\\"`), `browser_control schema must expose ${action}`);
@@ -238,7 +282,7 @@ assert.match(worker, /if\(action==='evaluate'\)/);
 assert.match(worker, /WORKER_BUSY:/, "extension reload must refuse while a worker is generating");
 assert.match(worker, /reconcileChatNetworkCompletion/, "canonical/stream completion must reconcile stuck network state");
 assert.match(worker, /networkStream\.completed/, "stream completion must end a generation without waiting for CDP loadingFinished");
-assert.match(worker, /network_stream_activity_text:networkStreamActivityText/, "worker responses must expose live CodexPro tool activity separately from assistant text");
+assert.match(worker, /network_stream_activity_text:visibleNetworkStreamActivityText/, "worker responses must expose only currently live CodexPro tool activity separately from assistant text");
 assert.match(worker, /network_stream_in_progress:networkStreamInProgress/, "worker responses must expose whether the tool stream is still open");
 assert.match(worker, /streamBusy\?\(streamActivity\|\|'CodexPro đang sử dụng tool'\)/, "profile status must prefer live tool activity over stale DOM activity");
 assert.match(worker, /probeCanonicalCompletion/, "tracker timeout must verify canonical response before reporting failure");
@@ -246,7 +290,9 @@ assert.match(worker, /function probeChatActivityPage/, "profile status must supp
 assert.match(worker, /const shouldProbeDom=Boolean\(conversationId&&\(tab\.active\|\|networkState\.busy\|\|cachedDomActivity\?\.busy/, "idle background ChatGPT tabs must not receive unconditional DOM probes");
 assert.match(worker, /for\(const tabId of chatDomActivityByTab\.keys\(\)\)if\(!liveTabIds\.has\(tabId\)\)chatDomActivityByTab\.delete\(tabId\)/, "closed tabs must be pruned from the DOM activity cache");
 assert.match(worker, /testId==='stop-button'/, "DOM activity probe must recognize ChatGPT's stop control");
-assert.match(worker, /settling:!networkBusy&&domActivity\.busy/, "completed network requests must remain settling while ChatGPT is visibly active");
+assert.match(worker, /const domToolBusy=Boolean\(domActivity\.busy&&domActivity\.source==='dom_tool'\)/, "DOM tool calls must remain working after the initial network request completes");
+assert.match(worker, /busy:networkBusy\|\|domToolBusy/, "profile status must treat an active DOM tool call as working, not finalizing");
+assert.match(worker, /settling:!networkBusy&&!domToolBusy&&domActivity\.busy/, "only non-tool DOM activity may use the finalizing state");
 assert.match(worker, /activity_text:streamBusy\?/, "active ChatGPT work must expose one concise network-or-DOM activity line");
 assert.match(worker, /async function confirmConnectorFromLiveToolActivity/, "worker must self-heal stale connector status after observing a real CodexPro tool call");
 assert.match(worker, /await confirmConnectorFromLiveToolActivity\(tabs\)[\s\S]*?const profile=await profileInfo\(\)/, "worker must persist live-tool confirmation before reporting the next profile heartbeat");
@@ -257,7 +303,7 @@ assert.match(worker, /async function replaceUnresponsiveChatTab[\s\S]*?chrome\.t
 assert.match(worker, /dom_replaced=true[\s\S]*?recovery_tab_id/, "stale-response reload recovery must escalate to replacing a renderer that stays unresponsive");
 assert.match(worker, /conversation\|steer_turn/, "ChatGPT steer_turn must be tracked as a generation request");
 assert.match(worker, /const staleActivity=Boolean\(injected\.result\.busy\)/, "canonical completion must recover a tab whose DOM is still stuck busy");
-assert.match(worker, /await chatDomActivityState\(tab\.id,conversationId,\{fresh:true\}\)\)\.busy/, "worker send must force a fresh DOM activity probe before submitting");
+assert.match(worker, /chatDomActivityState\(tab\.id,conversationId,\{maxAgeMs:750\}\)/, "worker send must reuse only a sub-second DOM activity probe before submitting");
 assert.match(worker, /num_turns=6/, "canonical transcript reads must request only the three most recent user/assistant exchanges");
 assert.doesNotMatch(worker, /num_turns=40/, "canonical transcript reads must not fetch the old 20-exchange window");
 assert.match(worker, /Array\.isArray\(payload\?\.messages\)/, "canonical transcript reads must parse the bounded messages payload directly");
@@ -299,6 +345,10 @@ assert.match(bridge, /const observedCodexProToolActivity = conversationSummaries
 assert.match(bridge, /const connectorInstalled = profile\.connectorInstalled \|\| observedCodexProToolActivity/, "profile summaries must not show CodexPro missing while it is actively being used");
 assert.match(bridge, /function pruneExpiredProfiles/);
 assert.match(bridge, /profileWorkspaceRoots\.delete\(id\)[\s\S]*?profileWorkspaceBindings\.delete\(id\)/, "expired extension profiles must release workspace maps");
+assert.match(bridge, /const visibleProfiles = \[\.\.\.state\.profiles\.values\(\)\][\s\S]*?now - profile\.lastSeen <= PROFILE_TTL_MS/, "profiles without a live heartbeat must disappear from the Manager list instead of remaining as disconnected cards");
+assert.match(bridge, /function scheduleProfileExpiryNotification[\s\S]*?profile\.lastSeen \+ PROFILE_TTL_MS[\s\S]*?scheduleProfileNotification\(state\)/, "the bridge must publish a profile-list update as soon as the heartbeat grace period expires");
+assert.match(bridge, /if \(state\.activeProfileId && !visibleProfiles\.some[\s\S]*?state\.activeProfileId = undefined/, "an expired active profile must release active ownership when it disappears from the UI");
+assert.doesNotMatch(bridge, /connected: now - profile\.lastSeen <= PROFILE_TTL_MS/, "the Manager must not receive retained-but-disconnected profile records");
 assert.match(bridge, /const PROFILE_RECONNECT_WAIT_MS = 45_000/, "a retained Chrome profile must get a bounded reconnect window");
 assert.match(bridge, /const waitingForReconnect = Date\.now\(\) - profile\.lastSeen > PROFILE_TTL_MS/, "a stale heartbeat must enter reconnect mode instead of being rejected immediately");
 assert.match(bridge, /function markCommandDispatched[\s\S]*?pending\.waitingForReconnect = false[\s\S]*?pending\.timeoutMs/, "a reconnected profile must receive the full action timeout after command dispatch");
@@ -310,13 +360,38 @@ assert.match(server, /structuredContent: \{ error: errorEnvelope\(error\) \}/);
 assert.match(httpSource, /app\.get\("\/browser-events"/);
 assert.match(httpSource, /text\/event-stream/);
 assert.match(managerMain, /startBrowserProfileEventStream/);
+assert.match(managerMain, /latestBrowserProfileStream[\s\S]*?cachedBrowserProfileForSend/, "Manager must cache the live browser profile stream for latency-sensitive sends");
+assert.match(managerMain, /latestBrowserProfileStream = \{ connected: true, checkedAt:[\s\S]*?profiles: payload\.profiles \}/, "browser-events payloads must refresh the send-side profile cache");
+assert.match(managerMain, /latestBrowserProfileStream = \{ \.\.\.latestBrowserProfileStream, connected: false \}/, "a broken browser event stream must disable the send-side cache");
 assert.match(managerMain, /selectedConversationTab\?\.busy \|\| selectedNetworkState === "generating"/, "Manager backend must reject active network generations");
 assert.doesNotMatch(managerMain, /selectedConversationTab\?\.busy \|\| selectedConversationTab\?\.settling/, "Manager backend must leave cached DOM settling decisions to the worker's fresh probe");
 const sendProfileRequestSource = managerMain.slice(managerMain.indexOf("async function sendProfileRequestUnlocked"), managerMain.indexOf("async function sendProfileRequest(payload)"));
 assert.doesNotMatch(sendProfileRequestSource, /if \(!profile\?\.connected\) throw/, "Manager must not reject a retained profile before the bridge can wait for reconnection");
-assert.match(sendProfileRequestSource, /runtimeStatus\(\{ forceRefresh: true \}\)/, "Manager must refresh stale profile status before deciding whether the profile still exists");
+assert.match(sendProfileRequestSource, /localMcpToolInSession\(session, "browser_control", \{ action: "list_profiles" \}\)[\s\S]*?setTimeout\(resolve, 120\)[\s\S]*?refreshedProfiles = await localMcpToolInSession\(session, "browser_control", \{ action: "list_profiles" \}\)/, "Manager must refresh a possibly stale profile on the same MCP session without a full runtime scan");
+assert.doesNotMatch(sendProfileRequestSource, /await listProjects\(\)/, "chat send preflight must not rescan every known project");
+assert.match(sendProfileRequestSource, /const streamedProfile = cachedBrowserProfileForSend\(profileId\)/, "chat send must prefer the realtime SSE profile snapshot");
+assert.match(sendProfileRequestSource, /streamedProfile \? Promise\.resolve\(null\) : localMcpToolInSession\(session, "browser_control", \{ action: "list_profiles" \}\)/, "chat send must skip list_profiles while a live SSE profile snapshot is available");
+assert.match(sendProfileRequestSource, /profilePreflightSource = "list-profiles-refresh"/, "chat send must retain list_profiles as the reconnect fallback");
+assert.match(sendProfileRequestSource, /runtimeConnectionForSend\(\)[\s\S]*?fast MCP connect failed; falling back to full runtime health/, "chat send must try cached/direct MCP config before the expensive health fallback");
+assert.doesNotMatch(sendProfileRequestSource, /const base = await readyRuntimeBaseStatus\(\)/, "healthy chat sends must not unconditionally run the full runtime health scan");
+assert.match(sendProfileRequestSource, /workspaceSelectSkipped[\s\S]*?if \(!workspaceSelectSkipped\)/, "Manager must skip redundant workspace selection when the profile is already scoped correctly");
 assert.match(sendProfileRequestSource, /action: "select_workspace"[\s\S]*?}, 75000\)/, "workspace selection must allow the bounded reconnect window");
+assert.match(sendProfileRequestSource, /localMcpToolInSession\(session, "prepare_repo_task", \{[\s\S]*?profile_id: profileId[\s\S]*?task_id: taskId[\s\S]*?root: initialWorkspaceRoot[\s\S]*?scope: requestScope[\s\S]*?preparedTask\?\.prepared !== true[\s\S]*?action: "send_chat_request"/, "Manager must prepare the exact repo task gate before dispatching the ChatGPT request");
 assert.match(sendProfileRequestSource, /action: "send_chat_request"[\s\S]*?}, 235000\)/, "chat submission must preserve the action timeout after a reconnect wait");
+const managerSendUiSource = managerUi.slice(managerUi.indexOf("async function sendRequest(profile)"), managerUi.indexOf("async function rolloverFullConversation"));
+assert.match(managerSendUiSource, /setRequestDrafts\([\s\S]*?profile\.profile_id\]: ""[\s\S]*?setRequestFiles\([\s\S]*?profile\.profile_id\]: \[\][\s\S]*?api\.sendProfileRequest/, "Manager must clear submitted text/files before awaiting the IPC send result");
+assert.match(managerSendUiSource, /restoreSubmittedInputs\(\)[\s\S]*?Trạng thái gửi chưa chắc chắn/, "an uncertain submission must restore the submitted draft instead of silently losing it");
+assert.match(managerSendUiSource, /CONVERSATION_LIMIT_REACHED:[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a terminal full-conversation banner must roll the pending user request and attachments into a new chat");
+const conversationRolloverSource = managerUi.slice(managerUi.indexOf("async function rolloverFullConversation"), managerUi.indexOf("async function verifyRepoTaskUse"));
+assert.match(conversationRolloverSource, /newChat: true[\s\S]*?text: handoffText[\s\S]*?attachments:/, "conversation rollover must create a fresh ChatGPT chat and send the preserved context once");
+assert.match(conversationRolloverSource, /previousAttempt\?\.status === "creating" \|\| previousAttempt\?\.status === "done"/, "conversation rollover must deduplicate repeated terminal-banner observations");
+assert.match(managerUi, /function buildConversationRolloverPrompt\([\s\S]*?Bối cảnh gần nhất từ chat trước:[\s\S]*?Tiếp tục từ đúng việc còn dang dở/, "the new chat handoff must preserve recent conversation context instead of restarting blindly");
+assert.match(worker, /ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS = 2500/, "attachment upload fallback must not impose the old 12 second wait");
+assert.match(worker, /Date\.now\(\)\+400,Date\.now\(\)\+400/, "attachment preview stability should use the shorter verified window");
+assert.match(worker, /const maxAgeMs=.*DOM_ACTIVITY_PROBE_CACHE_MS/, "DOM activity probes must support a bounded freshness override for send preflight reuse");
+assert.match(worker, /Promise\.all\(\[[\s\S]*?ensureChatNetworkStreamCapture\(tab\.id\)[\s\S]*?chatRequestState\(tab\.id,conversationId\)[\s\S]*?chatDomActivityState\(tab\.id,conversationId,\{maxAgeMs:750\}\)[\s\S]*?chatAttachmentOwnership\(tab\.id,targetConversationId\)/, "send preflight checks must run in parallel and reuse only a sub-second DOM probe");
+const workerSendSource = worker.slice(worker.indexOf("if(action==='send_chat_request')"), worker.indexOf("if(action==='rename_chat')"));
+assert.doesNotMatch(workerSendSource, /chatDomActivityState\(tab\.id,conversationId,\{fresh:true\}\)/, "send must not force a duplicate DOM activity probe immediately after list_profiles");
 assert.match(managerMain, /codexpro:browser-profiles/);
 assert.match(managerPreload, /onBrowserProfiles/);
 assert.match(managerPreload, /recoverProfileChat/);
@@ -354,6 +429,8 @@ assert.match(bridge, /message_delivery_timed_out:\s*tab\.message_delivery_timed_
 assert.match(worker, /args\.read_dom===false&&args\.canonical_only!==true[\s\S]*?args\.canonical_only===true[\s\S]*?canonical_available:true/, "worker must expose authenticated canonical response reads without querying transcript DOM");
 assert.match(managerMain, /read_dom: payload\?\.canonicalOnly === true \|\| payload\?\.readDom !== false,[\s\S]*?canonical_only: payload\?\.canonicalOnly === true/, "Manager canonical recovery must remain compatible with a server process that has not restarted yet");
 assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?network_last_completed_at/, "Chat reopening must compare the persisted response against the latest network completion before re-reading transcript content");
+assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?cached\?\.responseReady !== true/, "an unverified cached assistant fragment must never be accepted as the final ChatGPT response");
+assert.match(managerUi, /fastResult\?\.network_stream_available && fastResult\?\.network_stream_in_progress === true/, "only a currently running network stream may suppress canonical/DOM recovery");
 assert.match(managerPreload, /getChatResponseCache[\s\S]*?saveChatResponseCache/, "Manager preload must expose persistent chat-response cache access");
 assert.match(managerPreload, /logChatLayout[\s\S]*?codexpro:log-chat-layout/, "Manager preload must expose fire-and-forget chat layout tracing");
 assert.match(managerPreload, /logChatResponseAudit[\s\S]*?codexpro:log-chat-response-audit/, "Manager preload must expose response comparison tracing");
@@ -392,7 +469,13 @@ assert.match(managerUi, /networkState === "generating" \|\| tab\.settling/, "Man
 assert.match(managerUi, /network_stream_activity_text/, "Manager must render live network tool activity without exposing raw tool payloads");
 
 const manifest = JSON.parse(manifestText);
-assert.equal(manifest.version, "0.5.67");
+const canonicalReaderSource = worker.slice(worker.indexOf("function readCanonicalConversationPage"), worker.indexOf("function canonicalResponseSupersedesDom"));
+assert.match(canonicalReaderSource, /message\.role==='user'\|\|message\.end_turn===true/, "canonical transcript reads must exclude internal assistant progress fragments");
+assert.doesNotMatch(canonicalReaderSource, /status==='finished_successfully'/, "finished_successfully progress nodes must not be mistaken for an end-turn response");
+const responseReaderSource = worker.slice(worker.indexOf("if(action==='get_chat_response')"), worker.indexOf("if(action==='open_tab')"));
+assert.match(responseReaderSource, /const networkStreamLive=Boolean\(effectiveNetworkBusy&&networkStream\.available\)/, "closed network streams must be hidden after the request becomes terminal");
+assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'/, "DOM fallback must explicitly mark only settled latest-assistant content as ready");
+assert.equal(manifest.version, "0.5.73");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");

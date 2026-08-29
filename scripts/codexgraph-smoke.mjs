@@ -24,7 +24,7 @@ function symbolByName(analysis, name, file) {
 
 try {
   await write('package.json', JSON.stringify({ name: 'codexgraph-fixture', type: 'module', scripts: { test: 'node --test', build: 'tsc -p tsconfig.json' } }, null, 2));
-  await write('tsconfig.json', JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, baseUrl: '.', paths: { '@core/*': ['src/*'] } }, include: ['src/**/*.ts', 'test/**/*.ts'] }, null, 2));
+  await write('tsconfig.json', JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, jsx: 'react-jsx', baseUrl: '.', paths: { '@core/*': ['src/*'] } }, include: ['src/**/*.ts', 'src/**/*.tsx', 'test/**/*.ts'] }, null, 2));
   await write('.ai-bridge/transient.ts', `export const transient = true;\n`);
   await write('src/state.ts', `export let total = 0;
 export function setTotal(value: number) { total = value; }
@@ -74,16 +74,53 @@ export function Hooks() {
 export function healthHandler() { return { ok: true }; }
 app.get('/health', healthHandler);
 `);
+  await write('node_modules/react/package.json', JSON.stringify({ name: 'react', version: '0.0.0', types: 'index.d.ts', exports: { '.': './index.d.ts', './jsx-runtime': './jsx-runtime.d.ts' } }, null, 2));
+  await write('node_modules/react/index.d.ts', `export interface Context<T> { Provider: unknown; Consumer: unknown; }
+export interface RefObject<T> { current: T | null; }
+export function createContext<T>(value: T): Context<T>;
+export function useContext<T>(context: Context<T>): T;
+export function useRef<T>(value: T | null): RefObject<T>;
+export function createRef<T>(): RefObject<T>;
+export function forwardRef<T, P>(render: (props: P, ref: unknown) => unknown): (props: P & { ref?: unknown }) => unknown;
+export function useImperativeHandle(ref: unknown, create: () => unknown): void;
+`);
+  await write('node_modules/react/jsx-runtime.d.ts', `export namespace JSX { interface IntrinsicElements { input: any; button: any; } }
+export const Fragment: unknown;
+export function jsx(type: unknown, props: unknown, key?: unknown): unknown;
+export function jsxs(type: unknown, props: unknown, key?: unknown): unknown;
+`);
+  await write('node_modules/zustand/package.json', JSON.stringify({ name: 'zustand', version: '0.0.0', types: 'index.d.ts', exports: { '.': './index.d.ts' } }, null, 2));
+  await write('node_modules/zustand/index.d.ts', `export type StoreHook<T> = ((selector: (state: T) => unknown) => unknown) & { getState(): T; setState(value: Partial<T>): void; subscribe(listener: () => void): () => void; };
+export function create<T>(): (creator: (set: (value: unknown) => void, get: () => T) => T) => StoreHook<T>;
+export function create<T>(creator: (set: (value: unknown) => void, get: () => T) => T): StoreHook<T>;
+export function createStore<T>(creator: (set: (value: unknown) => void, get: () => T) => T): StoreHook<T>;
+export function useStore<T>(store: StoreHook<T>, selector: (state: T) => unknown): unknown;
+`);
+  await write('src/react-app.tsx', `import { createContext, forwardRef, useContext, useRef } from 'react';
+import { create } from 'zustand';
+export const ThemeContext = createContext('light');
+export const useCountStore = create<{ count: number }>()((_set, _get) => ({ count: 0 }));
+export function handleSave() { return true; }
+export const FancyInput = forwardRef<unknown, { onSave: () => void }>((_props, ref) => <input ref={ref} />);
+export function Parent() {
+  const theme = useContext(ThemeContext);
+  const localRef = useRef<unknown>(null);
+  const count = useCountStore((state) => state.count);
+  const snapshot = useCountStore.getState();
+  return <ThemeContext.Provider value={theme}><FancyInput ref={localRef} onSave={handleSave} /><button onClick={() => useCountStore.setState({ count: count + snapshot.count })}>save</button></ThemeContext.Provider>;
+}
+`);
   await write('test/service.test.ts', `import { top } from '../src/service.js';
 export function testTop() { return top(); }
 void testTop();
 `);
 
-  const [{ loadConfig }, { PathGuard, WorkspaceManager }, analysisApi, persistentApi] = await Promise.all([
+  const [{ loadConfig }, { PathGuard, WorkspaceManager }, analysisApi, persistentApi, projectionApi] = await Promise.all([
     importBuilt('config.js'),
     importBuilt('guard.js'),
     importBuilt('analysis/index.js'),
-    importBuilt('analysis/persistent.js')
+    importBuilt('analysis/persistent.js'),
+    importBuilt('analysis/projection.js')
   ]);
   const config = loadConfig(['--root', tmp, '--bash', 'off', '--write', 'off']);
   const guard = new PathGuard(config);
@@ -92,7 +129,7 @@ void testTop();
   const first = await analysisApi.inspectWorkspace(config, guard, workspace);
   assert.equal(first.cache.hit, false);
   assert(!first.files.some((file) => file.path.startsWith('.ai-bridge/')), 'analysis inventory must exclude transient .ai-bridge files');
-  assert.match(first.cache.key, /:graph-v2:/, 'CodexGraph cache key did not invalidate the previous semantic engine snapshot');
+  assert.match(first.cache.key, /:graph-v3:/, 'CodexGraph cache key did not invalidate the previous semantic engine snapshot');
   const leaf = symbolByName(first, 'leaf', 'src/service.ts');
   const middle = symbolByName(first, 'middle', 'src/service.ts');
   const top = symbolByName(first, 'top', 'src/service.ts');
@@ -119,6 +156,32 @@ void testTop();
   assert(hasEdge('calls', leaf.id, getTotal.id), 'leaf -> getTotal call edge missing');
   assert(hasEdge('writes', setTotal.id, total.id), 'state write edge missing');
   assert(hasEdge('reads', getTotal.id, total.id), 'state read edge missing');
+
+  const parent = symbolByName(first, 'Parent', 'src/react-app.tsx');
+  const themeContextDecl = symbolByName(first, 'ThemeContext', 'src/react-app.tsx');
+  const storeDecl = symbolByName(first, 'useCountStore', 'src/react-app.tsx');
+  const localRefDecl = symbolByName(first, 'localRef', 'src/react-app.tsx');
+  const fancyInput = symbolByName(first, 'FancyInput', 'src/react-app.tsx');
+  const handleSave = symbolByName(first, 'handleSave', 'src/react-app.tsx');
+  const contextNode = first.symbols.find((symbol) => symbol.kind === 'context' && symbol.source === 'react-context');
+  const storeNode = first.symbols.find((symbol) => symbol.kind === 'store' && symbol.source === 'zustand-store');
+  const localRefNode = first.symbols.find((symbol) => symbol.kind === 'ref' && symbol.name === 'Ref localRef');
+  const forwardedRefNode = first.symbols.find((symbol) => symbol.kind === 'ref' && symbol.name === 'Forwarded ref FancyInput');
+  assert(parent.id && themeContextDecl.id && storeDecl.id && localRefDecl.id && fancyInput.id && handleSave.id);
+  assert(contextNode?.id && storeNode?.id && localRefNode?.id && forwardedRefNode?.id, 'React/Zustand semantic resource nodes missing');
+  assert(hasEdge('stores', themeContextDecl.id, contextNode.id), 'createContext resource edge missing');
+  assert(hasEdge('provides', parent.id, contextNode.id), 'React Context Provider edge missing');
+  assert(hasEdge('consumes', parent.id, contextNode.id), 'useContext consumer edge missing');
+  assert(hasEdge('stores', storeDecl.id, storeNode.id), 'Zustand store resource edge missing');
+  assert(hasEdge('consumes', parent.id, storeNode.id), 'Zustand hook consumer edge missing');
+  assert(first.relationships.some((edge) => edge.kind === 'reads' && edge.toSymbolId === storeNode.id && edge.detail === 'getState'), 'Zustand getState edge missing');
+  assert(first.relationships.some((edge) => edge.kind === 'writes' && edge.toSymbolId === storeNode.id && edge.detail === 'setState'), 'Zustand setState edge missing');
+  assert(hasEdge('passes', parent.id, handleSave.id), 'JSX callback prop edge missing');
+  assert(hasEdge('stores', localRefDecl.id, localRefNode.id), 'React useRef resource edge missing');
+  assert(hasEdge('passes', parent.id, localRefNode.id), 'JSX ref prop edge missing');
+  assert(hasEdge('passes', localRefNode.id, forwardedRefNode.id), 'forwardRef bridge edge missing');
+  assert(hasEdge('provides', fancyInput.id, forwardedRefNode.id), 'forwardRef component edge missing');
+  assert(first.relationships.some((edge) => edge.kind === 'passes' && edge.fromSymbolId === forwardedRefNode.id), 'forwardRef callback edge missing');
 
   const child = symbolByName(first, 'Child', 'src/classes.ts');
   const base = symbolByName(first, 'Base', 'src/classes.ts');
@@ -147,6 +210,33 @@ void testTop();
   assert.equal(stableHookCallbackIds.size, 2, 'hook callbacks were not indexed with distinct anchored ids');
   assert(routeNode?.id, 'route node missing');
   assert(first.relationships.some((edge) => edge.kind === 'routes' && edge.toSymbolId === routeNode.id), 'route registration edge missing');
+
+  const prioritySymbols = [
+    { id: 'symbol:local-a', name: 'Local A', kind: 'variable', path: 'src/a.ts', line: 1, exported: false },
+    { id: 'symbol:local-b', name: 'Local B', kind: 'variable', path: 'src/b.ts', line: 1, exported: false },
+    { id: 'virtual:ipc:important', name: 'Important IPC', kind: 'channel', path: '@virtual/ipc/important', line: 1, virtual: true, exported: false }
+  ];
+  const priorityRelationships = [
+    { from: 'src/a.ts', to: '@virtual/ipc/important', kind: 'contains', fromSymbolId: 'symbol:local-a', toSymbolId: 'virtual:ipc:important' },
+    { from: 'src/b.ts', to: '@virtual/ipc/important', kind: 'ipc', fromSymbolId: 'symbol:local-b', toSymbolId: 'virtual:ipc:important' }
+  ];
+  const nodePriorityProjection = projectionApi.projectCompactGraph(prioritySymbols, priorityRelationships, { maxNodes: 2, maxEdges: 2, maxPayloadBytes: 262144 });
+  assert(nodePriorityProjection.nodes.some((node) => node.name === 'Important IPC'), 'compact graph truncation did not preserve a high-priority virtual node');
+  const edgePriorityProjection = projectionApi.projectCompactGraph(prioritySymbols, priorityRelationships, { maxNodes: 3, maxEdges: 1, maxPayloadBytes: 262144 });
+  assert.equal(edgePriorityProjection.edges[0]?.kind, 'ipc', 'compact graph truncation did not prioritize a flow edge');
+
+  const bulkySymbols = Array.from({ length: 3000 }, (_, index) => ({
+    id: `bulk:${index}`,
+    name: `${'x'.repeat(120)}-${index}`,
+    kind: 'variable',
+    path: `src/${'deep/'.repeat(8)}file-${index}.ts`,
+    line: index + 1,
+    exported: false
+  }));
+  const byteProjection = projectionApi.projectCompactGraph(bulkySymbols, [], { maxNodes: 5000, maxEdges: 100, maxPayloadBytes: 262144 });
+  assert.equal(byteProjection.byteLimited, true, 'compact graph byte cap was not enforced');
+  assert(byteProjection.nodes.length < bulkySymbols.length, 'compact graph byte cap returned every oversized node');
+  assert(byteProjection.limits.estimated_payload_bytes <= byteProjection.limits.max_payload_bytes, 'compact graph byte estimate exceeded its configured payload cap');
 
   const impactSearch = await analysisApi.searchWorkspaceStructured(config, guard, workspace, { query: 'leaf', intent: 'impact', includeTests: true, maxResults: 20 });
   assert(impactSearch.groups.references.some((match) => match.path === 'src/service.ts' && match.reasons.some((reason) => reason.includes('symbol dependency'))), 'symbol-level impact result missing');

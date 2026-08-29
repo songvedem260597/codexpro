@@ -78,11 +78,22 @@ export function materializeTranscriptMessages(response, conversationId) {
 export function transcriptAwaitingAssistant(messages) {
   const usable = Array.isArray(messages) ? messages.filter((message) => String(message?.text || "").trim()) : [];
   const latestUserIndex = usable.findLastIndex((message) => message?.role === "user");
-  return latestUserIndex >= 0 && !usable.slice(latestUserIndex + 1).some((message) => message?.role === "assistant");
+  return latestUserIndex >= 0 && !usable.slice(latestUserIndex + 1).some((message) => message?.role === "assistant" && message?.provisional !== true && message?.endTurn !== false);
+}
+
+export function discardProvisionalAssistantAfterLatestUser(messages, { includeUnverified = false } = {}) {
+  const usable = Array.isArray(messages) ? messages : [];
+  const latestUserIndex = usable.findLastIndex((message) => message?.role === "user");
+  if (latestUserIndex < 0) return trimRecentTranscriptMessages(usable);
+  return trimRecentTranscriptMessages(usable.filter((message, index) => {
+    if (index <= latestUserIndex || message?.role !== "assistant") return true;
+    return !(includeUnverified || message?.provisional === true || message?.endTurn === false);
+  }));
 }
 
 export function completedResponseNeedsDomFallback(response) {
   if (!response || response.response_ready === true) return false;
+  if (response.busy === true || response.network_stream_in_progress === true || response.network_state === "generating") return false;
   const messages = Array.isArray(response?.messages) ? response.messages : [];
   return response.canonical_available === false || messages.length === 0 || transcriptAwaitingAssistant(messages);
 }
@@ -131,7 +142,9 @@ function preserveProgressiveAssistantMessages(previousMessages, incomingMessages
     return {
       ...message,
       id: previousAssistant.id || message.id,
-      text: mergeProgressiveResponseText(previousAssistant.text, message.text),
+      text: previousAssistant.provisional === true && message.provisional !== true
+        ? message.text
+        : mergeProgressiveResponseText(previousAssistant.text, message.text),
       truncated: Boolean(previousAssistant.truncated && message.truncated)
     };
   });
@@ -143,7 +156,7 @@ export function mergeNetworkStreamTranscript(previousMessages, { conversationId,
   if (!streamText) return trimRecentTranscriptMessages(messages);
 
   const streamId = `network-stream-assistant:${conversationId}`;
-  const streamMessage = { id: streamId, role: "assistant", text: streamText, truncated: Boolean(truncated) };
+  const streamMessage = { id: streamId, role: "assistant", text: streamText, truncated: Boolean(truncated), provisional: true, endTurn: false };
   const existingIndex = messages.findIndex((message) => message?.id === streamId);
   if (existingIndex >= 0) messages[existingIndex] = {
     ...messages[existingIndex],

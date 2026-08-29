@@ -67,6 +67,10 @@ const IMPACT_EDGE_KINDS = new Set<AnalysisRelationshipKind>([
   "emits",
   "listens",
   "routes",
+  "provides",
+  "consumes",
+  "passes",
+  "stores",
   "contains"
 ]);
 

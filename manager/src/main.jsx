@@ -6,9 +6,11 @@ import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
-import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
+import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
+import { profileCardBorderState } from "./profile-card-state.js";
+import { CodeGraphView } from "./code-graph-view.jsx";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -33,7 +35,6 @@ function loadProfileTaskLabels() {
     return {};
   }
 }
-
 
 function Dot({ ok }) {
   return <span className={`dot ${ok ? "ok" : "bad"}`} aria-hidden="true" />;
@@ -418,7 +419,7 @@ function compactToolActivityMessages(messages) {
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.67";
+const WORKER_EXTENSION_VERSION = "0.5.73";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -748,7 +749,6 @@ function App() {
       return changed ? next : current;
     });
   }, [status?.browserProfiles]);
-
   const notify = useCallback((message) => {
     setToast(message);
     window.setTimeout(() => setToast(""), 2600);
@@ -1154,7 +1154,7 @@ function App() {
         const contentAlreadyRead = networkCompletionReads.current.get(completionKey) === networkCompletedAt;
         if (!contentAlreadyRead) {
           networkCompletionReads.current.set(completionKey, networkCompletedAt);
-          void loadResponse(profile, conversationId, true, true, true);
+          void loadResponse(profile, conversationId, true, false);
           if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
         }
         if (!tab.busy && !tab.settling && currentResponse?.repoTaskId) {
@@ -1548,6 +1548,7 @@ function App() {
 
   function cachedResponseIsFresh(profile, conversationId, cached) {
     if (!cached?.messages?.length && !cached?.text) return false;
+    if (cached?.responseReady !== true) return false;
     if (transcriptAwaitingAssistant(materializeTranscriptMessages(cached, conversationId))) return false;
     const tab = profileConversationTab(profile, conversationId);
     if (!tab) return false;
@@ -1571,7 +1572,7 @@ function App() {
       String(response?.responseSource || ""),
       Boolean(response?.truncated),
       text,
-      messages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain)])
+      messages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain), Boolean(message?.provisional), message?.endTurn])
     ]);
     if (responseCacheSaveSignatures.current.get(key) === signature) return;
     responseCacheSaveSignatures.current.set(key, signature);
@@ -1598,17 +1599,26 @@ function App() {
     try {
       const cached = await api.getChatResponseCache({ profileId: profile.profile_id, conversationId }).catch(() => null);
       if (cached) {
+        const tab = profileConversationTab(profile, conversationId);
+        const networkState = String(tab?.network_state || cached.networkState || "idle");
+        const terminalUnverified = cached.responseReady !== true && !tab?.busy && !tab?.settling && isTerminalChatNetworkState(networkState);
         const rawCachedMessages = trimRecentTranscriptMessages(cached.messages);
-        const cachedMessages = cacheableTranscriptMessages(cached.messages);
-        if (rawCachedMessages.length === cachedMessages.length) {
+        const cacheableMessages = cacheableTranscriptMessages(cached.messages);
+        const cachedMessages = terminalUnverified
+          ? discardProvisionalAssistantAfterLatestUser(cacheableMessages, { includeUnverified: true })
+          : cacheableMessages;
+        const cachedText = terminalUnverified
+          ? String([...cachedMessages].reverse().find((message) => message?.role === "assistant")?.text || "")
+          : String(cached.text || "").trim();
+        if (!terminalUnverified && rawCachedMessages.length === cachedMessages.length) {
           responseCacheSaveSignatures.current.set(key, JSON.stringify([
             String(cached.networkCompletedAt || ""),
             String(cached.networkState || ""),
             Boolean(cached.responseReady),
             String(cached.responseSource || ""),
             Boolean(cached.truncated),
-            String(cached.text || "").trim(),
-            cachedMessages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain)])
+            cachedText,
+            cachedMessages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain), Boolean(message?.provisional), message?.endTurn])
           ]));
         } else {
           responseCacheSaveSignatures.current.delete(key);
@@ -1618,8 +1628,6 @@ function App() {
           const previousIsNewer = previous.conversationId === conversationId
             && Date.parse(String(previous.updatedAt || "")) > Date.parse(String(cached.updatedAt || ""));
           if (previousIsNewer) return current;
-          const tab = profileConversationTab(profile, conversationId);
-          const networkState = String(tab?.network_state || cached.networkState || "idle");
           return {
             ...current,
             [profile.profile_id]: {
@@ -1629,6 +1637,7 @@ function App() {
               loading: false,
               error: "",
               conversationId,
+              text: cachedText,
               messages: cachedMessages,
               busy: Boolean(tab?.busy || tab?.settling || networkState === "generating"),
               networkState,
@@ -1639,8 +1648,15 @@ function App() {
         });
       }
       if (!cachedResponseIsFresh(profile, conversationId, cached)) {
-        const awaitingCachedAssistant = transcriptAwaitingAssistant(materializeTranscriptMessages(cached, conversationId));
-        await loadResponse(profile, conversationId, true, !awaitingCachedAssistant, false, awaitingCachedAssistant);
+        const cachedHasContent = Boolean(cached?.messages?.length || String(cached?.text || "").trim());
+        const fastResult = await loadResponse(profile, conversationId, true, false);
+        const fastHasContent = Boolean(
+          fastResult?.network_stream_available && fastResult?.network_stream_in_progress === true
+          && (String(fastResult?.text || "").trim() || fastResult?.messages?.length || String(fastResult?.network_stream_activity_text || "").trim())
+        );
+        if (!fastHasContent && completedResponseNeedsDomFallback(fastResult)) {
+          window.setTimeout(() => void loadResponse(profile, conversationId, true, true, false, false), cachedHasContent ? 250 : 0);
+        }
       }
     } finally {
       responseCacheLoads.current.delete(key);
@@ -1873,6 +1889,18 @@ function App() {
       });
     }
     try {
+      const restoreSubmittedInputs = () => {
+        setRequestDrafts((current) => {
+          if (!text || String(current[profile.profile_id] || "").trim()) return current;
+          return { ...current, [profile.profile_id]: text };
+        });
+        setRequestFiles((current) => {
+          if (!attachments.length || (current[profile.profile_id] || []).length) return current;
+          return { ...current, [profile.profile_id]: attachments };
+        });
+      };
+      setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
+      setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
       const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
       const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, text, attachments });
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence(result) }));
@@ -1908,6 +1936,7 @@ function App() {
         const generationEndpoint = String(result?.network_generation_endpoint || "");
         const uncertainMessage = `Chưa xác định được tin nhắn đã gửi hay chưa. Path: ${submitPath}.${generationEndpoint ? ` Endpoint: ${generationEndpoint}.` : ""} ${technicalReason}`;
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: uncertainMessage }));
+        restoreSubmittedInputs();
         notify("Trạng thái gửi chưa chắc chắn · CodexPro không tự gửi lại");
         window.setTimeout(() => void refresh(false), 500);
         return;
@@ -1915,8 +1944,6 @@ function App() {
       if (newChat && resolvedConversationId && resolvedConversationId !== NEW_CHAT_TARGET) {
         setRequestTargets((current) => ({ ...current, [profile.profile_id]: resolvedConversationId }));
       }
-      setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
-      setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         const previousMessages = materializeTranscriptMessages(previous, resolvedConversationId);
@@ -1976,11 +2003,17 @@ function App() {
           rollover_attachments: attachments
         });
         if (newConversationId) {
-          setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
-          setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
           return;
         }
       }
+      setRequestDrafts((current) => {
+        if (!text || String(current[profile.profile_id] || "").trim()) return current;
+        return { ...current, [profile.profile_id]: text };
+      });
+      setRequestFiles((current) => {
+        if (!attachments.length || (current[profile.profile_id] || []).length) return current;
+        return { ...current, [profile.profile_id]: attachments };
+      });
       if (!newChat && text) {
         setRequestResponses((current) => {
           const previous = current[profile.profile_id] || {};
@@ -2242,19 +2275,22 @@ function App() {
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         const sameConversation = previous.conversationId === conversationId;
-        const networkStreamAvailable = networkStreamPayloadAvailable && isNetworkStreamCurrentGeneration({
+        const networkStreamCurrentGeneration = networkStreamPayloadAvailable && isNetworkStreamCurrentGeneration({
           networkStartedAt: result.network_last_started_at || previous.networkStartedAt,
           streamUpdatedAt: result.network_stream_updated_at
         });
-        const networkStreamInProgress = Boolean(networkStreamAvailable && result.network_stream_in_progress);
         const nextNetworkState = String(result.network_state || previous.networkState || (result.busy ? "generating" : "idle"));
         const networkTerminal = isTerminalChatNetworkState(nextNetworkState);
+        const networkStreamInProgress = Boolean(networkStreamCurrentGeneration && result.network_stream_in_progress);
+        const networkStreamAvailable = Boolean(networkStreamCurrentGeneration && (!networkTerminal || networkStreamInProgress));
         const incomingMessages = Array.isArray(result.messages)
           ? trimRecentTranscriptMessages(result.messages.map((message, index) => ({
               id: String(message?.id || `${message?.role || "message"}-${index}`),
               role: message?.role === "user" ? "user" : "assistant",
               text: message?.role === "user" ? visibleUserMessageText(message?.text) : String(message?.text || ""),
-              truncated: Boolean(message?.truncated)
+              truncated: Boolean(message?.truncated),
+              provisional: message?.role === "assistant" && (message?.provisional === true || message?.end_turn === false),
+              endTurn: message?.role === "assistant" ? (message?.end_turn === true ? true : message?.end_turn === false ? false : null) : null
             })).filter((message) => message.text))
           : [];
         let nextMessages = sameConversation ? materializeTranscriptMessages(previous, conversationId) : [];
@@ -2262,8 +2298,12 @@ function App() {
         else if (networkStreamAvailable) nextMessages = mergeNetworkStreamTranscript(nextMessages, {
           conversationId,
           text: result.text,
-          truncated: result.truncated
+            truncated: result.truncated
         });
+        const terminalAwaitingFinal = Boolean(networkTerminal && !networkStreamInProgress && result.response_ready !== true);
+        if (terminalAwaitingFinal) {
+          nextMessages = discardProvisionalAssistantAfterLatestUser(nextMessages, { includeUnverified: true });
+        }
         const nextAssistantText = String([...nextMessages].reverse().find((message) => message?.role === "assistant")?.text || "").trim();
         return {
           ...current,
@@ -2273,9 +2313,11 @@ function App() {
             loading: false,
             error: "",
             conversationId,
-            text: contentAvailable || networkStreamAvailable
-              ? nextAssistantText || mergeProgressiveResponseText(sameConversation ? previous.text : "", result.text)
-              : (sameConversation ? previous.text || "" : ""),
+            text: terminalAwaitingFinal
+              ? nextAssistantText
+              : contentAvailable || networkStreamAvailable
+                ? nextAssistantText || mergeProgressiveResponseText(sameConversation ? previous.text : "", result.text)
+                : (sameConversation ? previous.text || "" : ""),
             messages: nextMessages,
             busy: networkTerminal && !networkStreamInProgress ? false : Boolean(result.busy || networkStreamInProgress),
             truncated: contentAvailable || networkStreamAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
@@ -2309,7 +2351,7 @@ function App() {
             networkError: String(result.network_error || previous.networkError || ""),
             networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
             responseReady: Boolean(result.response_ready && !networkStreamInProgress),
-            responseSource: String(result.response_source || previous.responseSource || ''),
+            responseSource: terminalAwaitingFinal ? "network_state" : String(result.response_source || previous.responseSource || ''),
             responseAudit,
             responseAuditFetchMode,
             responseAuditKey,
@@ -2674,7 +2716,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.74</small>
+          <small>CodexPro Manager 0.2.78</small>
         </div>
       </aside>
 
@@ -2777,8 +2819,15 @@ function App() {
                 : profile.connector_message;
               const idle = profile.connected && profile.activity === "idle" && (connectorInstalled || !ready);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
-              const profileHasError = rendererUnresponsive || !profile.connected || liveTab?.network_state === "failed" || Boolean(liveTab?.renderer_error) || Boolean(liveTab?.connection_interrupted);
-              const profileBorderState = profileHasError ? "error" : workerState === "working" ? "working" : "idle";
+              const profileBorderState = profileCardBorderState({
+                connected: profile.connected,
+                working,
+                settling,
+                rendererUnresponsive,
+                networkState: String(liveTab?.network_state || ""),
+                rendererError: String(liveTab?.renderer_error || ""),
+                connectionInterrupted: Boolean(liveTab?.connection_interrupted)
+              });
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
               const directProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const fallbackProject = profileRepoProject(profile, projects, profileRepoRoots[profile.profile_id]);
@@ -3391,16 +3440,20 @@ function App() {
 
       {inspection && (
         <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setInspection(null)}>
-          <div className="modal">
+          <div className="modal codexgraph-modal">
             <div className="modal-head"><div><p className="eyebrow">MCP INSPECTION</p><h2>{inspection.project.name}</h2></div><button onClick={() => setInspection(null)}>×</button></div>
             <div className="inspection-grid">
               <div><small>Workspace ID</small><code>{inspection.result.workspace_id || "—"}</code></div>
               <div><small>Root</small><code>{inspection.result.root || inspection.project.root}</code></div>
             </div>
-            <h3>Git status</h3>
+            <CodeGraphView graphData={inspection.result.codexgraph} />
+            <details className="codexgraph-raw-details">
+              <summary>Chi tiết workspace / Git / cây dự án</summary>
+              <h3>Git status</h3>
             <pre>{inspection.result.git_status || "Working tree sạch hoặc không có dữ liệu."}</pre>
             <h3>Cây dự án</h3>
-            <pre>{inspection.result.tree || inspection.result.tree_text || "CodexPro đã mở workspace thành công."}</pre>
+              <pre>{inspection.result.tree || inspection.result.tree_text || "CodexPro đã mở workspace thành công."}</pre>
+            </details>
           </div>
         </div>
       )}

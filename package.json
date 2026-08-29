@@ -1,7 +1,7 @@
 {
   "name": "codexpro",
   "version": "0.30.0",
-  "description": "Local MCP server that connects ChatGPT Plugins to explicitly allowed repos on your machine.",
+  "description": "A local MCP/App SDK-style connector that lets ChatGPT inspect, edit, and hand off work to Codex inside a local dev workspace.",
   "type": "module",
   "license": "MIT",
   "repository": {
