@@ -17,3 +17,8 @@ export function shouldShowChatSettling({ networkState, tabSettling, responseCurr
 export function canAcceptNextChatMessage(status) {
   return !shouldShowChatBusy(status) && !shouldShowChatSettling(status);
 }
+
+export function isRetryableChatTurnBusyError(error) {
+  const message = String(error?.message || error || "");
+  return /Đoạn chat (?:này )?(?:đang xử lý|vẫn đang hoàn tất)/i.test(message);
+}

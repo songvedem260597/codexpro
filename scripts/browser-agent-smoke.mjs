@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canAcceptNextChatMessage, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
+import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -14,6 +14,9 @@ assert.equal(shouldShowChatBusy({ networkState: "failed", tabBusy: true, respons
 assert.equal(shouldShowChatBusy({ networkState: "generating", tabBusy: false, responseCurrent: true, responseBusy: false }), true, "generating network state must remain busy");
 assert.equal(canAcceptNextChatMessage({ networkState: "completed", tabBusy: false, tabSettling: true, responseCurrent: true, responseBusy: false, responseIncomplete: false }), false, "a visibly settling turn must reject the next message so ChatGPT cannot steer the old turn");
 assert.equal(canAcceptNextChatMessage({ networkState: "completed", tabBusy: false, tabSettling: false, responseCurrent: true, responseBusy: false, responseIncomplete: false }), true, "a fully completed and settled turn may accept the next message");
+assert.equal(isRetryableChatTurnBusyError(new Error("Đoạn chat vẫn đang hoàn tất lượt trước.")), true, "a fresh worker busy guard must be retried after the turn settles");
+assert.equal(isRetryableChatTurnBusyError(new Error("Đoạn chat này đang xử lý yêu cầu khác.")), true, "a network busy race must be retried after the turn settles");
+assert.equal(isRetryableChatTurnBusyError(new Error("SEND_UNCERTAIN")), false, "an uncertain submission must never be retried as a harmless busy race");
 const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, manifestText] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
@@ -74,7 +77,7 @@ assert.match(worker, /activity_text:domActivity\.busy\?domActivity\.activity_tex
 assert.match(worker, /scheduleDomActivityRefresh/, "DOM settling must refresh until ChatGPT becomes idle");
 assert.match(worker, /conversation\|steer_turn/, "ChatGPT steer_turn must be tracked as a generation request");
 assert.match(worker, /const staleActivity=Boolean\(injected\.result\.busy\)/, "canonical completion must recover a tab whose DOM is still stuck busy");
-assert.match(worker, /await chatDomActivityState\(tab\.id,conversationId\)\)\.busy/, "worker send must reject a visibly settling conversation");
+assert.match(worker, /await chatDomActivityState\(tab\.id,conversationId,\{fresh:true\}\)\)\.busy/, "worker send must force a fresh DOM activity probe before submitting");
 assert.match(worker, /browserElementActionPage/);
 assert.match(worker, /__codexproSemanticRegistry/);
 assert.match(worker, /subscribeDebuggerEvents/);
@@ -107,7 +110,8 @@ assert.match(server, /structuredContent: \{ error: errorEnvelope\(error\) \}/);
 assert.match(httpSource, /app\.get\("\/browser-events"/);
 assert.match(httpSource, /text\/event-stream/);
 assert.match(managerMain, /startBrowserProfileEventStream/);
-assert.match(managerMain, /selectedConversationTab\?\.busy \|\| selectedConversationTab\?\.settling/, "Manager backend must reject sends while a conversation is settling");
+assert.match(managerMain, /selectedConversationTab\?\.busy \|\| selectedNetworkState === "generating"/, "Manager backend must reject active network generations");
+assert.doesNotMatch(managerMain, /selectedConversationTab\?\.busy \|\| selectedConversationTab\?\.settling/, "Manager backend must leave cached DOM settling decisions to the worker's fresh probe");
 assert.match(managerMain, /codexpro:browser-profiles/);
 assert.match(managerPreload, /onBrowserProfiles/);
 assert.match(managerPreload, /invokeResult/);
@@ -122,13 +126,16 @@ assert.match(managerUi, /responseScrollLocked\.current\.delete\(profile\.profile
 assert.match(managerUi, /!tab\.busy && !tab\.settling && currentResponse\?\.repoTaskId/, "CodexPro verification must wait until the ChatGPT turn has visibly settled");
 assert.match(managerUi, /ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước/, "send must reject attempts that would steer the active turn");
 assert.match(managerUi, /setRequestSendEvidence\(\(current\) => \(\{ \.\.\.current, \[profile\.profile_id\]: null \}\)\)/, "opening Chrome must clear stale send evidence");
+assert.match(managerUi, /isRetryableChatTurnBusyError\(err\)/, "CodexPro verification must distinguish a harmless busy race from an uncertain send");
+assert.match(managerUi, /repoTaskVerificationReads\.current\.set\(verificationKey, Date\.now\(\) \+ REPO_TASK_VERIFICATION_RETRY_MS\)/, "a blocked verification retry must be released after a cooldown");
+assert.match(managerUi, /repoTaskStatus: "waiting", loading: false/, "a rejected verification retry must return to waiting instead of remaining stuck on retrying");
 assert.match(managerStyles, /\.chat-response-head strong \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/, "long response headlines must remain one line and end with an ellipsis");
 assert.match(managerUi, /className="toast-icon"[\s\S]*?<svg viewBox="0 0 24 24"/, "success toasts must use the custom vector status icon");
 assert.match(managerStyles, /\.toast-message \{[^}]*font-family: var\(--app-font-family,[^}]*font-weight: var\(--weight-semibold\)/, "toast typography must match the Manager interface");
 assert.doesNotMatch(managerUi, /RESPONSE_AUTO_SCROLL_RESUME_MS/, "manual transcript scrolling must not auto-resume on a timer");
 
 const manifest = JSON.parse(manifestText);
-assert.equal(manifest.version, "0.5.52");
+assert.equal(manifest.version, "0.5.53");
 assert.ok(manifest.permissions.includes("debugger"));
 
 console.log("✓ Browser agent persistent-session/batch/wait smoke test passed");
