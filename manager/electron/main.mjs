@@ -20,7 +20,7 @@ const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
 
-const WORKER_EXTENSION_VERSION = "0.5.48";
+const WORKER_EXTENSION_VERSION = "0.5.49";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
@@ -1465,9 +1465,32 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
   const result = called.payload.result;
   if (result?.isError) {
     const message = result.content?.find((item) => item.type === "text")?.text || "CodexPro MCP trả về lỗi.";
-    throw new Error(message);
+    const structured = result.structuredContent?.error;
+    const envelope = structured && typeof structured === "object" && !Array.isArray(structured)
+      ? structured
+      : { name: "CodexProMcpError", message };
+    const error = new Error(String(envelope.message || message));
+    error.name = String(envelope.name || "CodexProMcpError");
+    error.code = String(envelope.code || "MCP_TOOL_ERROR");
+    error.details = envelope.details && typeof envelope.details === "object" ? envelope.details : envelope;
+    throw error;
   }
   return result?.structuredContent || {};
+}
+
+function managerErrorEnvelope(error) {
+  const source = error && typeof error === "object" ? error : {};
+  return {
+    name: String(source.name || "Error").slice(0, 120),
+    message: String(source.message || error || "CodexPro Manager action failed.").slice(0, 4000),
+    code: String(source.code || "MANAGER_ACTION_FAILED").slice(0, 160),
+    details: source.details && typeof source.details === "object" ? source.details : {}
+  };
+}
+
+async function ipcResult(operation) {
+  try { return { ok: true, value: await operation() }; }
+  catch (error) { return { ok: false, error: managerErrorEnvelope(error) }; }
 }
 
 async function listBrowserProfilesThroughMcp(config, token) {
@@ -1985,7 +2008,7 @@ ipcMain.handle("codexpro:reset-worker-image", (_event, payload) => resetWorkerIm
 ipcMain.handle("codexpro:reset-manager-settings", () => resetManagerSettings());
 ipcMain.handle("codexpro:choose-request-files", () => chooseRequestFiles());
 ipcMain.handle("codexpro:capture-clipboard-image", () => captureClipboardImage());
-ipcMain.handle("codexpro:send-profile-request", (_event, payload) => sendProfileRequest(payload));
+ipcMain.handle("codexpro:send-profile-request", (_event, payload) => ipcResult(() => sendProfileRequest(payload)));
 ipcMain.handle("codexpro:rename-profile-chat", (_event, payload) => renameProfileChat(payload));
 ipcMain.handle("codexpro:get-profile-response", (_event, payload) => getProfileResponse(payload));
 ipcMain.handle("codexpro:get-repo-task-status", (_event, payload) => getRepoTaskStatus(payload));

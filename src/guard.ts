@@ -20,9 +20,15 @@ export interface Workspace {
 const sharedWorkspaceCatalog = new Map<string, Workspace>();
 
 export class CodexProError extends Error {
-  constructor(message: string) {
+  readonly code?: string;
+  readonly details?: Record<string, unknown>;
+
+  constructor(message: string, options: { code?: string; details?: Record<string, unknown>; cause?: unknown } = {}) {
     super(message);
     this.name = "CodexProError";
+    this.code = options.code;
+    this.details = options.details;
+    if (options.cause !== undefined) (this as Error & { cause?: unknown }).cause = options.cause;
   }
 }
 

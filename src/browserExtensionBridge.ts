@@ -12,7 +12,7 @@ const SETUP_COMMAND_TIMEOUT_MS = 300_000;
 const SEND_COMMAND_TIMEOUT_MS = 180_000;
 const COMMAND_EXPIRY_HEADROOM_MS = 5_000;
 const READ_RESPONSE_TIMEOUT_MS = 75_000;
-const MAX_BODY_BYTES = 12 * 1024 * 1024;
+const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
 export interface ExtensionProfileSummary {
   profile_id: string;
@@ -179,6 +179,30 @@ async function readJson(req: IncomingMessage): Promise<Record<string, any>> {
   }
 }
 
+function boundedBridgeValue(value: unknown, maxChars = 2_000): string {
+  return String(value ?? "").slice(0, maxChars);
+}
+
+function bridgeErrorEnvelope(value: unknown): Record<string, unknown> {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const message = boundedBridgeValue(source.message ?? value ?? "Chrome extension action failed.");
+  const detailsSource = source.details && typeof source.details === "object" && !Array.isArray(source.details)
+    ? source.details as Record<string, unknown>
+    : {};
+  const details = Object.fromEntries(Object.entries(detailsSource).slice(0, 40).map(([key, item]) => [
+    boundedBridgeValue(key, 100),
+    typeof item === "string" ? boundedBridgeValue(item, 4_000) : item
+  ]));
+  return {
+    name: boundedBridgeValue(source.name || "CodexProExtensionError", 120),
+    message,
+    code: boundedBridgeValue(source.code, 160) || undefined,
+    stage: boundedBridgeValue(source.stage, 160) || undefined,
+    action: boundedBridgeValue(source.action, 160) || undefined,
+    details
+  };
+}
+
 function profileFromBody(state: BridgeState, body: Record<string, any>): ExtensionProfile {
   const source = body.profile && typeof body.profile === "object" ? body.profile : body;
   const id = String(source.id ?? "").trim().slice(0, 160);
@@ -324,7 +348,13 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     if (pending) {
       clearTimeout(pending.timer);
       state.pending.delete(commandId);
-      if (body.error) pending.reject(new CodexProError(`Chrome extension action failed: ${String(body.error).slice(0, 2_000)}`));
+      if (body.error) {
+        const envelope = bridgeErrorEnvelope(body.error);
+        pending.reject(new CodexProError(`Chrome extension action failed: ${String(envelope.message)}`, {
+          code: String(envelope.code || "EXTENSION_ACTION_FAILED"),
+          details: envelope
+        }));
+      }
       else pending.resolve(body.result && typeof body.result === "object" ? body.result : { value: body.result });
     }
     sendJson(req, res, 200, { ok: true });
