@@ -45,10 +45,13 @@ contextBridge.exposeInMainWorld("codexpro", {
   deleteHeadlessWorker: (workerId) => invoke("codexpro:delete-headless-worker", workerId),
   setHeadlessWorkerAutoStart: (payload) => invoke("codexpro:set-headless-worker-autostart", payload),
   chooseRequestFiles: () => invoke("codexpro:choose-request-files"),
+  getRequestFilePreview: (filePath) => invoke("codexpro:get-request-file-preview", filePath),
   captureClipboardImage: () => invoke("codexpro:capture-clipboard-image"),
   sendProfileRequest: (payload) => invokeResult("codexpro:send-profile-request", payload),
   renameProfileChat: (payload) => invoke("codexpro:rename-profile-chat", payload),
   getProfileResponse: (payload) => invoke("codexpro:get-profile-response", payload),
+  getChatResponseCache: (payload) => invoke("codexpro:get-chat-response-cache", payload),
+  saveChatResponseCache: (payload) => invoke("codexpro:save-chat-response-cache", payload),
   getRepoTaskStatus: (payload) => invoke("codexpro:get-repo-task-status", payload),
   chooseProject: () => invoke("codexpro:choose-project"),
 

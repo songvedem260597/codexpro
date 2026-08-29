@@ -359,7 +359,7 @@ section { margin-bottom: 38px; }
 .chat-response.is-incomplete .response-status-dot { background: #e0a64e; box-shadow: 0 0 9px #e0a64e88; }
 .chat-response.is-incomplete .chat-response-head strong { color: #ffd58e; }
 @keyframes response-pulse { 50% { opacity: .35; transform: scale(.72); } }
-.latest-response { flex: 1; min-height: 0; display: flex; align-items: flex-start; gap: 10px; padding: 15px 14px 18px; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; scroll-behavior: smooth; }
+.latest-response { flex: 1; min-height: 0; display: flex; align-items: flex-start; gap: 10px; padding: 15px 14px 18px; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; scrollbar-gutter: stable; scrollbar-width: thin; scroll-behavior: auto; }
 .chat-transcript { flex-direction: column; align-items: stretch; gap: 12px; }
 .chat-transcript-message { width: 100%; display: flex; align-items: flex-start; gap: 10px; }
 .chat-transcript-message.is-user { width: fit-content; max-width: min(82%, 680px); margin-left: auto; flex-direction: row-reverse; padding: 10px 11px; border: 1px solid #344159; border-radius: var(--radius-panel); background: #171e2a; }
@@ -485,7 +485,7 @@ h4.response-heading, h5.response-heading, h6.response-heading { font-size: 13px;
 .worker-update-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; padding-top: 16px; border-top: 1px solid #273142; }
 .worker-update-actions .button { min-width: 112px; }
 .chat-modal-backdrop { z-index: 24; padding: 22px; }
-.chat-modal { width: min(var(--chat-modal-width, 940px), 94vw); max-height: 94vh; padding: 20px; overflow: auto; }
+.chat-modal { width: min(var(--chat-modal-width, 940px), 94vw); height: 94vh; max-height: 94vh; padding: 20px; overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; }
 .chat-modal-head { align-items: center; gap: 18px; padding-bottom: 14px; }
 .chat-modal-head > button { display: flex; align-items: center; justify-content: center; flex: 0 0 32px; width: 32px; height: 32px; padding: 0; line-height: 1; transform: none; }
 .chat-modal-head > button > span { display: block; line-height: 1; transform: translateY(-1.5px); }
