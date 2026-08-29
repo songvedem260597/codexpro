@@ -631,6 +631,7 @@ function App() {
   const [requestProjectRoots, setRequestProjectRoots] = useState({});
   const [requestFiles, setRequestFiles] = useState({});
   const [requestResponses, setRequestResponses] = useState({});
+  const [responseSelection, setResponseSelection] = useState({ key: "", text: "" });
   const [clearedResponseTargets, setClearedResponseTargets] = useState({});
   const [requestSendErrors, setRequestSendErrors] = useState({});
   const [requestSendEvidence, setRequestSendEvidence] = useState({});
@@ -882,6 +883,21 @@ function App() {
       return;
     }
     if (Number.isFinite(previousScrollTop) && currentScrollTop < previousScrollTop - 1) responseScrollLocked.current.set(profileId, true);
+  }, []);
+
+  const captureResponseSelection = useCallback((key, container) => {
+    const selection = window.getSelection?.();
+    const text = selection?.toString() || "";
+    const inside = Boolean(
+      selection
+      && selection.rangeCount > 0
+      && !selection.isCollapsed
+      && selection.anchorNode
+      && selection.focusNode
+      && container.contains(selection.anchorNode)
+      && container.contains(selection.focusNode)
+    );
+    setResponseSelection(inside && text.trim() ? { key, text } : (current) => current.key === key ? { key: "", text: "" } : current);
   }, []);
 
   const refresh = useCallback(async (foreground = false) => {
@@ -1897,6 +1913,7 @@ function App() {
     const sendEvidence = requestSendEvidence[profile.profile_id] || null;
     const responseCurrent = response?.conversationId === selectedTarget;
     const clearedKey = `${profile.profile_id}:${selectedTarget}`;
+    const selectedResponseText = responseSelection.key === clearedKey ? responseSelection.text : "";
     const responseCleared = Boolean(clearedResponseTargets[clearedKey]);
     const responseMessages = responseCurrent && Array.isArray(response?.messages) ? response.messages : [];
     const compactResponseMessages = compactToolActivityMessages(responseMessages);
@@ -1988,7 +2005,8 @@ function App() {
                 <div className="response-head-actions">
                   {responseCurrent && !responseCleared && !isNewChat && !selectedBusy && (contentNeedsRefresh || domUnavailable) && <button type="button" onClick={() => void loadResponse(profile, selectedTarget, false, true)} disabled={Boolean(busy)}>Đọc nội dung</button>}
                   {responseCurrent && !responseCleared && response?.incomplete && !selectedBusy && <button type="button" className="continue-response" onClick={() => void continueIncompleteResponse(profile, selectedTarget)} disabled={Boolean(busy)}>Tiếp tục</button>}
-                  {responseCurrent && response?.text && !responseCleared && <button type="button" onClick={async () => { await api.copyText(response.text); notify("Đã copy phản hồi mới nhất"); }}>Copy</button>}
+                  {selectedResponseText && <button type="button" onClick={async () => { await api.copyText(selectedResponseText); notify("Đã copy đoạn được chọn"); }}>Copy đoạn</button>}
+                  {responseCurrent && response?.text && !responseCleared && <button type="button" onClick={async () => { await api.copyText(response.text); notify("Đã copy toàn bộ phản hồi mới nhất"); }}>Copy hết</button>}
                   {responseCurrent && hasResponseContent && !selectedBusy && <button type="button" onClick={() => { setClearedResponseTargets((current) => ({ ...current, [clearedKey]: true })); notify("Đã dọn chat trong Manager"); }}>Clear</button>}
                 </div>
               </div>
@@ -2021,7 +2039,7 @@ function App() {
                     return (
                       <div className={`chat-transcript-message is-${message.role}`} key={message.id}>
                         <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
-                        <div className="latest-response-content">
+                        <div className="latest-response-content" onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
                           <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
                           {message.role === "assistant" ? <><React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>{response.busy && response.networkStreamAvailable && isLastAssistant && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}</> : <div className="chat-message-text user-message-text">{message.text}</div>}
                         </div>
