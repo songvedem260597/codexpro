@@ -6,7 +6,7 @@ import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
-import { isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
+import { completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -1001,7 +1001,12 @@ function App() {
     const pollLatestResponse = async () => {
       const profile = profilesRef.current.find((item) => item.profile_id === chatProfileId);
       if (cancelled) return;
-      if (profile?.connected) await loadResponse(profile, conversationId, true, false, false, true);
+      if (profile?.connected) {
+        const canonical = await loadResponse(profile, conversationId, true, false, false, true);
+        if (!cancelled && completedResponseNeedsDomFallback(canonical)) {
+          await loadResponse(profile, conversationId, true, true);
+        }
+      }
       if (!cancelled) timer = window.setTimeout(pollLatestResponse, LATEST_RESPONSE_RECOVERY_POLL_MS);
     };
     timer = window.setTimeout(pollLatestResponse, 500);

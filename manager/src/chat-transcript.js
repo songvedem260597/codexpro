@@ -58,6 +58,12 @@ export function transcriptAwaitingAssistant(messages) {
   return latestUserIndex >= 0 && !usable.slice(latestUserIndex + 1).some((message) => message?.role === "assistant");
 }
 
+export function completedResponseNeedsDomFallback(response) {
+  if (String(response?.network_state || "") !== "completed") return false;
+  const messages = Array.isArray(response?.messages) ? response.messages : [];
+  return response?.response_ready !== true || transcriptAwaitingAssistant(messages);
+}
+
 export function mergeNetworkStreamTranscript(previousMessages, { conversationId, text, truncated = false }) {
   const streamText = String(text || "").trim();
   const messages = Array.isArray(previousMessages) ? [...previousMessages] : [];
