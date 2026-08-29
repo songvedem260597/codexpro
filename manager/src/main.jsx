@@ -5,7 +5,7 @@ import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
-import { materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript } from "./chat-transcript.js";
+import { isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, trimRecentTranscriptMessages } from "./chat-transcript.js";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -454,7 +454,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.53";
+const WORKER_EXTENSION_VERSION = "0.5.59";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -877,14 +877,14 @@ function App() {
             }
           };
         });
-        if (networkState === "generating") {
+        if (networkState === "generating" || tab.settling) {
           const streamKey = `${profile.profile_id}:${conversationId}`;
           const lastStreamRead = Number(networkStreamReads.current.get(streamKey) || 0);
           if (Date.now() - lastStreamRead >= 850) {
             networkStreamReads.current.set(streamKey, Date.now());
             void loadResponse(profile, conversationId, true, false);
           }
-          continue;
+          if (networkState === "generating") continue;
         }
         if (networkState !== "completed" || !networkCompletedAt) continue;
         const completionKey = `${profile.profile_id}:${conversationId}`;
@@ -1069,10 +1069,24 @@ function App() {
     const rememberedRoot = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
     if (projectRoot && projectRoot.toLowerCase() !== rememberedRoot.toLowerCase()) selectProjectForProfile(profile.profile_id, projectRoot);
     else if (projectRoot) setRequestProjectRoots((current) => ({ ...current, [profile.profile_id]: projectRoot }));
+    responseScrollLocked.current.delete(profile.profile_id);
+    responseScrollPositions.current.delete(profile.profile_id);
     setChatProfileId(profile.profile_id);
+    window.requestAnimationFrame(() => {
+      scrollResponseToBottom(profile.profile_id);
+      window.setTimeout(() => scrollResponseToBottom(profile.profile_id), 120);
+    });
     if (profile.connected && conversationId && conversationId !== NEW_CHAT_TARGET) {
-      setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
-      void loadResponse(profile, conversationId, true, true);
+      setRequestResponses((current) => {
+        const previous = current[profile.profile_id] || {};
+        return { ...current, [profile.profile_id]: { ...previous, visible: true, loading: true, error: "", conversationId, messages: trimRecentTranscriptMessages(previous.messages) } };
+      });
+      void loadResponse(profile, conversationId, true, true).finally(() => {
+        window.requestAnimationFrame(() => {
+          scrollResponseToBottom(profile.profile_id);
+          window.setTimeout(() => scrollResponseToBottom(profile.profile_id), 120);
+        });
+      });
     }
   }
 
@@ -1230,7 +1244,7 @@ function App() {
             loading: true,
             error: "",
             conversationId,
-            messages: [...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: true }].slice(-20)
+            messages: trimRecentTranscriptMessages([...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: true }])
           }
         };
       });
@@ -1288,7 +1302,7 @@ function App() {
         if (text && matchingPendingIndex >= 0) {
           optimisticMessages = previousMessages.map((message, index) => index === matchingPendingIndex ? { ...message, pending: false, uncertain: false } : message);
         } else if (text) {
-          optimisticMessages = [...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: false, uncertain: false }].slice(-20);
+          optimisticMessages = trimRecentTranscriptMessages([...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: false, uncertain: false }]);
         }
         return {
           ...current,
@@ -1328,7 +1342,7 @@ function App() {
       if (conversationLimitReached) {
         const previous = requestResponses[profile.profile_id] || {};
         const cleanMessages = Array.isArray(previous.messages) ? previous.messages.filter((item) => !item?.pending) : [];
-        const rolloverMessages = text ? [...cleanMessages, { id: `rollover-user-${Date.now()}`, role: "user", text }].slice(-20) : cleanMessages;
+        const rolloverMessages = text ? trimRecentTranscriptMessages([...cleanMessages, { id: `rollover-user-${Date.now()}`, role: "user", text }]) : trimRecentTranscriptMessages(cleanMessages);
         const newConversationId = await rolloverFullConversation(profile, conversationId, {
           ...previous,
           title: conversations.find((chat) => chat.id === conversationId)?.title || profile.active_chat_title || "",
@@ -1593,14 +1607,19 @@ function App() {
     try {
       const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId, readDom, recoverStaleDom });
       const domAvailable = result.dom_available !== false;
-      const networkStreamAvailable = Boolean(result.network_stream_available && (result.text || result.messages?.length));
+      const networkStreamPayloadAvailable = Boolean(result.network_stream_available && (result.text || result.messages?.length || result.network_stream_activity_text));
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         const sameConversation = previous.conversationId === conversationId;
+        const networkStreamAvailable = networkStreamPayloadAvailable && isNetworkStreamCurrentGeneration({
+          networkStartedAt: result.network_last_started_at || previous.networkStartedAt,
+          streamUpdatedAt: result.network_stream_updated_at
+        });
+        const networkStreamInProgress = Boolean(networkStreamAvailable && result.network_stream_in_progress);
         const nextNetworkState = String(result.network_state || previous.networkState || (result.busy ? "generating" : "idle"));
         const networkTerminal = isTerminalChatNetworkState(nextNetworkState);
         const incomingMessages = Array.isArray(result.messages)
-          ? result.messages.slice(-20).map((message, index) => ({
+          ? trimRecentTranscriptMessages(result.messages).map((message, index) => ({
               id: String(message?.id || `${message?.role || "message"}-${index}`),
               role: message?.role === "user" ? "user" : "assistant",
               text: message?.role === "user" ? visibleUserMessageText(message?.text) : String(message?.text || ""),
@@ -1624,7 +1643,7 @@ function App() {
             conversationId,
             text: domAvailable || networkStreamAvailable ? (result.text || "") : (sameConversation ? previous.text || "" : ""),
             messages: nextMessages,
-            busy: networkTerminal ? false : Boolean(result.busy),
+            busy: networkTerminal && !networkStreamInProgress ? false : Boolean(result.busy || networkStreamInProgress),
             truncated: domAvailable || networkStreamAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
             incomplete: networkTerminal ? false : domAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
             incompleteReason: networkTerminal ? "" : domAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
@@ -1635,8 +1654,13 @@ function App() {
             networkStreamAvailable,
             networkStreamEndpoint: String(result.network_stream_endpoint || previous.networkStreamEndpoint || ""),
             networkStreamEventCount: Number(result.network_stream_event_count) || Number(previous.networkStreamEventCount) || 0,
+            networkStreamActivityText: networkStreamAvailable ? String(result.network_stream_activity_text || "") : "",
+            networkStreamInProgress,
+            networkStreamUpdatedAt: String(result.network_stream_updated_at || previous.networkStreamUpdatedAt || ""),
             networkStreamError: String(result.network_stream_error || ""),
-            contentNeedsRefresh: result.dom_skipped
+            contentNeedsRefresh: networkStreamInProgress
+              ? false
+              : result.dom_skipped
               ? String(result.network_state || previous.networkState || "") === "completed"
               : domAvailable
                 ? false
@@ -1649,7 +1673,7 @@ function App() {
             networkStatusCode: Number(result.network_status_code) || Number(previous.networkStatusCode) || 0,
             networkError: String(result.network_error || previous.networkError || ""),
             networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
-            responseReady: Boolean(result.response_ready),
+            responseReady: Boolean(result.response_ready && !networkStreamInProgress),
             responseSource: String(result.response_source || previous.responseSource || ''),
             messageCount: domAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
             updatedAt: result.updated_at || new Date().toISOString()
@@ -1745,7 +1769,11 @@ function App() {
     const clearedKey = `${profile.profile_id}:${selectedTarget}`;
     const responseCleared = Boolean(clearedResponseTargets[clearedKey]);
     const responseMessages = responseCurrent && Array.isArray(response?.messages) ? response.messages : [];
-    const displayResponseMessages = compactToolActivityMessages(responseMessages);
+    const compactResponseMessages = compactToolActivityMessages(responseMessages);
+    const liveNetworkToolActivity = responseCurrent && response?.networkStreamInProgress ? String(response?.networkStreamActivityText || "").trim() : "";
+    const displayResponseMessages = liveNetworkToolActivity
+      ? [...compactResponseMessages.filter((message) => !message?.toolActivity), { id: "codexpro-live-tool-activity", role: "assistant", text: liveNetworkToolActivity, truncated: false, toolActivity: true }]
+      : compactResponseMessages;
     const fallbackToolActivity = toolActivityFromText(response?.text);
     const fallbackResponseMessage = fallbackToolActivity
       ? { id: "codexpro-live-tool-activity", role: "assistant", text: fallbackToolActivity, truncated: false, toolActivity: true }
@@ -1753,7 +1781,7 @@ function App() {
     const hasResponseContent = !responseCleared && Boolean(fallbackResponseMessage.text || displayResponseMessages.length);
     const responseVerifiedComplete = Boolean(responseCurrent && response?.responseReady && hasResponseContent);
     const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${selectedTarget}`));
-    const selectedActivityText = String(selectedTab?.activity_text || "").trim();
+    const selectedActivityText = String((responseCurrent && response?.networkStreamActivityText) || selectedTab?.activity_text || "").trim();
     const selectedNetworkState = String(selectedTab?.network_state || (responseCurrent ? response?.networkState : "") || (selectedTab?.busy ? "generating" : "idle"));
     const selectedNetworkCompleted = selectedNetworkState === "completed";
     const selectedNetworkFailed = selectedNetworkState === "failed";
@@ -1761,9 +1789,10 @@ function App() {
       networkState: selectedNetworkState,
       tabBusy: selectedTab?.busy,
       responseCurrent,
-      responseBusy: response?.busy
+      responseBusy: response?.busy,
+      streamBusy: responseCurrent && response?.networkStreamInProgress
     });
-    const selectedSettling = shouldShowChatSettling({
+    const selectedSettling = !(responseCurrent && response?.networkStreamInProgress) && shouldShowChatSettling({
       networkState: selectedNetworkState,
       tabSettling: selectedTab?.settling,
       responseCurrent,

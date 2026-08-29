@@ -1,9 +1,9 @@
 (() => {
   const GLOBAL_KEY = "__codexproNetworkStreamCaptureV1";
   const current = globalThis[GLOBAL_KEY];
-  if (current?.version === 1 && typeof current.read === "function") return;
+  if (current?.version === 3 && typeof current.read === "function") return;
 
-  const originalFetch = globalThis.fetch?.bind(globalThis);
+  const originalFetch = (current?.originalFetch || globalThis.fetch)?.bind(globalThis);
   if (typeof originalFetch !== "function") return;
 
   const records = [];
@@ -20,9 +20,17 @@
     const endpoint = endpointOf(url);
     return /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|(?:codex\/)?responses)(?:\/|$)/.test(endpoint);
   };
+  const requestConversationId = (body) => {
+    if (typeof body !== "string" || !body.trim()) return "";
+    try { return conversationIdFrom(JSON.parse(body)); } catch { return ""; }
+  };
+  const pageConversationId = () => {
+    try { return new URL(location.href).pathname.match(/^\/c\/([A-Za-z0-9-]{8,180})/)?.[1] || ""; } catch { return ""; }
+  };
   const requestDetails = (input, init) => ({
     url: typeof input === "string" || input instanceof URL ? String(input) : String(input?.url || ""),
-    method: String(init?.method || input?.method || "GET").toUpperCase()
+    method: String(init?.method || input?.method || "GET").toUpperCase(),
+    conversationId: requestConversationId(init?.body) || pageConversationId()
   });
   const messageText = (message) => {
     const content = message?.content || message?.message?.content;
@@ -45,6 +53,38 @@
     180
   );
   const assistantRole = (message) => String(message?.author?.role || message?.role || message?.message?.author?.role || "").toLowerCase() === "assistant";
+  const toolActivityFromText = (text) => {
+    const source = String(text || "").trim().replace(/\\\"/g, '"');
+    if (!source.includes("/CodexPro/") || !source.includes("args")) return "";
+    let toolPath = "";
+    let args = {};
+    try {
+      const payload = JSON.parse(source);
+      toolPath = String(payload?.path || "");
+      args = payload?.args && typeof payload.args === "object" ? payload.args : {};
+    } catch {
+      toolPath = source.match(/"path"\s*:\s*"(\/CodexPro\/[^"\s]+)"/)?.[1] || "";
+    }
+    if (!toolPath.includes("/CodexPro/")) return "";
+    const action = toolPath.split("/").filter(Boolean).pop() || "tool";
+    const target = String(args.path || args.cwd || args.root || "").trim();
+    const shortTarget = target ? target.replace(/\\+/g, "/").split("/").slice(-3).join("/") : "";
+    const labels = {
+      begin_repo_task: "CodexPro đang xác minh repo",
+      open_workspace: "CodexPro đang mở repo",
+      open_current_workspace: "CodexPro đang mở workspace",
+      search: shortTarget ? `CodexPro đang tìm trong ${shortTarget}` : "CodexPro đang tìm trong mã nguồn",
+      read: shortTarget ? `CodexPro đang đọc ${shortTarget}` : "CodexPro đang đọc file",
+      edit: shortTarget ? `CodexPro đang sửa ${shortTarget}` : "CodexPro đang sửa code",
+      write: shortTarget ? `CodexPro đang ghi ${shortTarget}` : "CodexPro đang ghi file",
+      apply_patch: "CodexPro đang áp dụng thay đổi",
+      show_changes: "CodexPro đang kiểm tra thay đổi",
+      bash: "CodexPro đang chạy lệnh kiểm tra",
+      view_image: shortTarget ? `CodexPro đang kiểm tra ${shortTarget}` : "CodexPro đang kiểm tra ảnh",
+      inspect_workspace: "CodexPro đang phân tích repo"
+    };
+    return labels[action] || `CodexPro đang sử dụng ${action}`;
+  };
   const visibleAssistant = (message) => {
     const candidate = message?.message || message;
     const metadata = candidate?.metadata || {};
@@ -55,10 +95,10 @@
   };
   const messageId = (message, record) => bounded(message?.id || message?.message?.id || record.activeMessageId || `stream-${record.id}`, 220);
 
-  function createRecord(url) {
+  function createRecord(url, conversationId = "") {
     const record = {
       id: nextRecordId++,
-      conversationId: "",
+      conversationId: bounded(conversationId, 180),
       endpoint: endpointOf(url),
       startedAt: Date.now(),
       updatedAt: Date.now(),
@@ -213,14 +253,14 @@
     const details = requestDetails(args[0], args[1]);
     const response = await originalFetch(...args);
     if (isGenerationEndpoint(details.url, details.method)) {
-      const record = createRecord(details.url);
+      const record = createRecord(details.url, details.conversationId);
       void consumeResponse(record, response);
     }
     return response;
   };
 
   const api = {
-    version: 1,
+    version: 3,
     installedAt: Date.now(),
     originalFetch,
     records,
@@ -231,16 +271,20 @@
         ? [...recent].reverse().find((item) => item.conversationId === requested)
         : recent.at(-1);
       if (!record) return { available: false, capture_installed: true, conversation_id: requested };
-      const messages = record.messages.filter((message) => message.text).map((message) => ({ ...message }));
+      const rawMessages = record.messages.filter((message) => message.text);
+      const latestActivity = [...rawMessages].reverse().map((message) => toolActivityFromText(message.text)).find(Boolean) || "";
+      const messages = rawMessages.filter((message) => !toolActivityFromText(message.text)).map((message) => ({ ...message }));
       const latest = [...messages].reverse().find((message) => message.role === "assistant");
       return {
-        available: Boolean(messages.length),
+        available: Boolean(messages.length || latestActivity),
         capture_installed: true,
         conversation_id: record.conversationId || requested,
         endpoint: record.endpoint,
         text: latest?.text || "",
         text_length: String(latest?.text || "").length,
         messages,
+        activity_text: latestActivity,
+        in_progress: !record.completedAt,
         event_count: record.eventCount,
         started_at: new Date(record.startedAt).toISOString(),
         updated_at: new Date(record.updatedAt).toISOString(),

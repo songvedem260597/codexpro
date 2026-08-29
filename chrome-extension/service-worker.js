@@ -2,6 +2,8 @@ const BRIDGE = 'http://127.0.0.1:9224';
 const HEADERS = {'content-type':'application/json','x-codexpro-extension':'profile-bridge-v1'};
 const CHAT_REQUEST_STALE_MS = 30 * 60 * 1000;
 const CHAT_NETWORK_STATE_KEY = 'codexproChatNetworkStateV1';
+const CHAT_ATTACHMENT_OWNERSHIP_KEY = 'codexproChatAttachmentOwnershipV1';
+const CHAT_ATTACHMENT_OWNERSHIP_TTL_MS = 30 * 60 * 1000;
 const DOM_READ_TIMEOUT_MS = 2500;
 const DOM_ACTIVITY_PROBE_TIMEOUT_MS = 800;
 const DOM_ACTIVITY_PROBE_CACHE_MS = 1000;
@@ -34,9 +36,12 @@ const debuggerEventSubscribersByTab = new Map();
 const browserMutationTailsByTab = new Map();
 const canonicalCompletionProbeAtByTab = new Map();
 const pendingConversationByTab = new Map();
+const chatAttachmentOwnershipByTab = new Map();
 const chatDomActivityByTab = new Map();
 let chatNetworkStateLoaded = false;
 let chatNetworkStateLoadPromise = null;
+let chatAttachmentOwnershipLoaded = false;
+let chatAttachmentOwnershipLoadPromise = null;
 let recentConversationCache = {at:0,items:[]};
 const TITLE_OVERRIDE_TTL_MS = 10 * 60 * 1000;
 let conversationTitleOverrides = null;
@@ -329,6 +334,60 @@ function scheduleRealtimeProfilePush(delayMs=40) {
   },delayMs);
 }
 
+async function ensureChatAttachmentOwnershipLoaded() {
+  if(chatAttachmentOwnershipLoaded)return;
+  if(chatAttachmentOwnershipLoadPromise)return await chatAttachmentOwnershipLoadPromise;
+  chatAttachmentOwnershipLoadPromise=(async()=>{
+    try{
+      const stored=await chrome.storage.local.get(CHAT_ATTACHMENT_OWNERSHIP_KEY);
+      const raw=stored[CHAT_ATTACHMENT_OWNERSHIP_KEY]&&typeof stored[CHAT_ATTACHMENT_OWNERSHIP_KEY]==='object'?stored[CHAT_ATTACHMENT_OWNERSHIP_KEY]:{};
+      const now=Date.now();
+      for(const [tabId,value] of Object.entries(raw)){
+        if(!value||typeof value!=='object'||now-Number(value.at||0)>CHAT_ATTACHMENT_OWNERSHIP_TTL_MS)continue;
+        chatAttachmentOwnershipByTab.set(Number(tabId),value);
+      }
+    }catch{}
+    chatAttachmentOwnershipLoaded=true;
+    chatAttachmentOwnershipLoadPromise=null;
+  })();
+  await chatAttachmentOwnershipLoadPromise;
+}
+
+async function persistChatAttachmentOwnership() {
+  try{
+    const now=Date.now();
+    const entries=[...chatAttachmentOwnershipByTab.entries()]
+      .filter(([,value])=>now-Number(value?.at||0)<=CHAT_ATTACHMENT_OWNERSHIP_TTL_MS)
+      .slice(-30);
+    await chrome.storage.local.set({[CHAT_ATTACHMENT_OWNERSHIP_KEY]:Object.fromEntries(entries.map(([tabId,value])=>[String(tabId),value]))});
+  }catch{}
+}
+
+async function chatAttachmentOwnership(tabId,conversationId='') {
+  await ensureChatAttachmentOwnershipLoaded();
+  const ownership=chatAttachmentOwnershipByTab.get(tabId);
+  if(!ownership)return null;
+  if(Date.now()-Number(ownership.at||0)>CHAT_ATTACHMENT_OWNERSHIP_TTL_MS){chatAttachmentOwnershipByTab.delete(tabId);await persistChatAttachmentOwnership();return null;}
+  const ownedConversation=String(ownership.conversation_id||'');
+  if(ownedConversation&&conversationId&&ownedConversation!==conversationId)return null;
+  return ownership;
+}
+
+async function rememberChatAttachmentOwnership(tabId,conversationId,attemptId,names,labels=[]) {
+  await ensureChatAttachmentOwnershipLoaded();
+  chatAttachmentOwnershipByTab.set(tabId,{conversation_id:String(conversationId||''),attempt_id:String(attemptId||''),names:(Array.isArray(names)?names:[]).map(String).filter(Boolean).slice(0,4),labels:(Array.isArray(labels)?labels:[]).map(String).filter(Boolean).slice(0,4),at:Date.now()});
+  await persistChatAttachmentOwnership();
+}
+
+async function clearChatAttachmentOwnership(tabId,attemptId='') {
+  await ensureChatAttachmentOwnershipLoaded();
+  const current=chatAttachmentOwnershipByTab.get(tabId);
+  if(!current||attemptId&&String(current.attempt_id||'')!==String(attemptId))return false;
+  chatAttachmentOwnershipByTab.delete(tabId);
+  await persistChatAttachmentOwnership();
+  return true;
+}
+
 function scheduleDomActivityRefresh(delayMs=1000) {
   if(domActivityRefreshTimer)return;
   domActivityRefreshTimer=setTimeout(()=>{
@@ -342,7 +401,7 @@ chrome.webRequest.onBeforeRequest.addListener(details=>{const attributed=attribu
 chrome.webRequest.onCompleted.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'completed',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onErrorOccurred.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'failed',0,details.error);finishChatRequest(attributed,'failed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onBeforeRedirect.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'redirected',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
-chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);chatDomActivityByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
+chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
 
 async function profileInfo() {
   const stored = await chrome.storage.local.get(['profileId','active','connectorInstall']);
@@ -421,8 +480,11 @@ async function tabList() {
   const summaries=await Promise.all(tabs.map(async tab => {
     const conversationId=conversationIdFromUrl(tab.url);
     const [networkState,domActivity]=await Promise.all([chatRequestState(tab.id,conversationId),chatDomActivityState(tab.id,conversationId)]);
+    const networkStream=conversationId&&networkState.network_state!=='idle'?await chatNetworkStreamCapture(tab.id,conversationId):{};
     const titleOverride=conversationId?titleOverrides[conversationId]:null;
-    const networkBusy=Boolean(networkState.busy);
+    const streamBusy=Boolean(networkStream.in_progress);
+    const networkBusy=Boolean(networkState.busy||streamBusy);
+    const streamActivity=String(networkStream.activity_text||'').trim().slice(0,220);
     return {
       id:tab.id,
       window_id:tab.windowId,
@@ -433,8 +495,9 @@ async function tabList() {
       settling:!networkBusy&&domActivity.busy,
       busy_request_count:networkState.busy_request_count,
       busy_since:networkState.busy_since,
-      busy_source:networkBusy?'network':domActivity.busy?domActivity.source:'',
-      activity_text:domActivity.busy?domActivity.activity_text:'',
+      busy_source:streamBusy?'network_stream':networkState.busy?'network':domActivity.busy?domActivity.source:'',
+      activity_text:streamBusy?(streamActivity||'CodexPro đang sử dụng tool'):domActivity.busy?domActivity.activity_text:'',
+      network_stream_in_progress:streamBusy,
       dom_busy:domActivity.busy,
       dom_probe_available:domActivity.available,
       network_state:networkState.network_state,
@@ -602,7 +665,7 @@ async function browserElementActionPage(action,locator={},text='',state='visible
   return {ok:false,error:'Unsupported element action'};
 }
 
-async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0) {
+async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0,staleAttachmentOwnership=null) {
   const sleep=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
   const expired=()=>Boolean(deadlineAt&&Date.now()>Number(deadlineAt));
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
@@ -615,13 +678,13 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
   const composerRootFor=element=>element?.closest('form')||element?.closest('[data-type="unified-composer"]')||element?.parentElement;
   const attachmentButtons=root=>Array.from((root||document).querySelectorAll('button[aria-label*="Remove file" i],button[aria-label*="Remove attachment" i],button[aria-label*="Xóa tệp" i],button[aria-label*="Xóa file" i]')).filter(visible);
   const attachmentLabel=button=>String(button?.getAttribute?.('aria-label')||button?.innerText||button?.textContent||'').trim();
-  const markedRootForAttempt=()=>attemptId?document.querySelector(`[data-codexpro-attachment-attempt="${CSS.escape(attemptId)}"]`):null;
+  const markedRootForAttempt=ownedAttemptId=>ownedAttemptId?document.querySelector(`[data-codexpro-attachment-attempt="${CSS.escape(ownedAttemptId)}"]`):null;
   let initialRoot=null;
-  const clearOwnedDraft=async()=>{
+  const clearOwnedAttempt=async ownedAttemptId=>{
     let textCleared=false,attachmentsRemoved=0;
     const current=findComposer();
-    const root=composerRootFor(current)||markedRootForAttempt()||initialRoot;
-    if(current&&current.dataset.codexproDraftAttempt===attemptId){
+    const root=composerRootFor(current)||markedRootForAttempt(ownedAttemptId)||initialRoot;
+    if(current&&current.dataset.codexproDraftAttempt===ownedAttemptId){
       current.focus();
       if(current.isContentEditable){
         const selection=window.getSelection(),range=document.createRange();
@@ -636,27 +699,51 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
       current.dispatchEvent(new Event('change',{bubbles:true}));
       textCleared=!composerText(current);
       delete current.dataset.codexproDraftAttempt;
+      delete current.dataset.codexproDraftText;
     }
     let ownedLabels=new Set();
-    if(root?.dataset?.codexproAttachmentAttempt===attemptId){
+    if(root?.dataset?.codexproAttachmentAttempt===ownedAttemptId){
       try{ownedLabels=new Set(JSON.parse(root.dataset.codexproAttachmentLabels||'[]'));}catch{}
     }
     for(const button of attachmentButtons(root)){
-      const owned=button.dataset.codexproAttachmentAttempt===attemptId||ownedLabels.has(attachmentLabel(button));
+      const owned=button.dataset.codexproAttachmentAttempt===ownedAttemptId||ownedLabels.has(attachmentLabel(button));
       if(!owned)continue;
       button.click();attachmentsRemoved+=1;await sleep(40);
     }
-    if(root?.dataset?.codexproAttachmentAttempt===attemptId){
+    if(root?.dataset?.codexproAttachmentAttempt===ownedAttemptId){
       delete root.dataset.codexproAttachmentAttempt;
       delete root.dataset.codexproAttachmentLabels;
     }
     return {text_cleared:textCleared,attachments_removed:attachmentsRemoved};
   };
+  const clearOwnedDraft=async()=>await clearOwnedAttempt(attemptId);
   const fail=async(error,extra={})=>({ok:false,error,...extra,cleanup:await clearOwnedDraft()});
   let composer=findComposer();
   if(!composer)return {ok:false,error:'Không tìm thấy ô nhập đang hiển thị trong đoạn chat.'};
   initialRoot=composerRootFor(composer);
-  const root=initialRoot;
+  let root=initialRoot;
+  const markedAttempts=[composer.dataset.codexproDraftAttempt,root?.dataset?.codexproAttachmentAttempt].filter(Boolean);
+  const staleAttempts=[...new Set(markedAttempts)].filter(value=>value!==attemptId);
+  let staleOwnedCleanup=null;
+  if(staleAttempts.length===1){
+    const staleAttemptId=staleAttempts[0];
+    const staleButtons=attachmentButtons(root);
+    let staleLabels=new Set();
+    if(root?.dataset?.codexproAttachmentAttempt===staleAttemptId){
+      try{staleLabels=new Set(JSON.parse(root.dataset.codexproAttachmentLabels||'[]'));}catch{}
+    }
+    const staleAttachmentsOwned=staleButtons.length>0&&staleButtons.every(button=>button.dataset.codexproAttachmentAttempt===staleAttemptId||staleLabels.has(attachmentLabel(button)));
+    const staleDraft=composerText(composer);
+    const markedDraftText=String(composer.dataset.codexproDraftText||'');
+    const staleDraftOwned=!staleDraft||(composer.dataset.codexproDraftAttempt===staleAttemptId&&((markedDraftText&&comparableText(staleDraft)===comparableText(markedDraftText))||comparableText(staleDraft)===comparableText(text)));
+    if(staleAttachmentsOwned&&staleDraftOwned){
+      staleOwnedCleanup=await clearOwnedAttempt(staleAttemptId);
+      composer=findComposer();
+      if(!composer)return {ok:false,error:'Ô nhập ChatGPT biến mất sau khi dọn attachment cũ của CodexPro.'};
+      initialRoot=composerRootFor(composer);
+      root=initialRoot;
+    }
+  }
   const contentEditableEmpty=Boolean(composer.isContentEditable&&composer.querySelector('[data-empty-paragraph="true"]')&&!Array.from(composer.querySelectorAll('p')).some(node=>!node.hasAttribute('data-empty-paragraph')&&String(node.textContent||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim()));
   const rawDraft=composer.isContentEditable?String(composer.innerText||''):String(composer.value||'');
   const normalizedDraft=rawDraft.replace(/[\u200B-\u200D\uFEFF]/g,'').trim();
@@ -664,12 +751,43 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
   const draft=contentEditableEmpty||normalizedDraft===placeholder||/^(?:ask|message|chat with)\s+chatgpt[.…]*$/i.test(normalizedDraft)?'':normalizedDraft;
   const ownedExistingDraft=Boolean(draft&&composer.dataset.codexproDraftAttempt===attemptId&&draft===normalizedText(text));
   if(draft&&!ownedExistingDraft)return {ok:false,error:'Ô ChatGPT đang có một bản nháp khác. CodexPro không ghi đè bản nháp của người dùng.'};
-  const existingAttachments=attachmentButtons(root);
-  if(existingAttachments.length)return {ok:false,error:'Ô chat đang có file chưa gửi; CodexPro không ghi đè file/bản nháp có sẵn.'};
+  let existingAttachments=attachmentButtons(root);
+  const persistedNames=Array.isArray(staleAttachmentOwnership?.names)?staleAttachmentOwnership.names.map(name=>String(name||'').trim().toLocaleLowerCase()).filter(Boolean):[];
+  const persistedLabels=Array.isArray(staleAttachmentOwnership?.labels)?staleAttachmentOwnership.labels.map(label=>String(label||'').trim().toLocaleLowerCase()).filter(Boolean):[];
+  const existingLabelsBeforeCleanup=existingAttachments.map(button=>attachmentLabel(button).toLocaleLowerCase());
+  const persistedOwnershipMatches=Boolean(
+    !draft&&staleAttachmentOwnership?.attempt_id&&staleAttachmentOwnership.attempt_id!==attemptId&&
+    existingAttachments.length>0&&existingAttachments.length===persistedNames.length&&
+    persistedNames.every(name=>existingLabelsBeforeCleanup.some(label=>label.includes(name)))&&
+    (!persistedLabels.length||persistedLabels.every(label=>existingLabelsBeforeCleanup.includes(label)))
+  );
+  if(persistedOwnershipMatches){
+    let attachmentsRemoved=0;
+    for(const button of existingAttachments){button.click();attachmentsRemoved+=1;await sleep(60);}
+    const cleanupDeadline=Date.now()+1500;
+    while(Date.now()<cleanupDeadline&&attachmentButtons(root).length)await sleep(60);
+    if(!attachmentButtons(root).length){
+      staleOwnedCleanup={text_cleared:false,attachments_removed:attachmentsRemoved,source:'extension-ownership',attempt_id:String(staleAttachmentOwnership.attempt_id||'')};
+      composer=findComposer();
+      if(!composer)return {ok:false,error:'Ô nhập ChatGPT biến mất sau khi dọn attachment cũ của CodexPro.'};
+      root=composerRootFor(composer);
+      existingAttachments=[];
+    }
+  }
+  const expectedAttachmentNames=attachments.map(file=>String(file.name||'').trim().toLocaleLowerCase()).filter(Boolean);
+  const existingAttachmentLabels=existingAttachments.map(button=>attachmentLabel(button).toLocaleLowerCase());
+  let existingOwnedLabels=new Set();
+  if(root?.dataset?.codexproAttachmentAttempt===attemptId){
+    try{existingOwnedLabels=new Set(JSON.parse(root.dataset.codexproAttachmentLabels||'[]'));}catch{}
+  }
+  const ownedExistingAttachments=Boolean(existingAttachments.length&&root?.dataset?.codexproAttachmentAttempt===attemptId&&existingAttachments.every(button=>button.dataset.codexproAttachmentAttempt===attemptId||existingOwnedLabels.has(attachmentLabel(button))));
+  const matchingExistingAttachments=Boolean(!draft&&existingAttachments.length===expectedAttachmentNames.length&&expectedAttachmentNames.every(name=>existingAttachmentLabels.some(label=>label.includes(name))));
+  const reusableExistingAttachments=ownedExistingAttachments||matchingExistingAttachments;
+  if(existingAttachments.length&&!reusableExistingAttachments)return {ok:false,error:'Ô chat đang có file chưa gửi; CodexPro không ghi đè file/bản nháp có sẵn.'};
   if(expired())return {ok:false,error:'Lần gửi đã hết hạn trước khi thao tác composer.',expired:true};
   let attachmentPreparePath='';
 
-  if(attachments.length){
+  if(attachments.length&&!reusableExistingAttachments){
     const candidates=Array.from((root||document).querySelectorAll('input[type="file"]')).filter(input=>!input.disabled);
     const fallbackCandidates=Array.from(document.querySelectorAll('input[type="file"]')).filter(input=>!input.disabled);
     const fileInput=candidates.find(input=>input.multiple)||candidates[0]||fallbackCandidates.find(input=>input.multiple)||fallbackCandidates[0];
@@ -727,6 +845,7 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
     if(expired())return await fail('Lần gửi đã hết hạn trước khi nhập nội dung.',{expired:true});
     composer.scrollIntoView({block:'center',inline:'center'});composer.focus();
     composer.dataset.codexproDraftAttempt=attemptId;
+    composer.dataset.codexproDraftText=text;
     if(composer.isContentEditable){
       if(composer.querySelector('[data-inline-selection-pill]')){
         const selection=window.getSelection(),range=document.createRange(),paragraph=composer.querySelector('p:last-child')||composer;
@@ -752,6 +871,7 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
       if(comparableText(composerText(currentComposer))===expectedComparable){
         composer=currentComposer;
         composer.dataset.codexproDraftAttempt=attemptId;
+        composer.dataset.codexproDraftText=text;
         break;
       }
       await sleep(50);
@@ -764,7 +884,7 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
   if(!currentComposer)return await fail('Ô nhập ChatGPT biến mất ngay trước khi submit.');
   composer=currentComposer;
   composer.dataset.codexproSubmitAttempt=attemptId;
-  return {ok:true,title:document.title,url:location.href,length:text.length,attachment_count:attachments.length,attachment_names:attachments.map(file=>file.name),attachment_prepare_path:attachmentPreparePath,prepared:true,composer_prepared:true,requires_trusted_submit:true,internal_submit_found:false,internal_submit_reason:'ChatGPT không công khai một frontend submit action ổn định; dùng trusted Enter cho text và page-context submit đã khóa attempt cho attachment để SPA tự chạy Sentinel/PoW.',submitted:false,submitted_by:'prepared',attempt_id:attemptId};
+  return {ok:true,title:document.title,url:location.href,length:text.length,attachment_count:attachments.length,attachment_names:attachments.map(file=>file.name),attachment_labels:attachmentButtons(root).map(attachmentLabel),existing_attachment_count:attachmentButtons(root).length,attachment_prepare_path:ownedExistingAttachments?'existing-attempt':matchingExistingAttachments?'matching-existing-file':attachmentPreparePath,attachment_reused:Boolean(reusableExistingAttachments),stale_owned_cleanup:staleOwnedCleanup,prepared:true,composer_prepared:true,requires_trusted_submit:true,internal_submit_found:false,internal_submit_reason:'ChatGPT không công khai một frontend submit action ổn định; dùng trusted Enter cho text và page-context submit đã khóa attempt cho attachment để SPA tự chạy Sentinel/PoW.',submitted:false,submitted_by:'prepared',attempt_id:attemptId};
 }
 
 async function cleanupChatRequestDraftPage(attemptId='') {
@@ -788,7 +908,7 @@ async function cleanupChatRequestDraftPage(attemptId='') {
     }
     composer.dispatchEvent(new InputEvent('input',{bubbles:true,inputType:'deleteContentBackward',data:null}));
     composer.dispatchEvent(new Event('change',{bubbles:true}));
-    delete composer.dataset.codexproDraftAttempt;textCleared=true;
+    delete composer.dataset.codexproDraftAttempt;delete composer.dataset.codexproDraftText;textCleared=true;
   }
   let ownedLabels=new Set();
   if(root?.dataset?.codexproAttachmentAttempt===attemptId){
@@ -863,6 +983,7 @@ async function focusChatComposerForSubmitPage(attemptId='',expectedText='') {
   const composer=marked||recovered&&current;
   if(!composer)return {ok:false,error:'Composer của attempt đã bị React thay thế và draft hiện tại không còn khớp payload.'};
   composer.dataset.codexproDraftAttempt=attemptId;
+  composer.dataset.codexproDraftText=expectedText;
   composer.dataset.codexproSubmitAttempt=attemptId;
   composer.scrollIntoView({block:'center',inline:'center'});
   composer.focus({preventScroll:true});
@@ -884,6 +1005,7 @@ function prepareTrustedClickFallbackPage(attemptId='',expectedText='') {
   const recovered=Boolean(composer&&composer.dataset.codexproDraftAttempt!==attemptId&&expectedText&&normalized(composerText)===normalized(expectedText));
   if(!composer||composer.dataset.codexproDraftAttempt!==attemptId&&!recovered)return {ok:false,error:'Composer không còn giữ đúng draft của attempt này.'};
   composer.dataset.codexproDraftAttempt=attemptId;
+  composer.dataset.codexproDraftText=expectedText;
   const root=composer.closest('form')||composer.closest('[data-type="unified-composer"]')||composer.parentElement;
   const send=['#composer-submit-button','button[data-testid="send-button"]','button[aria-label*="Send" i]','button[aria-label*="Gửi" i]'].flatMap(selector=>[root?.querySelector(selector),document.querySelector(selector)]).filter(Boolean).find(element=>{
     if(!visible(element)||element.disabled||element.getAttribute?.('aria-disabled')==='true'||element.hasAttribute?.('data-visually-disabled'))return false;
@@ -1159,6 +1281,8 @@ async function execute(command) {
     const targetTemporarilyActivated=false;
     const submitStartedAt=Date.now();
     const attemptId=crypto.randomUUID();
+    const targetConversationId=newChat?'':conversationId||conversationIdFromUrl(tab.url);
+    const staleAttachmentOwnership=await chatAttachmentOwnership(tab.id,targetConversationId);
     const prepareTimeoutMs=attachments.length?ATTACHMENT_PREPARE_TIMEOUT_MS:DOM_PREPARE_TIMEOUT_MS;
     let deadlineAt=Math.min(submitStartedAt+prepareTimeoutMs-1500,commandDeadlineAt-1500);
     pendingConversationByTab.set(tab.id,{conversation_id:newChat?'':conversationId||conversationIdFromUrl(tab.url),source:'codexpro',at:submitStartedAt});
@@ -1169,6 +1293,7 @@ async function execute(command) {
     };
     const resultForNetwork=async(networkAck,injectedResult={})=>{
       pendingConversationByTab.delete(tab.id);
+      await clearChatAttachmentOwnership(tab.id,attemptId);
       const submittedBy=String(injectedResult.submitted_by||'network-observed');
       const networkEvidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
       const shared={network_tracking:true,network_acknowledged:true,network_stream_capture_installed:networkCaptureInstalled,submission_state:'submitted',generation_state:networkAck.network_state,network_state:networkAck.network_state,network_generation_endpoint:networkAck.network_generation_endpoint,network_error:networkAck.network_error,network_status_code:networkAck.network_status_code,network_evidence:networkEvidence,command_queued_ms:commandQueuedMs,...injectedResult,submitted:true,submitted_by:submittedBy};
@@ -1197,7 +1322,7 @@ async function execute(command) {
         const currentPrepareTimeoutMs=Math.max(1000,Math.min(prepareTimeoutMs,remainingCommandMs()-1500));
         deadlineAt=Math.min(Date.now()+currentPrepareTimeoutMs-500,commandDeadlineAt-1000);
         [injected]=await promiseWithTimeout(
-          chrome.scripting.executeScript({target:{tabId:tab.id},func:sendChatRequestPage,args:[text,attachments,attemptId,deadlineAt]}),
+          chrome.scripting.executeScript({target:{tabId:tab.id},func:sendChatRequestPage,args:[text,attachments,attemptId,deadlineAt,staleAttachmentOwnership]}),
           currentPrepareTimeoutMs,
           attachments.length?'Chrome renderer không phản hồi khi chuẩn bị file đính kèm.':'Chrome renderer không phản hồi khi chuẩn bị tin nhắn.'
         );
@@ -1253,6 +1378,14 @@ async function execute(command) {
       if(newChat)await chrome.tabs.remove(tab.id).catch(()=>{});
       throw new Error(injected?.result?.error||'Không gửi được yêu cầu vào ChatGPT.');
     }
+    if(injected.result.stale_owned_cleanup?.source==='extension-ownership'){
+      await clearChatAttachmentOwnership(tab.id,String(injected.result.stale_owned_cleanup.attempt_id||''));
+    }else if(staleAttachmentOwnership&&!attachments.length&&Number(injected.result.existing_attachment_count||0)===0){
+      await clearChatAttachmentOwnership(tab.id,String(staleAttachmentOwnership.attempt_id||''));
+    }
+    if(attachments.length){
+      await rememberChatAttachmentOwnership(tab.id,targetConversationId,attemptId,injected.result.attachment_names||attachments.map(file=>file.name),injected.result.attachment_labels||[]);
+    }
     if(remainingCommandMs()<=1500){
       pendingConversationByTab.delete(tab.id);
       const cleanup=await cleanupAttempt();
@@ -1261,7 +1394,7 @@ async function execute(command) {
     const preparationPath=preparationRecovery.renderer_reloaded?['prepare',preparationRecovery.renderer_replaced?'replace-tab':'reload','prepare']:[];
     let submitResult={...injected.result,...preparationRecovery,submit_path:'trusted-enter',path_attempted:[...preparationPath,'trusted-enter'],trusted_enter_dispatched:false,trusted_click_dispatched:false,submitted_by:'trusted-enter'};
     if(injected.result.requires_trusted_submit){
-      if(attachments.length){
+      if(attachments.length&&!injected.result.attachment_reused){
         try{
           const uploadAck=await waitForAttachmentUploadNetwork(tab.id,submitStartedAt-100,Math.max(1000,Math.min(ATTACHMENT_UPLOAD_TIMEOUT_MS,remainingCommandMs()-1500)));
           submitResult={...submitResult,attachment_upload_acknowledged:true,attachment_upload_endpoint:uploadAck.endpoint,attachment_upload_fallback:Boolean(uploadAck.fallback)};
@@ -1270,6 +1403,8 @@ async function execute(command) {
           const cleanup=await cleanupAttempt();
           return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,...submitResult,ok:true,submission_state:'failed',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,send_uncertain:false,error:'ATTACHMENT_UPLOAD_FAILED: '+String(error?.message||error),attempt_id:attemptId,cleanup};
         }
+      }else if(attachments.length){
+        submitResult={...submitResult,attachment_upload_acknowledged:true,attachment_upload_endpoint:'existing-composer-file',attachment_upload_fallback:true};
       }
       const attachmentSubmit=attachments.length>0;
       if(attachmentSubmit)submitResult={...submitResult,submit_path:'dom-click-attachment',path_attempted:[...preparationPath,'dom-click-attachment'],submitted_by:'dom-click-attachment'};
@@ -1442,16 +1577,22 @@ if(action==='rename_chat'){
     }
     const networkStreamMessages=Array.isArray(networkStream.messages)?networkStream.messages.slice(-20):[];
     const networkStreamText=String(networkStream.text||'');
+    const networkStreamActivityText=String(networkStream.activity_text||'').trim().slice(0,220);
+    const networkStreamInProgress=Boolean(networkStream.in_progress);
+    const effectiveNetworkBusy=Boolean(networkState.busy||networkStreamInProgress);
     const networkStreamPayload={
-      network_stream_available:Boolean(networkStream.available&&networkStreamText),
+      network_stream_available:Boolean(networkStream.available&&(networkStreamText||networkStreamMessages.length||networkStreamActivityText)),
       network_stream_capture_installed:Boolean(networkStream.capture_installed),
       network_stream_endpoint:String(networkStream.endpoint||''),
       network_stream_event_count:Number(networkStream.event_count)||0,
       network_stream_error:String(networkStream.error||''),
+      network_stream_activity_text:networkStreamActivityText,
+      network_stream_in_progress:networkStreamInProgress,
+      network_stream_started_at:String(networkStream.started_at||''),
       network_stream_updated_at:String(networkStream.updated_at||'')
     };
     if(args.read_dom===false){
-      return {action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:networkStreamText,text_length:networkStreamText.length,truncated:false,incomplete:Boolean(networkState.busy),incomplete_reason:networkState.busy?(networkStreamText?'network_stream_in_progress':'generation_in_progress'):'',conversation_limit_reached:false,conversation_limit_message:'',message_count:networkStreamMessages.length,total_message_count:networkStreamMessages.length,messages:networkStreamMessages,busy:networkState.busy,dom_available:false,dom_skipped:true,dom_error:'',response_source:networkStreamText?'network_stream':'network_state',updated_at:networkStream.updated_at||new Date().toISOString(),...networkStreamPayload,...networkPayload};
+      return {action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:networkStreamText,text_length:networkStreamText.length,truncated:false,incomplete:effectiveNetworkBusy,incomplete_reason:effectiveNetworkBusy?(networkStreamText?'network_stream_in_progress':networkStreamActivityText?'tool_activity_in_progress':'generation_in_progress'):'',conversation_limit_reached:false,conversation_limit_message:'',message_count:networkStreamMessages.length,total_message_count:networkStreamMessages.length,messages:networkStreamMessages,busy:effectiveNetworkBusy,dom_available:false,dom_skipped:true,dom_error:'',response_source:networkStreamText?'network_stream':networkStreamActivityText?'network_tool_activity':'network_state',updated_at:networkStream.updated_at||new Date().toISOString(),...networkStreamPayload,...networkPayload};
     }
     let canonical={ok:false,error:''};
     try{
@@ -1518,11 +1659,11 @@ if(action==='rename_chat'){
           recovery.dom_recovery_error=String(error?.message||error).slice(0,500);
         }
       }
-      return {action,target_id:tab.id,...domResult,busy:Boolean(networkState.busy||canonical.busy||domResult.busy),dom_available:true,dom_busy:Boolean(domResult.busy),canonical_available:Boolean(canonical.ok),canonical_error:String(canonical.error||''),...networkStreamPayload,...recovery,...networkPayload};
+      return {action,target_id:tab.id,...domResult,busy:Boolean(effectiveNetworkBusy||canonical.busy||domResult.busy),dom_available:true,dom_busy:Boolean(domResult.busy),canonical_available:Boolean(canonical.ok),canonical_error:String(canonical.error||''),...networkStreamPayload,...recovery,...networkPayload};
     }catch(error){
       if(canonical.ok){
         const latestAssistant=[...(canonical.messages||[])].reverse().find(message=>message.role==='assistant');
-        return {action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(canonical.text||''),text_length:String(canonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(canonical.busy),incomplete_reason:canonical.busy?'canonical_generation_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,messages:canonical.messages||[],busy:Boolean(networkState.busy||canonical.busy),dom_available:false,dom_error:String(error?.message||error).slice(0,500),canonical_available:true,response_ready:Boolean(canonical.response_ready),response_source:'canonical_api',updated_at:new Date().toISOString(),...networkStreamPayload,...networkPayload};
+        return {action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(canonical.text||''),text_length:String(canonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(canonical.busy||networkStreamInProgress),incomplete_reason:canonical.busy?'canonical_generation_in_progress':networkStreamInProgress?'tool_activity_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,messages:canonical.messages||[],busy:Boolean(effectiveNetworkBusy||canonical.busy),dom_available:false,dom_error:String(error?.message||error).slice(0,500),canonical_available:true,response_ready:Boolean(canonical.response_ready&&!networkStreamInProgress),response_source:'canonical_api',updated_at:new Date().toISOString(),...networkStreamPayload,...networkPayload};
       }
       return {
         action,
@@ -1540,7 +1681,7 @@ if(action==='rename_chat'){
         message_count:0,
         total_message_count:0,
         messages:[],
-        busy:networkState.busy,
+        busy:effectiveNetworkBusy,
         dom_available:false,
         dom_error:String(error?.message||error).slice(0,500),
         updated_at:new Date().toISOString(),
