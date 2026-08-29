@@ -1823,7 +1823,7 @@ function App() {
     const canSend = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0) && Boolean(draft.trim() || attachments.length);
     const working = profile.connected && (profile.activity === "working" || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
-    const responseHeadline = sending ? "Đang gửi tin nhắn" : responseCleared
+    const responseHeadline = responseCleared
       ? "Chat đã được dọn"
       : isNewChat
       ? "Chat mới"
@@ -1865,7 +1865,7 @@ function App() {
             <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${sending || selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
               <div className="chat-response-head">
-                <div><span className="response-status-dot" /><strong title={responseHeadline}>{responseHeadline}</strong>{!sending && !isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
+                <div><span className="response-status-dot" /><strong title={responseHeadline}>{responseHeadline}</strong>{sending && <span className="chat-response-send-state"><span>Đang gửi tin nhắn</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span>}{!sending && !isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
                 <div className="response-head-actions">
                   {responseCurrent && !responseCleared && !isNewChat && !selectedBusy && (contentNeedsRefresh || domUnavailable) && <button type="button" onClick={() => void loadResponse(profile, selectedTarget, false, true)} disabled={Boolean(busy)}>Đọc nội dung</button>}
                   {responseCurrent && !responseCleared && response?.incomplete && !selectedBusy && <button type="button" className="continue-response" onClick={() => void continueIncompleteResponse(profile, selectedTarget)} disabled={Boolean(busy)}>Tiếp tục</button>}
