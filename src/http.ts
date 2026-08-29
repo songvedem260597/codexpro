@@ -1599,6 +1599,7 @@ async function main(): Promise<void> {
     transport: StreamableHTTPServerTransport;
     createdAt: number;
     lastSeenAt: number;
+    activeRequests: number;
   };
 
   const transports = new Map<string, TransportRecord>();
@@ -1627,16 +1628,18 @@ async function main(): Promise<void> {
     void record.transport.close?.();
   }
 
-  function pruneTransports(): void {
+  function pruneTransports(preserveSessionId?: string): void {
     const now = Date.now();
     for (const [sessionId, record] of transports) {
-      if (now - record.lastSeenAt > config.httpSessionTtlMs) {
+      if (sessionId !== preserveSessionId && record.activeRequests === 0 && now - record.lastSeenAt > config.httpSessionTtlMs) {
         transports.delete(sessionId);
         closeTransport(record);
       }
     }
     while (transports.size > config.maxHttpSessions) {
-      const oldest = [...transports.entries()].sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt)[0];
+      const oldest = [...transports.entries()]
+        .filter(([sessionId, record]) => sessionId !== preserveSessionId && record.activeRequests === 0)
+        .sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt)[0];
       if (!oldest) break;
       transports.delete(oldest[0]);
       closeTransport(oldest[1]);
@@ -1645,11 +1648,21 @@ async function main(): Promise<void> {
 
   function getTransport(sessionId: string | undefined): StreamableHTTPServerTransport | undefined {
     if (!sessionId || !sessionIdPattern.test(sessionId)) return undefined;
-    pruneTransports();
+    pruneTransports(sessionId);
     const record = transports.get(sessionId);
     if (!record) return undefined;
     record.lastSeenAt = Date.now();
+    record.activeRequests += 1;
     return record.transport;
+  }
+
+  function releaseTransport(sessionId: string | undefined): void {
+    if (!sessionId) return;
+    const record = transports.get(sessionId);
+    if (!record) return;
+    record.activeRequests = Math.max(0, record.activeRequests - 1);
+    record.lastSeenAt = Date.now();
+    pruneTransports(sessionId);
   }
 
   const pruneTimer = setInterval(pruneTransports, Math.min(config.httpSessionTtlMs, 60_000));
@@ -1742,21 +1755,25 @@ async function main(): Promise<void> {
     try {
       const sessionId = requestSessionId(req);
       let transport: StreamableHTTPServerTransport;
+      let acquiredSessionId: string | undefined;
 
       const existingTransport = getTransport(sessionId);
       if (existingTransport) {
         transport = existingTransport;
+        acquiredSessionId = sessionId;
       } else if (!sessionId && isInitializeRequest(req.body)) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
-            pruneTransports();
+            pruneTransports(newSessionId);
             transports.set(newSessionId, {
               transport,
               createdAt: Date.now(),
-              lastSeenAt: Date.now()
+              lastSeenAt: Date.now(),
+              activeRequests: 1
             });
-            pruneTransports();
+            acquiredSessionId = newSessionId;
+            pruneTransports(newSessionId);
           }
         } as any);
 
@@ -1775,7 +1792,11 @@ async function main(): Promise<void> {
         return;
       }
 
-      await transport.handleRequest(req, res, req.body);
+      try {
+        await transport.handleRequest(req, res, req.body);
+      } finally {
+        releaseTransport(acquiredSessionId);
+      }
     } catch (error) {
       console.error(error instanceof Error ? error.stack ?? error.message : String(error));
       if (!res.headersSent) {
@@ -1795,7 +1816,11 @@ async function main(): Promise<void> {
       sendSessionError(res, sessionId);
       return;
     }
-    await transport.handleRequest(req, res);
+    try {
+      await transport.handleRequest(req, res);
+    } finally {
+      releaseTransport(sessionId);
+    }
   };
 
   app.get("/mcp", handleSessionRequest);
