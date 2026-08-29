@@ -15,10 +15,15 @@ const codexProHome = process.env.CODEXPRO_HOME
 const tokenFileDefault = path.join(codexProHome, "http-token");
 const managerProjectsFile = path.join(codexProHome, "manager-projects.json");
 const managerSettingsFile = path.join(codexProHome, "manager-settings.json");
+const managerChatCacheFile = path.join(codexProHome, "manager-chat-cache.json");
 const managerAssetsDir = path.join(codexProHome, "manager-assets");
+const MAX_CHAT_CACHE_ENTRIES = 30;
+const MAX_CHAT_CACHE_MESSAGES = 12;
+const MAX_CHAT_CACHE_TEXT_CHARS = 40000;
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
+const MAX_REQUEST_TEXT_PREVIEW_BYTES = 512 * 1024;
 
 const WORKER_EXTENSION_VERSION = "0.5.60";
 const RUNTIME_BASE_CACHE_MS = 10000;
@@ -89,6 +94,44 @@ function requestFileSummary(filePath) {
   return { path: resolved, name: path.basename(resolved), size: stat.size, mimeType, previewDataUrl };
 }
 
+function canPreviewRequestFileAsText(mimeType) {
+  return String(mimeType || "").startsWith("text/")
+    || ["application/json", "application/xml", "application/yaml"].includes(String(mimeType || ""));
+}
+
+async function requestFilePreview(filePath) {
+  const summary = requestFileSummary(filePath);
+  if (summary.size > MAX_REQUEST_ATTACHMENT_BYTES) throw new Error("File lớn quá 8 MB nên không thể xem trước.");
+  if (summary.mimeType.startsWith("image/")) {
+    const bytes = await fs.promises.readFile(summary.path);
+    return {
+      kind: "image",
+      name: summary.name,
+      size: summary.size,
+      mimeType: summary.mimeType,
+      dataUrl: `data:${summary.mimeType};base64,${bytes.toString("base64")}`
+    };
+  }
+  if (canPreviewRequestFileAsText(summary.mimeType)) {
+    const handle = await fs.promises.open(summary.path, "r");
+    try {
+      const bytesToRead = Math.min(summary.size, MAX_REQUEST_TEXT_PREVIEW_BYTES);
+      const buffer = Buffer.alloc(bytesToRead);
+      const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0);
+      return {
+        kind: "text",
+        name: summary.name,
+        size: summary.size,
+        mimeType: summary.mimeType,
+        text: buffer.subarray(0, bytesRead).toString("utf8"),
+        truncated: summary.size > bytesRead
+      };
+    } finally {
+      await handle.close();
+    }
+  }
+  return { kind: "unsupported", name: summary.name, size: summary.size, mimeType: summary.mimeType };
+}
 async function chooseRequestFiles() {
   const result = await dialog.showOpenDialog({
     title: "Chọn file gửi cùng yêu cầu",
@@ -192,6 +235,81 @@ function readManagerSettings() {
 function writeManagerSettings(settings) {
   fs.mkdirSync(codexProHome, { recursive: true });
   fs.writeFileSync(managerSettingsFile, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+function chatCacheKey(profileId, conversationId) {
+  return `${profileId}:${conversationId}`;
+}
+
+function normalizeChatCacheMessage(message, index) {
+  const role = message?.role === "user" ? "user" : message?.role === "assistant" ? "assistant" : "";
+  const text = String(message?.text || "").trim().slice(0, MAX_CHAT_CACHE_TEXT_CHARS);
+  if (!role || !text) return null;
+  return {
+    id: String(message?.id || `${role}-${index}`).slice(0, 220),
+    role,
+    text,
+    truncated: Boolean(message?.truncated)
+  };
+}
+
+function normalizeChatCacheEntry(value) {
+  const profileId = String(value?.profileId || "").trim();
+  const conversationId = String(value?.conversationId || "").trim();
+  if (!/^[A-Za-z0-9._-]{1,160}$/.test(profileId) || !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) return null;
+  const messages = (Array.isArray(value?.messages) ? value.messages : [])
+    .map(normalizeChatCacheMessage)
+    .filter(Boolean)
+    .slice(-MAX_CHAT_CACHE_MESSAGES);
+  const text = String(value?.text || "").trim().slice(0, MAX_CHAT_CACHE_TEXT_CHARS);
+  if (!messages.length && !text) return null;
+  return {
+    profileId,
+    conversationId,
+    messages,
+    text,
+    truncated: Boolean(value?.truncated),
+    networkCompletedAt: String(value?.networkCompletedAt || "").slice(0, 80),
+    networkState: String(value?.networkState || "").slice(0, 32),
+    responseReady: Boolean(value?.responseReady),
+    responseSource: String(value?.responseSource || "").slice(0, 80),
+    updatedAt: String(value?.updatedAt || new Date().toISOString()).slice(0, 80)
+  };
+}
+
+function readManagerChatCache() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(managerChatCacheFile, "utf8"));
+    const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+    return entries.map(normalizeChatCacheEntry).filter(Boolean).slice(-MAX_CHAT_CACHE_ENTRIES);
+  } catch {
+    return [];
+  }
+}
+
+function writeManagerChatCache(entries) {
+  fs.mkdirSync(codexProHome, { recursive: true });
+  const normalized = entries.map(normalizeChatCacheEntry).filter(Boolean).slice(-MAX_CHAT_CACHE_ENTRIES);
+  fs.writeFileSync(managerChatCacheFile, `${JSON.stringify({ version: 1, entries: normalized }, null, 2)}\n`, "utf8");
+}
+
+function getManagerChatCacheEntry(payload) {
+  const profileId = String(payload?.profileId || "").trim();
+  const conversationId = String(payload?.conversationId || "").trim();
+  if (!/^[A-Za-z0-9._-]{1,160}$/.test(profileId) || !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) return null;
+  const key = chatCacheKey(profileId, conversationId);
+  return readManagerChatCache().find((entry) => chatCacheKey(entry.profileId, entry.conversationId) === key) || null;
+}
+
+function saveManagerChatCacheEntry(payload) {
+  const entry = normalizeChatCacheEntry(payload);
+  if (!entry) return null;
+  const key = chatCacheKey(entry.profileId, entry.conversationId);
+  const entries = readManagerChatCache().filter((candidate) => chatCacheKey(candidate.profileId, candidate.conversationId) !== key);
+  const saved = { ...entry, updatedAt: new Date().toISOString() };
+  entries.push(saved);
+  writeManagerChatCache(entries);
+  return saved;
 }
 
 function imageDataUrl(filePath) {
@@ -2077,10 +2195,13 @@ ipcMain.handle("codexpro:choose-worker-image", (_event, payload) => chooseWorker
 ipcMain.handle("codexpro:reset-worker-image", (_event, payload) => resetWorkerImage(payload?.packId, payload?.state));
 ipcMain.handle("codexpro:reset-manager-settings", () => resetManagerSettings());
 ipcMain.handle("codexpro:choose-request-files", () => chooseRequestFiles());
+ipcMain.handle("codexpro:get-request-file-preview", (_event, filePath) => requestFilePreview(filePath));
 ipcMain.handle("codexpro:capture-clipboard-image", () => captureClipboardImage());
 ipcMain.handle("codexpro:send-profile-request", (_event, payload) => ipcResult(() => sendProfileRequest(payload)));
 ipcMain.handle("codexpro:rename-profile-chat", (_event, payload) => renameProfileChat(payload));
 ipcMain.handle("codexpro:get-profile-response", (_event, payload) => getProfileResponse(payload));
+ipcMain.handle("codexpro:get-chat-response-cache", (_event, payload) => getManagerChatCacheEntry(payload));
+ipcMain.handle("codexpro:save-chat-response-cache", (_event, payload) => saveManagerChatCacheEntry(payload));
 ipcMain.handle("codexpro:get-repo-task-status", (_event, payload) => getRepoTaskStatus(payload));
 ipcMain.handle("codexpro:choose-project", async () => {
   const result = await dialog.showOpenDialog({ properties: ["openDirectory"], title: "Chọn repo hoặc dự án" });

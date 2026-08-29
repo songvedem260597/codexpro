@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import workerHung from "./assets/worker-hung.gif";
@@ -569,6 +569,7 @@ function App() {
   const [requestTargets, setRequestTargets] = useState({});
   const [requestProjectRoots, setRequestProjectRoots] = useState({});
   const [requestFiles, setRequestFiles] = useState({});
+  const [attachmentPreview, setAttachmentPreview] = useState(null);
   const [requestResponses, setRequestResponses] = useState({});
   const [responseSelection, setResponseSelection] = useState({ key: "", text: "" });
   const [clearedResponseTargets, setClearedResponseTargets] = useState({});
@@ -581,6 +582,8 @@ function App() {
   const statusRefreshInFlight = useRef(false);
   const profileCheckTimes = useRef(new Map());
   const responseFetches = useRef(new Set());
+  const responseCacheLoads = useRef(new Set());
+  const responseCacheSaveSignatures = useRef(new Map());
   const networkStreamReads = useRef(new Map());
   const networkCompletionReads = useRef(new Map());
   const repoTaskVerificationReads = useRef(new Map());
@@ -594,6 +597,16 @@ function App() {
 
   const projectPageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE));
   const visibleProjects = useMemo(() => projects.slice(projectPage * PROJECTS_PER_PAGE, (projectPage + 1) * PROJECTS_PER_PAGE), [projects, projectPage]);
+  const openChatResponse = chatProfileId ? requestResponses[chatProfileId] : null;
+  const openChatScrollKey = useMemo(() => {
+    if (!openChatResponse) return "";
+    const messages = Array.isArray(openChatResponse.messages) ? openChatResponse.messages : [];
+    const lastMessage = messages.at(-1);
+    const visibleText = String(lastMessage?.text || openChatResponse.text || "");
+    const contentKey = `${lastMessage?.id || "response"}:${visibleText.length}:${visibleText.slice(-48)}`;
+    const emptyBusyKey = !messages.length && !visibleText ? Boolean(openChatResponse.busy || openChatResponse.loading) : false;
+    return `${openChatResponse.conversationId || ""}:${messages.length}:${contentKey}:${emptyBusyKey}`;
+  }, [openChatResponse]);
 
   useEffect(() => {
     setProjectPage((current) => Math.min(current, Math.max(0, Math.ceil(projects.length / PROJECTS_PER_PAGE) - 1)));
@@ -957,7 +970,7 @@ function App() {
       setRequestTargets((current) => ({ ...current, [chatProfileId]: initialTarget }));
     }
     const response = requestResponses[chatProfileId];
-    if (profile.connected && initialTarget !== NEW_CHAT_TARGET && (!response || response.conversationId !== initialTarget)) void loadResponse(profile, initialTarget, true, true);
+    if (profile.connected && initialTarget !== NEW_CHAT_TARGET && (!response || response.conversationId !== initialTarget)) void hydrateCachedResponse(profile, initialTarget);
   }, [chatProfileId, status?.browserProfiles, requestResponses]);
 
   useEffect(() => {
@@ -969,12 +982,14 @@ function App() {
   useEffect(() => {
     if (!chatProfileId) return;
     const response = requestResponses[chatProfileId];
-    const thinking = Boolean(response?.busy || response?.loading || response?.networkState === "generating");
-    if (!response?.text && !thinking) return;
+    persistResponseCache(chatProfileId, response);
+  }, [chatProfileId, requestResponses]);
+
+  useLayoutEffect(() => {
+    if (!chatProfileId || !openChatScrollKey) return;
     if (responseScrollLocked.current.get(chatProfileId)) return;
-    const frame = window.requestAnimationFrame(() => scrollResponseToBottom(chatProfileId));
-    return () => window.cancelAnimationFrame(frame);
-  }, [chatProfileId, requestResponses, scrollResponseToBottom]);
+    scrollResponseToBottom(chatProfileId);
+  }, [chatProfileId, openChatScrollKey, scrollResponseToBottom]);
 
   useEffect(() => {
     if (!chatProfileId) return undefined;
@@ -1103,6 +1118,100 @@ function App() {
     }
   }
 
+  function responseCacheKey(profileId, conversationId) {
+    return `${profileId}:${conversationId}`;
+  }
+
+  function profileConversationTab(profile, conversationId) {
+    return (profile?.conversation_tabs || []).find((tab) => String(tab?.url || "").includes(`/c/${conversationId}`)) || null;
+  }
+
+  function cachedResponseIsFresh(profile, conversationId, cached) {
+    if (!cached?.messages?.length && !cached?.text) return false;
+    const tab = profileConversationTab(profile, conversationId);
+    if (!tab) return false;
+    const networkState = String(tab.network_state || (tab.busy ? "generating" : "idle"));
+    if (tab.busy || tab.settling || networkState === "generating") return false;
+    const completedAt = String(tab.network_last_completed_at || "");
+    return !completedAt || completedAt === String(cached.networkCompletedAt || "");
+  }
+
+  function persistResponseCache(profileId, response) {
+    const conversationId = String(response?.conversationId || "");
+    const messages = trimRecentTranscriptMessages(response?.messages);
+    const text = String(response?.text || "").trim();
+    const networkState = String(response?.networkState || "");
+    if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId) || (!messages.length && !text) || response?.loading || response?.busy || networkState === "generating") return;
+    const key = responseCacheKey(profileId, conversationId);
+    const signature = JSON.stringify([
+      String(response?.networkCompletedAt || ""),
+      Boolean(response?.truncated),
+      messages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated)])
+    ]);
+    if (responseCacheSaveSignatures.current.get(key) === signature) return;
+    responseCacheSaveSignatures.current.set(key, signature);
+    void api.saveChatResponseCache({
+      profileId,
+      conversationId,
+      messages,
+      text,
+      truncated: Boolean(response?.truncated),
+      networkCompletedAt: String(response?.networkCompletedAt || ""),
+      networkState,
+      responseReady: Boolean(response?.responseReady),
+      responseSource: String(response?.responseSource || ""),
+      updatedAt: String(response?.updatedAt || new Date().toISOString())
+    }).catch(() => {
+      if (responseCacheSaveSignatures.current.get(key) === signature) responseCacheSaveSignatures.current.delete(key);
+    });
+  }
+
+  async function hydrateCachedResponse(profile, conversationId) {
+    const key = responseCacheKey(profile.profile_id, conversationId);
+    if (responseCacheLoads.current.has(key)) return;
+    responseCacheLoads.current.add(key);
+    try {
+      const cached = await api.getChatResponseCache({ profileId: profile.profile_id, conversationId }).catch(() => null);
+      if (cached) {
+        const cachedMessages = trimRecentTranscriptMessages(cached.messages);
+        responseCacheSaveSignatures.current.set(key, JSON.stringify([
+          String(cached.networkCompletedAt || ""),
+          Boolean(cached.truncated),
+          cachedMessages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated)])
+        ]));
+        setRequestResponses((current) => {
+          const previous = current[profile.profile_id] || {};
+          const previousIsNewer = previous.conversationId === conversationId
+            && Date.parse(String(previous.updatedAt || "")) > Date.parse(String(cached.updatedAt || ""));
+          if (previousIsNewer) return current;
+          const tab = profileConversationTab(profile, conversationId);
+          const networkState = String(tab?.network_state || cached.networkState || "idle");
+          return {
+            ...current,
+            [profile.profile_id]: {
+              ...previous,
+              ...cached,
+              visible: true,
+              loading: false,
+              error: "",
+              conversationId,
+              messages: trimRecentTranscriptMessages(cached.messages),
+              busy: Boolean(tab?.busy || tab?.settling || networkState === "generating"),
+              networkState,
+              networkCompletedAt: String(tab?.network_last_completed_at || cached.networkCompletedAt || ""),
+              cached: true
+            }
+          };
+        });
+      }
+      if (!cachedResponseIsFresh(profile, conversationId, cached)) {
+        await loadResponse(profile, conversationId, true, true);
+      }
+    } finally {
+      responseCacheLoads.current.delete(key);
+    }
+  }
+
   function openChat(profile) {
     const conversations = profileRequestChats(profile);
     const conversationId = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
@@ -1121,9 +1230,10 @@ function App() {
     if (profile.connected && conversationId && conversationId !== NEW_CHAT_TARGET) {
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
-        return { ...current, [profile.profile_id]: { ...previous, visible: true, loading: true, error: "", conversationId, messages: trimRecentTranscriptMessages(previous.messages) } };
+        const sameConversation = previous.conversationId === conversationId;
+        return { ...current, [profile.profile_id]: { ...(sameConversation ? previous : {}), visible: true, loading: !sameConversation, error: "", conversationId, messages: sameConversation ? trimRecentTranscriptMessages(previous.messages) : [] } };
       });
-      void loadResponse(profile, conversationId, true, true).finally(() => {
+      void hydrateCachedResponse(profile, conversationId).finally(() => {
         window.requestAnimationFrame(() => {
           scrollOpenChatToBottom(profile.profile_id);
           window.setTimeout(() => scrollOpenChatToBottom(profile.profile_id), 180);
@@ -1261,7 +1371,6 @@ function App() {
       }
     }
     responseScrollLocked.current.delete(profile.profile_id);
-    window.requestAnimationFrame(() => scrollResponseToBottom(profile.profile_id));
     setBusy(`request:${profile.profile_id}`);
     setError("");
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
