@@ -442,9 +442,11 @@ function probeChatActivityPage() {
   const assistantNodes=Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
   const latestText=String(assistantNodes.at(-1)?.innerText||assistantNodes.at(-1)?.textContent||'').replace(/\u200b/g,'').trim();
   const thinkingPlaceholder=/(?:^|\n)(?:thinking|đang suy nghĩ)(?:\s*[.…]{1,3})?$/i.test(latestText);
+  const pageText=String(document.body?.innerText||document.body?.textContent||'').replace(/\u200b/g,' ');
+  const connectionInterrupted=/connection interrupted\.\s*waiting for the complete answer/i.test(pageText);
   const activityLines=latestText.split(/\r?\n/).map(line=>line.trim()).filter(line=>line&&!/^(?:called tool|thinking|đang suy nghĩ|chatgpt can make mistakes)/i.test(line));
   const activityText=String(activityLines.at(-1)||'').slice(0,220);
-  return {busy:Boolean(stopControl||thinkingPlaceholder),source:stopControl?'dom_stop':thinkingPlaceholder?'dom_thinking':'',activity_text:activityText,observed_at:Date.now()};
+  return {busy:Boolean(stopControl||thinkingPlaceholder||connectionInterrupted),source:connectionInterrupted?'dom_connection_interrupted':stopControl?'dom_stop':thinkingPlaceholder?'dom_thinking':'',activity_text:connectionInterrupted?'Kết nối phản hồi bị ngắt · đang khôi phục':activityText,connection_interrupted:connectionInterrupted,observed_at:Date.now()};
 }
 
 async function chatDomActivityState(tabId,conversationId,options={}) {
@@ -466,7 +468,7 @@ async function chatDomActivityState(tabId,conversationId,options={}) {
         'Chrome renderer không phản hồi khi kiểm tra trạng thái ChatGPT.'
       );
       const result=injected?.result&&typeof injected.result==='object'?injected.result:{};
-      return {available:true,busy:Boolean(result.busy),source:String(result.source||''),activity_text:String(result.activity_text||'').trim().slice(0,220),observed_at:Number(result.observed_at)||Date.now()};
+      return {available:true,busy:Boolean(result.busy),source:String(result.source||''),activity_text:String(result.activity_text||'').trim().slice(0,220),connection_interrupted:Boolean(result.connection_interrupted),observed_at:Number(result.observed_at)||Date.now()};
     }catch(error){return {available:false,busy:false,source:'',activity_text:'',error:String(error?.message||error).slice(0,300)};}
   })();
   chatDomActivityByTab.set(tabId,{at:Number(cached?.at)||0,value:cached?.value||null,promise});
@@ -506,6 +508,7 @@ async function tabList() {
       activity_text:streamBusy?(streamActivity||'CodexPro đang sử dụng tool'):domActivity.busy?domActivity.activity_text:'',
       network_stream_in_progress:streamBusy,
       dom_busy:domActivity.busy,
+      connection_interrupted:Boolean(domActivity.connection_interrupted),
       dom_probe_available:domActivity.available,
       network_state:networkState.network_state,
       network_source:networkState.network_source,
@@ -975,8 +978,10 @@ async function readChatResponsePage() {
     return /^(?:stop(?: answering| generating| streaming)?|dừng(?: trả lời)?)$/i.test(label);
   });
   const thinkingPlaceholder=/^(?:thinking|đang suy nghĩ)(?:\s*[.…]{1,3})?$/i.test(text);
-  const busy=Boolean(stopControl||thinkingPlaceholder);
-  return {ok:true,title:document.title,url:location.href,text,text_length:text.length,truncated:Boolean(latestAssistant?.truncated),incomplete:busy,incomplete_reason:busy?(thinkingPlaceholder?'thinking_placeholder':'generation_in_progress'):'',conversation_limit_reached:false,conversation_limit_message:'',conversation_limit_button_label:'',message_count:messages.filter(message=>message.role==='assistant').length,total_message_count:messages.length,messages,busy,updated_at:new Date().toISOString()};
+  const pageText=String(document.body?.innerText||document.body?.textContent||'').replace(/\u200b/g,' ');
+  const connectionInterrupted=/connection interrupted\.\s*waiting for the complete answer/i.test(pageText);
+  const busy=Boolean(stopControl||thinkingPlaceholder||connectionInterrupted);
+  return {ok:true,title:document.title,url:location.href,text,text_length:text.length,truncated:Boolean(latestAssistant?.truncated),incomplete:busy,incomplete_reason:connectionInterrupted?'connection_interrupted':busy?(thinkingPlaceholder?'thinking_placeholder':'generation_in_progress'):'',connection_interrupted:connectionInterrupted,conversation_limit_reached:false,conversation_limit_message:'',conversation_limit_button_label:'',message_count:messages.filter(message=>message.role==='assistant').length,total_message_count:messages.length,messages,busy,updated_at:new Date().toISOString()};
 }
 
 function inspectChatSendAttemptPage(attemptId='') {
@@ -1670,15 +1675,16 @@ if(action==='rename_chat'){
         domResult={...domResult,text:canonicalText,text_length:canonicalText.length,messages:canonical.messages||domResult.messages,message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,truncated:Boolean(latestAssistant?.truncated),busy:Boolean(canonical.busy),response_ready:Boolean(canonical.response_ready),response_source:'canonical_api',updated_at:new Date().toISOString()};
       }
       const recovery={dom_recovery_checked:false,dom_recovered:false,dom_reloaded:false,dom_replaced:false,replaced_tab_id:0,recovery_tab_id:0,dom_recovery_source:'',dom_recovery_error:''};
-      if(args.recover_stale_dom===true&&canonical.ok&&canonical.response_ready&&!canonical.busy){
+      const connectionInterrupted=Boolean(injected.result.connection_interrupted);
+      if(args.recover_stale_dom===true&&(connectionInterrupted||canonical.ok&&canonical.response_ready&&!canonical.busy)){
         recovery.dom_recovery_checked=true;
         try{
           const domText=domTextBeforeMerge;
           const staleContent=canonicalText.length>domText.length&&(!domText||canonicalText.startsWith(domText)||domText.length<160);
           const staleActivity=Boolean(injected.result.busy);
-          const stale=staleContent||staleActivity;
+          const stale=connectionInterrupted||staleContent||staleActivity;
           if(stale){
-            recovery.dom_recovery_source=staleActivity?'canonical_activity':'canonical_api';
+            recovery.dom_recovery_source=connectionInterrupted?'connection_interrupted':staleActivity?'canonical_activity':'canonical_api';
             await new Promise(resolve=>setTimeout(resolve,900));
             await chrome.tabs.reload(tab.id);
             await waitForTab(tab.id,45000);
@@ -1694,10 +1700,10 @@ if(action==='rename_chat'){
                   'Chrome renderer không phản hồi sau khi reload conversation.'
                 );
                 if(refreshed?.result?.ok){rendererRefreshed=true;domResult=refreshed.result;}
-                if(!domResult.busy&&String(domResult.text||'').trim().length>=canonicalText.length)break;
+                if(!domResult.connection_interrupted&&(connectionInterrupted||!domResult.busy&&String(domResult.text||'').trim().length>=canonicalText.length))break;
               }catch{}
             }
-            if(!rendererRefreshed){
+            if(!rendererRefreshed||domResult.connection_interrupted){
               const replaced=await replaceUnresponsiveChatTab(tab,`https://chatgpt.com/c/${conversationId}`);
               tab=replaced.tab;
               recovery.dom_replaced=true;
@@ -1714,7 +1720,7 @@ if(action==='rename_chat'){
               const latestAssistant=[...(canonical.messages||[])].reverse().find(message=>message.role==='assistant');
               domResult={...domResult,text:canonicalText,text_length:canonicalText.length,messages:canonical.messages||domResult.messages,message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,truncated:Boolean(latestAssistant?.truncated),updated_at:new Date().toISOString()};
             }
-            recovery.dom_recovered=String(domResult.text||'').trim().length>=canonicalText.length;
+            recovery.dom_recovered=!domResult.connection_interrupted&&(connectionInterrupted||String(domResult.text||'').trim().length>=canonicalText.length);
           }else if(!canonical.ok)recovery.dom_recovery_error=String(canonical.error||'Không đọc được conversation canonical.').slice(0,500);
         }catch(error){
           recovery.dom_recovery_error=String(error?.message||error).slice(0,500);
