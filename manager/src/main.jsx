@@ -2554,12 +2554,17 @@ function App() {
               const hung = !profile.connected;
               const settling = profile.connected && profile.activity === "settling";
               const working = profile.connected && profile.activity === "working";
-              const idle = profile.connected && profile.activity === "idle" && (profile.connector_installed || !ready);
-              const workerState = hung ? "hung" : working || settling ? "working" : "idle";
               const profileTabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
               const liveTab = profileTabs.find((tab) => tab.active) || profileTabs.find((tab) => tab.busy || tab.settling) || profileTabs[0];
               const rendererUnresponsive = Boolean(profile.connected && liveTab?.renderer_unresponsive);
               const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
+              const connectorObservedLive = Boolean((working || settling) && /^CodexPro đang\b/i.test(liveActivityText));
+              const connectorInstalled = Boolean(profile.connector_installed || connectorObservedLive);
+              const connectorMessage = connectorInstalled && !profile.connector_installed && connectorObservedLive
+                ? "CodexPro đang hoạt động trong ChatGPT."
+                : profile.connector_message;
+              const idle = profile.connected && profile.activity === "idle" && (connectorInstalled || !ready);
+              const workerState = hung ? "hung" : working || settling ? "working" : "idle";
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
               const directProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const fallbackProject = profileRepoProject(profile, projects, profileRepoRoots[profile.profile_id]);
@@ -2578,7 +2583,7 @@ function App() {
                       {settling && <span className="badge profile-settling">ĐANG HOÀN TẤT</span>}
                       {working && <WorkingBadge />}
                       {idle && <span className="badge connected">ĐANG RẢNH</span>}
-                      {!profile.connector_installed && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
+                      {!connectorInstalled && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
                       <span
                         className={`active-repo-chip ${repoLabel ? "" : "is-empty"}`}
                         title={repoTitle}
@@ -2591,7 +2596,7 @@ function App() {
                       <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Mất heartbeat extension"}</span>
                       <span>v{profile.extension_version || "cũ"}</span>
                       <span>{profile.tab_count} tab</span>
-                      {profile.connector_message && <span className={profile.connector_installed ? "ready-text" : "profile-warning"}>{profile.connector_message}</span>}
+                      {connectorMessage && <span className={connectorInstalled ? "ready-text" : "profile-warning"}>{connectorMessage}</span>}
                     </div>
                     {(working || settling) && <div className="profile-live-activity" role="status" aria-live="polite"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{liveActivityText || (settling ? "ChatGPT đang hoàn tất tác vụ" : "ChatGPT đang xử lý")}</span></div>}
                   </div>
@@ -2602,7 +2607,7 @@ function App() {
                       <button
                         className="button primary profile-chat"
                         onClick={() => openChat(profile)}
-                        disabled={!profile.connected || !profile.connector_installed || !profileRequestChats(profile).length}
+                        disabled={!profile.connected || !connectorInstalled || !profileRequestChats(profile).length}
                       >
                         Chat
                       </button>
@@ -2615,7 +2620,7 @@ function App() {
                         {busy === `recover-profile:${profile.profile_id}` ? "Đang khôi phục…" : busy === `open-profile:${profile.profile_id}` ? "Đang mở…" : rendererUnresponsive ? "Khôi phục tab" : "Mở profile"}
                       </button>
                     </div>
-                    {profile.connector_installed ? (
+                    {connectorInstalled ? (
                       <span className="already-connected">✓ Đã thêm CodexPro</span>
                     ) : (
                       <button
