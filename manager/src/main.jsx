@@ -2144,7 +2144,7 @@ function App() {
       responseCurrent,
       responseIncomplete: response?.incomplete
     });
-    const responseTurnActive = Boolean(sending || selectedBusy || selectedSettling || response?.busy || response?.loading);
+    const responseTurnActive = !isTerminalChatNetworkState(selectedNetworkState) && Boolean(sending || selectedBusy || selectedSettling || response?.busy || response?.loading);
     const turnReady = canAcceptNextChatMessage({
       networkState: selectedNetworkState,
       tabBusy: selectedTab?.busy,
@@ -2242,7 +2242,7 @@ function App() {
                         <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
                         <div className="latest-response-content" onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
                           <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
-                          {message.role === "assistant" ? <><React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>{response.busy && response.networkStreamAvailable && isLastAssistant && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}</> : <div className="chat-message-text user-message-text">{message.text}</div>}
+                          {message.role === "assistant" ? <><React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>{responseTurnActive && response.networkStreamAvailable && isLastAssistant && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}</> : <div className="chat-message-text user-message-text">{message.text}</div>}
                         </div>
                       </div>
                     );
