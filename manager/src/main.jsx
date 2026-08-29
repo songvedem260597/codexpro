@@ -5,6 +5,7 @@ import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
+import { materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript } from "./chat-transcript.js";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -1220,7 +1221,7 @@ function App() {
     if (!newChat && text) {
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
-        const previousMessages = previous.conversationId === conversationId && Array.isArray(previous.messages) ? previous.messages : [];
+        const previousMessages = materializeTranscriptMessages(previous, conversationId);
         return {
           ...current,
           [profile.profile_id]: {
@@ -1281,7 +1282,7 @@ function App() {
       setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
-        const previousMessages = previous.conversationId === resolvedConversationId && Array.isArray(previous.messages) ? previous.messages : [];
+        const previousMessages = materializeTranscriptMessages(previous, resolvedConversationId);
         const matchingPendingIndex = text ? previousMessages.findIndex((message) => message?.role === "user" && message?.pending && message?.text === text) : -1;
         let optimisticMessages = previousMessages;
         if (text && matchingPendingIndex >= 0) {
@@ -1606,17 +1607,13 @@ function App() {
               truncated: Boolean(message?.truncated)
             })).filter((message) => message.text)
           : [];
-        let nextMessages = sameConversation && Array.isArray(previous.messages) ? previous.messages : [];
-        if (domAvailable) nextMessages = incomingMessages;
-        else if (networkStreamAvailable) {
-          const merged = [...nextMessages];
-          for (const message of incomingMessages) {
-            const index = merged.findIndex((candidate) => candidate.id === message.id);
-            if (index >= 0) merged[index] = { ...merged[index], ...message };
-            else merged.push(message);
-          }
-          nextMessages = merged.slice(-20);
-        }
+        let nextMessages = sameConversation ? materializeTranscriptMessages(previous, conversationId) : [];
+        if (domAvailable) nextMessages = replaceCanonicalTranscript(nextMessages, incomingMessages);
+        else if (networkStreamAvailable) nextMessages = mergeNetworkStreamTranscript(nextMessages, {
+          conversationId,
+          text: result.text,
+          truncated: result.truncated
+        });
         return {
           ...current,
           [profile.profile_id]: {
