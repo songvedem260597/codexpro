@@ -394,7 +394,7 @@ function compactToolActivityMessages(messages) {
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.60";
+const WORKER_EXTENSION_VERSION = "0.5.61";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -1557,6 +1557,32 @@ function App() {
     }
   }
 
+  async function recoverProfileTab(profile) {
+    const tabs = profile.conversation_tabs || [];
+    const conversationOf = (tab) => String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+    const selectedConversationId = String(requestTargets[profile.profile_id] || "");
+    const selectedTab = tabs.find((tab) => conversationOf(tab) === selectedConversationId);
+    const targetTab = selectedTab || tabs.find((tab) => tab.active) || tabs[0];
+    const conversationId = conversationOf(targetTab);
+    const selectedConversation = profileRequestChats(profile).find((chat) => String(chat.id) === conversationId);
+    setBusy(`recover-profile:${profile.profile_id}`);
+    setError("");
+    try {
+      await api.recoverProfileChat({
+        profileId: profile.profile_id,
+        conversationId,
+        targetId: targetTab?.id,
+        title: selectedConversation?.title || targetTab?.title || profile.active_chat_title || ""
+      });
+      notify("Đã thay tab ChatGPT bị treo bằng tab mới");
+      window.setTimeout(() => void refresh(false), 1200);
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function reloadProfiles() {
     if (!profileSummary.reload) return;
     setWorkerUpdateConfirmOpen(false);
@@ -2499,6 +2525,7 @@ function App() {
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
               const profileTabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
               const liveTab = profileTabs.find((tab) => tab.active) || profileTabs.find((tab) => tab.busy || tab.settling) || profileTabs[0];
+              const rendererUnresponsive = Boolean(profile.connected && liveTab?.renderer_unresponsive);
               const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
               const directProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
@@ -2548,10 +2575,11 @@ function App() {
                       </button>
                       <button
                         className="button secondary open-profile"
-                        onClick={() => openProfile(profile)}
+                        onClick={() => rendererUnresponsive ? recoverProfileTab(profile) : openProfile(profile)}
                         disabled={Boolean(busy) || !profile.connected || !(profile.conversation_tabs?.length)}
+                        title={rendererUnresponsive ? "Đóng tab renderer bị treo và mở lại đúng conversation trong một tab mới" : "Mở profile Chrome"}
                       >
-                        {busy === `open-profile:${profile.profile_id}` ? "Đang mở…" : "Mở profile"}
+                        {busy === `recover-profile:${profile.profile_id}` ? "Đang khôi phục…" : busy === `open-profile:${profile.profile_id}` ? "Đang mở…" : rendererUnresponsive ? "Khôi phục tab" : "Mở profile"}
                       </button>
                     </div>
                     {profile.connector_installed ? (

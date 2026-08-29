@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   checkProfile: (profileId) => invoke("codexpro:check-profile", profileId),
   setupProfile: (profileId) => invoke("codexpro:setup-profile", profileId),
   openProfileChat: (payload) => invoke("codexpro:open-profile-chat", payload),
+  recoverProfileChat: (payload) => invoke("codexpro:recover-profile-chat", payload),
   reloadProfiles: () => invoke("codexpro:reload-profiles"),
   getManagerSettings: () => invoke("codexpro:get-manager-settings"),
   saveManagerSettings: (patch) => invoke("codexpro:save-manager-settings", patch),

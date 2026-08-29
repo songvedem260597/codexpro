@@ -3103,7 +3103,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       description:
         "Fast browser-agent control for the Chrome profile explicitly marked ACTIVE, with dedicated port-9223 Chrome as fallback. Supports persistent CDP/debugger sessions, trusted input, batch actions, wait_for, inspect_element, evaluate, hover/scroll, screenshots, and existing ChatGPT-specific actions.",
       inputSchema: {
-        action: z.enum(["status", "list_profiles", "select_workspace", "check_chatgpt", "setup_chatgpt", "reload_extension", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch", "screenshot"]),
+        action: z.enum(["status", "list_profiles", "select_workspace", "check_chatgpt", "setup_chatgpt", "reload_extension", "recover_chat_tab", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch", "screenshot"]),
         profile_id: z.string().optional().describe("Optional extension profile id. Omit to use the profile marked ACTIVE. Ignored for the dedicated fallback browser."),
         root: z.string().optional().describe("Workspace root for select_workspace. The selected profile is locked to this root until changed by CodexPro Manager."),
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),

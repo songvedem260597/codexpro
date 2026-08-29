@@ -34,7 +34,7 @@ const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
 const MAX_REQUEST_TEXT_PREVIEW_BYTES = 512 * 1024;
 
-const WORKER_EXTENSION_VERSION = "0.5.60";
+const WORKER_EXTENSION_VERSION = "0.5.61";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
 const GIT_SUMMARY_CACHE_MS = 2 * 60 * 1000;
@@ -2214,6 +2214,26 @@ async function openProfileChat(payload) {
   };
 }
 
+async function recoverProfileChatTab(payload) {
+  const profileId = String(payload?.profileId || "").trim();
+  const conversationId = String(payload?.conversationId || "").trim();
+  const targetId = String(payload?.targetId ?? "").trim();
+  const title = String(payload?.title || "").trim();
+  if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
+  if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat cần khôi phục không hợp lệ.");
+  if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome cần khôi phục.");
+  const base = await runtimeBaseStatus();
+  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  const result = await localMcpTool(base.config, base.token, "browser_control", {
+    action: "recover_chat_tab",
+    profile_id: profileId,
+    conversation_id: conversationId,
+    target_id: targetId
+  }, 60000);
+  const windowFocus = await focusChromeWindow(title);
+  return { ...result, window_focus: windowFocus };
+}
+
 async function reloadChromeProfiles() {
   const status = await runtimeStatus();
   const connectedProfiles = status.browserProfiles.filter((profile) => profile.connected);
@@ -2602,6 +2622,12 @@ ipcMain.handle("codexpro:open-profile-chat", async (event, payload) => {
   const result = await openProfileChat(payload);
   const owner = BrowserWindow.fromWebContents(event.sender);
   if (result?.window_focus?.ok && owner && !owner.isDestroyed()) owner.minimize();
+  return result;
+});
+ipcMain.handle("codexpro:recover-profile-chat", async (event, payload) => {
+  const result = await recoverProfileChatTab(payload);
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  if ((result?.window_focused || result?.window_focus?.ok) && owner && !owner.isDestroyed()) owner.minimize();
   return result;
 });
 ipcMain.handle("codexpro:reload-profiles", () => reloadChromeProfiles());
