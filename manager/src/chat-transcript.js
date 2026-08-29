@@ -9,21 +9,31 @@ function usableMessages(response, conversationId) {
 export function trimRecentTranscriptMessages(messages) {
   const usable = Array.isArray(messages) ? messages.filter((message) => String(message?.text || "").trim()) : [];
   if (!usable.length) return [];
-  let userTurns = 0;
-  let insideUserBlock = false;
-  let startIndex = 0;
-  for (let index = usable.length - 1; index >= 0; index -= 1) {
-    if (usable[index]?.role === "user") {
-      if (!insideUserBlock) userTurns += 1;
-      insideUserBlock = true;
-      if (userTurns === TRANSCRIPT_EXCHANGE_LIMIT) startIndex = index;
+  const exchanges = [];
+  let current = null;
+  const orphanAssistants = [];
+  const normalized = (value) => String(value || "").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  for (const message of usable) {
+    if (message?.role === "user") {
+      if (current?.users?.length && current?.assistant) exchanges.push(current);
+      if (!current || current.assistant) current = { users: [], assistant: null };
+      const text = normalized(message?.text);
+      const lastUserText = normalized(current.users.at(-1)?.text);
+      if (!lastUserText || lastUserText !== text) current.users.push(message);
+      else current.users[current.users.length - 1] = message;
       continue;
     }
-    if (userTurns === TRANSCRIPT_EXCHANGE_LIMIT) break;
-    insideUserBlock = false;
+    if (message?.role === "assistant") {
+      if (current?.users?.length) current.assistant = message;
+      else orphanAssistants.push(message);
+    }
   }
-  if (!userTurns) return usable.slice(-TRANSCRIPT_EXCHANGE_LIMIT);
-  return usable.slice(startIndex).slice(-TRANSCRIPT_MESSAGE_HARD_LIMIT);
+  if (current?.users?.length) exchanges.push(current);
+  if (!exchanges.length) return orphanAssistants.slice(-TRANSCRIPT_EXCHANGE_LIMIT);
+  const selectedExchanges = exchanges.slice(-TRANSCRIPT_EXCHANGE_LIMIT);
+  const orphanCapacity = Math.max(0, TRANSCRIPT_EXCHANGE_LIMIT - selectedExchanges.length);
+  const orphanPrefix = orphanCapacity ? orphanAssistants.slice(-orphanCapacity) : [];
+  return [...orphanPrefix, ...selectedExchanges.flatMap((exchange) => exchange.assistant ? [...exchange.users, exchange.assistant] : exchange.users)].slice(-TRANSCRIPT_MESSAGE_HARD_LIMIT);
 }
 
 export function materializeTranscriptMessages(response, conversationId) {

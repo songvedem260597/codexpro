@@ -392,7 +392,7 @@ function compactToolActivityMessages(messages) {
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.59";
+const WORKER_EXTENSION_VERSION = "0.5.60";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -647,6 +647,7 @@ function App() {
   const profilesRef = useRef([]);
   const requestTargetsRef = useRef({});
   const responseBodyRefs = useRef(new Map());
+  const chatModalRef = useRef(null);
   const responseScrollLocked = useRef(new Map());
   const responseScrollPositions = useRef(new Map());
 
@@ -851,6 +852,16 @@ function App() {
     container.scrollTop = container.scrollHeight;
     responseScrollPositions.current.set(profileId, container.scrollTop);
   }, []);
+
+  const scrollOpenChatToBottom = useCallback((profileId) => {
+    scrollResponseToBottom(profileId);
+    const modal = chatModalRef.current;
+    if (!modal) return;
+    const previousBehavior = modal.style.scrollBehavior;
+    modal.style.scrollBehavior = 'auto';
+    modal.scrollTop = modal.scrollHeight;
+    modal.style.scrollBehavior = previousBehavior;
+  }, [scrollResponseToBottom]);
 
   const holdResponseAutoScroll = useCallback((profileId, container, deltaY = 0) => {
     const distanceFromBottom = container ? container.scrollHeight - container.scrollTop - container.clientHeight : Infinity;
@@ -1192,8 +1203,8 @@ function App() {
     responseScrollPositions.current.delete(profile.profile_id);
     setChatProfileId(profile.profile_id);
     window.requestAnimationFrame(() => {
-      scrollResponseToBottom(profile.profile_id);
-      window.setTimeout(() => scrollResponseToBottom(profile.profile_id), 120);
+      scrollOpenChatToBottom(profile.profile_id);
+      window.setTimeout(() => scrollOpenChatToBottom(profile.profile_id), 180);
     });
     if (profile.connected && conversationId && conversationId !== NEW_CHAT_TARGET) {
       setRequestResponses((current) => {
@@ -1202,8 +1213,8 @@ function App() {
       });
       void loadResponse(profile, conversationId, true, true).finally(() => {
         window.requestAnimationFrame(() => {
-          scrollResponseToBottom(profile.profile_id);
-          window.setTimeout(() => scrollResponseToBottom(profile.profile_id), 120);
+          scrollOpenChatToBottom(profile.profile_id);
+          window.setTimeout(() => scrollOpenChatToBottom(profile.profile_id), 180);
         });
       });
     }
@@ -1738,12 +1749,12 @@ function App() {
         const nextNetworkState = String(result.network_state || previous.networkState || (result.busy ? "generating" : "idle"));
         const networkTerminal = isTerminalChatNetworkState(nextNetworkState);
         const incomingMessages = Array.isArray(result.messages)
-          ? trimRecentTranscriptMessages(result.messages).map((message, index) => ({
+          ? trimRecentTranscriptMessages(result.messages.map((message, index) => ({
               id: String(message?.id || `${message?.role || "message"}-${index}`),
               role: message?.role === "user" ? "user" : "assistant",
               text: message?.role === "user" ? visibleUserMessageText(message?.text) : String(message?.text || ""),
               truncated: Boolean(message?.truncated)
-            })).filter((message) => message.text)
+            })).filter((message) => message.text))
           : [];
         let nextMessages = sameConversation ? materializeTranscriptMessages(previous, conversationId) : [];
         if (domAvailable) nextMessages = replaceCanonicalTranscript(nextMessages, incomingMessages);
@@ -1953,7 +1964,7 @@ function App() {
 
     return (
       <div className="modal-backdrop chat-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setChatProfileId("")}>
-        <div className="modal chat-modal">
+        <div className="modal chat-modal" ref={chatModalRef}>
           <div className="modal-head chat-modal-head">
             <div className="chat-modal-profile">
               <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />

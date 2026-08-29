@@ -648,7 +648,9 @@ function createWindow() {
           await new Promise((resolve) => setTimeout(resolve, 1400));
           chatModalProbe = await win.webContents.executeJavaScript(`(() => {
             const modal = document.querySelector('.chat-modal');
-            return { open: Boolean(modal), profile: modal?.querySelector('.chat-modal-profile code')?.textContent || '', hasProjectDropdown: Boolean(modal?.querySelector('.project-dropdown')), selectedProject: modal?.querySelector('.project-dropdown-value strong')?.textContent?.trim() || '', hasChatSelector: Boolean(modal?.querySelector('.chat-dropdown, .chat-manage-actions')), hasResponse: Boolean(modal?.querySelector('.chat-response')), hasTextarea: Boolean(modal?.querySelector('textarea')) };
+            const transcript = modal?.querySelector('.latest-response');
+            const scrollMetrics = (element) => element ? { scrollTop: element.scrollTop, scrollHeight: element.scrollHeight, clientHeight: element.clientHeight, distanceFromBottom: Math.max(0, element.scrollHeight - element.scrollTop - element.clientHeight) } : null;
+            return { open: Boolean(modal), profile: modal?.querySelector('.chat-modal-profile code')?.textContent || '', hasProjectDropdown: Boolean(modal?.querySelector('.project-dropdown')), selectedProject: modal?.querySelector('.project-dropdown-value strong')?.textContent?.trim() || '', hasChatSelector: Boolean(modal?.querySelector('.chat-dropdown, .chat-manage-actions')), hasResponse: Boolean(modal?.querySelector('.chat-response')), hasTextarea: Boolean(modal?.querySelector('textarea')), modalScroll: scrollMetrics(modal), transcriptScroll: scrollMetrics(transcript) };
           })()`, true);
           chatModalProbe.click = clickProbe;
           await win.webContents.executeJavaScript("document.querySelector('.project-dropdown-trigger:not(:disabled)')?.click()", true);
