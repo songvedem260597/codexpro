@@ -4,6 +4,7 @@
 
 - Added server-side Playwright Chromium tools for opening public/localhost pages, bounded DOM snapshots, click/type/select actions, PNG screenshots, console capture, explicit close, and idle cleanup. Browser page state survives MCP transport reconnects within one CodexPro process. Browser networking blocks file URLs, URL credentials, cloud metadata, and private networks outside loopback. Playwright signal handlers stay disabled so the CodexPro launcher remains responsible for clean service shutdown and restart.
 - Added optional OpenCode subagent-assisted handoff execution for repository exploration and bug localization, local agent readiness checks in `codexpro doctor`, and repository-level `AGENTS.md` guidance for root-cause fixes and multi-agent investigation.
+- Added verifiable OpenCode subagent-assisted handoff execution for repository exploration and bug localization: CodexPro now requires a real `task` child session, exportable read-only evidence, and records fallback reasons when delegation cannot be verified. `codexpro doctor` can optionally run live model and live child-session checks.
 - Added cross-platform safe Git writes: explicit-file staging, hook-disabled unsigned commits, and option-free pushes of verified local branches to HTTPS `origin` remotes, while continuing to block broad staging, force, deleting, tag, and alternate-remote pushes.
 
 ## 0.30.0 (2026-08-08)

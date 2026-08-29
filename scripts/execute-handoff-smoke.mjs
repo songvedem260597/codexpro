@@ -67,8 +67,11 @@ const subagentDryRun = run([
   '--dry-run'
 ]);
 requireSuccess(subagentDryRun, 'execute-handoff subagent dry-run');
-if (!subagentDryRun.stdout.includes('OpenCode Explore + Scout') || !subagentDryRun.stdout.includes('subagents=explore,scout')) {
-  throw new Error(`subagent dry-run did not show delegated investigation\n${subagentDryRun.stdout}`);
+if (!subagentDryRun.stdout.includes('runtime Task/child-session verification deferred')) {
+  throw new Error(`subagent dry-run did not mark runtime verification as deferred\n${subagentDryRun.stdout}`);
+}
+if (/Scout|subagents=explore,scout/i.test(subagentDryRun.stdout)) {
+  throw new Error(`subagent dry-run still advertised the removed fake Scout path\n${subagentDryRun.stdout}`);
 }
 
 const missingPlaceholder = run([

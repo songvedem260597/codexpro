@@ -303,7 +303,7 @@ codexpro execute-handoff --agent opencode --subagents --yes
 codexpro watch-handoff --agent opencode --subagents --yes
 ```
 
-`--subagents` is an OpenCode optimization for bug-fix/repository-reading work: the primary agent is told to delegate independent read-only investigation to Explore/Scout subagents, synthesize the findings, and keep source edits/final verification coordinated centrally.
+`--subagents` runs a verified OpenCode investigation phase before implementation. CodexPro requires a real `task` tool event, a real child session ID, an exportable read-only child session, and returned evidence before it marks delegation as successful. If any of those checks fail, execution falls back to the normal single-agent path and records the reason instead of claiming a subagent ran.
 
 `handoff_to_agent` is planning-only over MCP. CodexPro does not expose arbitrary local agent execution as a remote ChatGPT tool.
 
