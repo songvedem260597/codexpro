@@ -67,8 +67,11 @@ const subagentDryRun = run([
   '--dry-run'
 ]);
 requireSuccess(subagentDryRun, 'execute-handoff subagent dry-run');
-if (!subagentDryRun.stdout.includes('runtime Task/child-session verification deferred')) {
+if (!subagentDryRun.stdout.includes('runtime Task/child-session verification') || !subagentDryRun.stdout.includes('deferred until execution')) {
   throw new Error(`subagent dry-run did not mark runtime verification as deferred\n${subagentDryRun.stdout}`);
+}
+if (!subagentDryRun.stdout.includes('max=1')) {
+  throw new Error(`subagent dry-run did not enforce the test-safe default max=1\n${subagentDryRun.stdout}`);
 }
 if (/Scout|subagents=explore,scout/i.test(subagentDryRun.stdout)) {
   throw new Error(`subagent dry-run still advertised the removed fake Scout path\n${subagentDryRun.stdout}`);

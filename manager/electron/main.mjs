@@ -20,7 +20,7 @@ const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
 
-const WORKER_EXTENSION_VERSION = "0.5.49";
+const WORKER_EXTENSION_VERSION = "0.5.52";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
@@ -1802,7 +1802,7 @@ async function sendProfileRequestUnlocked(payload) {
     }
   }
   const selectedConversationTab = newChat ? null : (profile.conversation_tabs || []).find((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] === conversationId);
-  if (selectedConversationTab?.busy) throw new Error("Đoạn chat này đang xử lý yêu cầu khác. Hãy chờ phản hồi hiện tại hoàn tất.");
+  if (selectedConversationTab?.busy || selectedConversationTab?.settling) throw new Error("Đoạn chat này đang xử lý hoặc hoàn tất yêu cầu khác. Hãy chờ trạng thái về ĐANG RẢNH.");
   if (!newChat) {
     const allowedConversationIds = new Set([
       ...(profile.recent_conversations || []).map((conversation) => String(conversation.id || "")),

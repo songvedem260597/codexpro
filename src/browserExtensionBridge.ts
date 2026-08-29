@@ -39,6 +39,7 @@ export interface ExtensionProfileSummary {
     active: boolean;
     busy: boolean;
     settling: boolean;
+    activity_text: string;
     network_state: string;
     network_source: string;
     network_last_started_at: string;
@@ -423,6 +424,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
           active: tab.active === true,
           busy: tab.busy === true,
           settling: tab.settling === true,
+          activity_text: String(tab.activity_text ?? "").trim().slice(0, 220),
           network_state: tab.network_state === "generating" ? "generating" : tab.network_state === "completed" ? "completed" : tab.network_state === "failed" ? "failed" : "idle",
           network_source: String(tab.network_source ?? "").trim().slice(0, 32),
           network_generation_endpoint: String(tab.network_generation_endpoint ?? "").trim().slice(0, 500),
