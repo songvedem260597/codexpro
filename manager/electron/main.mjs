@@ -20,9 +20,11 @@ const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
 
-const WORKER_EXTENSION_VERSION = "0.5.59";
+const WORKER_EXTENSION_VERSION = "0.5.60";
 const RUNTIME_BASE_CACHE_MS = 10000;
-const REPO_SCAN_CACHE_MS = 60000;
+const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
+const GIT_SUMMARY_CACHE_MS = 2 * 60 * 1000;
+const GIT_SUMMARY_CACHE_RETENTION_MS = 30 * 60 * 1000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
 const REPO_SCAN_MAX_DEPTH = 12;
 const REPO_SCAN_TIMEOUT_MS = 12000;
@@ -30,6 +32,8 @@ let runtimeBaseCache = null;
 let runtimeBasePromise = null;
 let repoScanCache = null;
 let repoScanPromise = null;
+const gitSummaryCache = new Map();
+const gitSummaryPromises = new Map();
 
 function versionAtLeast(version, target = WORKER_EXTENSION_VERSION) {
   const current = String(version || "").split(".").map(Number);
@@ -1206,7 +1210,7 @@ async function githubRepoForRoot(root) {
   return value;
 }
 
-async function gitSummary(root) {
+async function readGitSummary(root) {
   try {
     const { stdout: branchText } = await execFileAsync("git.exe", ["-C", root, "branch", "--show-current"], { windowsHide: true });
     const { stdout: statusText } = await execFileAsync("git.exe", ["-C", root, "status", "--porcelain"], { windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
@@ -1253,6 +1257,31 @@ async function gitSummary(root) {
     };
   } catch {
     return { isGit: false, branch: "", changes: 0, commit: null, remoteUrl: "", upstream: "", pushedAt: "", remoteCommitAt: "", activityAt: "", activityTimestamp: 0, activityKind: "", githubRepo: "", officialName: "", repoFullName: "" };
+  }
+}
+
+async function gitSummary(root) {
+  const key = path.resolve(root).toLowerCase();
+  const now = Date.now();
+  const cached = gitSummaryCache.get(key);
+  if (cached && now - cached.at < GIT_SUMMARY_CACHE_MS) return cached.value;
+  if (gitSummaryPromises.has(key)) return gitSummaryPromises.get(key);
+  const promise = readGitSummary(root).then((value) => {
+    gitSummaryCache.set(key, { at: Date.now(), value });
+    return value;
+  });
+  gitSummaryPromises.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    if (gitSummaryPromises.get(key) === promise) gitSummaryPromises.delete(key);
+  }
+}
+
+function pruneGitSummaryCache(liveRoots) {
+  const now = Date.now();
+  for (const [key, cached] of gitSummaryCache) {
+    if (!liveRoots.has(key) && now - cached.at > GIT_SUMMARY_CACHE_RETENTION_MS) gitSummaryCache.delete(key);
   }
 }
 
@@ -1368,6 +1397,7 @@ async function listProjects() {
   }
 
   const entries = [...sources];
+  pruneGitSummaryCache(new Set([...sources.keys()].map((root) => path.resolve(root).toLowerCase())));
   const projects = [];
   let nextIndex = 0;
   await Promise.all(Array.from({ length: Math.min(8, entries.length) }, async () => {
@@ -1733,12 +1763,29 @@ async function reloadChromeProfiles() {
     profile_id: profile.profile_id
   }, 20000)));
 
+  const attemptedProfiles = [...legacy, ...modern];
   const results = [...legacyResults, ...modernResults];
-  const updated = results.filter((result) => result.status === "fulfilled").length;
+  const reloadAcceptedIds = new Set(results.flatMap((result, index) => result.status === "fulfilled" ? [attemptedProfiles[index].profile_id] : []));
   const racedBusy = results.filter((result) => result.status === "rejected" && /WORKER_BUSY/i.test(String(result.reason?.message || result.reason || ""))).length;
-  const hardFailures = results.length - updated - racedBusy;
+  let confirmedIds = new Set();
+  if (reloadAcceptedIds.size) {
+    const confirmationDeadline = Date.now() + 15000;
+    while (Date.now() < confirmationDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const refreshed = await runtimeStatus();
+      confirmedIds = new Set(refreshed.browserProfiles
+        .filter((profile) => reloadAcceptedIds.has(profile.profile_id) && profile.connected && versionAtLeast(profile.extension_version))
+        .map((profile) => profile.profile_id));
+      if (confirmedIds.size === reloadAcceptedIds.size) break;
+    }
+  }
+  const updated = confirmedIds.size;
+  const unconfirmed = reloadAcceptedIds.size - updated;
+  const hardFailures = results.length - reloadAcceptedIds.size - racedBusy + unconfirmed;
   const deferredCount = deferred.length + racedBusy;
-  if (!updated && hardFailures) throw new Error("Không worker đang rảnh nào nhận được lệnh update.");
+  if (!updated && hardFailures) {
+    throw new Error(`Worker đã nhận lệnh reload nhưng chưa xác nhận chạy bản ${WORKER_EXTENSION_VERSION}. Hãy kiểm tra đường dẫn extension trong chrome://extensions.`);
+  }
   if (!updated) {
     return {
       ok: true,
@@ -2065,13 +2112,28 @@ ipcMain.handle("codexpro:open-external", async (_event, url) => {
   return true;
 });
 
-app.whenReady().then(() => {
-  createWindow();
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-});
+const managerSmokeMode = process.env.CODEXPRO_MANAGER_SMOKE === "1";
+const hasSingleInstanceLock = managerSmokeMode || app.requestSingleInstanceLock();
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
-});
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  });
+
+  app.whenReady().then(() => {
+    createWindow();
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") app.quit();
+  });
+}

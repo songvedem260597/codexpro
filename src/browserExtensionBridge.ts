@@ -6,6 +6,7 @@ const BRIDGE_HOST = "127.0.0.1";
 const CODEXPRO_EXTENSION_ORIGIN = "chrome-extension://gndipignbnipohooclcbhjliikamjlpl";
 export const BROWSER_EXTENSION_BRIDGE_PORT = 9224;
 const PROFILE_TTL_MS = 45_000;
+const PROFILE_RETENTION_MS = 10 * 60_000;
 const COMMAND_TIMEOUT_MS = 25_000;
 const CHECK_COMMAND_TIMEOUT_MS = 60_000;
 const SETUP_COMMAND_TIMEOUT_MS = 300_000;
@@ -245,6 +246,16 @@ function clearWaiter(profile: ExtensionProfile): void {
   profile.waiter = undefined;
 }
 
+function pruneExpiredProfiles(state: BridgeState, now = Date.now()): void {
+  for (const [id, profile] of state.profiles) {
+    if (now - profile.lastSeen <= PROFILE_RETENTION_MS || profile.waiter || profile.queued.length) continue;
+    state.profiles.delete(id);
+    profileWorkspaceRoots.delete(id);
+    profileWorkspaceBindings.delete(id);
+    if (state.activeProfileId === id) state.activeProfileId = undefined;
+  }
+}
+
 function deliver(state: BridgeState, profile: ExtensionProfile, command: BridgeCommand | null): boolean {
   if (!profile.waiter) return false;
   const response = profile.waiter;
@@ -392,6 +403,7 @@ export function ensureBrowserExtensionBridge(options: BrowserExtensionBridgeOpti
 export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
   const state = ensureBrowserExtensionBridge();
   const now = Date.now();
+  pruneExpiredProfiles(state, now);
   return [...state.profiles.values()]
     .map((profile) => {
       const tabs = profile.tabs

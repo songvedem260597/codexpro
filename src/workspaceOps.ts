@@ -176,8 +176,10 @@ export async function workspaceSummary(
     treeText = tree.text;
   }
 
-  const status = gitStatus(config, workspace);
-  const log = gitLog(config, workspace, 5);
+  const [status, log] = await Promise.all([
+    gitStatus(config, workspace),
+    gitLog(config, workspace, 5)
+  ]);
   const skillText = options.includeSkills
     ? `Skills: ${counts.total} total (${counts.workspace ?? 0} workspace, ${counts.user ?? 0} user, ${counts.plugin ?? 0} plugin, ${counts.other ?? 0} other).`
     : "Skills: skipped. Pass include_skills=true if skill discovery is needed.";
@@ -255,8 +257,10 @@ export async function readCodexContext(
   const ai = options.includeAiBridge === false
     ? { text: "Skipped by request.", files: [] }
     : await readAiBridgeContext(config, guard, workspace);
-  const status = options.includeGit === false ? undefined : gitStatus(config, workspace);
-  const diff = options.includeDiff ? gitDiff(config, guard, workspace) : undefined;
+  const [status, diff] = await Promise.all([
+    options.includeGit === false ? undefined : gitStatus(config, workspace),
+    options.includeDiff ? gitDiff(config, guard, workspace) : undefined
+  ]);
 
   const text = [
     "# Codex Context",
