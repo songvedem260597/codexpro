@@ -59,9 +59,9 @@ export function transcriptAwaitingAssistant(messages) {
 }
 
 export function completedResponseNeedsDomFallback(response) {
-  if (String(response?.network_state || "") !== "completed") return false;
+  if (!response || response.response_ready === true) return false;
   const messages = Array.isArray(response?.messages) ? response.messages : [];
-  return response?.response_ready !== true || transcriptAwaitingAssistant(messages);
+  return response.canonical_available === false || messages.length === 0 || transcriptAwaitingAssistant(messages);
 }
 
 export function mergeNetworkStreamTranscript(previousMessages, { conversationId, text, truncated = false }) {
