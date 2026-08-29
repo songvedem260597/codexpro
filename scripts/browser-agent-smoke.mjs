@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
-import { completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant } from "../manager/src/chat-transcript.js";
+import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant } from "../manager/src/chat-transcript.js";
 import { projectSelectionChanged } from "../manager/src/chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "../manager/src/chat-response-audit.js";
 
@@ -43,7 +43,9 @@ assert.equal(mergeProgressiveResponseText("Phần phản hồi đã nhận", "Ph
 assert.equal(mergeProgressiveResponseText("Phần phản hồi", "Phần phản hồi đã nhận đủ"), "Phần phản hồi đã nhận đủ", "a longer cumulative response must extend the saved checkpoint");
 assert.equal(mergeProgressiveResponseText("Phần một - phần hai đầy đủ", "phần hai đầy đủ - phần ba"), "Phần một - phần hai đầy đủ - phần ba", "an overlapping later fragment must append only its missing tail");
 
-const optimisticTranscript = [...cachedTranscript, { id: "optimistic-user-1", role: "user", text: "Yêu cầu mới", pending: true }];
+const optimisticTranscript = [...cachedTranscript, { id: "optimistic-user-1", role: "user", text: "Yêu cầu mới", pending: true, submissionState: "pending", createdAt: "2026-08-29T00:00:00.000Z" }];
+assert.deepEqual(cacheableTranscriptMessages(optimisticTranscript), cachedTranscript, "an outgoing message without a send result must never be persisted as confirmed chat history");
+assert.deepEqual(cacheableTranscriptMessages([...cachedTranscript, { id: "optimistic-user-legacy", role: "user", text: "Tin giả từ cache cũ" }]), cachedTranscript, "legacy optimistic bubbles without send evidence must be removed during cache migration");
 const firstStreamTranscript = mergeNetworkStreamTranscript(optimisticTranscript, {
   conversationId: "conversation-1",
   text: "Đang xử lý"
@@ -57,8 +59,18 @@ assert.equal(updatedStreamTranscript.at(-1).text, "Đã xử lý gần xong");
 assert.ok(updatedStreamTranscript.some((message) => message.text === "Phản hồi cũ vẫn phải còn"), "network streaming must preserve the previous response");
 assert.ok(updatedStreamTranscript.some((message) => message.text === "Yêu cầu mới"), "network streaming must preserve the optimistic user message");
 assert.deepEqual(replaceCanonicalTranscript(updatedStreamTranscript, []), updatedStreamTranscript, "an empty transient canonical read must not erase the visible transcript");
-const laggingCanonicalTranscript = replaceCanonicalTranscript(updatedStreamTranscript, [{ id: "canonical-1", role: "assistant", text: "Canonical" }]);
+const laggingCanonicalTranscript = replaceCanonicalTranscript(updatedStreamTranscript, [{ id: "canonical-1", role: "assistant", text: "Canonical" }], { nowMs: Date.parse("2026-08-29T00:01:00.000Z") });
 assert.deepEqual(laggingCanonicalTranscript.map((message) => message.text), ["Canonical", "Yêu cầu mới"], "a populated but lagging canonical read must preserve a just-submitted optimistic user message");
+const legacyOrphanTranscript = replaceCanonicalTranscript([
+  { id: "canonical-old", role: "assistant", text: "Canonical" },
+  { id: "optimistic-user-legacy", role: "user", text: "Tin chỉ tồn tại trong Manager" }
+], [{ id: "canonical-old", role: "assistant", text: "Canonical" }]);
+assert.deepEqual(legacyOrphanTranscript.map((message) => message.text), ["Canonical"], "a legacy optimistic bubble missing send evidence must not survive authoritative canonical reconciliation");
+const expiredSubmittedTranscript = replaceCanonicalTranscript([
+  { id: "canonical-old", role: "assistant", text: "Canonical" },
+  { id: "optimistic-user-expired", role: "user", text: "Tin không bao giờ tới ChatGPT", submissionState: "submitted", createdAt: "2026-08-29T00:00:00.000Z" }
+], [{ id: "canonical-old", role: "assistant", text: "Canonical" }], { nowMs: Date.parse("2026-08-29T00:11:00.000Z") });
+assert.deepEqual(expiredSubmittedTranscript.map((message) => message.text), ["Canonical"], "a submitted optimistic bubble must expire when ChatGPT never materializes it");
 const materializedCanonicalTranscript = replaceCanonicalTranscript(updatedStreamTranscript, [
   { id: "canonical-user-1", role: "user", text: "  Yêu cầu\u00a0mới  " },
   { id: "canonical-assistant-1", role: "assistant", text: "Đã nhận" }
@@ -81,14 +93,14 @@ assert.equal(reloadExtendedTranscript.at(-1).text, "Phần phản hồi đã đ�
 const previousCompleteTranscript = [
   { id: "previous-user-1", role: "user", text: "Yêu cầu cũ" },
   { id: "previous-assistant-1", role: "assistant", text: "Phản hồi cũ phải còn" },
-  { id: "optimistic-user-2", role: "user", text: "Yêu cầu đang xử lý" },
+  { id: "optimistic-user-2", role: "user", text: "Yêu cầu đang xử lý", submissionState: "submitted", createdAt: "2026-08-29T00:00:00.000Z" },
   { id: "network-stream-assistant:conversation-1", role: "assistant", text: "Đang gọi tool" }
 ];
 const partialCanonicalTranscript = replaceCanonicalTranscript(previousCompleteTranscript, [
   { id: "canonical-user-1", role: "user", text: "Yêu cầu cũ" },
   { id: "canonical-assistant-1", role: "assistant", text: "Phản hồi cũ phải còn" },
   { id: "canonical-user-2", role: "user", text: "Yêu cầu đang xử lý" }
-]);
+], { nowMs: Date.parse("2026-08-29T00:01:00.000Z") });
 assert.deepEqual(partialCanonicalTranscript, previousCompleteTranscript, "a canonical snapshot ending at the latest user must not erase prior or streaming assistant responses while ChatGPT is still working");
 assert.equal(transcriptAwaitingAssistant(partialCanonicalTranscript), false, "an existing live stream assistant counts as the response for the latest user");
 const missingLatestResponse = [
