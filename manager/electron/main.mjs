@@ -342,7 +342,11 @@ function normalizeChatCacheMessage(message, index) {
     id: String(message?.id || `${role}-${index}`).slice(0, 220),
     role,
     text,
-    truncated: Boolean(message?.truncated)
+    truncated: Boolean(message?.truncated),
+    pending: Boolean(message?.pending),
+    uncertain: Boolean(message?.uncertain),
+    submissionState: ["pending", "submitted", "uncertain"].includes(String(message?.submissionState || "")) ? String(message.submissionState) : "",
+    createdAt: String(message?.createdAt || "").slice(0, 80)
   };
 }
 

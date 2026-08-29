@@ -6,7 +6,7 @@ import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
-import { completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
+import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 
@@ -1404,16 +1404,19 @@ function App() {
 
   function persistResponseCache(profileId, response) {
     const conversationId = String(response?.conversationId || "");
-    const messages = trimRecentTranscriptMessages(response?.messages);
+    const messages = cacheableTranscriptMessages(response?.messages);
     const text = String(response?.text || "").trim();
     const networkState = String(response?.networkState || "");
     if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId) || (!messages.length && !text)) return;
     const key = responseCacheKey(profileId, conversationId);
     const signature = JSON.stringify([
       String(response?.networkCompletedAt || ""),
+      networkState,
+      Boolean(response?.responseReady),
+      String(response?.responseSource || ""),
       Boolean(response?.truncated),
       text,
-      messages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated)])
+      messages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain)])
     ]);
     if (responseCacheSaveSignatures.current.get(key) === signature) return;
     responseCacheSaveSignatures.current.set(key, signature);
@@ -1440,13 +1443,21 @@ function App() {
     try {
       const cached = await api.getChatResponseCache({ profileId: profile.profile_id, conversationId }).catch(() => null);
       if (cached) {
-        const cachedMessages = trimRecentTranscriptMessages(cached.messages);
-        responseCacheSaveSignatures.current.set(key, JSON.stringify([
-          String(cached.networkCompletedAt || ""),
-          Boolean(cached.truncated),
-          String(cached.text || "").trim(),
-          cachedMessages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated)])
-        ]));
+        const rawCachedMessages = trimRecentTranscriptMessages(cached.messages);
+        const cachedMessages = cacheableTranscriptMessages(cached.messages);
+        if (rawCachedMessages.length === cachedMessages.length) {
+          responseCacheSaveSignatures.current.set(key, JSON.stringify([
+            String(cached.networkCompletedAt || ""),
+            String(cached.networkState || ""),
+            Boolean(cached.responseReady),
+            String(cached.responseSource || ""),
+            Boolean(cached.truncated),
+            String(cached.text || "").trim(),
+            cachedMessages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain)])
+          ]));
+        } else {
+          responseCacheSaveSignatures.current.delete(key);
+        }
         setRequestResponses((current) => {
           const previous = current[profile.profile_id] || {};
           const previousIsNewer = previous.conversationId === conversationId
@@ -1463,7 +1474,7 @@ function App() {
               loading: false,
               error: "",
               conversationId,
-              messages: trimRecentTranscriptMessages(cached.messages),
+              messages: cachedMessages,
               busy: Boolean(tab?.busy || tab?.settling || networkState === "generating"),
               networkState,
               networkCompletedAt: String(tab?.network_last_completed_at || cached.networkCompletedAt || ""),
@@ -1694,7 +1705,14 @@ function App() {
             loading: true,
             error: "",
             conversationId,
-            messages: trimRecentTranscriptMessages([...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: true }])
+            messages: trimRecentTranscriptMessages([...previousMessages, {
+              id: `optimistic-user-${Date.now()}`,
+              role: "user",
+              text,
+              pending: true,
+              submissionState: "pending",
+              createdAt: new Date().toISOString()
+            }])
           }
         };
       });
@@ -1714,7 +1732,7 @@ function App() {
           const previous = current[profile.profile_id] || {};
           const previousMessages = previous.conversationId === conversationId && Array.isArray(previous.messages) ? previous.messages : [];
           const messages = text
-            ? previousMessages.map((message) => message?.role === "user" && message?.pending && message?.text === text ? { ...message, pending: false, uncertain: true } : message)
+            ? previousMessages.map((message) => message?.role === "user" && message?.pending && message?.text === text ? { ...message, pending: false, uncertain: true, submissionState: "uncertain" } : message)
             : previousMessages;
           return {
             ...current,
@@ -1750,9 +1768,9 @@ function App() {
         const matchingPendingIndex = text ? previousMessages.findIndex((message) => message?.role === "user" && message?.pending && message?.text === text) : -1;
         let optimisticMessages = previousMessages;
         if (text && matchingPendingIndex >= 0) {
-          optimisticMessages = previousMessages.map((message, index) => index === matchingPendingIndex ? { ...message, pending: false, uncertain: false } : message);
+          optimisticMessages = previousMessages.map((message, index) => index === matchingPendingIndex ? { ...message, pending: false, uncertain: false, submissionState: "submitted" } : message);
         } else if (text) {
-          optimisticMessages = trimRecentTranscriptMessages([...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: false, uncertain: false }]);
+          optimisticMessages = trimRecentTranscriptMessages([...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: false, uncertain: false, submissionState: "submitted", createdAt: new Date().toISOString() }]);
         }
         return {
           ...current,
@@ -1792,7 +1810,7 @@ function App() {
       if (conversationLimitReached) {
         const previous = requestResponses[profile.profile_id] || {};
         const cleanMessages = Array.isArray(previous.messages) ? previous.messages.filter((item) => !item?.pending) : [];
-        const rolloverMessages = text ? trimRecentTranscriptMessages([...cleanMessages, { id: `rollover-user-${Date.now()}`, role: "user", text }]) : trimRecentTranscriptMessages(cleanMessages);
+        const rolloverMessages = text ? trimRecentTranscriptMessages([...cleanMessages, { id: `rollover-user-${Date.now()}`, role: "user", text, submissionState: "submitted", createdAt: new Date().toISOString() }]) : trimRecentTranscriptMessages(cleanMessages);
         const newConversationId = await rolloverFullConversation(profile, conversationId, {
           ...previous,
           title: conversations.find((chat) => chat.id === conversationId)?.title || profile.active_chat_title || "",

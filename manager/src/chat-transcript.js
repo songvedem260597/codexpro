@@ -1,5 +1,6 @@
 const TRANSCRIPT_EXCHANGE_LIMIT = 3;
 const TRANSCRIPT_MESSAGE_HARD_LIMIT = 12;
+const OPTIMISTIC_SUBMISSION_TTL_MS = 10 * 60 * 1000;
 
 function usableMessages(response, conversationId) {
   if (!response || response.conversationId !== conversationId || !Array.isArray(response.messages)) return [];
@@ -34,6 +35,28 @@ export function trimRecentTranscriptMessages(messages) {
   const orphanCapacity = Math.max(0, TRANSCRIPT_EXCHANGE_LIMIT - selectedExchanges.length);
   const orphanPrefix = orphanCapacity ? orphanAssistants.slice(-orphanCapacity) : [];
   return [...orphanPrefix, ...selectedExchanges.flatMap((exchange) => exchange.assistant ? [...exchange.users, exchange.assistant] : exchange.users)].slice(-TRANSCRIPT_MESSAGE_HARD_LIMIT);
+}
+
+function optimisticSubmissionState(message) {
+  if (!/^(?:optimistic|rollover)-user-/.test(String(message?.id || ""))) return "";
+  return String(message?.submissionState || "");
+}
+
+function optimisticSubmissionIsCurrent(message, nowMs = Date.now()) {
+  const state = optimisticSubmissionState(message);
+  if (!state) return Boolean(message?.pending || message?.uncertain);
+  if (state === "uncertain") return true;
+  if (state !== "pending" && state !== "submitted") return false;
+  const createdAtMs = Date.parse(String(message?.createdAt || ""));
+  return Number.isFinite(createdAtMs) && nowMs - createdAtMs <= OPTIMISTIC_SUBMISSION_TTL_MS;
+}
+
+export function cacheableTranscriptMessages(messages) {
+  return trimRecentTranscriptMessages(messages).filter((message) => {
+    if (message?.pending || optimisticSubmissionState(message) === "pending") return false;
+    if (/^(?:optimistic|rollover)-user-/.test(String(message?.id || "")) && !optimisticSubmissionState(message) && !message?.uncertain) return false;
+    return true;
+  });
 }
 
 export function materializeTranscriptMessages(response, conversationId) {
@@ -131,7 +154,7 @@ export function mergeNetworkStreamTranscript(previousMessages, { conversationId,
   return trimRecentTranscriptMessages(messages);
 }
 
-export function replaceCanonicalTranscript(previousMessages, incomingMessages) {
+export function replaceCanonicalTranscript(previousMessages, incomingMessages, { nowMs = Date.now() } = {}) {
   const incoming = Array.isArray(incomingMessages) ? incomingMessages : [];
   if (incoming.length) {
     const comparableText = (value) => String(value || "")
@@ -143,7 +166,11 @@ export function replaceCanonicalTranscript(previousMessages, incomingMessages) {
       .filter((message) => message?.role === "user")
       .map((message) => comparableText(message?.text))
       .filter(Boolean));
-    const previous = Array.isArray(previousMessages) ? previousMessages : [];
+    const previous = (Array.isArray(previousMessages) ? previousMessages : []).filter((message) => {
+      if (message?.role !== "user" || !/^(?:optimistic|rollover)-user-/.test(String(message?.id || ""))) return true;
+      const text = comparableText(message?.text);
+      return canonicalUserTexts.has(text) || optimisticSubmissionIsCurrent(message, nowMs);
+    });
     const latestCanonicalUserIndex = incoming.findLastIndex((message) => message?.role === "user");
     const canonicalHasAssistantAfterLatestUser = latestCanonicalUserIndex < 0
       || incoming.slice(latestCanonicalUserIndex + 1).some((message) => message?.role === "assistant");
@@ -166,7 +193,7 @@ export function replaceCanonicalTranscript(previousMessages, incomingMessages) {
       }
       return trimRecentTranscriptMessages([...previous, ...trailingCanonicalMessages]);
     }
-    const unmaterializedOptimisticUsers = (Array.isArray(previousMessages) ? previousMessages : [])
+    const unmaterializedOptimisticUsers = previous
       .filter((message) => message?.role === "user" && /^(?:optimistic|rollover)-user-/.test(String(message?.id || "")))
       .filter((message) => {
         const text = comparableText(message?.text);
