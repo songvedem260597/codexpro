@@ -2199,14 +2199,16 @@ async function sendProfileRequestUnlocked(payload) {
         "CodexPro Manager đang ở chế độ TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN. Không có repo hoặc đường dẫn cụ thể bị khóa cho yêu cầu này.",
         `Các vùng CodexPro hiện được phép truy cập: ${allowedRoots.join(" ; ")}`,
         `Task ID bắt buộc: ${taskId}`,
-        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","root":"${initialWorkspaceRoot.replace(/\\/g, "\\\\")}","scope":"all_allowed"} trước mọi câu trả lời. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
+        "BẮT BUỘC tự đặt task_title ngắn gọn 2-6 từ, mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
+        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","root":"${initialWorkspaceRoot.replace(/\\/g, "\\\\")}","scope":"all_allowed"} trước mọi câu trả lời. Phải thay placeholder task_title bằng tên thật do bạn đặt. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
         "BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Không được trả lời rằng không có tool/MCP, tool/MCP không sử dụng được hoặc tool/MCP bị disable khi chưa thực hiện một tool-call MCP CodexPro thực tế và nhận lỗi kỹ thuật từ chính lần gọi đó.",
         "Sau khi begin_repo_task thành công, bạn ĐƯỢC PHÉP dùng open_workspace để chuyển giữa các workspace nằm bên trong những vùng CodexPro đã được cấp quyền ở trên nhằm tìm đúng dự án hoặc file. Không được truy cập đường dẫn nằm ngoài các vùng đó."
       ]
     : [
         `Workspace đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
         `Task ID bắt buộc: ${taskId}`,
-        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
+        "BẮT BUỘC tự đặt task_title ngắn gọn 2-6 từ, mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
+        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Phải thay placeholder task_title bằng tên thật do bạn đặt. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
         "BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Không được trả lời rằng không có tool/MCP, tool/MCP không sử dụng được hoặc tool/MCP bị disable khi chưa thực hiện một tool-call MCP CodexPro thực tế và nhận lỗi kỹ thuật từ chính lần gọi đó.",
         "Sau khi begin_repo_task thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác."
       ];

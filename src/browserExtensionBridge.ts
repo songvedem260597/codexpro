@@ -35,6 +35,8 @@ export interface ExtensionProfileSummary {
   activity: "working" | "settling" | "idle" | "no_chatgpt";
   active_chat_title: string;
   current_workspace_root: string;
+  current_task_id: string;
+  current_task_title: string;
   conversation_tabs: Array<{
     id: number;
     title: string;
@@ -121,6 +123,8 @@ interface BridgeState {
 
 const profileWorkspaceRoots = new Map<string, string>();
 const profileWorkspaceBindings = new Map<string, string>();
+const profileTaskIds = new Map<string, string>();
+const profileTaskTitles = new Map<string, string>();
 let singleton: BridgeState | undefined;
 
 function scheduleProfileNotification(state: BridgeState): void {
@@ -557,6 +561,8 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       activity,
       active_chat_title: activeChatTitle,
       current_workspace_root: profile.workspaceRoot,
+      current_task_id: profileTaskIds.get(profile.id) || "",
+      current_task_title: profileTaskTitles.get(profile.id) || "",
       conversation_tabs: conversationSummaries,
       recent_conversations: recentConversations
       };
@@ -578,6 +584,18 @@ export function setBrowserExtensionProfileWorkspace(profileId: string, root: str
   else profileWorkspaceRoots.delete(id);
   const profile = singleton?.profiles.get(id);
   if (profile) profile.workspaceRoot = workspaceRoot;
+  if (singleton) scheduleProfileNotification(singleton);
+}
+
+export function setBrowserExtensionProfileTask(profileId: string, taskId: string, title: string): void {
+  const id = String(profileId || "").trim();
+  const normalizedTaskId = String(taskId || "").trim();
+  const taskTitle = String(title || "").trim();
+  if (!id) return;
+  if (normalizedTaskId) profileTaskIds.set(id, normalizedTaskId);
+  else profileTaskIds.delete(id);
+  if (taskTitle) profileTaskTitles.set(id, taskTitle);
+  else profileTaskTitles.delete(id);
   if (singleton) scheduleProfileNotification(singleton);
 }
 
