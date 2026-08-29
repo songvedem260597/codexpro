@@ -254,6 +254,11 @@ assert.match(worker, /connection_interrupted:Boolean\(domActivity\.connection_in
 assert.match(worker, /connectionInterrupted\?'connection_interrupted':staleActivity[\s\S]*?chrome\.tabs\.reload\(tab\.id\)/, "an interrupted ChatGPT response must reload the exact conversation tab first");
 assert.match(worker, /!rendererRefreshed\|\|domResult\.connection_interrupted[\s\S]*?replaceUnresponsiveChatTab\(tab,`https:\/\/chatgpt\.com\/c\/\$\{conversationId\}`\)/, "a chat that remains interrupted after reload must be replaced at the same conversation URL");
 assert.match(bridge, /connection_interrupted:\s*tab\.connection_interrupted\s*===\s*true/, "the extension bridge must preserve interrupted-response state for Manager recovery");
+assert.match(worker, /message delivery timed out\\\.\\s\*please try again/i, "ChatGPT's delivery-timeout banner must trigger renderer recovery");
+assert.match(worker, /messageDeliveryTimedOut\?'message_delivery_timeout'/, "delivery timeout recovery must be distinguishable in diagnostics");
+assert.match(worker, /claimTimedOutContinuation\(continuationKey\)[\s\S]*?markTimedOutChatRequestFailed\(tab\.id,conversationId\)[\s\S]*?action:'send_chat_request'[\s\S]*?text:'tiếp tục'/, "a recovered long-running timeout must send one idempotent continuation through the normal ACK-tracked send path");
+assert.match(worker, /duplicate_suppressed:true[\s\S]*?network_acknowledged:false/, "a previously claimed timeout continuation must never be sent twice");
+assert.match(bridge, /message_delivery_timed_out:\s*tab\.message_delivery_timed_out\s*===\s*true/, "the extension bridge must preserve delivery-timeout diagnostics");
 assert.match(worker, /args\.read_dom===false&&args\.canonical_only!==true[\s\S]*?args\.canonical_only===true[\s\S]*?canonical_available:true/, "worker must expose authenticated canonical response reads without querying transcript DOM");
 assert.match(managerMain, /read_dom: payload\?\.canonicalOnly === true \|\| payload\?\.readDom !== false,[\s\S]*?canonical_only: payload\?\.canonicalOnly === true/, "Manager canonical recovery must remain compatible with a server process that has not restarted yet");
 assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?network_last_completed_at/, "Chat reopening must compare the persisted response against the latest network completion before re-reading transcript content");
@@ -292,7 +297,7 @@ assert.match(managerUi, /networkState === "generating" \|\| tab\.settling/, "Man
 assert.match(managerUi, /network_stream_activity_text/, "Manager must render live network tool activity without exposing raw tool payloads");
 
 const manifest = JSON.parse(manifestText);
-assert.equal(manifest.version, "0.5.63");
+assert.equal(manifest.version, "0.5.64");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");

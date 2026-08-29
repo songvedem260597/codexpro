@@ -52,6 +52,7 @@ export interface ExtensionProfileSummary {
     network_error: string;
     network_duration_ms: number;
     connection_interrupted: boolean;
+    message_delivery_timed_out: boolean;
     renderer_unresponsive: boolean;
     renderer_error: string;
   }>;
@@ -527,6 +528,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
           network_error: String(tab.network_error ?? "").trim().slice(0, 500),
           network_duration_ms: Math.max(0, Number(tab.network_duration_ms) || 0),
           connection_interrupted: tab.connection_interrupted === true,
+          message_delivery_timed_out: tab.message_delivery_timed_out === true,
           renderer_unresponsive: tab.renderer_unresponsive === true,
           renderer_error: String(tab.renderer_error ?? "").trim().slice(0, 300),
           network_recent_posts: Array.isArray(tab.network_recent_posts) ? tab.network_recent_posts.slice(-12) : []
