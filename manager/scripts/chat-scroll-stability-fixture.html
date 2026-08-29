@@ -1,0 +1,96 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body { margin: 0; background: #090b10; color: #dce5f4; font: 15px/1.5 system-ui, sans-serif; }
+      #panel { width: 760px; height: 520px; display: flex; flex-direction: column; margin: 16px; border: 1px solid #31415d; }
+      .head, .banner { flex: 0 0 45px; box-sizing: border-box; padding: 12px; background: #111827; }
+      .head::after { content: "Isolated chat scroll fixture"; }
+      .banner { display: none; height: 55px; flex-basis: 55px; color: #6ee7b7; border-block: 1px solid #24513e; }
+      .banner::after { content: "Network state changed without moving away from the newest turn"; }
+      .banner.visible { display: block; }
+      #transcript { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 12px; overflow-y: auto; overflow-anchor: none; }
+      .message { flex: 0 0 auto; box-sizing: border-box; min-height: 180px; padding: 14px; border: 1px solid #24324b; border-radius: 8px; background: #0d1420; }
+      .user { align-self: flex-end; width: 65%; min-height: 74px; background: #172235; }
+      .runway { min-height: 230px; display: flex; align-items: flex-end; border-color: #315a9a; }
+    </style>
+  </head>
+  <body>
+    <script>
+      window.__chatScrollErrors = [];
+      window.addEventListener("error", (event) => window.__chatScrollErrors.push(String(event.error?.stack || event.message || event.error)));
+      window.addEventListener("unhandledrejection", (event) => window.__chatScrollErrors.push(String(event.reason?.stack || event.reason)));
+    </script>
+    <div id="panel">
+      <div class="head"></div>
+      <div class="banner"></div>
+      <div id="transcript">
+        <div class="message assistant">old assistant one</div>
+        <div class="message user">old user</div>
+        <div class="message assistant">old assistant two</div>
+      </div>
+    </div>
+    <script type="module">
+      window.__chatScrollModuleStarted = true;
+      const { handleResponseWheel, installResponseAutoPin, recordResponseScroll, responseDistanceFromBottom } = await import("../src/chat-scroll.js");
+      const waitFrames = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const panel = document.querySelector("#panel");
+      const transcript = document.querySelector("#transcript");
+      const locked = new Map();
+      const positions = new Map();
+      const profileId = "fixture";
+      const stop = installResponseAutoPin({
+        panel,
+        getContainer: () => transcript,
+        isLocked: () => Boolean(locked.get(profileId)),
+        scrollToBottom: () => { transcript.scrollTop = transcript.scrollHeight; }
+      });
+      const metrics = () => ({ top: transcript.scrollTop, height: transcript.scrollHeight, client: transcript.clientHeight, distance: responseDistanceFromBottom(transcript) });
+      const steps = [];
+      await waitFrames();
+      steps.push({ name: "initial", ...metrics() });
+      const sent = document.createElement("div");
+      sent.className = "message user";
+      sent.textContent = "new user";
+      const runway = document.createElement("div");
+      runway.className = "message runway";
+      runway.textContent = "Thinking";
+      transcript.append(sent, runway);
+      await waitFrames();
+      steps.push({ name: "new-message-runway", ...metrics() });
+      document.querySelector(".banner").classList.add("visible");
+      await waitFrames();
+      steps.push({ name: "network-banner", ...metrics() });
+      const canonical = document.createElement("div");
+      canonical.className = "message runway";
+      canonical.style.minHeight = "420px";
+      canonical.textContent = "canonical response";
+      runway.replaceWith(canonical);
+      await waitFrames();
+      steps.push({ name: "canonical-replace", ...metrics() });
+      transcript.scrollTop = Math.max(0, transcript.scrollTop - 140);
+      handleResponseWheel(profileId, transcript, -120, locked);
+      recordResponseScroll(profileId, transcript, locked, positions);
+      const manualTop = transcript.scrollTop;
+      canonical.style.minHeight = "500px";
+      await waitFrames();
+      steps.push({ name: "manual-scroll-lock", expectedTop: manualTop, locked: Boolean(locked.get(profileId)), ...metrics() });
+      transcript.scrollTop = transcript.scrollHeight;
+      handleResponseWheel(profileId, transcript, 120, locked);
+      recordResponseScroll(profileId, transcript, locked, positions);
+      canonical.style.minHeight = "540px";
+      await waitFrames();
+      steps.push({ name: "resume-bottom-pin", locked: Boolean(locked.get(profileId)), ...metrics() });
+      stop();
+      window.__chatScrollResult = {
+        ok: steps.slice(0, 4).every((step) => step.distance <= 1)
+          && steps[4].locked && Math.abs(steps[4].top - steps[4].expectedTop) <= 1
+          && !steps[5].locked && steps[5].distance <= 1,
+        order: [...transcript.children].map((node) => node.textContent),
+        oldMessageHeights: [...transcript.children].slice(0, 3).map((node) => Math.round(node.getBoundingClientRect().height)),
+        steps
+      };
+    </script>
+  </body>
+</html>

@@ -5,6 +5,7 @@ import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
+import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
 import { isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, trimRecentTranscriptMessages } from "./chat-transcript.js";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
@@ -663,14 +664,26 @@ function App() {
   const visibleProjects = useMemo(() => projects.slice(projectPage * PROJECTS_PER_PAGE, (projectPage + 1) * PROJECTS_PER_PAGE), [projects, projectPage]);
   const openChatResponse = chatProfileId ? requestResponses[chatProfileId] : null;
   const openChatScrollKey = useMemo(() => {
-    if (!openChatResponse) return "";
+    if (!openChatResponse || !chatProfileId) return "";
     const messages = Array.isArray(openChatResponse.messages) ? openChatResponse.messages : [];
     const lastMessage = messages.at(-1);
     const visibleText = String(lastMessage?.text || openChatResponse.text || "");
     const contentKey = `${lastMessage?.id || "response"}:${visibleText.length}:${visibleText.slice(-48)}`;
-    const emptyBusyKey = !messages.length && !visibleText ? Boolean(openChatResponse.busy || openChatResponse.loading) : false;
-    return `${openChatResponse.conversationId || ""}:${messages.length}:${contentKey}:${emptyBusyKey}`;
-  }, [openChatResponse]);
+    const selectedTarget = String(requestTargets[chatProfileId] || openChatResponse.conversationId || "");
+    const openProfile = (status?.browserProfiles || []).find((profile) => profile.profile_id === chatProfileId);
+    const openTab = (openProfile?.conversation_tabs || []).find((tab) => selectedTarget && String(tab.url || "").includes(`/c/${selectedTarget}`))
+      || (openProfile?.conversation_tabs || []).find((tab) => tab.active);
+    const turnKey = [
+      busy === `request:${chatProfileId}`,
+      Boolean(openChatResponse.busy),
+      Boolean(openChatResponse.loading),
+      Boolean(openChatResponse.networkStreamInProgress),
+      Boolean(openTab?.busy),
+      Boolean(openTab?.settling),
+      String(openTab?.network_state || openChatResponse.networkState || "")
+    ].join(":");
+    return `${openChatResponse.conversationId || ""}:${messages.length}:${contentKey}:${turnKey}`;
+  }, [busy, chatProfileId, openChatResponse, requestTargets, status?.browserProfiles]);
 
   useEffect(() => {
     setProjectPage((current) => Math.min(current, Math.max(0, Math.ceil(projects.length / PROJECTS_PER_PAGE) - 1)));
@@ -882,24 +895,11 @@ function App() {
   }, [scrollResponseToBottom]);
 
   const holdResponseAutoScroll = useCallback((profileId, container, deltaY = 0) => {
-    const distanceFromBottom = container ? container.scrollHeight - container.scrollTop - container.clientHeight : Infinity;
-    if (deltaY > 0 && distanceFromBottom <= RESPONSE_BOTTOM_THRESHOLD_PX) {
-      responseScrollLocked.current.delete(profileId);
-      return;
-    }
-    responseScrollLocked.current.set(profileId, true);
+    handleResponseWheel(profileId, container, deltaY, responseScrollLocked.current, RESPONSE_BOTTOM_THRESHOLD_PX);
   }, []);
 
   const pauseResponseAutoScroll = useCallback((profileId, container) => {
-    const currentScrollTop = container.scrollTop;
-    const previousScrollTop = responseScrollPositions.current.get(profileId);
-    responseScrollPositions.current.set(profileId, currentScrollTop);
-    const distanceFromBottom = container.scrollHeight - currentScrollTop - container.clientHeight;
-    if (distanceFromBottom <= RESPONSE_BOTTOM_THRESHOLD_PX) {
-      responseScrollLocked.current.delete(profileId);
-      return;
-    }
-    if (Number.isFinite(previousScrollTop) && currentScrollTop < previousScrollTop - 1) responseScrollLocked.current.set(profileId, true);
+    recordResponseScroll(profileId, container, responseScrollLocked.current, responseScrollPositions.current, RESPONSE_BOTTOM_THRESHOLD_PX);
   }, []);
 
   const captureResponseSelection = useCallback((key, container) => {
@@ -1110,6 +1110,16 @@ function App() {
     if (responseScrollLocked.current.get(chatProfileId)) return;
     scrollResponseToBottom(chatProfileId);
   }, [chatProfileId, openChatScrollKey, scrollResponseToBottom]);
+
+  useEffect(() => {
+    if (!chatProfileId) return undefined;
+    return installResponseAutoPin({
+      panel: chatResponseRef.current,
+      getContainer: () => responseBodyRefs.current.get(chatProfileId),
+      isLocked: () => Boolean(responseScrollLocked.current.get(chatProfileId)),
+      scrollToBottom: () => scrollResponseToBottom(chatProfileId)
+    });
+  }, [chatProfileId, requestTargets[chatProfileId], scrollResponseToBottom]);
 
   useEffect(() => {
     if (!chatProfileId || typeof api.logChatLayout !== "function") return undefined;
@@ -2280,7 +2290,7 @@ function App() {
               )}
               {/* Trạng thái gửi nằm ngay trên thanh trạng thái phản hồi. */}
               {responseCleared ? <div className="response-empty">Chat đã được dọn.</div> : !profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
-                <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, event.deltaY)} onTouchMove={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
+                <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, event.deltaY)} onTouchMove={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, -1)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
                   {(displayResponseMessages.length ? displayResponseMessages : [fallbackResponseMessage]).map((message, messageIndex, allMessages) => {
                     const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
                     const responseSpaceClass = !isLastAssistant ? "" : responseTurnActive && !(response.networkStreamAvailable && hasResponseContent) ? "is-response-cage" : "is-response-runway";
