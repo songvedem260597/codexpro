@@ -2018,6 +2018,7 @@ async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
+      connection: "close",
       ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...(sessionId ? { "mcp-session-id": sessionId } : {})
     },
@@ -2067,6 +2068,26 @@ async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
   return { payload, sessionId: nextSessionId };
 }
 
+async function closeLocalMcpSession(session) {
+  if (!session?.url || !session?.sessionId) return;
+  try {
+    await fetch(session.url, {
+      method: "DELETE",
+      headers: {
+        accept: "application/json, text/event-stream",
+        connection: "close",
+        ...(session.token ? { authorization: `Bearer ${session.token}` } : {}),
+        "mcp-session-id": session.sessionId
+      },
+      signal: AbortSignal.timeout(3000)
+    });
+  } catch (error) {
+    if (process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1") {
+      console.error(`[manager-mcp] close session failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
 async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
   const url = `http://127.0.0.1:${config.port}/mcp`;
   const debug = process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1";
@@ -2078,6 +2099,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.74" } }
   });
   const sessionId = initialized.sessionId;
+  try {
   if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
   if (debug) console.error(`[manager-mcp] ${toolName}: tools/call`);
@@ -2102,6 +2124,9 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     throw error;
   }
   return result?.structuredContent || {};
+  } finally {
+    await closeLocalMcpSession({ url, token, sessionId });
+  }
 }
 
 function managerErrorEnvelope(error) {

@@ -1612,6 +1612,7 @@ async function main(): Promise<void> {
     clientVersion: string | null;
     workspaceId: string | null;
     workspaceRoot: string | null;
+    activeRequests: number;
   };
 
   const transports = new Map<string, TransportRecord>();
@@ -1687,9 +1688,13 @@ async function main(): Promise<void> {
     void record.transport.close?.();
   }
 
-  function evictOldestTransport(predicate: (record: TransportRecord) => boolean, reason: string): boolean {
+  function evictOldestTransport(
+    predicate: (record: TransportRecord) => boolean,
+    reason: string,
+    preserveSessionId?: string
+  ): boolean {
     const oldest = [...transports.entries()]
-      .filter(([, record]) => predicate(record))
+      .filter(([sessionId, record]) => sessionId !== preserveSessionId && record.activeRequests === 0 && predicate(record))
       .sort((left, right) => left[1].lastSeenAt - right[1].lastSeenAt)[0];
     if (!oldest) return false;
     transports.delete(oldest[0]);
@@ -1697,29 +1702,29 @@ async function main(): Promise<void> {
     return true;
   }
 
-  function pruneTransports(): void {
+  function pruneTransports(preserveSessionId?: string): void {
     const now = Date.now();
     for (const [sessionId, record] of transports) {
       const ttlMs = record.workerId ? config.httpSessionTtlMs : config.unattributedHttpSessionTtlMs;
-      if (now - record.lastSeenAt > ttlMs) {
+      if (sessionId !== preserveSessionId && record.activeRequests === 0 && now - record.lastSeenAt > ttlMs) {
         transports.delete(sessionId);
         closeTransport(sessionId, record, "ttl_expired");
       }
     }
     while ([...transports.values()].filter((record) => !record.workerId).length > config.maxUnattributedHttpSessions) {
-      if (!evictOldestTransport((record) => !record.workerId, "unattributed_capacity")) break;
+      if (!evictOldestTransport((record) => !record.workerId, "unattributed_capacity", preserveSessionId)) break;
     }
     const attributedWorkerIds = new Set(
       [...transports.values()].map((record) => record.workerId).filter((workerId): workerId is string => Boolean(workerId))
     );
     for (const workerId of attributedWorkerIds) {
       while ([...transports.values()].filter((record) => record.workerId === workerId).length > config.maxHttpSessionsPerWorker) {
-        if (!evictOldestTransport((record) => record.workerId === workerId, "worker_capacity")) break;
+        if (!evictOldestTransport((record) => record.workerId === workerId, "worker_capacity", preserveSessionId)) break;
       }
     }
     while (transports.size > config.maxHttpSessions) {
-      if (evictOldestTransport((record) => !record.workerId, "global_capacity_unattributed_first")) continue;
-      if (!evictOldestTransport(() => true, "global_capacity")) break;
+      if (evictOldestTransport((record) => !record.workerId, "global_capacity_unattributed_first", preserveSessionId)) continue;
+      if (!evictOldestTransport(() => true, "global_capacity", preserveSessionId)) break;
     }
     for (const [workerId, activity] of workerActivity) {
       if (now - activity.lastSeenAt > config.httpSessionTtlMs) workerActivity.delete(workerId);
@@ -1742,11 +1747,12 @@ async function main(): Promise<void> {
 
   function getTransport(sessionId: string | undefined): StreamableHTTPServerTransport | undefined {
     if (!sessionId || !sessionIdPattern.test(sessionId)) return undefined;
-    pruneTransports();
+    pruneTransports(sessionId);
     const record = transports.get(sessionId);
     if (!record) return undefined;
     record.lastSeenAt = Date.now();
     recordWorkerActivity(record.workerId, record.lastSeenAt);
+    record.activeRequests += 1;
     return record.transport;
   }
 
@@ -1808,6 +1814,14 @@ async function main(): Promise<void> {
         workers: [...workspace.workers].sort()
       })).sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
     };
+
+  function releaseTransport(sessionId: string | undefined): void {
+    if (!sessionId) return;
+    const record = transports.get(sessionId);
+    if (!record) return;
+    record.activeRequests = Math.max(0, record.activeRequests - 1);
+    record.lastSeenAt = Date.now();
+    pruneTransports(sessionId);
   }
 
   const pruneTimer = setInterval(pruneTransports, Math.min(config.httpSessionTtlMs, 60_000));
@@ -1902,10 +1916,12 @@ async function main(): Promise<void> {
       const sessionId = requestSessionId(req);
       const workerId = requestWorkerId(req);
       let transport: StreamableHTTPServerTransport;
+      let acquiredSessionId: string | undefined;
 
       const existingTransport = getTransport(sessionId);
       if (existingTransport) {
         transport = existingTransport;
+        acquiredSessionId = sessionId;
       } else if (!sessionId && isInitializeRequest(req.body)) {
         const clientInfo = requestClientInfo(req);
         logMcpLifecycle("initialize_received", {
@@ -1916,7 +1932,7 @@ async function main(): Promise<void> {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
-            pruneTransports();
+            pruneTransports(newSessionId);
             const timestamp = Date.now();
             transports.set(newSessionId, {
               transport,
@@ -1926,10 +1942,12 @@ async function main(): Promise<void> {
               clientName: clientInfo.clientName ?? null,
               clientVersion: clientInfo.clientVersion ?? null,
               workspaceId: null,
-              workspaceRoot: null
+              workspaceRoot: null,
+              activeRequests: 1
             });
+            acquiredSessionId = newSessionId;
             recordWorkerActivity(workerId, timestamp, true);
-            pruneTransports();
+            pruneTransports(newSessionId);
             logMcpLifecycle("session_initialized", {
               workerId,
               sessionId: newSessionId,
@@ -1976,7 +1994,11 @@ async function main(): Promise<void> {
         return;
       }
 
-      await transport.handleRequest(req, res, req.body);
+      try {
+        await transport.handleRequest(req, res, req.body);
+      } finally {
+        releaseTransport(acquiredSessionId);
+      }
     } catch (error) {
       if (error instanceof Error && error.message.startsWith("codexpro_worker_id must")) {
         logMcpLifecycle("worker_marker_error", {
@@ -2007,7 +2029,11 @@ async function main(): Promise<void> {
       sendSessionError(res, sessionId, null);
       return;
     }
-    await transport.handleRequest(req, res);
+    try {
+      await transport.handleRequest(req, res);
+    } finally {
+      releaseTransport(sessionId);
+    }
   };
 
   app.get("/mcp", handleSessionRequest);

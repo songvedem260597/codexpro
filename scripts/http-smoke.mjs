@@ -139,6 +139,52 @@ async function listTools(url, token) {
   }
 }
 
+async function expectActiveSessionPreservedUnderCapacityPressure() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-active-session-'));
+  const port = await getFreePort();
+  const token = 'codexpro-http-active-session-smoke-token';
+  const child = spawn(process.execPath, ['dist/http.js'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      CODEXPRO_ROOT: root,
+      CODEXPRO_ALLOWED_ROOTS: root,
+      CODEXPRO_HOST: '127.0.0.1',
+      CODEXPRO_PORT: String(port),
+      CODEXPRO_HTTP_TOKEN: token,
+      CODEXPRO_BASH_MODE: 'full',
+      CODEXPRO_WRITE_MODE: 'workspace',
+      CODEXPRO_MAX_HTTP_SESSIONS: '2'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  const clients = [];
+  try {
+    await waitForListening(child);
+    const url = new URL(`http://127.0.0.1:${port}/mcp`);
+    const createClient = async (name) => {
+      const client = new Client({ name, version: '0.0.0' });
+      const transport = new StreamableHTTPClientTransport(url, {
+        requestInit: { headers: { Authorization: `Bearer ${token}` } }
+      });
+      await client.connect(transport);
+      clients.push(client);
+      return client;
+    };
+    const primary = await createClient('active-session-primary');
+    const longCall = callTool(primary, 'bash', { command: 'node -e "setTimeout(()=>console.log(\'active-ok\'),2500)"' });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    for (let index = 0; index < 5; index += 1) await createClient(`active-session-pressure-${index}`);
+    await longCall;
+    const tools = await primary.listTools();
+    if (!tools.tools.length) throw new Error('active MCP session disappeared after capacity pressure');
+  } finally {
+    for (const client of clients.reverse()) await client.close().catch(() => {});
+    child.kill('SIGTERM');
+    await waitForExit(child).catch(() => {});
+  }
+}
+
 function toolNames(tools) {
   return tools.map((tool) => tool.name);
 }
@@ -160,6 +206,7 @@ await expectHttpTokenRequired('non-loopback', { CODEXPRO_HOST: '0.0.0.0' });
 await expectHttpTokenRequired('non-loopback-allow-no-token', { CODEXPRO_HOST: '0.0.0.0', CODEXPRO_ALLOW_NO_HTTP_TOKEN: '1' }, { keepAllowNoToken: true });
 await expectHttpTokenRequired('tunnel-mode', { CODEXPRO_TUNNEL_MODE: '1' });
 await expectWeakHttpTokenRejected();
+await expectActiveSessionPreservedUnderCapacityPressure();
 
 async function withClient(url, fn) {
   const client = new Client({ name: 'codexpro-http-smoke', version: '0.0.0' });
