@@ -3,8 +3,9 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
-import { completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, transcriptAwaitingAssistant } from "../manager/src/chat-transcript.js";
+import { completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant } from "../manager/src/chat-transcript.js";
 import { projectSelectionChanged } from "../manager/src/chat-project.js";
+import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "../manager/src/chat-response-audit.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -37,6 +38,10 @@ const newerCachedTranscript = materializeTranscriptMessages({
   messages: cachedTranscript
 }, "conversation-1");
 assert.equal(newerCachedTranscript.length, 2, "a newer cached response must not be hidden just because an older assistant message exists");
+assert.equal(mergeProgressiveResponseText("Phần phản hồi đã nhận", ""), "Phần phản hồi đã nhận", "an empty post-reload snapshot must not erase the response checkpoint");
+assert.equal(mergeProgressiveResponseText("Phần phản hồi đã nhận", "Phần phản hồi"), "Phần phản hồi đã nhận", "a shorter post-reload snapshot must not regress visible response text");
+assert.equal(mergeProgressiveResponseText("Phần phản hồi", "Phần phản hồi đã nhận đủ"), "Phần phản hồi đã nhận đủ", "a longer cumulative response must extend the saved checkpoint");
+assert.equal(mergeProgressiveResponseText("Phần một - phần hai đầy đủ", "phần hai đầy đủ - phần ba"), "Phần một - phần hai đầy đủ - phần ba", "an overlapping later fragment must append only its missing tail");
 
 const optimisticTranscript = [...cachedTranscript, { id: "optimistic-user-1", role: "user", text: "Yêu cầu mới", pending: true }];
 const firstStreamTranscript = mergeNetworkStreamTranscript(optimisticTranscript, {
@@ -58,7 +63,21 @@ const materializedCanonicalTranscript = replaceCanonicalTranscript(updatedStream
   { id: "canonical-user-1", role: "user", text: "  Yêu cầu\u00a0mới  " },
   { id: "canonical-assistant-1", role: "assistant", text: "Đã nhận" }
 ]);
-assert.deepEqual(materializedCanonicalTranscript.map((message) => message.id), ["canonical-user-1", "canonical-assistant-1"], "canonical materialization must replace the matching optimistic message without duplication");
+assert.deepEqual(materializedCanonicalTranscript.map((message) => message.id), ["canonical-user-1", "network-stream-assistant:conversation-1"], "canonical materialization must preserve the live assistant identity so React does not remount the response");
+const reloadRegressedTranscript = replaceCanonicalTranscript([
+  { id: "checkpoint-user", role: "user", text: "Sửa lỗi reload" },
+  { id: "checkpoint-assistant", role: "assistant", text: "Phần phản hồi đã được lưu trước reload" }
+], [
+  { id: "reload-user", role: "user", text: "Sửa lỗi reload" },
+  { id: "reload-assistant", role: "assistant", text: "Phần phản hồi" }
+]);
+assert.equal(reloadRegressedTranscript.at(-1).id, "checkpoint-assistant", "post-reload canonical updates must keep the existing assistant DOM identity");
+assert.equal(reloadRegressedTranscript.at(-1).text, "Phần phản hồi đã được lưu trước reload", "a shorter post-reload assistant must not erase the saved response");
+const reloadExtendedTranscript = replaceCanonicalTranscript(reloadRegressedTranscript, [
+  { id: "reload-user-2", role: "user", text: "Sửa lỗi reload" },
+  { id: "reload-assistant-2", role: "assistant", text: "Phần phản hồi đã được lưu trước reload và đây là phần nối thêm" }
+]);
+assert.equal(reloadExtendedTranscript.at(-1).text, "Phần phản hồi đã được lưu trước reload và đây là phần nối thêm", "later ChatGPT content must extend the saved response without sending another user message");
 const previousCompleteTranscript = [
   { id: "previous-user-1", role: "user", text: "Yêu cầu cũ" },
   { id: "previous-assistant-1", role: "assistant", text: "Phản hồi cũ phải còn" },
@@ -115,6 +134,44 @@ const fragmentedAssistantTurns = replaceCanonicalTranscript([], [
 assert.deepEqual(fragmentedAssistantTurns.map((message) => message.id), ["fragment-user-1", "fragment-assistant-1b", "fragment-user-2", "fragment-assistant-2b"], "each exchange must keep only the latest visible assistant response instead of rendering internal assistant fragments");
 assert.equal(isNetworkStreamCurrentGeneration({ networkStartedAt: "2026-08-29T14:00:10.000Z", streamUpdatedAt: "2026-08-29T14:00:09.999Z" }), false, "a stream from the previous generation must never be appended after a new optimistic user message");
 assert.equal(isNetworkStreamCurrentGeneration({ networkStartedAt: "2026-08-29T14:00:10.000Z", streamUpdatedAt: "2026-08-29T14:00:10.001Z" }), true, "a stream updated by the current generation may be rendered live");
+const auditSource = {
+  selected_source: "chatgpt_dom",
+  chatgpt_dom: {
+    source: "chatgpt_dom",
+    available: true,
+    message_count: 4,
+    latest_user: { fingerprint: responseAuditTextFingerprint("Yêu cầu mới"), length: 12, preview: "Yêu cầu mới" },
+    latest_assistant: { fingerprint: responseAuditTextFingerprint("Phản hồi mới"), length: 13, preview: "Phản hồi mới" },
+    assistant_after_latest_user: { fingerprint: responseAuditTextFingerprint("Phản hồi mới"), length: 13, preview: "Phản hồi mới" }
+  }
+};
+const missingManagerResponseAudit = buildChatResponseAuditRecord({
+  profileId: "profile-1",
+  conversationId: "conversation-1",
+  sourceAudit: auditSource,
+  managerMessages: [{ role: "user", text: "Yêu cầu mới" }],
+  renderedMessages: [{ role: "user", fingerprint: responseAuditTextFingerprint("Yêu cầu mới") }]
+});
+assert.equal(missingManagerResponseAudit.comparison, "missing_in_manager_state", "audit must identify a ChatGPT DOM response lost before Manager state");
+const missingRenderedResponseAudit = buildChatResponseAuditRecord({
+  profileId: "profile-1",
+  conversationId: "conversation-1",
+  sourceAudit: auditSource,
+  managerMessages: [{ role: "user", text: "Yêu cầu mới" }, { role: "assistant", text: "Phản hồi mới" }],
+  renderedMessages: [{ role: "user", fingerprint: responseAuditTextFingerprint("Yêu cầu mới") }]
+});
+assert.equal(missingRenderedResponseAudit.comparison, "missing_in_manager_ui", "audit must distinguish a response held in state but missing from the rendered transcript");
+const matchingResponseAudit = buildChatResponseAuditRecord({
+  profileId: "profile-1",
+  conversationId: "conversation-1",
+  sourceAudit: auditSource,
+  managerMessages: [{ role: "user", text: "Yêu cầu mới" }, { role: "assistant", text: "Phản hồi mới" }],
+  renderedMessages: [
+    { role: "user", fingerprint: responseAuditTextFingerprint("Yêu cầu mới") },
+    { role: "assistant", fingerprint: responseAuditTextFingerprint("Phản hồi mới") }
+  ]
+});
+assert.equal(matchingResponseAudit.comparison, "match", "audit must confirm the ChatGPT DOM response reaches the Manager UI unchanged");
 const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, managerChatScroll, manifestText] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
@@ -193,6 +250,7 @@ assert.match(worker, /num_turns=6/, "canonical transcript reads must request onl
 assert.doesNotMatch(worker, /num_turns=40/, "canonical transcript reads must not fetch the old 20-exchange window");
 assert.match(worker, /Array\.isArray\(payload\?\.messages\)/, "canonical transcript reads must parse the bounded messages payload directly");
 assert.match(worker, /function canonicalResponseSupersedesDom[\s\S]*?if\(domHasResponse&&!canonicalHasResponse\)return false/, "a lagging canonical snapshot must not erase a newer assistant response already rendered in the DOM");
+assert.match(worker, /function withResponseAudit[\s\S]*?chatgpt_dom[\s\S]*?canonical_api[\s\S]*?network_stream/, "worker response reads must preserve separate ChatGPT DOM, canonical, and network fingerprints");
 assert.doesNotMatch(worker, /canonical\.response_ready\|\|canonical\.busy\|\|canonicalText\.length>domTextBeforeMerge\.length/, "canonical busy state alone must never overwrite a newer DOM transcript");
 assert.match(worker, /browserElementActionPage/);
 assert.match(worker, /__codexproSemanticRegistry/);
@@ -229,6 +287,10 @@ assert.match(bridge, /const observedCodexProToolActivity = conversationSummaries
 assert.match(bridge, /const connectorInstalled = profile\.connectorInstalled \|\| observedCodexProToolActivity/, "profile summaries must not show CodexPro missing while it is actively being used");
 assert.match(bridge, /function pruneExpiredProfiles/);
 assert.match(bridge, /profileWorkspaceRoots\.delete\(id\)[\s\S]*?profileWorkspaceBindings\.delete\(id\)/, "expired extension profiles must release workspace maps");
+assert.match(bridge, /const PROFILE_RECONNECT_WAIT_MS = 45_000/, "a retained Chrome profile must get a bounded reconnect window");
+assert.match(bridge, /const waitingForReconnect = Date\.now\(\) - profile\.lastSeen > PROFILE_TTL_MS/, "a stale heartbeat must enter reconnect mode instead of being rejected immediately");
+assert.match(bridge, /function markCommandDispatched[\s\S]*?pending\.waitingForReconnect = false[\s\S]*?pending\.timeoutMs/, "a reconnected profile must receive the full action timeout after command dispatch");
+assert.match(bridge, /waitingForReconnect \? PROFILE_RECONNECT_WAIT_MS : timeoutMs/, "a stale profile command must wait only for the bounded reconnect deadline");
 assert.match(bridge, /bridgeErrorEnvelope/);
 assert.match(bridge, /code: String\(envelope\.code/);
 assert.match(server, /function errorEnvelope/);
@@ -238,6 +300,11 @@ assert.match(httpSource, /text\/event-stream/);
 assert.match(managerMain, /startBrowserProfileEventStream/);
 assert.match(managerMain, /selectedConversationTab\?\.busy \|\| selectedNetworkState === "generating"/, "Manager backend must reject active network generations");
 assert.doesNotMatch(managerMain, /selectedConversationTab\?\.busy \|\| selectedConversationTab\?\.settling/, "Manager backend must leave cached DOM settling decisions to the worker's fresh probe");
+const sendProfileRequestSource = managerMain.slice(managerMain.indexOf("async function sendProfileRequestUnlocked"), managerMain.indexOf("async function sendProfileRequest(payload)"));
+assert.doesNotMatch(sendProfileRequestSource, /if \(!profile\?\.connected\) throw/, "Manager must not reject a retained profile before the bridge can wait for reconnection");
+assert.match(sendProfileRequestSource, /runtimeStatus\(\{ forceRefresh: true \}\)/, "Manager must refresh stale profile status before deciding whether the profile still exists");
+assert.match(sendProfileRequestSource, /action: "select_workspace"[\s\S]*?}, 75000\)/, "workspace selection must allow the bounded reconnect window");
+assert.match(sendProfileRequestSource, /action: "send_chat_request"[\s\S]*?}, 235000\)/, "chat submission must preserve the action timeout after a reconnect wait");
 assert.match(managerMain, /codexpro:browser-profiles/);
 assert.match(managerPreload, /onBrowserProfiles/);
 assert.match(managerPreload, /recoverProfileChat/);
@@ -261,24 +328,30 @@ assert.match(managerUi, /function changeProjectForProfile\(profile, root\)[\s\S]
 assert.match(managerUi, /openChatAwaitingAssistant[\s\S]*?pollLatestResponse[\s\S]*?completedResponseNeedsDomFallback\(canonical\)[\s\S]*?loadResponse\(profile, conversationId, true, true\)/, "Manager must fall back to the live DOM when network completion arrives before canonical contains the newest response");
 assert.match(managerUi, /tab\.connection_interrupted[\s\S]*?connectionRecoveryReads[\s\S]*?loadResponse\(profile, conversationId, true, true, true\)/, "Manager must automatically recover the exact chat when ChatGPT reports an interrupted connection");
 assert.match(worker, /connection_interrupted:Boolean\(domActivity\.connection_interrupted\)/, "profile status must expose interrupted ChatGPT renderers to Manager");
-assert.match(worker, /connectionInterrupted\?'connection_interrupted':staleActivity[\s\S]*?chrome\.tabs\.reload\(tab\.id\)/, "an interrupted ChatGPT response must reload the exact conversation tab first");
+assert.match(worker, /const reloadAllowed=shouldReloadChatRecovery\([\s\S]*?if\(stale&&reloadAllowed\)[\s\S]*?chrome\.tabs\.reload\(tab\.id\)/, "response reload must pass through the guarded recovery decision");
+assert.match(worker, /if\(networkBusy\)return false/, "active generation or tool traffic must block an early response reload");
+assert.match(worker, /dom_reload_deferred=true/, "unsafe reload attempts must keep the checkpoint and wait for a later poll");
+assert.match(worker, /mergeChatRecoveryResponse\(recoveryCheckpoint,domResult\)/, "a reloaded response must merge into the pre-reload checkpoint");
 assert.match(worker, /!rendererRefreshed\|\|domResult\.connection_interrupted[\s\S]*?replaceUnresponsiveChatTab\(tab,`https:\/\/chatgpt\.com\/c\/\$\{conversationId\}`\)/, "a chat that remains interrupted after reload must be replaced at the same conversation URL");
 assert.match(bridge, /connection_interrupted:\s*tab\.connection_interrupted\s*===\s*true/, "the extension bridge must preserve interrupted-response state for Manager recovery");
 assert.match(worker, /message delivery timed out\\\.\\s\*please try again/i, "ChatGPT's delivery-timeout banner must trigger renderer recovery");
 assert.match(worker, /messageDeliveryTimedOut\?'message_delivery_timeout'/, "delivery timeout recovery must be distinguishable in diagnostics");
-assert.match(worker, /claimTimedOutContinuation\(continuationKey\)[\s\S]*?markTimedOutChatRequestFailed\(tab\.id,conversationId\)[\s\S]*?action:'send_chat_request'[\s\S]*?text:'tiếp tục'/, "a recovered long-running timeout must send one idempotent continuation through the normal ACK-tracked send path");
-assert.match(worker, /duplicate_suppressed:true[\s\S]*?network_acknowledged:false/, "a previously claimed timeout continuation must never be sent twice");
+assert.doesNotMatch(worker, /text:'tiếp tục'/, "recovery must merge later UI/canonical content rather than sending a synthetic continuation message");
+assert.doesNotMatch(worker, /claimTimedOutContinuation/, "timeout recovery must not retain the obsolete automatic continuation path");
 assert.match(bridge, /message_delivery_timed_out:\s*tab\.message_delivery_timed_out\s*===\s*true/, "the extension bridge must preserve delivery-timeout diagnostics");
 assert.match(worker, /args\.read_dom===false&&args\.canonical_only!==true[\s\S]*?args\.canonical_only===true[\s\S]*?canonical_available:true/, "worker must expose authenticated canonical response reads without querying transcript DOM");
 assert.match(managerMain, /read_dom: payload\?\.canonicalOnly === true \|\| payload\?\.readDom !== false,[\s\S]*?canonical_only: payload\?\.canonicalOnly === true/, "Manager canonical recovery must remain compatible with a server process that has not restarted yet");
 assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?network_last_completed_at/, "Chat reopening must compare the persisted response against the latest network completion before re-reading transcript content");
 assert.match(managerPreload, /getChatResponseCache[\s\S]*?saveChatResponseCache/, "Manager preload must expose persistent chat-response cache access");
 assert.match(managerPreload, /logChatLayout[\s\S]*?codexpro:log-chat-layout/, "Manager preload must expose fire-and-forget chat layout tracing");
+assert.match(managerPreload, /logChatResponseAudit[\s\S]*?codexpro:log-chat-response-audit/, "Manager preload must expose response comparison tracing");
 assert.match(managerMain, /manager-chat-layout\.jsonl[\s\S]*?appendManagerChatLayoutLog[\s\S]*?codexpro:log-chat-layout/, "Manager must persist bounded chat layout traces");
+assert.match(managerMain, /manager-chat-response-audit\.jsonl[\s\S]*?appendManagerChatResponseAuditLog[\s\S]*?codexpro:log-chat-response-audit/, "Manager must persist bounded ChatGPT-to-Manager response comparison logs");
 assert.match(managerMain, /manager-chat-cache\.json[\s\S]*?MAX_CHAT_CACHE_ENTRIES = 30/, "Manager must persist a bounded local response cache instead of rebuilding every transcript on open");
 assert.match(managerUi, /!tab\.busy && !tab\.settling && currentResponse\?\.repoTaskId/, "CodexPro verification must wait until the ChatGPT turn has visibly settled");
 assert.match(managerUi, /ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước/, "send must reject attempts that would steer the active turn");
 assert.match(managerUi, /setRequestSendEvidence\(\(current\) => \(\{ \.\.\.current, \[profile\.profile_id\]: null \}\)\)/, "opening Chrome must clear stale send evidence");
+assert.match(managerUi, /heartbeat\|offline\|did not reconnect[\s\S]*?refreshStatus\(\)/, "a final heartbeat failure must immediately reconcile the visible profile status");
 assert.match(managerUi, /isRetryableChatTurnBusyError\(err\)/, "CodexPro verification must distinguish a harmless busy race from an uncertain send");
 assert.match(managerUi, /repoTaskVerificationReads\.current\.set\(verificationKey, Date\.now\(\) \+ REPO_TASK_VERIFICATION_RETRY_MS\)/, "a blocked verification retry must be released after a cooldown");
 assert.match(managerUi, /repoTaskStatus: "waiting", loading: false/, "a rejected verification retry must return to waiting instead of remaining stuck on retrying");
@@ -307,7 +380,7 @@ assert.match(managerUi, /networkState === "generating" \|\| tab\.settling/, "Man
 assert.match(managerUi, /network_stream_activity_text/, "Manager must render live network tool activity without exposing raw tool payloads");
 
 const manifest = JSON.parse(manifestText);
-assert.equal(manifest.version, "0.5.65");
+assert.equal(manifest.version, "0.5.67");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");

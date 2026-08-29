@@ -64,6 +64,56 @@ export function completedResponseNeedsDomFallback(response) {
   return response.canonical_available === false || messages.length === 0 || transcriptAwaitingAssistant(messages);
 }
 
+export function mergeProgressiveResponseText(previousValue, incomingValue) {
+  const previous = String(previousValue || "").trim();
+  const incoming = String(incomingValue || "").trim();
+  if (!previous) return incoming;
+  if (!incoming) return previous;
+  const comparable = (value) => String(value || "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const previousComparable = comparable(previous);
+  const incomingComparable = comparable(incoming);
+  if (previousComparable === incomingComparable) return incoming.length >= previous.length ? incoming : previous;
+  if (incomingComparable.includes(previousComparable)) return incoming;
+  if (previousComparable.includes(incomingComparable)) return previous;
+  const maximumOverlap = Math.min(previous.length, incoming.length);
+  const minimumOverlap = Math.min(12, maximumOverlap);
+  for (let size = maximumOverlap; size >= minimumOverlap; size -= 1) {
+    if (previous.slice(-size) === incoming.slice(0, size)) return `${previous}${incoming.slice(size)}`;
+  }
+  return incoming.length > previous.length ? incoming : previous;
+}
+
+function preserveProgressiveAssistantMessages(previousMessages, incomingMessages, comparableText) {
+  const previous = Array.isArray(previousMessages) ? previousMessages : [];
+  return incomingMessages.map((message, incomingIndex, incoming) => {
+    if (message?.role !== "assistant") return message;
+    const incomingUserIndex = incoming.slice(0, incomingIndex).findLastIndex((candidate) => candidate?.role === "user");
+    const incomingUserText = comparableText(incoming[incomingUserIndex]?.text);
+    let previousUserIndex = -1;
+    for (let index = previous.length - 1; index >= 0; index -= 1) {
+      if (previous[index]?.role === "user" && comparableText(previous[index]?.text) === incomingUserText) {
+        previousUserIndex = index;
+        break;
+      }
+    }
+    if (previousUserIndex < 0) return message;
+    const nextPreviousUserIndex = previous.findIndex((candidate, index) => index > previousUserIndex && candidate?.role === "user");
+    const previousTurnEnd = nextPreviousUserIndex < 0 ? previous.length : nextPreviousUserIndex;
+    const previousAssistant = previous.slice(previousUserIndex + 1, previousTurnEnd).findLast((candidate) => candidate?.role === "assistant");
+    if (!previousAssistant) return message;
+    return {
+      ...message,
+      id: previousAssistant.id || message.id,
+      text: mergeProgressiveResponseText(previousAssistant.text, message.text),
+      truncated: Boolean(previousAssistant.truncated && message.truncated)
+    };
+  });
+}
+
 export function mergeNetworkStreamTranscript(previousMessages, { conversationId, text, truncated = false }) {
   const streamText = String(text || "").trim();
   const messages = Array.isArray(previousMessages) ? [...previousMessages] : [];
@@ -72,7 +122,11 @@ export function mergeNetworkStreamTranscript(previousMessages, { conversationId,
   const streamId = `network-stream-assistant:${conversationId}`;
   const streamMessage = { id: streamId, role: "assistant", text: streamText, truncated: Boolean(truncated) };
   const existingIndex = messages.findIndex((message) => message?.id === streamId);
-  if (existingIndex >= 0) messages[existingIndex] = { ...messages[existingIndex], ...streamMessage };
+  if (existingIndex >= 0) messages[existingIndex] = {
+    ...messages[existingIndex],
+    ...streamMessage,
+    text: mergeProgressiveResponseText(messages[existingIndex]?.text, streamText)
+  };
   else messages.push(streamMessage);
   return trimRecentTranscriptMessages(messages);
 }
@@ -118,7 +172,8 @@ export function replaceCanonicalTranscript(previousMessages, incomingMessages) {
         const text = comparableText(message?.text);
         return text && !canonicalUserTexts.has(text);
       });
-    return trimRecentTranscriptMessages([...incoming, ...unmaterializedOptimisticUsers]);
+    const progressiveIncoming = preserveProgressiveAssistantMessages(previous, incoming, comparableText);
+    return trimRecentTranscriptMessages([...progressiveIncoming, ...unmaterializedOptimisticUsers]);
   }
   return trimRecentTranscriptMessages(previousMessages);
 }
