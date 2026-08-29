@@ -23,26 +23,7 @@ const ROLLOVER_CONTEXT_MAX_CHARS = 9000;
 const REPO_TASK_VERIFICATION_RETRY_MS = 1500;
 const LATEST_RESPONSE_RECOVERY_POLL_MS = 3000;
 const PROJECTS_PER_PAGE = 8;
-const PROFILE_TASK_LABELS_STORAGE_KEY = "codexpro.profileTaskLabels.v1";
-
-function shortTaskLabel(value) {
-  const normalized = String(value || "")
-    .replace(/\r?\n+/g, " ")
-    .replace(/[`*_#>]/g, "")
-    .replace(/^\s*(?:hãy\s+|vui lòng\s+|giúp\s+|cần\s+biết\s+|cái\s+)/i, "")
-    .replace(/\s+làm\s+là\s+gì.*$/i, "")
-    .replace(/\s+(?:để|nhằm)\s+.+$/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!normalized) return "";
-  const firstClause = normalized.split(/\s*[:.!?]\s*/)[0] || normalized;
-  const allWords = firstClause.split(/\s+/).filter(Boolean);
-  const words = allWords.slice(0, 8);
-  let label = words.join(" ").replace(/\s+(?:đi|nhé|nha|dùm|giúp)$/i, "").trim();
-  if (!label) label = firstClause.slice(0, 52).trim();
-  if (allWords.length > words.length || label.length > 52) label = `${label.slice(0, 49).trimEnd()}…`;
-  return label.charAt(0).toUpperCase() + label.slice(1);
-}
+const PROFILE_TASK_LABELS_STORAGE_KEY = "codexpro.profileTaskLabels.v2";
 
 function loadProfileTaskLabels() {
   try {
@@ -751,6 +732,22 @@ function App() {
       // Convenience UI only; storage failure must not affect request sending.
     }
   }, [profileTaskLabels]);
+
+  useEffect(() => {
+    const browserProfiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    if (!browserProfiles.length) return;
+    setProfileTaskLabels((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const profile of browserProfiles) {
+        const title = String(profile?.current_task_title || "").trim();
+        if (!title || next[profile.profile_id] === title) continue;
+        next[profile.profile_id] = title;
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [status?.browserProfiles]);
 
   const notify = useCallback((message) => {
     setToast(message);
@@ -1915,10 +1912,6 @@ function App() {
         window.setTimeout(() => void refresh(false), 500);
         return;
       }
-      const taskLabel = shortTaskLabel(text);
-      if (taskLabel) {
-        setProfileTaskLabels((current) => ({ ...current, [profile.profile_id]: taskLabel }));
-      }
       if (newChat && resolvedConversationId && resolvedConversationId !== NEW_CHAT_TARGET) {
         setRequestTargets((current) => ({ ...current, [profile.profile_id]: resolvedConversationId }));
       }
@@ -2792,7 +2785,7 @@ function App() {
               const repoProject = directProject || fallbackProject;
               const repoLabel = String(profile.current_workspace_repo || repoProject?.githubRepo || (repoProject ? `Local · ${repoProject.name}` : "")).trim();
               const repoTitle = repoProject?.githubUrl || repoProject?.remoteUrl || workspaceRoot || repoProject?.root || "Worker chưa xác định được repo GitHub";
-              const profileTaskLabel = String(profileTaskLabels[profile.profile_id] || "").trim();
+              const profileTaskLabel = String(profile.current_task_title || profileTaskLabels[profile.profile_id] || "").trim();
               return (
                 <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`} key={profile.profile_id}>
                   <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />

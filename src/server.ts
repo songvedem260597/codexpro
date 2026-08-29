@@ -25,7 +25,7 @@ import { CONTROL_PLANE_TOOL_NAMES, controlPlaneToolDefinitions } from "./control
 import { codexPatchToUnifiedDiff, codexPatchTouchedPaths, isCodexPatchEnvelope } from "./patchOps.js";
 import { createRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import { runBrowserControl } from "./browserOps.js";
-import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 
@@ -1162,9 +1162,9 @@ const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructive
 const BROWSER_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true, destructiveHint: false, idempotentHint: false };
 const BROWSER_ACTION_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
-const repoTaskProofs = new Map<string, { taskId: string; root: string; workspaceId: string; startedAt: string; scope: "workspace" | "all_allowed"; globalRulesPath: string; globalRulesSha256: string }>();
+const repoTaskProofs = new Map<string, { taskId: string; taskTitle: string; root: string; workspaceId: string; startedAt: string; scope: "workspace" | "all_allowed"; globalRulesPath: string; globalRulesSha256: string }>();
 
-function rememberRepoTaskProof(proof: { taskId: string; root: string; workspaceId: string; startedAt: string; scope: "workspace" | "all_allowed"; globalRulesPath: string; globalRulesSha256: string }): void {
+function rememberRepoTaskProof(proof: { taskId: string; taskTitle: string; root: string; workspaceId: string; startedAt: string; scope: "workspace" | "all_allowed"; globalRulesPath: string; globalRulesSha256: string }): void {
   repoTaskProofs.set(proof.taskId, proof);
   if (repoTaskProofs.size <= 500) return;
   for (const taskId of [...repoTaskProofs.keys()].slice(0, repoTaskProofs.size - 400)) repoTaskProofs.delete(taskId);
@@ -1772,6 +1772,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       description: "Mandatory first call for every task sent by CodexPro Manager. Opens the initial workspace and records server-side proof that CodexPro was actually invoked. Normal tasks stay locked to that workspace; scope=all_allowed lets the task switch only between workspaces inside CodexPro's configured allowed roots.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).describe("Exact task id included by CodexPro Manager."),
+        task_title: z.string().trim().min(4).max(56).refine((value) => { const words = value.split(/\s+/).filter(Boolean).length; return words >= 2 && words <= 7; }, "Task title must contain 2-7 words.").describe("AI-generated short task name: 2-7 clear words describing the actual work. Do not copy a vague opening such as Làm sao, Sửa đi, or Làm đi."),
         root: z.string().min(1).describe("Initial workspace root included by CodexPro Manager."),
         scope: z.enum(["workspace", "all_allowed"]).optional().describe("Task scope. Omit or use workspace for a locked workspace; use all_allowed only when Manager explicitly enables all allowed roots.")
       },
@@ -1786,10 +1787,12 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       const workspace = workspaces.openWorkspace(args.root);
       const scope: "workspace" | "all_allowed" = args.scope === "all_allowed" ? "all_allowed" : "workspace";
       const globalRules = await readGlobalRulesSnapshot();
-      const proof = { taskId: args.task_id, root: workspace.root, workspaceId: workspace.id, startedAt: new Date().toISOString(), scope, globalRulesPath: globalRules.path, globalRulesSha256: globalRules.sha256 };
+      const proof = { taskId: args.task_id, taskTitle: args.task_title.trim(), root: workspace.root, workspaceId: workspace.id, startedAt: new Date().toISOString(), scope, globalRulesPath: globalRules.path, globalRulesSha256: globalRules.sha256 };
+      if (browserProfileId) setBrowserExtensionProfileTask(browserProfileId, proof.taskId, proof.taskTitle);
       rememberRepoTaskProof(proof);
       return textResult(withGlobalRules(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}`, globalRules), {
         task_id: proof.taskId,
+        task_title: proof.taskTitle,
         verified: true,
         root: proof.root,
         workspace_id: proof.workspaceId,
@@ -1818,7 +1821,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       return textResult(proof ? `# Repo Task Verified\n\n${proof.taskId} opened ${proof.root} with scope ${proof.scope}.` : `# Repo Task Missing\n\nNo begin_repo_task call was received for ${args.task_id}.`, {
         task_id: args.task_id,
         verified: Boolean(proof),
-        ...(proof ? { root: proof.root, workspace_id: proof.workspaceId, started_at: proof.startedAt, scope: proof.scope } : {})
+        ...(proof ? { task_title: proof.taskTitle, root: proof.root, workspace_id: proof.workspaceId, started_at: proof.startedAt, scope: proof.scope } : {})
       });
     }
   );
