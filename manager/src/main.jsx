@@ -1931,7 +1931,7 @@ function App() {
     const canSend = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0) && Boolean(draft.trim() || attachments.length);
     const working = profile.connected && (profile.activity === "working" || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
-    const responseHeadline = responseCleared
+    const responseHeadline = sending ? "Đang gửi tin nhắn" : responseCleared
       ? "Chat đã được dọn"
       : isNewChat
       ? "Chat mới"
@@ -1971,9 +1971,9 @@ function App() {
             <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating} />
             {!workspaceProjects.length && selectedProjectRoot !== ALL_ALLOWED_WORKSPACES && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
             <label className="request-label">Tin nhắn gần nhất</label>
-            <div className={`chat-response is-inline ${selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
+            <div className={`chat-response is-inline ${sending || selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
               <div className="chat-response-head">
-                <div><span className="response-status-dot" /><strong title={responseHeadline}>{responseHeadline}</strong>{!isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
+                <div><span className="response-status-dot" /><strong title={responseHeadline}>{responseHeadline}</strong>{!sending && !isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
                 <div className="response-head-actions">
                   {responseCurrent && !responseCleared && !isNewChat && !selectedBusy && (contentNeedsRefresh || domUnavailable) && <button type="button" onClick={() => void loadResponse(profile, selectedTarget, false, true)} disabled={Boolean(busy)}>Đọc nội dung</button>}
                   {responseCurrent && !responseCleared && response?.incomplete && !selectedBusy && <button type="button" className="continue-response" onClick={() => void continueIncompleteResponse(profile, selectedTarget)} disabled={Boolean(busy)}>Tiếp tục</button>}
@@ -1999,12 +1999,7 @@ function App() {
                   <span>{selectedBusy ? "Theo dõi trực tiếp vòng đời request của ChatGPT." : (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`)}</span>
                 </div>
               )}
-              {sending && (
-                <div className="message-send-indicator" role="status" aria-live="polite">
-                  <span>{isNewChat ? "Đang tạo chat và gửi" : attachments.length ? "Đang tải file và gửi" : "Đang gửi tin nhắn"}</span>
-                  <span className="typing-dots" aria-hidden="true"><i /><i /><i /></span>
-                </div>
-              )}
+              {/* Trạng thái gửi nằm ngay trên thanh trạng thái phản hồi. */}
               {responseCleared ? <div className="response-empty">Chat đã được dọn.</div> : !profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
                 <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, event.deltaY)} onTouchMove={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
                   {(displayResponseMessages.length ? displayResponseMessages : [fallbackResponseMessage]).map((message, messageIndex, allMessages) => {
