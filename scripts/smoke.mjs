@@ -81,6 +81,8 @@ assertCommand(['dist/http.js', '--help'], 'CodexPro MCP HTTP server');
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-'));
 const alternateWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-alternate-'));
+const smokeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-home-'));
+process.env.CODEXPRO_HOME = smokeHome;
 await fs.writeFile(path.join(alternateWorkspace, 'selected.txt'), 'alternate workspace\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'demo.txt'), 'alpha\nread\nread\nomega\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'other.txt'), 'keep\n', 'utf8');
@@ -584,7 +586,7 @@ await client.request('tools/call', {
 if (!((await fs.readFile(path.join(tmp, 'token.txt'), 'utf8')).includes('updatedshorttok'))) {
   throw new Error('apply_patch blocked or changed secret-like source content');
 }
-await client.request('tools/call', {
+const envRefWrite = await client.request('tools/call', {
   name: 'write',
   arguments: {
     workspace_id: ws,
@@ -592,9 +594,12 @@ await client.request('tools/call', {
     content: 'const TOKEN = process.env.TOKEN;\nconst OPENAI_API_KEY = process.env.OPENAI_API_KEY;\nconst apiToken = getToken();\n'
   }
 });
+if (!envRefWrite.structuredContent.codexgraph?.after) {
+  throw new Error(`write omitted automatic CodexGraph after-state: ${JSON.stringify(envRefWrite.structuredContent.codexgraph)}`);
+}
 const inspectAfterWrite = await client.request('tools/call', { name: 'inspect_workspace', arguments: { workspace_id: ws } });
-if (inspectAfterWrite.structuredContent.cache?.hit !== false || !inspectAfterWrite.structuredContent.files?.some((file) => file.path === 'env-ref.js')) {
-  throw new Error(`write did not invalidate workspace analysis: ${JSON.stringify(inspectAfterWrite.structuredContent.cache)}`);
+if (inspectAfterWrite.structuredContent.cache?.hit !== true || !inspectAfterWrite.structuredContent.files?.some((file) => file.path === 'env-ref.js')) {
+  throw new Error(`write did not rebuild and cache workspace analysis: ${JSON.stringify(inspectAfterWrite.structuredContent.cache)}`);
 }
 const envRefRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'env-ref.js' } });
 const envRefPayload = JSON.stringify(envRefRead);
@@ -774,10 +779,13 @@ for (const linkPath of danglingSymlinks) {
   await expectToolError('write', { workspace_id: ws, path: linkPath, content: 'escaped write\n' }, /symlink/i);
 }
 await client.request('tools/call', { name: 'edit', arguments: { workspace_id: ws, path: 'demo.txt', old_text: 'read\nread', new_text: 'read\nwrite' } });
-await client.request('tools/call', { name: 'edit', arguments: { workspace_id: ws, path: 'src/auth.ts', old_text: 'return Boolean(user);', new_text: 'return Boolean(user?.trim());' } });
+const authEditResult = await client.request('tools/call', { name: 'edit', arguments: { workspace_id: ws, path: 'src/auth.ts', old_text: 'return Boolean(user);', new_text: 'return Boolean(user?.trim());' } });
+if (!authEditResult.structuredContent.codexgraph?.after) {
+  throw new Error(`edit omitted automatic CodexGraph after-state: ${JSON.stringify(authEditResult.structuredContent.codexgraph)}`);
+}
 const inspectAfterEdit = await client.request('tools/call', { name: 'inspect_workspace', arguments: { workspace_id: ws } });
-if (inspectAfterEdit.structuredContent.cache?.hit !== false) {
-  throw new Error(`edit did not invalidate workspace analysis: ${JSON.stringify(inspectAfterEdit.structuredContent.cache)}`);
+if (inspectAfterEdit.structuredContent.cache?.hit !== true) {
+  throw new Error(`edit did not rebuild and cache workspace analysis: ${JSON.stringify(inspectAfterEdit.structuredContent.cache)}`);
 }
 const changes = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws } });
 if (!changes.structuredContent.changed || !changes.structuredContent.diff.includes('demo.txt')) {
@@ -785,6 +793,9 @@ if (!changes.structuredContent.changed || !changes.structuredContent.diff.includ
 }
 if (!changes.structuredContent.analysis?.risk_signals?.some((risk) => risk.id === 'authentication')) {
   throw new Error(`show_changes omitted authentication risk analysis: ${JSON.stringify(changes.structuredContent.analysis)}`);
+}
+if (!changes.structuredContent.analysis?.graph_diff?.currentFingerprint) {
+  throw new Error(`show_changes omitted CodexGraph before/after diff: ${JSON.stringify(changes.structuredContent.analysis)}`);
 }
 if (!changes.structuredContent.analysis?.related_tests?.some((file) => file.path === 'test/auth.test.ts')) {
   throw new Error(`show_changes omitted related auth test: ${JSON.stringify(changes.structuredContent.analysis)}`);
@@ -821,12 +832,15 @@ const patchResult = await client.request('tools/call', {
 if (!patchResult.structuredContent.changed || !patchResult.structuredContent.paths?.includes?.('demo.txt')) {
   throw new Error(`apply_patch did not report the patched file: ${JSON.stringify(patchResult.structuredContent)}`);
 }
+if (!patchResult.structuredContent.codexgraph?.after) {
+  throw new Error(`apply_patch omitted automatic CodexGraph after-state: ${JSON.stringify(patchResult.structuredContent.codexgraph)}`);
+}
 if (patchResult.structuredContent.diff?.includes?.('other.txt')) {
   throw new Error(`apply_patch leaked unrelated workspace diff: ${patchResult.structuredContent.diff}`);
 }
 const inspectAfterPatch = await client.request('tools/call', { name: 'inspect_workspace', arguments: { workspace_id: ws } });
-if (inspectAfterPatch.structuredContent.cache?.hit !== false) {
-  throw new Error(`apply_patch did not invalidate workspace analysis: ${JSON.stringify(inspectAfterPatch.structuredContent.cache)}`);
+if (inspectAfterPatch.structuredContent.cache?.hit !== true) {
+  throw new Error(`apply_patch did not rebuild and cache workspace analysis: ${JSON.stringify(inspectAfterPatch.structuredContent.cache)}`);
 }
 const patchedRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'demo.txt' } });
 if (!patchedRead.content?.[0]?.text?.includes('omega patched')) {
@@ -1726,4 +1740,5 @@ if (!lowerContext.content?.[0]?.text?.includes('Lowercase instruction file loade
   throw new Error('codex_context did not include lowercase agents.md content');
 }
 lowerClient.close();
+await fs.rm(smokeHome, { recursive: true, force: true });
 console.log('✓ smoke test passed');

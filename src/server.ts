@@ -19,6 +19,7 @@ import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
+import { createRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
@@ -306,6 +307,7 @@ const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
 };
 
 const registeredToolHandlersByServer = new WeakMap<object, Map<string, CodexToolHandler>>();
+const runtimeTraceWorkspaceByServer = new WeakMap<object, () => Workspace | undefined>();
 
 function rememberRegisteredToolHandler(server: McpServer, name: string, handler: CodexToolHandler): void {
   const key = server as object;
@@ -316,6 +318,36 @@ function rememberRegisteredToolHandler(server: McpServer, name: string, handler:
 
 function registeredToolHandler(server: McpServer, name: string): CodexToolHandler | undefined {
   return registeredToolHandlersByServer.get(server as object)?.get(name);
+}
+
+async function recordToolRuntimeTrace(
+  server: McpServer,
+  name: string,
+  args: any,
+  status: "ok" | "error",
+  startedAtMs: number,
+  endedAtMs: number,
+  context?: RuntimeTraceContext
+): Promise<void> {
+  let workspace: Workspace | undefined;
+  try {
+    workspace = runtimeTraceWorkspaceByServer.get(server as object)?.();
+  } catch {
+    workspace = undefined;
+  }
+  if (!workspace) return;
+  const matchingContext = context?.workspaceId === workspace.id ? context : undefined;
+  const rawAction = typeof args?.action === "string" ? args.action.trim() : "";
+  await recordRuntimeTraceSpan(workspace, {
+    ...(matchingContext ? { traceId: matchingContext.traceId, spanId: matchingContext.spanId } : {}),
+    kind: "tool",
+    name,
+    ...(rawAction ? { action: rawAction.slice(0, 160) } : {}),
+    source: "mcp-tool",
+    status,
+    startedAtMs,
+    endedAtMs
+  }).catch(() => undefined);
 }
 
 function normalizeSupertoolAction(value: unknown): string {
@@ -352,18 +384,31 @@ function registerToolCompat(
   const wrapped = async (args: any) => {
     const started = Date.now();
     const usageArgs = args ?? {};
+    let initialWorkspace: Workspace | undefined;
     try {
-      const result = tagToolResult(await handler(usageArgs), name, options);
+      initialWorkspace = runtimeTraceWorkspaceByServer.get(server as object)?.();
+    } catch {
+      initialWorkspace = undefined;
+    }
+    const traceContext = initialWorkspace ? createRuntimeTraceContext(initialWorkspace) : undefined;
+    const invokeHandler = () => handler(usageArgs);
+    try {
+      const handled = traceContext
+        ? await runWithRuntimeTraceContext(traceContext, invokeHandler)
+        : await invokeHandler();
+      const result = tagToolResult(handled, name, options);
       const status = result?.isError ? "error" : "ok";
       const durationMs = Date.now() - started;
       logToolCall(name, status, started);
       recordMcpUsage(name, usageArgs, result, status, durationMs);
+      await recordToolRuntimeTrace(server, name, usageArgs, status, started, started + durationMs, traceContext);
       return result;
     } catch (error) {
       const result = tagToolResult(errorResult(error), name, options);
       const durationMs = Date.now() - started;
       logToolCall(name, "error", started);
       recordMcpUsage(name, usageArgs, result, "error", durationMs);
+      await recordToolRuntimeTrace(server, name, usageArgs, "error", started, started + durationMs, traceContext);
       return result;
     }
   };
@@ -584,14 +629,16 @@ function serverInstructions(config: CodexProConfig): string {
     "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
     editInstruction,
     bashInstruction,
-    "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
+    "6. Prioritize correctness over minimizing tool calls or context. For non-trivial edits, use structured search with intent=impact/references to inspect CodexGraph callers, state, framework links, and related tests before changing code.",
+    "7. write/edit/apply_patch return automatic CodexGraph before/after impact evidence. Treat graph-integrity warnings or removed dependency edges as verification requirements, not harmless noise.",
+    "8. CodexGraph augments but never replaces source inspection, typecheck, runtime tests, or broader review when code uses dynamic dispatch, reflection, string-based routing, or unresolved compiler diagnostics.",
     config.codexSessions !== "off"
-      ? `7. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
+      ? `9. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
       : "",
     config.requireBashSession && config.bashSessionId
-      ? `8. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
+      ? `10. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
       : config.bashSessionId
-        ? `8. Bash session label for this server is "${config.bashSessionId}".`
+        ? `10. Bash session label for this server is "${config.bashSessionId}".`
         : "",
     "",
     `Current modes: tool=${config.toolMode}, bash=${config.bashMode}, write=${config.writeMode}.`
@@ -622,6 +669,26 @@ function diffStats(diff: string): { additions: number; deletions: number; change
     if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
   }
   return { additions, deletions, changed: Boolean(diff.trim()) };
+}
+
+async function mutationCodexGraphImpact(config: CodexProConfig, guard: PathGuard, workspace: Workspace, changedPaths: string[]) {
+  if (!config.analysisEnabled || !changedPaths.length) return undefined;
+  try {
+    return await reviewWorkspaceChanges(config, guard, workspace, { changedPaths });
+  } catch {
+    return undefined;
+  }
+}
+
+function compactMutationCodexGraphImpact(impact: Awaited<ReturnType<typeof reviewWorkspaceChanges>> | undefined) {
+  if (!impact) return undefined;
+  return {
+    dependent_files: impact.dependentFiles.slice(0, 40),
+    related_tests: impact.relatedTests.slice(0, 40),
+    risk_signals: impact.riskSignals,
+    graph_diff: impact.graphDiff,
+    warnings: impact.warnings.slice(-8)
+  };
 }
 
 function reviewCheckpointKey(workspace: Workspace, options: { path?: string; staged: boolean }): string {
@@ -1023,14 +1090,19 @@ function rememberRepoTaskProof(proof: { taskId: string; root: string; workspaceI
 
 export function createCodexProServer(config: CodexProConfig, options: { browserProfileId?: string } = {}): McpServer {
   const browserProfileId = String(options.browserProfileId || "").trim();
+  let selectedRuntimeTraceWorkspace: Workspace | undefined;
   const workspaces = new WorkspaceManager(
     config,
-    browserProfileId ? (workspace) => setBrowserExtensionProfileWorkspace(browserProfileId, workspace.root) : undefined,
+    (workspace) => {
+      selectedRuntimeTraceWorkspace = workspace;
+      if (browserProfileId) setBrowserExtensionProfileWorkspace(browserProfileId, workspace.root);
+    },
     browserProfileId ? () => getBrowserExtensionProfileWorkspaceBinding(browserProfileId) : undefined
   );
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
   const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
+  runtimeTraceWorkspaceByServer.set(server as object, () => selectedRuntimeTraceWorkspace ?? workspaces.defaultWorkspace());
   if (config.browserControl) ensureBrowserExtensionBridge();
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
@@ -2013,18 +2085,21 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
+      const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]);
       const result = await writeTextFile(config, guard, workspace, args.path, String(args.content ?? ""), {
         createDirs: args.create_dirs !== false,
         overwrite: args.overwrite !== false,
         expectedSha256: args.expected_sha256
       });
       if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
+      const codexGraphAfter = result.diff.changed ? await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]) : codexGraphBefore;
       const text = `# Write File\n\nPath: ${result.path}\nExisted before: ${result.existed}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
       return textResult(text, {
         workspace_id: workspace.id,
         root: workspace.root,
         path: result.path,
         existed: result.existed,
+        codexgraph: { before: compactMutationCodexGraphImpact(codexGraphBefore), after: compactMutationCodexGraphImpact(codexGraphAfter) },
         bytes: result.bytes,
         sha256: result.sha256,
         additions: result.diff.additions,
@@ -2061,18 +2136,21 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
+      const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]);
       const result = await editTextFile(config, guard, workspace, args.path, String(args.old_text ?? ""), String(args.new_text ?? ""), {
         replaceAll: parseBool(args.replace_all, false),
         expectedReplacements: args.expected_replacements,
         expectedSha256: args.expected_sha256
       });
       if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
+      const codexGraphAfter = result.diff.changed ? await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]) : codexGraphBefore;
       const text = `# Edit File\n\nPath: ${result.path}\nReplacements: ${result.replacements}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
       return textResult(text, {
         workspace_id: workspace.id,
         root: workspace.root,
         path: result.path,
         replacements: result.replacements,
+        codexgraph: { before: compactMutationCodexGraphImpact(codexGraphBefore), after: compactMutationCodexGraphImpact(codexGraphAfter) },
         bytes: result.bytes,
         sha256: result.sha256,
         additions: result.diff.additions,
@@ -2103,8 +2181,12 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const result = await applyWorkspacePatch(config, guard, workspace, String(args.patch ?? ""));
+      const patchText = String(args.patch ?? "");
+      const codexGraphPaths = patchTouchedPaths(patchText);
+      const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, codexGraphPaths);
+      const result = await applyWorkspacePatch(config, guard, workspace, patchText);
       if (result.changed) invalidateWorkspaceAnalysis(workspace.id);
+      const codexGraphAfter = result.changed ? await mutationCodexGraphImpact(config, guard, workspace, result.paths) : codexGraphBefore;
       const text = [
         "# Apply Patch",
         "",
@@ -2122,6 +2204,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         additions: result.additions,
         deletions: result.deletions,
         changed: result.changed,
+        codexgraph: { before: compactMutationCodexGraphImpact(codexGraphBefore), after: compactMutationCodexGraphImpact(codexGraphAfter) },
         diff: result.diff
       });
     }
@@ -2311,6 +2394,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             dependent_files: impact.dependentFiles,
             related_tests: impact.relatedTests,
             risk_signals: impact.riskSignals,
+            graph_diff: impact.graphDiff,
             recommended_commands: impact.recommendedCommands,
             coverage: impact.coverage,
             warnings: impact.warnings,
