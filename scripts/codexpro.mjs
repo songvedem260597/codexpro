@@ -15,6 +15,17 @@ import {
   readCloudflaredAssetResponse,
   verifyCloudflaredAsset
 } from './cloudflared-release.mjs';
+import {
+  CODEXPRO_EXPLORE_AGENT,
+  CODEXPRO_ORCHESTRATOR_AGENT
+} from './opencode-subagents.mjs';
+import {
+  buildOpenCodeExecutorArgs,
+  executorPromptWithInvestigation,
+  inspectOpenCodeRuntime,
+  runOpenCodeModelProbe,
+  runVerifiedOpenCodeInvestigation
+} from './opencode-subagent-runner.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UNTRACKED_FILE_HASH_BYTES = 64 * 1024;
@@ -139,7 +150,7 @@ Execute handoff options:
   --agent <opencode|pi|codex|custom>
                              Local implementation agent adapter.
   --model <provider/model>  Optional model name passed to the adapter.
-  --subagents               For OpenCode, delegate investigation to read-only Explore/Scout subagents before editing.
+  --subagents               For OpenCode, require a real read-only Task child session before editing; fall back safely if verification fails.
   --command <template>      Custom command template. Supports {{model}}, {{plan_file}}, {{plan_text}}, {{root}}.
   --dry-run                 Print the command that would run without executing it.
   --timeout-ms <ms>         Execution timeout. Default: 600000.
@@ -195,6 +206,10 @@ Workspace settings:
 
 Preflight diagnostics:
   codexpro doctor
+  codexpro doctor --live-agent-check --model opencode/big-pickle
+  codexpro doctor --live-subagent-check --model opencode/big-pickle
+  --live-agent-check        Make one tiny OpenCode model call to verify provider/model readiness.
+  --live-subagent-check     Run one read-only OpenCode Task delegation and require child-session evidence.
 
 Ngrok stable URL mode:
   codexpro ngrok --root /path/to/repo --hostname your-domain.ngrok-free.dev
@@ -349,6 +364,8 @@ function parseArgs(argv) {
     else if (key === 'allow-review-pass-on-failure') out.allowReviewPassOnFailure = true;
     else if (key === 'subagents') out.subagents = true;
     else if (key === 'no-subagents') out.subagents = false;
+    else if (key === 'live-agent-check') out.liveAgentCheck = true;
+    else if (key === 'live-subagent-check') out.liveSubagentCheck = true;
     else if (key === 'open-chatgpt') out.openChatgpt = true;
     else if (key === 'headless') out.headless = true;
     else if (key === 'no-profile') out.noProfile = true;
@@ -1537,7 +1554,7 @@ function applyCommandTemplate(value, replacements) {
 function buildExecutorCommand(args, root, planPath, planText) {
   const agent = String(args.agent ?? 'opencode').trim().toLowerCase();
   const model = String(args.model ?? process.env.CODEXPRO_AGENT_MODEL ?? '').trim();
-  const subagents = args.subagents === true;
+  const subagentsRequested = args.subagents === true;
   const replacements = {
     model,
     plan_file: planPath,
@@ -1563,22 +1580,14 @@ function buildExecutorCommand(args, root, planPath, planText) {
   const relativePlanPath = path.relative(root, planPath) || planPath;
   const basePlanPrompt = `Read the handoff plan at ${relativePlanPath} and execute it in this workspace.`;
   if (agent === 'opencode') {
-    const planPrompt = subagents
-      ? [
-          basePlanPrompt,
-          'Before editing, delegate independent investigation to OpenCode subagents when useful.',
-          'Use Explore subagents for code architecture, call/data flow, bug localization, and related tests; use Scout for external dependency or upstream documentation research.',
-          'Run independent investigations in parallel when practical, synthesize their findings in the primary agent, then keep implementation and final verification coordinated by the primary agent.',
-          'Do not delegate trivial work or duplicate the same investigation.'
-        ].join(' ')
-      : basePlanPrompt;
     return {
       agent,
       model,
-      subagents,
+      subagentsRequested,
+      basePlanPrompt,
       command: resolveAgentCommand('opencode'),
-      args: ['run', ...(model ? ['--model', model] : []), planPrompt],
-      displayArgs: ['run', ...(model ? ['--model', model] : []), subagents ? `<read ${relativePlanPath}; subagents=explore,scout>` : `<read ${relativePlanPath}>`],
+      args: ['run', ...(model ? ['--model', model] : []), basePlanPrompt],
+      displayArgs: ['run', ...(model ? ['--model', model] : []), `<read ${relativePlanPath}>`],
       custom: false
     };
   }
@@ -1586,7 +1595,7 @@ function buildExecutorCommand(args, root, planPath, planText) {
     return {
       agent,
       model,
-      subagents: false,
+      subagentsRequested: false,
       command: resolveAgentCommand('pi'),
       args: [...(model ? ['--model', model] : []), '-p', basePlanPrompt],
       displayArgs: [...(model ? ['--model', model] : []), '-p', `<read ${relativePlanPath}>`],
@@ -1604,7 +1613,7 @@ function buildExecutorCommand(args, root, planPath, planText) {
     return {
       agent,
       model,
-      subagents: false,
+      subagentsRequested: false,
       command: resolveCodexCommand(),
       args: [
         'exec',
@@ -1777,6 +1786,13 @@ function codeBlock(label, value) {
   return `## ${label}\n\n\`\`\`text\n${String(value || '').replace(/```/g, '`\\`\\`') || '(empty)'}\n\`\`\`\n`;
 }
 
+function appendExecutionTelemetry(root, contextDir, events) {
+  if (!Array.isArray(events) || !events.length) return;
+  const logPath = resolveWorkspaceFile(root, path.join(contextDir, 'execution-log.jsonl'));
+  fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 });
+  for (const event of events) fs.appendFileSync(logPath, `${JSON.stringify(event)}\n`, { mode: 0o600 });
+}
+
 function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, gitStatusText) {
   const bridgeDir = resolveWorkspaceFile(root, contextDir);
   fs.mkdirSync(bridgeDir, { recursive: true, mode: 0o700 });
@@ -1790,6 +1806,11 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, 
     `Updated: ${new Date().toISOString()}`,
     `Agent: ${commandInfo.agent}`,
     commandInfo.model ? `Model: ${commandInfo.model}` : '',
+    commandInfo.subagentRun?.requested ? 'Subagents requested: yes' : '',
+    commandInfo.subagentRun?.requested ? `Subagent verified: ${commandInfo.subagentRun.verified ? 'yes' : 'no'}` : '',
+    commandInfo.subagentRun?.fallbackReason ? `Subagent fallback: ${commandInfo.subagentRun.fallbackReason}` : '',
+    commandInfo.subagentRun?.childSessionId ? `Child session: ${commandInfo.subagentRun.childSessionId}` : '',
+    commandInfo.subagentRun?.filesInspected?.length ? `Files inspected by child: ${commandInfo.subagentRun.filesInspected.join(', ')}` : '',
     `Command: ${commandText}`,
     `Exit code: ${result.exitCode ?? 'null'}`,
     result.signal ? `Signal: ${result.signal}` : '',
@@ -1810,6 +1831,11 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, 
     event: 'execute_handoff',
     agent: commandInfo.agent,
     model: commandInfo.model || undefined,
+    subagents_requested: Boolean(commandInfo.subagentRun?.requested),
+    subagent_verified: Boolean(commandInfo.subagentRun?.verified),
+    subagent_fallback: commandInfo.subagentRun?.fallbackReason || undefined,
+    child_session_id: commandInfo.subagentRun?.childSessionId || undefined,
+    files_inspected: commandInfo.subagentRun?.filesInspected?.length ? commandInfo.subagentRun.filesInspected : undefined,
     command: commandText,
     exit_code: result.exitCode,
     signal: result.signal,
@@ -1879,7 +1905,7 @@ function printHandoffDryRun(request, title = 'CodexPro execute-handoff dry run')
     labelValue('Plan', path.relative(request.root, request.planPath)),
     labelValue('Agent', request.commandInfo.agent),
     ...(request.commandInfo.model ? [labelValue('Model', request.commandInfo.model)] : []),
-    ...(request.commandInfo.subagents ? [labelValue('Subagents', 'OpenCode Explore + Scout')] : []),
+    ...(request.commandInfo.subagentsRequested ? [labelValue('Subagents', 'requested; runtime Task/child-session verification deferred until execution')] : []),
     labelValue('Command', request.commandText),
     'No command was executed and no .ai-bridge result files were changed.'
   ]);
@@ -1907,19 +1933,46 @@ async function executeHandoffRequest(request, args, options = {}) {
     plan_hash: runPlanHash,
     executor: request.commandInfo.agent,
     model: request.commandInfo.model || undefined,
-    subagents: request.commandInfo.subagents || undefined,
+    subagents_requested: Boolean(request.commandInfo.subagentsRequested),
     pid: process.pid
   });
 
-  statusLine('wait', `Running ${request.commandInfo.agent}: ${request.commandText}`);
-  const result = await runProcessCaptured(request.commandInfo.command, request.commandInfo.args, {
+  let subagentRun = { requested: false, verified: false, fallbackReason: '', events: [] };
+  if (request.commandInfo.agent === 'opencode' && request.commandInfo.subagentsRequested) {
+    statusLine('wait', `Verifying OpenCode Task delegation through ${CODEXPRO_EXPLORE_AGENT}...`);
+    subagentRun = await runVerifiedOpenCodeInvestigation({
+      command: request.commandInfo.command,
+      root: request.root,
+      planText: request.planText,
+      model: request.commandInfo.model,
+      configDir: path.join(projectRoot, '.opencode'),
+      timeoutMs: request.timeoutMs,
+      maxOutputBytes: request.maxOutputBytes
+    });
+    appendExecutionTelemetry(request.root, request.contextDir, subagentRun.events);
+    if (subagentRun.verified) statusLine('ok', `Verified child session ${subagentRun.childSessionId} from ${CODEXPRO_EXPLORE_AGENT}.`);
+    else statusLine('warn', `Subagent unavailable; falling back to single-agent execution: ${subagentRun.fallbackReason}`);
+  }
+
+  let effectiveCommandInfo = { ...request.commandInfo, subagentRun };
+  if (subagentRun.verified && request.commandInfo.agent === 'opencode') {
+    const prompt = executorPromptWithInvestigation(request.commandInfo.basePlanPrompt, subagentRun);
+    effectiveCommandInfo = {
+      ...effectiveCommandInfo,
+      args: buildOpenCodeExecutorArgs(request.commandInfo.model, prompt),
+      displayArgs: ['run', ...(request.commandInfo.model ? ['--model', request.commandInfo.model] : []), '<read handoff + verified child evidence>']
+    };
+  }
+  const effectiveCommandText = executorCommandPreview(effectiveCommandInfo);
+  statusLine('wait', `Running ${effectiveCommandInfo.agent}: ${effectiveCommandText}`);
+  const result = await runProcessCaptured(effectiveCommandInfo.command, effectiveCommandInfo.args, {
     cwd: request.root,
     timeoutMs: request.timeoutMs,
     maxOutputBytes: request.maxOutputBytes
   });
   const diffText = readGitDiffExcludingContext(request.root, request.contextDir, request.maxOutputBytes);
   const gitStatusText = readGitStatus(request.root, request.maxOutputBytes);
-  const outputs = writeExecutionOutputs(request.root, request.contextDir, request.commandInfo, result, diffText, gitStatusText);
+  const outputs = writeExecutionOutputs(request.root, request.contextDir, effectiveCommandInfo, result, diffText, gitStatusText);
 
   const runState = result.timedOut ? 'timed_out' : (result.exitCode === 0 ? 'completed' : 'failed');
   const testsAbsPath = path.join(request.bridgeDir, 'loop-tests.txt');
@@ -1929,8 +1982,13 @@ async function executeHandoffRequest(request, args, options = {}) {
     started_at: startedAt,
     finished_at: new Date().toISOString(),
     plan_hash: runPlanHash,
-    executor: request.commandInfo.agent,
-    model: request.commandInfo.model || undefined,
+    executor: effectiveCommandInfo.agent,
+    model: effectiveCommandInfo.model || undefined,
+    subagents_requested: Boolean(subagentRun.requested),
+    subagent_verified: Boolean(subagentRun.verified),
+    subagent_fallback: subagentRun.fallbackReason || undefined,
+    child_session_id: subagentRun.childSessionId || undefined,
+    files_inspected: subagentRun.filesInspected?.length ? subagentRun.filesInspected : undefined,
     exit_code: result.exitCode ?? null,
     timed_out: Boolean(result.timedOut),
     duration_ms: result.durationMs,
@@ -1943,7 +2001,7 @@ async function executeHandoffRequest(request, args, options = {}) {
   console.log(`Status: ${path.relative(request.root, outputs.statusPath)}`);
   console.log(`Diff:   ${path.relative(request.root, outputs.diffPath)}`);
   console.log(`Log:    ${path.relative(request.root, outputs.logPath)}`);
-  return { cancelled: false, result, outputs };
+  return { cancelled: false, result, outputs, subagentRun };
 }
 
 async function runExecuteHandoff(argv) {
@@ -3046,9 +3104,54 @@ async function runDoctor(argv) {
   record(['minimal', 'standard', 'full'].includes(toolMode) ? 'ok' : 'fail', 'Tool mode', ['minimal', 'standard', 'full'].includes(toolMode) ? toolMode : '--tool-mode must be minimal, standard, or full');
   record(clipboard ? 'ok' : 'warn', 'Clipboard', clipboard || 'not found; URL will be printed for manual copy');
   record(browser ? 'ok' : 'warn', 'Browser open', browser || 'not found; open ChatGPT manually');
-  record(commandAvailableFromRoot(opencodeCommand, root) ? 'ok' : 'warn', 'OpenCode agent', commandAvailableFromRoot(opencodeCommand, root) ? opencodeCommand : 'not found; install opencode-ai to use --agent opencode');
+  const openCodeAvailable = commandAvailableFromRoot(opencodeCommand, root);
+  record(openCodeAvailable ? 'ok' : 'warn', 'OpenCode agent', openCodeAvailable ? opencodeCommand : 'not found; install opencode-ai to use --agent opencode');
   record(commandAvailableFromRoot(piCommand, root) ? 'ok' : 'warn', 'Pi agent', commandAvailableFromRoot(piCommand, root) ? piCommand : 'not found; install @mariozechner/pi-coding-agent to use --agent pi');
   record(commandAvailableFromRoot(codexCommand, root) ? 'ok' : 'warn', 'Codex agent', commandAvailableFromRoot(codexCommand, root) ? codexCommand : 'not found; install Codex CLI to use --agent codex');
+
+  if (openCodeAvailable) {
+    const openCodeConfigDir = path.join(projectRoot, '.opencode');
+    const capability = inspectOpenCodeRuntime(opencodeCommand, root, openCodeConfigDir);
+    record(capability.ready ? 'ok' : 'warn', 'OC subagents', capability.ready
+      ? `${CODEXPRO_ORCHESTRATOR_AGENT} -> ${CODEXPRO_EXPLORE_AGENT}`
+      : capability.reasons.join('; '));
+    record(capability.subagentDepth >= 1 ? 'ok' : 'warn', 'OC child depth', `subagent_depth=${capability.subagentDepth}`);
+    record(capability.taskPermission === 'allow' ? 'ok' : 'warn', 'OC Task access', `${CODEXPRO_EXPLORE_AGENT}: ${capability.taskPermission || 'not allowed'}`);
+    record(capability.explorerEdit === 'deny' && capability.explorerBash === 'deny' && capability.explorerTask === 'deny' ? 'ok' : 'warn', 'OC child safety', `edit=${capability.explorerEdit || '?'} bash=${capability.explorerBash || '?'} task=${capability.explorerTask || '?'}`);
+
+    const selectedModel = String(args.model ?? capability.model ?? '').trim();
+    const modelList = spawnSyncPortable(opencodeCommand, ['models'], { cwd: root, encoding: 'utf8', maxBuffer: 2_000_000, env: { ...process.env, NO_COLOR: '1' } });
+    const modelListed = Boolean(selectedModel && modelList.status === 0 && String(modelList.stdout || '').split(/\r?\n/).some((line) => line.trim() === selectedModel));
+    record(modelListed ? 'ok' : 'warn', 'OC model', selectedModel ? `${selectedModel}${modelListed ? '' : ' (not found in model catalog)'}` : 'no model selected or configured');
+
+    const provider = selectedModel.includes('/') ? selectedModel.split('/')[0] : '';
+    const authList = spawnSyncPortable(opencodeCommand, ['auth', 'list'], { cwd: root, encoding: 'utf8', maxBuffer: 200_000, env: { ...process.env, NO_COLOR: '1' } });
+    const authText = String(authList.stdout || '');
+    const providerCredentialVisible = provider === 'opencode' || Boolean(provider && authList.status === 0 && authText.toLowerCase().includes(provider.toLowerCase()));
+    record(providerCredentialVisible ? 'ok' : 'warn', 'OC provider auth', provider ? (providerCredentialVisible ? `${provider}${provider === 'opencode' ? ' built-in' : ' credential visible'}` : `${provider}: no saved credential visible`) : 'provider unknown');
+
+    if (args.liveAgentCheck) {
+      const probe = await runOpenCodeModelProbe({ command: opencodeCommand, root, configDir: openCodeConfigDir, model: selectedModel });
+      record(probe.ok ? 'ok' : 'fail', 'OC live model', probe.ok ? `${selectedModel || 'default'} responded in ${probe.durationMs} ms` : probe.reason);
+    } else {
+      record('warn', 'OC live model', 'not called; use --live-agent-check to verify provider/model end-to-end');
+    }
+
+    if (args.liveSubagentCheck) {
+      const liveSubagent = await runVerifiedOpenCodeInvestigation({
+        command: opencodeCommand,
+        root,
+        configDir: openCodeConfigDir,
+        model: selectedModel,
+        planText: 'Read package.json and report the exact package name plus the file path used as evidence. Do not modify anything.',
+        timeoutMs: 120_000,
+        maxOutputBytes: 120_000
+      });
+      record(liveSubagent.verified ? 'ok' : 'fail', 'OC live child', liveSubagent.verified ? `${liveSubagent.childSessionId}; files=${liveSubagent.filesInspected.join(', ') || '(none reported)'}` : liveSubagent.fallbackReason);
+    } else {
+      record('warn', 'OC live child', 'not called; use --live-subagent-check to require a real Task child session');
+    }
+  }
 
   try {
     await assertPortAvailable(host, port);
