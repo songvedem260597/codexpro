@@ -219,6 +219,9 @@ assert.match(managerUi, /isRetryableChatTurnBusyError\(err\)/, "CodexPro verific
 assert.match(managerUi, /repoTaskVerificationReads\.current\.set\(verificationKey, Date\.now\(\) \+ REPO_TASK_VERIFICATION_RETRY_MS\)/, "a blocked verification retry must be released after a cooldown");
 assert.match(managerUi, /repoTaskStatus: "waiting", loading: false/, "a rejected verification retry must return to waiting instead of remaining stuck on retrying");
 assert.match(managerStyles, /\.chat-response-head strong \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/, "long response headlines must remain one line and end with an ellipsis");
+assert.match(managerUi, /className="chat-response-send-state"[\s\S]*?Đang gửi tin nhắn[\s\S]*?className="typing-dots"/, "the send indicator must render inline inside the response header");
+assert.match(managerStyles, /\.chat-response-send-state \{[^}]*inline-flex;[^}]*white-space: nowrap;/, "the inline send indicator must stay compact on the response status row");
+assert.doesNotMatch(managerStyles, /\.message-send-indicator\s*\{/, "the old standalone send status panel must be removed");
 assert.match(managerUi, /className="toast-icon"[\s\S]*?<svg viewBox="0 0 24 24"/, "success toasts must use the custom vector status icon");
 assert.match(managerStyles, /\.toast-message \{[^}]*font-family: var\(--app-font-family,[^}]*font-weight: var\(--weight-semibold\)/, "toast typography must match the Manager interface");
 assert.doesNotMatch(managerUi, /RESPONSE_AUTO_SCROLL_RESUME_MS/, "manual transcript scrolling must not auto-resume on a timer");
