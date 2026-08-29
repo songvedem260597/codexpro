@@ -947,7 +947,7 @@ async function readChatResponsePage() {
     return String(clone.textContent||'').replace(/\u200b/g,'').replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   };
   if(!location.pathname.startsWith('/c/'))return {ok:false,error:'Tab đã chọn không phải đoạn chat ChatGPT.'};
-  const messageNodes=Array.from(document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')).slice(-20);
+  const messageNodes=Array.from(document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')).slice(-12);
   const messages=messageNodes.map((message,index)=>{
     const role=message.getAttribute('data-message-author-role')==='user'?'user':'assistant';
     const content=role==='assistant'?message.querySelector('.markdown,.prose,[class*="markdown"]')||message:message.querySelector('.whitespace-pre-wrap,[class*="whitespace-pre-wrap"],[data-message-content]')||message;
@@ -1037,6 +1037,15 @@ async function readCanonicalConversationPage(conversationId) {
     }).filter(Boolean).join('\n').replace(/\u200b/g,'').trim();
   };
   const messagesFromPayload=payload=>{
+    const directMessages=Array.isArray(payload?.messages)?payload.messages.map((message,index)=>{
+      const role=String(message?.author?.role||message?.role||'');
+      if(!['user','assistant'].includes(role))return null;
+      const contentType=String(message?.content?.content_type||'');
+      if(role==='assistant'&&!['text','multimodal_text'].includes(contentType))return null;
+      const text=messageText(message);
+      return text?{id:String(message?.id||`${role}-${index}`),role,text:text.slice(0,40000),truncated:text.length>40000,content_type:contentType,status:String(message?.status||''),end_turn:message?.end_turn===true,create_time:Number(message?.create_time)||0,order:index}:null;
+    }).filter(Boolean):[];
+    if(directMessages.length)return directMessages;
     const mapping=payload?.mapping||payload?.conversation?.mapping;
     if(!mapping||typeof mapping!=='object')return [];
     const nodes=[];
@@ -1068,8 +1077,8 @@ async function readCanonicalConversationPage(conversationId) {
     const accountId=String(session?.account?.id||session?.accountId||session?.user?.account_id||session?.user?.accountId||session?.accounts?.[0]?.id||'').trim();
     const headers={authorization:`Bearer ${accessToken}`,...(accountId?{'chatgpt-account-id':accountId}:{})};
     const endpoints=[
-      `/backend-api/conversation/${encodeURIComponent(conversationId)}`,
-      `/backend-api/conversations/${encodeURIComponent(conversationId)}?include_has_versions=true&num_turns=40`
+
+      `/backend-api/conversations/${encodeURIComponent(conversationId)}?include_has_versions=true&num_turns=6`
     ];
     let lastError='';
     for(const endpoint of endpoints){

@@ -82,6 +82,15 @@ const consecutiveUserFollowups = replaceCanonicalTranscript([], [
   { id: "user-4", role: "user", text: "Sửa thêm phần C" }
 ]);
 assert.deepEqual(consecutiveUserFollowups.map((message) => message.id), ["user-1", "assistant-1", "user-2", "user-3", "user-4"], "consecutive user follow-ups before one assistant response must count as one open exchange and must not evict prior responses");
+const fragmentedAssistantTurns = replaceCanonicalTranscript([], [
+  { id: "fragment-user-1", role: "user", text: "Turn one" },
+  { id: "fragment-assistant-1a", role: "assistant", text: "Tool progress" },
+  { id: "fragment-assistant-1b", role: "assistant", text: "Final one" },
+  { id: "fragment-user-2", role: "user", text: "Turn two" },
+  { id: "fragment-assistant-2a", role: "assistant", text: "Draft two" },
+  { id: "fragment-assistant-2b", role: "assistant", text: "Final two" }
+]);
+assert.deepEqual(fragmentedAssistantTurns.map((message) => message.id), ["fragment-user-1", "fragment-assistant-1b", "fragment-user-2", "fragment-assistant-2b"], "each exchange must keep only the latest visible assistant response instead of rendering internal assistant fragments");
 assert.equal(isNetworkStreamCurrentGeneration({ networkStartedAt: "2026-08-29T14:00:10.000Z", streamUpdatedAt: "2026-08-29T14:00:09.999Z" }), false, "a stream from the previous generation must never be appended after a new optimistic user message");
 assert.equal(isNetworkStreamCurrentGeneration({ networkStartedAt: "2026-08-29T14:00:10.000Z", streamUpdatedAt: "2026-08-29T14:00:10.001Z" }), true, "a stream updated by the current generation may be rendered live");
 const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, manifestText] = await Promise.all([
@@ -148,6 +157,9 @@ assert.match(worker, /scheduleDomActivityRefresh/, "DOM settling must refresh un
 assert.match(worker, /conversation\|steer_turn/, "ChatGPT steer_turn must be tracked as a generation request");
 assert.match(worker, /const staleActivity=Boolean\(injected\.result\.busy\)/, "canonical completion must recover a tab whose DOM is still stuck busy");
 assert.match(worker, /await chatDomActivityState\(tab\.id,conversationId,\{fresh:true\}\)\)\.busy/, "worker send must force a fresh DOM activity probe before submitting");
+assert.match(worker, /num_turns=6/, "canonical transcript reads must request only the three most recent user/assistant exchanges");
+assert.doesNotMatch(worker, /num_turns=40/, "canonical transcript reads must not fetch the old 20-exchange window");
+assert.match(worker, /Array\.isArray\(payload\?\.messages\)/, "canonical transcript reads must parse the bounded messages payload directly");
 assert.match(worker, /browserElementActionPage/);
 assert.match(worker, /__codexproSemanticRegistry/);
 assert.match(worker, /subscribeDebuggerEvents/);
@@ -198,6 +210,8 @@ assert.doesNotMatch(managerUi, /REALTIME_POLL_MS = 1000/, "Manager must not poll
 assert.match(managerUi, /responseScrollLocked/, "manual transcript scrolling must lock auto-scroll");
 assert.match(managerUi, /responseScrollLocked\.current\.get\(chatProfileId\)/, "stream updates must respect the manual scroll lock");
 assert.match(managerUi, /responseScrollLocked\.current\.delete\(profile\.profile_id\)/, "sending a new message must resume auto-scroll");
+assert.match(managerUi, /const scrollOpenChatToBottom = useCallback\([\s\S]*?modal\.scrollTop = modal\.scrollHeight/, "opening Chat must drive the outer modal scrollbar to the real bottom");
+assert.match(managerUi, /function openChat\(profile\)[\s\S]*?responseScrollPositions\.current\.delete\(profile\.profile_id\)[\s\S]*?scrollOpenChatToBottom\(profile\.profile_id\)[\s\S]*?loadResponse\(profile, conversationId, true, true\)\.finally/, "opening Chat must reset manual scroll state and finish both modal/transcript at the bottom after loading");
 assert.match(managerUi, /!tab\.busy && !tab\.settling && currentResponse\?\.repoTaskId/, "CodexPro verification must wait until the ChatGPT turn has visibly settled");
 assert.match(managerUi, /ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước/, "send must reject attempts that would steer the active turn");
 assert.match(managerUi, /setRequestSendEvidence\(\(current\) => \(\{ \.\.\.current, \[profile\.profile_id\]: null \}\)\)/, "opening Chrome must clear stale send evidence");
@@ -212,7 +226,7 @@ assert.match(managerUi, /networkState === "generating" \|\| tab\.settling/, "Man
 assert.match(managerUi, /network_stream_activity_text/, "Manager must render live network tool activity without exposing raw tool payloads");
 
 const manifest = JSON.parse(manifestText);
-assert.equal(manifest.version, "0.5.59");
+assert.equal(manifest.version, "0.5.60");
 assert.ok(manifest.permissions.includes("debugger"));
 
 console.log("✓ Browser agent persistent-session/batch/wait smoke test passed");
