@@ -30,7 +30,7 @@ const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
 const MAX_REQUEST_TEXT_PREVIEW_BYTES = 512 * 1024;
 
-const WORKER_EXTENSION_VERSION = "0.5.61";
+const WORKER_EXTENSION_VERSION = "0.5.62";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
 const GIT_SUMMARY_CACHE_MS = 2 * 60 * 1000;
@@ -2161,6 +2161,7 @@ async function getProfileResponse(payload) {
     profile_id: profileId,
     conversation_id: conversationId,
     read_dom: payload?.readDom !== false,
+    canonical_only: payload?.canonicalOnly === true,
     recover_stale_dom: payload?.recoverStaleDom === true
   }, 80000);
 }
