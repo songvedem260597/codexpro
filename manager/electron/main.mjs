@@ -1454,8 +1454,12 @@ function runtimeLaunchArgs(command, fallbackRoot) {
   return args;
 }
 
-async function runtimeBaseStatus() {
-  if (runtimeBaseCache && Date.now() - runtimeBaseCache.cachedAt < RUNTIME_BASE_CACHE_MS) return runtimeBaseCache.value;
+async function runtimeBaseStatus(options = {}) {
+  const forceRefresh = options?.forceRefresh === true;
+  const cacheAge = runtimeBaseCache ? Date.now() - runtimeBaseCache.cachedAt : Number.POSITIVE_INFINITY;
+  const cacheTtl = runtimeBaseCache?.value?.local?.ok ? RUNTIME_BASE_CACHE_MS : RUNTIME_BASE_FAILURE_CACHE_MS;
+  if (!forceRefresh && runtimeBaseCache && cacheAge < cacheTtl) return runtimeBaseCache.value;
+  if (forceRefresh) runtimeBaseCache = null;
   if (runtimeBasePromise) return runtimeBasePromise;
   runtimeBasePromise = (async () => {
     const task = await scheduledTask();
@@ -2552,8 +2556,9 @@ async function controlServer(action) {
     await new Promise((resolve) => setTimeout(resolve, 3000));
     return runtimeStatus();
   }
-  const current = await runtimeStatus();
+  const current = await runtimeStatus({ forceRefresh: true });
   if (action === "start" && current.local.ok) return current;
+  runtimeBaseCache = null;
   if (action === "restart") {
     const task = await scheduledTask();
     const config = parseTaskArguments(task.arguments);
@@ -2572,7 +2577,8 @@ async function controlServer(action) {
     await runPowerShell("Start-ScheduledTask -TaskName 'CodexPro' -ErrorAction Stop");
   }
   await new Promise((resolve) => setTimeout(resolve, 2400));
-  return runtimeStatus();
+  runtimeBaseCache = null;
+  return runtimeStatus({ forceRefresh: true });
 }
 
 ipcMain.handle("codexpro:status", () => runtimeStatus());
