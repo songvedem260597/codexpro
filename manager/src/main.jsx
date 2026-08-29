@@ -4,12 +4,11 @@ import "./styles.css";
 import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
-import { isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
+import { canAcceptNextChatMessage, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 
 const api = window.codexpro;
 const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
-const RESPONSE_AUTO_SCROLL_RESUME_MS = 3000;
 const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
 const REALTIME_WATCHDOG_MS = 30000;
 const NEW_CHAT_TARGET = "__codexpro_new_chat__";
@@ -521,7 +520,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.49";
+const WORKER_EXTENSION_VERSION = "0.5.52";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -776,8 +775,8 @@ function App() {
   const profilesRef = useRef([]);
   const requestTargetsRef = useRef({});
   const responseBodyRefs = useRef(new Map());
-  const responseScrollPauseUntil = useRef(new Map());
-  const responseScrollTimers = useRef(new Map());
+  const responseScrollLocked = useRef(new Map());
+  const responseScrollPositions = useRef(new Map());
 
   const projectPageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE));
   const visibleProjects = useMemo(() => projects.slice(projectPage * PROJECTS_PER_PAGE, (projectPage + 1) * PROJECTS_PER_PAGE), [projects, projectPage]);
@@ -978,31 +977,28 @@ function App() {
     const container = responseBodyRefs.current.get(profileId);
     if (!container) return;
     container.scrollTop = container.scrollHeight;
+    responseScrollPositions.current.set(profileId, container.scrollTop);
   }, []);
 
-  const holdResponseAutoScroll = useCallback((profileId) => {
-    const currentTimer = responseScrollTimers.current.get(profileId);
-    const resumeAt = Date.now() + RESPONSE_AUTO_SCROLL_RESUME_MS;
-    responseScrollPauseUntil.current.set(profileId, resumeAt);
-    if (currentTimer) window.clearTimeout(currentTimer);
-    const timer = window.setTimeout(() => {
-      if ((responseScrollPauseUntil.current.get(profileId) || 0) > Date.now()) return;
-      responseScrollPauseUntil.current.delete(profileId);
-      responseScrollTimers.current.delete(profileId);
-      scrollResponseToBottom(profileId);
-    }, RESPONSE_AUTO_SCROLL_RESUME_MS + 40);
-    responseScrollTimers.current.set(profileId, timer);
-  }, [scrollResponseToBottom]);
+  const holdResponseAutoScroll = useCallback((profileId, container, deltaY = 0) => {
+    const distanceFromBottom = container ? container.scrollHeight - container.scrollTop - container.clientHeight : Infinity;
+    if (deltaY > 0 && distanceFromBottom <= RESPONSE_BOTTOM_THRESHOLD_PX) {
+      responseScrollLocked.current.delete(profileId);
+      return;
+    }
+    responseScrollLocked.current.set(profileId, true);
+  }, []);
 
   const pauseResponseAutoScroll = useCallback((profileId, container) => {
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distanceFromBottom <= RESPONSE_BOTTOM_THRESHOLD_PX) return;
-    holdResponseAutoScroll(profileId);
-  }, [holdResponseAutoScroll]);
-
-  useEffect(() => () => {
-    for (const timer of responseScrollTimers.current.values()) window.clearTimeout(timer);
-    responseScrollTimers.current.clear();
+    const currentScrollTop = container.scrollTop;
+    const previousScrollTop = responseScrollPositions.current.get(profileId);
+    responseScrollPositions.current.set(profileId, currentScrollTop);
+    const distanceFromBottom = container.scrollHeight - currentScrollTop - container.clientHeight;
+    if (distanceFromBottom <= RESPONSE_BOTTOM_THRESHOLD_PX) {
+      responseScrollLocked.current.delete(profileId);
+      return;
+    }
+    if (Number.isFinite(previousScrollTop) && currentScrollTop < previousScrollTop - 1) responseScrollLocked.current.set(profileId, true);
   }, []);
 
   const refresh = useCallback(async (foreground = false) => {
@@ -1139,13 +1135,15 @@ function App() {
         }
         if (networkState !== "completed" || !networkCompletedAt) continue;
         const completionKey = `${profile.profile_id}:${conversationId}`;
-        if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) continue;
-        networkCompletionReads.current.set(completionKey, networkCompletedAt);
-        void (async () => {
-          await loadResponse(profile, conversationId, true, true, true);
-          if (currentResponse?.repoTaskId) await verifyRepoTaskUse(profile, conversationId, currentResponse, networkCompletedAt);
-        })();
-        if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
+        const contentAlreadyRead = networkCompletionReads.current.get(completionKey) === networkCompletedAt;
+        if (!contentAlreadyRead) {
+          networkCompletionReads.current.set(completionKey, networkCompletedAt);
+          void loadResponse(profile, conversationId, true, true, true);
+          if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
+        }
+        if (!tab.busy && !tab.settling && currentResponse?.repoTaskId) {
+          void verifyRepoTaskUse(profile, conversationId, currentResponse, networkCompletedAt);
+        }
       }
     }
   }, [status?.browserProfiles, chatProfileId, requestResponses, notify]);
@@ -1169,11 +1167,16 @@ function App() {
 
   useEffect(() => {
     if (!chatProfileId) return;
+    responseScrollLocked.current.delete(chatProfileId);
+    responseScrollPositions.current.delete(chatProfileId);
+  }, [chatProfileId, requestTargets[chatProfileId]]);
+
+  useEffect(() => {
+    if (!chatProfileId) return;
     const response = requestResponses[chatProfileId];
     const thinking = Boolean(response?.busy || response?.loading || response?.networkState === "generating");
     if (!response?.text && !thinking) return;
-    if (thinking) responseScrollPauseUntil.current.delete(chatProfileId);
-    if ((responseScrollPauseUntil.current.get(chatProfileId) || 0) > Date.now()) return;
+    if (responseScrollLocked.current.get(chatProfileId)) return;
     const frame = window.requestAnimationFrame(() => scrollResponseToBottom(chatProfileId));
     return () => window.cancelAnimationFrame(frame);
   }, [chatProfileId, requestResponses, scrollResponseToBottom]);
@@ -1378,6 +1381,8 @@ function App() {
     const selectedTab = tabs.find((tab) => conversationOf(tab) === conversationId);
     const targetTab = selectedTab || activeTab;
     const selectedConversation = conversations.find((chat) => String(chat.id) === conversationId);
+    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+    setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: null }));
     setBusy(`open-profile:${profile.profile_id}`);
     setError("");
     try {
@@ -1431,6 +1436,25 @@ function App() {
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có workspace nào được chọn." }));
       return;
     }
+    if (!newChat) {
+      const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${conversationId}`));
+      const currentResponse = requestResponses[profile.profile_id];
+      const networkState = String(selectedTab?.network_state || currentResponse?.networkState || (selectedTab?.busy ? "generating" : "idle"));
+      const turnReady = canAcceptNextChatMessage({
+        networkState,
+        tabBusy: selectedTab?.busy,
+        tabSettling: selectedTab?.settling,
+        responseCurrent: currentResponse?.conversationId === conversationId,
+        responseBusy: currentResponse?.busy,
+        responseIncomplete: currentResponse?.incomplete
+      });
+      if (!turnReady) {
+        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước. Chờ trạng thái về ĐANG RẢNH rồi gửi để tin nhắn không bị nhập vào turn cũ." }));
+        return;
+      }
+    }
+    responseScrollLocked.current.delete(profile.profile_id);
+    window.requestAnimationFrame(() => scrollResponseToBottom(profile.profile_id));
     setBusy(`request:${profile.profile_id}`);
     setError("");
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
@@ -1962,6 +1986,7 @@ function App() {
     const hasResponseContent = !responseCleared && Boolean(fallbackResponseMessage.text || displayResponseMessages.length);
     const responseVerifiedComplete = Boolean(responseCurrent && response?.responseReady && hasResponseContent);
     const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${selectedTarget}`));
+    const selectedActivityText = String(selectedTab?.activity_text || "").trim();
     const selectedNetworkState = String(selectedTab?.network_state || (responseCurrent ? response?.networkState : "") || (selectedTab?.busy ? "generating" : "idle"));
     const selectedNetworkCompleted = selectedNetworkState === "completed";
     const selectedNetworkFailed = selectedNetworkState === "failed";
@@ -1977,18 +2002,26 @@ function App() {
       responseCurrent,
       responseIncomplete: response?.incomplete
     });
+    const turnReady = canAcceptNextChatMessage({
+      networkState: selectedNetworkState,
+      tabBusy: selectedTab?.busy,
+      tabSettling: selectedTab?.settling,
+      responseCurrent,
+      responseBusy: response?.busy,
+      responseIncomplete: response?.incomplete
+    });
     const domUnavailable = Boolean(responseCurrent && response?.domAvailable === false && !response?.domSkipped);
     const contentNeedsRefresh = Boolean(responseCurrent && response?.contentNeedsRefresh);
     const rolloverCreating = Boolean(responseCurrent && response?.rolloverStatus === "creating");
-    const canSend = !busy && profile.connected && Boolean(selectedProjectRoot) && !selectedBusy && !rolloverCreating && (isNewChat || conversations.length > 0) && Boolean(draft.trim() || attachments.length);
+    const canSend = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0) && Boolean(draft.trim() || attachments.length);
     const working = profile.connected && (profile.activity === "working" || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
     const responseHeadline = responseCleared
       ? "Chat đã được dọn"
       : isNewChat
       ? "Chat mới"
-      : selectedBusy
-        ? "AI đang xử lý · theo dõi bằng network"
+      : selectedBusy || selectedSettling
+        ? selectedActivityText || (selectedBusy ? "AI đang xử lý · theo dõi bằng network" : "AI đang hoàn tất tác vụ")
         : selectedNetworkFailed && responseVerifiedComplete
           ? "AI đã phản hồi xong · network tracker quá thời gian"
           : selectedNetworkFailed
@@ -2020,12 +2053,12 @@ function App() {
 
           <article className={`request-card chat-popup-card ${profile.connected ? "is-online" : "is-offline"}`}>
             <label className="request-label">Dự án / đường dẫn cần làm <small>chọn phạm vi cho profile/chat hiện tại</small></label>
-            <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} disabled={!profile.connected || sending || selectedBusy || rolloverCreating} />
+            <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating} />
             {!workspaceProjects.length && selectedProjectRoot !== ALL_ALLOWED_WORKSPACES && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
             <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
               <div className="chat-response-head">
-                <div><span className="response-status-dot" /><strong>{responseHeadline}</strong>{!isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
+                <div><span className="response-status-dot" /><strong title={responseHeadline}>{responseHeadline}</strong>{!isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
                 <div className="response-head-actions">
                   {responseCurrent && !responseCleared && !isNewChat && !selectedBusy && (contentNeedsRefresh || domUnavailable) && <button type="button" onClick={() => void loadResponse(profile, selectedTarget, false, true)} disabled={Boolean(busy)}>Đọc nội dung</button>}
                   {responseCurrent && !responseCleared && response?.incomplete && !selectedBusy && <button type="button" className="continue-response" onClick={() => void continueIncompleteResponse(profile, selectedTarget)} disabled={Boolean(busy)}>Tiếp tục</button>}
@@ -2058,7 +2091,7 @@ function App() {
                 </div>
               )}
               {responseCleared ? <div className="response-empty">Chat đã được dọn.</div> : !profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
-                <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={() => holdResponseAutoScroll(profile.profile_id)} onTouchMove={() => holdResponseAutoScroll(profile.profile_id)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
+                <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, event.deltaY)} onTouchMove={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
                   {(displayResponseMessages.length ? displayResponseMessages : [fallbackResponseMessage]).map((message, messageIndex, allMessages) => {
                     const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
                     if (message.toolActivity) {
@@ -2094,7 +2127,7 @@ function App() {
                   event.preventDefault();
                   void sendRequest(profile);
                 }}
-                disabled={!profile.connected || sending || rolloverCreating}
+                disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating}
               />
               {attachments.length > 0 && (
                 <div className="request-files">
@@ -2121,7 +2154,7 @@ function App() {
               <div className="request-card-actions">
                 <button type="button" className="button secondary" onClick={() => setChatProfileId("")}>Đóng</button>
                 <button type="button" className="button secondary" onClick={() => openProfile(profile)} disabled={Boolean(busy) || !profile.connected || isNewChat || !(profile.conversation_tabs?.length)}>Mở Chrome</button>
-                <button type="button" className="button primary" onClick={() => sendRequest(profile)} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
+                <button type="button" className="button primary" onClick={() => sendRequest(profile)} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : selectedSettling ? "Chat đang hoàn tất" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
               </div>
             </div>
           </article>
@@ -2263,6 +2296,9 @@ function App() {
               const working = profile.connected && profile.activity === "working";
               const idle = profile.connected && profile.activity === "idle" && (profile.connector_installed || !ready);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
+              const profileTabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
+              const liveTab = profileTabs.find((tab) => tab.active) || profileTabs.find((tab) => tab.busy || tab.settling) || profileTabs[0];
+              const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
               const directProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const fallbackProject = profileRepoProject(profile, projects, profileRepoRoots[profile.profile_id]);
@@ -2296,6 +2332,7 @@ function App() {
                       <span>{profile.tab_count} tab</span>
                       {profile.connector_message && <span className={profile.connector_installed ? "ready-text" : "profile-warning"}>{profile.connector_message}</span>}
                     </div>
+                    {(working || settling) && <div className="profile-live-activity" role="status" aria-live="polite"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{liveActivityText || (settling ? "ChatGPT đang hoàn tất tác vụ" : "ChatGPT đang xử lý")}</span></div>}
                   </div>
                   <div className="profile-actions">
                     {!ready && <span className="update-needed">Có worker {WORKER_EXTENSION_VERSION} mới</span>}
@@ -2780,7 +2817,16 @@ function App() {
         </div>
       )}
 
-      {toast && <div className="toast">✓ {toast}</div>}
+      {toast && (
+        <div className="toast" role="status" aria-live="polite">
+          <span className="toast-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <path d="m7.5 12.4 3 3.1 6.4-7" />
+            </svg>
+          </span>
+          <span className="toast-message">{toast}</span>
+        </div>
+      )}
     </div>
   );
 }

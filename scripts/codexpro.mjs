@@ -158,7 +158,8 @@ Execute handoff options:
   --agent <opencode|pi|codex|custom>
                              Local implementation agent adapter.
   --model <provider/model>  Optional model name passed to the adapter.
-  --subagents               For OpenCode, require a real read-only repo child; external/API plans may also use verified gemini-scout research.
+  --subagents               For OpenCode, require real verified read-only child execution.
+  --max-subagents <n>       Requested subagent cap. During the current test phase it is hard-capped to 1.
   --command <template>      Custom command template. Supports {{model}}, {{plan_file}}, {{plan_text}}, {{root}}.
   --dry-run                 Print the command that would run without executing it.
   --timeout-ms <ms>         Execution timeout. Default: 600000.
@@ -1568,6 +1569,7 @@ function buildExecutorCommand(args, root, planPath, planText) {
   const agent = String(args.agent ?? 'opencode').trim().toLowerCase();
   const model = String(args.model ?? process.env.CODEXPRO_AGENT_MODEL ?? '').trim();
   const subagentsRequested = args.subagents === true;
+  const maxSubagents = subagentsRequested ? numberOption(args.maxSubagents ?? process.env.CODEXPRO_MAX_SUBAGENTS, 1, 1, 1) : 0;
   const replacements = {
     model,
     plan_file: planPath,
@@ -1597,6 +1599,7 @@ function buildExecutorCommand(args, root, planPath, planText) {
       agent,
       model,
       subagentsRequested,
+      maxSubagents,
       basePlanPrompt,
       command: resolveAgentCommand('opencode'),
       args: ['run', ...(model ? ['--model', model] : []), basePlanPrompt],
@@ -1820,6 +1823,7 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, 
     `Agent: ${commandInfo.agent}`,
     commandInfo.model ? `Model: ${commandInfo.model}` : '',
     commandInfo.subagentRun?.requested ? 'Subagents requested: yes' : '',
+    commandInfo.subagentRun?.requested ? `Subagent cap: ${commandInfo.maxSubagents || 1}` : '',
     commandInfo.subagentRun?.requested ? `Explore verified: ${commandInfo.subagentRun.verified ? 'yes' : 'no'}` : '',
     commandInfo.subagentRun?.fallbackReason ? `Explore fallback: ${commandInfo.subagentRun.fallbackReason}` : '',
     commandInfo.subagentRun?.childSessionId ? `Explore child session: ${commandInfo.subagentRun.childSessionId}` : '',
@@ -1848,6 +1852,7 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, 
     event: 'execute_handoff',
     agent: commandInfo.agent,
     model: commandInfo.model || undefined,
+    max_subagents: commandInfo.maxSubagents || 0,
     subagents_requested: Boolean(commandInfo.subagentRun?.requested),
     subagent_verified: Boolean(commandInfo.subagentRun?.verified),
     subagent_fallback: commandInfo.subagentRun?.fallbackReason || undefined,
@@ -1927,7 +1932,7 @@ function printHandoffDryRun(request, title = 'CodexPro execute-handoff dry run')
     labelValue('Plan', path.relative(request.root, request.planPath)),
     labelValue('Agent', request.commandInfo.agent),
     ...(request.commandInfo.model ? [labelValue('Model', request.commandInfo.model)] : []),
-    ...(request.commandInfo.subagentsRequested ? [labelValue('Subagents', 'requested; runtime Task/child-session verification deferred until execution')] : []),
+    ...(request.commandInfo.subagentsRequested ? [labelValue('Subagents', `requested; max=${request.commandInfo.maxSubagents}; runtime Task/child-session verification deferred until execution`)] : []),
     labelValue('Command', request.commandText),
     'No command was executed and no .ai-bridge result files were changed.'
   ]);
@@ -1956,14 +1961,16 @@ async function executeHandoffRequest(request, args, options = {}) {
     executor: request.commandInfo.agent,
     model: request.commandInfo.model || undefined,
     subagents_requested: Boolean(request.commandInfo.subagentsRequested),
+    max_subagents: request.commandInfo.maxSubagents || 0,
     pid: process.pid
   });
 
   let subagentRun = { requested: false, verified: false, fallbackReason: '', events: [] };
   let scoutRun = { requested: false, verified: false, fallbackReason: '', events: [] };
+  let subagentAttempts = 0;
   if (request.commandInfo.agent === 'opencode' && request.commandInfo.subagentsRequested) {
     const openCodeConfigDir = path.join(projectRoot, '.opencode');
-    statusLine('wait', `Verifying OpenCode Task delegation through ${CODEXPRO_EXPLORE_AGENT}...`);
+    statusLine('wait', `Verifying OpenCode Task delegation through ${CODEXPRO_EXPLORE_AGENT} (max subagents=${request.commandInfo.maxSubagents})...`);
     subagentRun = await runVerifiedOpenCodeInvestigation({
       command: request.commandInfo.command,
       root: request.root,
@@ -1973,22 +1980,37 @@ async function executeHandoffRequest(request, args, options = {}) {
       timeoutMs: request.timeoutMs,
       maxOutputBytes: request.maxOutputBytes
     });
+    subagentAttempts += 1;
     appendExecutionTelemetry(request.root, request.contextDir, subagentRun.events);
     if (subagentRun.verified) statusLine('ok', `Verified child session ${subagentRun.childSessionId} from ${CODEXPRO_EXPLORE_AGENT}.`);
     else statusLine('warn', `Repository explore unavailable; continuing without child evidence: ${subagentRun.fallbackReason}`);
 
-    scoutRun = await runVerifiedGeminiScout({
-      command: request.commandInfo.command,
-      root: request.root,
-      planText: request.planText,
-      model: request.commandInfo.model,
-      configDir: openCodeConfigDir,
-      timeoutMs: request.timeoutMs,
-      maxOutputBytes: request.maxOutputBytes
-    });
-    appendExecutionTelemetry(request.root, request.contextDir, scoutRun.events);
-    if (scoutRun.verified) statusLine('ok', `Verified ${GEMINI_SCOUT_AGENT} child ${scoutRun.childSessionId} using ${scoutRun.childModel}.`);
-    else if (scoutRun.requested) statusLine('warn', `Gemini scout unavailable; continuing without external scout evidence: ${scoutRun.fallbackReason}`);
+    if (subagentAttempts < request.commandInfo.maxSubagents) {
+      scoutRun = await runVerifiedGeminiScout({
+        command: request.commandInfo.command,
+        root: request.root,
+        planText: request.planText,
+        model: request.commandInfo.model,
+        configDir: openCodeConfigDir,
+        timeoutMs: request.timeoutMs,
+        maxOutputBytes: request.maxOutputBytes
+      });
+      if (scoutRun.requested) subagentAttempts += 1;
+      appendExecutionTelemetry(request.root, request.contextDir, scoutRun.events);
+      if (scoutRun.verified) statusLine('ok', `Verified ${GEMINI_SCOUT_AGENT} child ${scoutRun.childSessionId} using ${scoutRun.childModel}.`);
+      else if (scoutRun.requested) statusLine('warn', `Gemini scout unavailable; continuing without external scout evidence: ${scoutRun.fallbackReason}`);
+    } else {
+      const limitEvent = {
+        ts: new Date().toISOString(),
+        event: 'subagent_limit_reached',
+        max_subagents: request.commandInfo.maxSubagents,
+        attempts_used: subagentAttempts,
+        skipped_agent: GEMINI_SCOUT_AGENT
+      };
+      scoutRun = { requested: false, verified: false, skipped: true, fallbackReason: `subagent limit ${request.commandInfo.maxSubagents} reached`, events: [limitEvent] };
+      appendExecutionTelemetry(request.root, request.contextDir, scoutRun.events);
+      statusLine('warn', `Subagent cap reached (${subagentAttempts}/${request.commandInfo.maxSubagents}); ${GEMINI_SCOUT_AGENT} skipped.`);
+    }
   }
 
   let effectiveCommandInfo = { ...request.commandInfo, subagentRun, scoutRun };
@@ -2021,6 +2043,8 @@ async function executeHandoffRequest(request, args, options = {}) {
     plan_hash: runPlanHash,
     executor: effectiveCommandInfo.agent,
     model: effectiveCommandInfo.model || undefined,
+    max_subagents: effectiveCommandInfo.maxSubagents || 0,
+    subagent_attempts: subagentAttempts,
     subagents_requested: Boolean(subagentRun.requested),
     subagent_verified: Boolean(subagentRun.verified),
     subagent_fallback: subagentRun.fallbackReason || undefined,
@@ -3284,6 +3308,7 @@ async function runDoctor(argv) {
       ? `${CODEXPRO_ORCHESTRATOR_AGENT} -> ${CODEXPRO_EXPLORE_AGENT}`
       : capability.reasons.join('; '));
     record(capability.subagentDepth >= 1 ? 'ok' : 'warn', 'OC child depth', `subagent_depth=${capability.subagentDepth}`);
+    record('ok', 'OC handoff cap', `max_subagents=${numberOption(args.maxSubagents ?? process.env.CODEXPRO_MAX_SUBAGENTS, 1, 1, 1)}`);
     record(capability.taskPermission === 'allow' ? 'ok' : 'warn', 'OC Task access', `${CODEXPRO_EXPLORE_AGENT}: ${capability.taskPermission || 'not allowed'}`);
     record(capability.explorerEdit === 'deny' && capability.explorerBash === 'deny' && capability.explorerTask === 'deny' ? 'ok' : 'warn', 'OC child safety', `edit=${capability.explorerEdit || '?'} bash=${capability.explorerBash || '?'} task=${capability.explorerTask || '?'}`);
 
