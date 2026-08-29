@@ -118,6 +118,7 @@ assert.match(browserOps, /action === "batch"/);
 assert.match(browserOps, /Browser wait_for timed out/);
 assert.match(browserOps, /Input\.dispatchMouseEvent/);
 assert.match(browserOps, /private readonly listeners = new Map/);
+assert.match(browserOps, /Timed out connecting to the Chrome tab[\s\S]*?socket\.close\(\)/, "a timed-out CDP connection must close its half-open socket");
 assert.match(browserOps, /typeof message\.method === "string"/);
 assert.match(browserOps, /Network\.requestWillBeSent/);
 assert.match(browserOps, /Runtime\.consoleAPICalled/);
@@ -150,6 +151,8 @@ assert.match(worker, /network_stream_in_progress:networkStreamInProgress/, "work
 assert.match(worker, /streamBusy\?\(streamActivity\|\|'CodexPro đang sử dụng tool'\)/, "profile status must prefer live tool activity over stale DOM activity");
 assert.match(worker, /probeCanonicalCompletion/, "tracker timeout must verify canonical response before reporting failure");
 assert.match(worker, /function probeChatActivityPage/, "profile status must supplement network state with a lightweight DOM activity probe");
+assert.match(worker, /const shouldProbeDom=Boolean\(conversationId&&\(tab\.active\|\|networkState\.busy\|\|cachedDomActivity\?\.busy/, "idle background ChatGPT tabs must not receive unconditional DOM probes");
+assert.match(worker, /for\(const tabId of chatDomActivityByTab\.keys\(\)\)if\(!liveTabIds\.has\(tabId\)\)chatDomActivityByTab\.delete\(tabId\)/, "closed tabs must be pruned from the DOM activity cache");
 assert.match(worker, /testId==='stop-button'/, "DOM activity probe must recognize ChatGPT's stop control");
 assert.match(worker, /settling:!networkBusy&&domActivity\.busy/, "completed network requests must remain settling while ChatGPT is visibly active");
 assert.match(worker, /activity_text:streamBusy\?/, "active ChatGPT work must expose one concise network-or-DOM activity line");
@@ -190,6 +193,8 @@ assert.match(server, /trace_ms/);
 assert.match(server, /delta:/);
 
 assert.match(bridge, /subscribeBrowserExtensionProfiles/);
+assert.match(bridge, /function pruneExpiredProfiles/);
+assert.match(bridge, /profileWorkspaceRoots\.delete\(id\)[\s\S]*?profileWorkspaceBindings\.delete\(id\)/, "expired extension profiles must release workspace maps");
 assert.match(bridge, /bridgeErrorEnvelope/);
 assert.match(bridge, /code: String\(envelope\.code/);
 assert.match(server, /function errorEnvelope/);
@@ -205,6 +210,10 @@ assert.match(managerPreload, /invokeResult/);
 assert.match(managerUi, /SendDebugEvidence/);
 assert.match(managerUi, /network_evidence/);
 assert.match(managerUi, /REALTIME_WATCHDOG_MS = 30000/);
+assert.match(managerUi, /PROJECT_REFRESH_MS = 5 \* 60 \* 1000/, "project discovery must not run every status watchdog tick");
+assert.match(managerMain, /app\.requestSingleInstanceLock\(\)/, "normal Manager launches must hold a single-instance lock");
+assert.match(managerMain, /REPO_SCAN_CACHE_MS = 10 \* 60 \* 1000/, "repo discovery must use a durable cache");
+assert.match(managerMain, /GIT_SUMMARY_CACHE_MS = 2 \* 60 \* 1000/, "project Git summaries must be cached independently");
 assert.match(managerUi, /api\.onBrowserProfiles/);
 assert.doesNotMatch(managerUi, /REALTIME_POLL_MS = 1000/, "Manager must not poll status every second");
 assert.match(managerUi, /responseScrollLocked/, "manual transcript scrolling must lock auto-scroll");
@@ -230,6 +239,11 @@ assert.match(managerUi, /network_stream_activity_text/, "Manager must render liv
 
 const manifest = JSON.parse(manifestText);
 assert.equal(manifest.version, "0.5.60");
+assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
+assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
+assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");
+assert.match(managerUi, /className="worker-update-dialog"[\s\S]*?Cập nhật CodexPro Worker[\s\S]*?Cập nhật worker/, "Manager must render the custom worker update confirmation dialog");
+assert.match(managerUi, /Đã update thành công.*result\.version/, "Manager must only announce update success after the backend confirms the target version");
 assert.ok(manifest.permissions.includes("debugger"));
 
 console.log("✓ Browser agent persistent-session/batch/wait smoke test passed");

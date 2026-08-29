@@ -8,6 +8,9 @@ export const CODEXPRO_MODEL = "gpt-5.6-sol";
 export const CODEXPRO_REASONING_EFFORT = "high";
 export const CODEXPRO_INPUT_USD_PER_MILLION = 4.0;
 export const CODEXPRO_OUTPUT_USD_PER_MILLION = 20.0;
+const DEFAULT_USAGE_LOG_MAX_BYTES = 10 * 1024 * 1024;
+const USAGE_LOG_BACKUP_COUNT = 3;
+let usageWriteQueue: Promise<void> = Promise.resolve();
 
 function serializeForEstimate(value: unknown): string {
   if (value === undefined) return "";
@@ -57,10 +60,46 @@ export function resolveMcpUsageLogPath(): string | null {
   return path.join(base, "codexpro", "mcp-usage.jsonl");
 }
 
-export async function recordMcpUsage(tool: string, args: unknown, result: unknown, status: McpUsageStatus, durationMs: number): Promise<void> {
+function usageLogMaxBytes(): number {
+  const parsed = Number(process.env.CODEXPRO_USAGE_LOG_MAX_BYTES);
+  return Number.isFinite(parsed) && parsed >= 1024 ? Math.floor(parsed) : DEFAULT_USAGE_LOG_MAX_BYTES;
+}
+
+async function pathExists(file: string): Promise<boolean> {
+  try {
+    await fsp.access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function rotateUsageLog(logPath: string, incomingBytes: number): Promise<void> {
+  let currentBytes = 0;
+  try {
+    currentBytes = (await fsp.stat(logPath)).size;
+  } catch {}
+  if (currentBytes + incomingBytes <= usageLogMaxBytes()) return;
+  await fsp.rm(`${logPath}.${USAGE_LOG_BACKUP_COUNT}`, { force: true });
+  for (let index = USAGE_LOG_BACKUP_COUNT - 1; index >= 1; index -= 1) {
+    const source = `${logPath}.${index}`;
+    if (await pathExists(source)) await fsp.rename(source, `${logPath}.${index + 1}`);
+  }
+  if (await pathExists(logPath)) await fsp.rename(logPath, `${logPath}.1`);
+}
+
+async function appendUsageRecord(logPath: string, record: Record<string, unknown>): Promise<void> {
+  const line = `${JSON.stringify(record)}\n`;
+  await fsp.mkdir(path.dirname(logPath), { recursive: true });
+  await rotateUsageLog(logPath, Buffer.byteLength(line, "utf8"));
+  await fsp.appendFile(logPath, line, "utf8");
+}
+
+export function recordMcpUsage(tool: string, args: unknown, result: unknown, status: McpUsageStatus, durationMs: number): void {
   const logPath = resolveMcpUsageLogPath();
   if (!logPath) return;
-  try {
+  const timestamp = new Date().toISOString();
+  usageWriteQueue = usageWriteQueue.then(async () => {
     const inputText = serializeForEstimate(args);
     const outputText = serializeForEstimate(result);
     const inputTokens = estimateMcpTokens(inputText);
@@ -71,7 +110,7 @@ export async function recordMcpUsage(tool: string, args: unknown, result: unknow
       : undefined;
     const record = {
       schema_version: 1,
-      timestamp: new Date().toISOString(),
+      timestamp,
       source: "codexpro",
       model: CODEXPRO_MODEL,
       reasoning_effort: CODEXPRO_REASONING_EFFORT,
@@ -92,9 +131,12 @@ export async function recordMcpUsage(tool: string, args: unknown, result: unknow
       output_bytes: Buffer.byteLength(outputText, "utf8"),
       estimate_kind: "mcp_payload_heuristic"
     };
-    await fsp.mkdir(path.dirname(logPath), { recursive: true });
-    await fsp.appendFile(logPath, `${JSON.stringify(record)}\n`, "utf8");
-  } catch {
+    await appendUsageRecord(logPath, record);
+  }).catch(() => {
     // Usage accounting must never make an MCP tool fail.
-  }
+  });
+}
+
+export async function flushMcpUsage(): Promise<void> {
+  await usageWriteQueue;
 }

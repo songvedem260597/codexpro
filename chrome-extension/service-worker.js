@@ -7,7 +7,8 @@ const CHAT_ATTACHMENT_OWNERSHIP_KEY = 'codexproChatAttachmentOwnershipV1';
 const CHAT_ATTACHMENT_OWNERSHIP_TTL_MS = 30 * 60 * 1000;
 const DOM_READ_TIMEOUT_MS = 2500;
 const DOM_ACTIVITY_PROBE_TIMEOUT_MS = 800;
-const DOM_ACTIVITY_PROBE_CACHE_MS = 1000;
+const DOM_ACTIVITY_PROBE_CACHE_MS = 5000;
+const DOM_ACTIVITY_RECENT_NETWORK_MS = 2*60*1000;
 const CANONICAL_READ_TIMEOUT_MS = 15000;
 const DOM_ACTION_TIMEOUT_MS = 5000;
 const SCREENSHOT_TIMEOUT_MS = 15000;
@@ -560,10 +561,16 @@ async function chatDomActivityState(tabId,conversationId,options={}) {
 
 async function tabList() {
   const tabs = await chrome.tabs.query({});
+  const liveTabIds=new Set(tabs.map(tab=>tab.id).filter(Number.isInteger));
+  for(const tabId of chatDomActivityByTab.keys())if(!liveTabIds.has(tabId))chatDomActivityByTab.delete(tabId);
   const titleOverrides=await getConversationTitleOverrides();
   const summaries=await Promise.all(tabs.map(async tab => {
     const conversationId=conversationIdFromUrl(tab.url);
-    const [networkState,domActivity]=await Promise.all([chatRequestState(tab.id,conversationId),chatDomActivityState(tab.id,conversationId)]);
+    const networkState=await chatRequestState(tab.id,conversationId);
+    const cachedDomActivity=chatDomActivityByTab.get(tab.id)?.value;
+    const networkObservedAt=Math.max(Date.parse(networkState.network_last_started_at||'')||0,Date.parse(networkState.network_last_completed_at||'')||0);
+    const shouldProbeDom=Boolean(conversationId&&(tab.active||networkState.busy||cachedDomActivity?.busy||Date.now()-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS));
+    const domActivity=shouldProbeDom?await chatDomActivityState(tab.id,conversationId):{available:false,busy:false,source:'',activity_text:''};
     const networkStream=conversationId&&networkState.network_state!=='idle'?await chatNetworkStreamCapture(tab.id,conversationId):{};
     const titleOverride=conversationId?titleOverrides[conversationId]:null;
     const streamBusy=Boolean(networkStream.in_progress);

@@ -629,15 +629,25 @@ class CdpClient {
   static async connect(webSocketUrl: string): Promise<CdpClient> {
     const socket = new WebSocket(webSocketUrl);
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new CodexProError("Timed out connecting to the Chrome tab.")), 8_000);
+      let settled = false;
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { socket.close(); } catch {}
+        reject(error);
+      };
+      const timer = setTimeout(() => fail(new CodexProError("Timed out connecting to the Chrome tab.")), 8_000);
       socket.addEventListener("open", () => {
+        if (settled) {
+          try { socket.close(); } catch {}
+          return;
+        }
+        settled = true;
         clearTimeout(timer);
         resolve();
       }, { once: true });
-      socket.addEventListener("error", () => {
-        clearTimeout(timer);
-        reject(new CodexProError("Unable to connect to the Chrome tab."));
-      }, { once: true });
+      socket.addEventListener("error", () => fail(new CodexProError("Unable to connect to the Chrome tab.")), { once: true });
     });
     return new CdpClient(socket);
   }

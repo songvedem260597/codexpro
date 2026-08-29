@@ -13,6 +13,7 @@ const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
 const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
 const REALTIME_WATCHDOG_MS = 30000;
+const PROJECT_REFRESH_MS = 5 * 60 * 1000;
 const NEW_CHAT_TARGET = "__codexpro_new_chat__";
 const ALL_ALLOWED_WORKSPACES = "__codexpro_all_allowed__";
 const ROLLOVER_CONTEXT_MAX_CHARS = 9000;
@@ -297,7 +298,7 @@ function ProjectDropdown({ value, projects, disabled, onChange }) {
           </div>
           <button type="button" role="option" aria-selected={allAllowed} className={`project-dropdown-option project-dropdown-option-all ${allAllowed ? "is-selected" : ""}`} onClick={() => { onChange(ALL_ALLOWED_WORKSPACES); setOpen(false); setQuery(""); }}>
             <span className="project-dropdown-mark">⌕</span>
-            <span className="project-dropdown-copy"><strong>Tất cả vùng CodexPro được cấp quyền</strong><small>Không chọn repo/đường dẫn cụ thể · cho phép tìm trên mọi workspace được phép truy cập</small></span>
+            <span className="project-dropdown-copy"><strong>Tất cả đường dẫn</strong><small>Không chọn repo/đường dẫn cụ thể · cho phép tìm trên mọi workspace được phép truy cập</small></span>
             {allAllowed && <span className="project-dropdown-check">✓</span>}
           </button>
           {filteredProjects.map((project) => (
@@ -624,6 +625,7 @@ function App() {
   const [busy, setBusy] = useState("");
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
+  const [workerUpdateConfirmOpen, setWorkerUpdateConfirmOpen] = useState(false);
   const [inspection, setInspection] = useState(null);
   const [checkingProfiles, setCheckingProfiles] = useState([]);
   const [requestDrafts, setRequestDrafts] = useState({});
@@ -638,6 +640,7 @@ function App() {
   const [renameChat, setRenameChat] = useState(null);
   const conversationTitleOverridesRef = useRef({});
   const refreshInFlight = useRef(false);
+  const projectRefreshInFlight = useRef(false);
   const statusRefreshInFlight = useRef(false);
   const profileCheckTimes = useRef(new Map());
   const responseFetches = useRef(new Set());
@@ -929,6 +932,18 @@ function App() {
     }
   }, []);
 
+  const refreshProjects = useCallback(async () => {
+    if (projectRefreshInFlight.current || refreshInFlight.current) return;
+    projectRefreshInFlight.current = true;
+    try {
+      setProjects(await api.listProjects());
+    } catch {
+      // Keep the last good project list when a background discovery refresh transiently fails.
+    } finally {
+      projectRefreshInFlight.current = false;
+    }
+  }, []);
+
   useEffect(() => {
     void refresh(true);
     const unsubscribe = api.onBrowserProfiles?.((payload) => {
@@ -941,13 +956,13 @@ function App() {
       });
     });
     const statusTimer = window.setInterval(() => void refreshStatus(), REALTIME_WATCHDOG_MS);
-    const projectsTimer = window.setInterval(() => void refresh(false), 30000);
+    const projectsTimer = window.setInterval(() => void refreshProjects(), PROJECT_REFRESH_MS);
     return () => {
       unsubscribe?.();
       window.clearInterval(statusTimer);
       window.clearInterval(projectsTimer);
     };
-  }, [refresh, refreshStatus]);
+  }, [refresh, refreshProjects, refreshStatus]);
 
   const platform = status?.platform || status?.task?.platform || "Windows";
 
@@ -1315,15 +1330,13 @@ function App() {
 
   async function reloadProfiles() {
     if (!profileSummary.reload) return;
-    const deferredNote = profileSummary.deferredUpdate ? ` ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua để không gián đoạn task.` : "";
-    const message = `Update worker extension lên ${WORKER_EXTENSION_VERSION} cho ${profileSummary.reload} worker đang rảnh?${deferredNote}`;
-    if (!window.confirm(message)) return;
+    setWorkerUpdateConfirmOpen(false);
     setBusy("reload-profiles");
     setError("");
     try {
       const result = await api.reloadProfiles();
       if (result.count) {
-        notify(`Đang update ${result.count} worker đang rảnh${result.deferred ? ` · bỏ qua ${result.deferred} worker đang làm việc` : ""}`);
+        notify(`Đã update thành công ${result.count} worker lên ${result.version}${result.deferred ? ` · bỏ qua ${result.deferred} worker đang làm việc` : ""}`);
       } else if (result.deferred) {
         notify(`${result.deferred} worker đang làm việc · chưa update để tránh gián đoạn`);
       } else {
@@ -2195,7 +2208,7 @@ function App() {
               </div>
               <button
                 className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}
-                onClick={reloadProfiles}
+                onClick={() => setWorkerUpdateConfirmOpen(true)}
                 disabled={Boolean(busy) || profileSummary.reload === 0}
                 title={profileSummary.reload
                   ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${WORKER_EXTENSION_VERSION}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
@@ -2765,6 +2778,29 @@ function App() {
       </main>
 
       {renderChatModal()}
+
+      {workerUpdateConfirmOpen && (
+        <div className="modal-backdrop worker-update-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setWorkerUpdateConfirmOpen(false)}>
+          <div className="worker-update-dialog" role="dialog" aria-modal="true" aria-labelledby="worker-update-title">
+            <div className="worker-update-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M12 3v12m0 0 4-4m-4 4-4-4" />
+                <path d="M5 17v2h14v-2" />
+              </svg>
+            </div>
+            <div className="worker-update-copy">
+              <p className="eyebrow">WORKER UPDATE</p>
+              <h2 id="worker-update-title">Cập nhật CodexPro Worker</h2>
+              <p>Cập nhật <strong>{profileSummary.reload} worker đang rảnh</strong> lên phiên bản <code>{WORKER_EXTENSION_VERSION}</code>.</p>
+              {profileSummary.deferredUpdate > 0 && <p className="worker-update-note">{profileSummary.deferredUpdate} worker đang làm việc sẽ được giữ nguyên để không gián đoạn task.</p>}
+            </div>
+            <div className="worker-update-actions">
+              <button type="button" className="button ghost" onClick={() => setWorkerUpdateConfirmOpen(false)}>Hủy</button>
+              <button type="button" className="button primary" onClick={() => void reloadProfiles()}>Cập nhật worker</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {inspection && (
         <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setInspection(null)}>

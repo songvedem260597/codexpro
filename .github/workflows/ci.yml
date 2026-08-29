@@ -32,8 +32,14 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Install Manager
+        run: npm --prefix manager ci
+
       - name: Build
         run: npm run build
+
+      - name: Check Manager
+        run: npm run manager:check
 
       - name: Smoke Test
         run: npm run smoke

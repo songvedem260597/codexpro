@@ -11,6 +11,12 @@ function assert(ok, message) {
   if (!ok) throw new Error(message);
 }
 
+function structuredErrorMessage(result) {
+  const error = result?.structuredContent?.error;
+  if (typeof error === 'string') return error;
+  return String(error?.message ?? error?.name ?? '');
+}
+
 async function pathExists(file) {
   try {
     await fs.access(file);
@@ -271,7 +277,7 @@ async function runFullModeStress(root) {
       name: 'bash',
       arguments: { workspace_id: ws, command: 'pwd\ntouch newline-direct-owned' }
     });
-    assert(blockedNewline.isError === true && String(blockedNewline.structuredContent.error).includes('blocked'), 'safe bash allowed newline command chaining');
+    assert(blockedNewline.isError === true && structuredErrorMessage(blockedNewline).includes('blocked'), 'safe bash allowed newline command chaining');
     assert(!(await pathExists(newlineDirectTarget)), 'safe bash newline command created a file');
 
     const newlineSuperTarget = path.join(root, 'newline-supertool-owned');
@@ -286,7 +292,7 @@ async function runFullModeStress(root) {
       name: 'bash',
       arguments: { workspace_id: ws, command: 'git diff "--output=safe-bash-owned.patch"' }
     });
-    assert(blockedOutputFlag.isError === true && String(blockedOutputFlag.structuredContent.error).includes('blocked'), 'safe bash allowed quoted git output path');
+    assert(blockedOutputFlag.isError === true && structuredErrorMessage(blockedOutputFlag).includes('blocked'), 'safe bash allowed quoted git output path');
     assert(!(await pathExists(path.join(root, 'safe-bash-owned.patch'))), 'safe bash git output path created a file');
 
     const blockedDollarExpansion = await client.request('tools/call', {
@@ -300,7 +306,7 @@ async function runFullModeStress(root) {
       name: 'bash',
       arguments: { workspace_id: ws, command: 'find . "-fprint0" find-owned.txt' }
     });
-    assert(blockedFindFprint0.isError === true && String(blockedFindFprint0.structuredContent.error).includes('blocked'), 'safe bash allowed quoted find -fprint0 path write');
+    assert(blockedFindFprint0.isError === true && structuredErrorMessage(blockedFindFprint0).includes('blocked'), 'safe bash allowed quoted find -fprint0 path write');
     assert(!(await pathExists(path.join(root, 'find-owned.txt'))), 'safe bash find -fprint0 created a file');
 
     const blockedEnvWrite = await client.request('tools/call', {
@@ -546,7 +552,7 @@ async function runSupertoolModeStress(root) {
       name: 'codexpro',
       arguments: { action: 'search', args: { workspace_id: opened.structuredContent.workspace_id, query: 'alpha' } }
     });
-    assert(blockedSearch.isError === true && String(blockedSearch.structuredContent.error).includes('not available'), 'supertool allowed disabled search action');
+    assert(blockedSearch.isError === true && structuredErrorMessage(blockedSearch).includes('not available'), 'supertool allowed disabled search action');
 
     const missingRead = await client.request('tools/call', {
       name: 'codexpro',
@@ -558,7 +564,7 @@ async function runSupertoolModeStress(root) {
       name: 'codexpro',
       arguments: { action: 'read', args: { workspace_id: opened.structuredContent.workspace_id, path: ['demo.txt'] } }
     });
-    const malformedReadError = String(malformedRead.structuredContent.error ?? '');
+    const malformedReadError = structuredErrorMessage(malformedRead);
     assert(malformedRead.isError === true && malformedRead.structuredContent.codexpro_tool === 'read' && malformedRead.structuredContent.wrapped_tool === 'read', 'supertool malformed read was not tagged as read');
     assert(malformedReadError.includes('Invalid arguments for read') && !malformedReadError.includes('TypeError'), `supertool malformed read leaked raw handler error: ${malformedReadError}`);
 
@@ -566,7 +572,7 @@ async function runSupertoolModeStress(root) {
       name: 'codexpro',
       arguments: { action: 'bash', args: { workspace_id: opened.structuredContent.workspace_id, command: 'pwd' } }
     });
-    assert(blockedBash.isError === true && String(blockedBash.structuredContent.error).includes('not available'), 'supertool allowed disabled bash action');
+    assert(blockedBash.isError === true && structuredErrorMessage(blockedBash).includes('not available'), 'supertool allowed disabled bash action');
   } finally {
     await client.close();
   }
@@ -589,7 +595,7 @@ async function runMaxReadSearchStress() {
       name: 'read',
       arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'large.txt' }
     });
-    assert(fullRead.isError === true && String(fullRead.structuredContent.error).includes('too large'), 'full read ignored maxReadBytes');
+    assert(fullRead.isError === true && structuredErrorMessage(fullRead).includes('too large'), 'full read ignored maxReadBytes');
     const rangedRead = await client.request('tools/call', {
       name: 'read',
       arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'large.txt', start_line: 3, end_line: 3 }
@@ -630,7 +636,7 @@ async function runNodeFallbackSearchLimitStress() {
       name: 'search',
       arguments: { workspace_id: opened.structuredContent.workspace_id, query: '(a+)+$', regex: true, path: 'overflow.txt' }
     });
-    assert(String(regex.structuredContent.error).toLowerCase().includes('regex search requires ripgrep'), `node fallback accepted regex search: ${JSON.stringify(regex.structuredContent)}`);
+    assert(structuredErrorMessage(regex).toLowerCase().includes('regex search requires ripgrep'), `node fallback accepted regex search: ${JSON.stringify(regex.structuredContent)}`);
   } finally {
     await client.close();
   }
@@ -649,7 +655,7 @@ async function runBashOutputTerminationStress() {
       name: 'bash',
       arguments: {
         workspace_id: opened.structuredContent.workspace_id,
-        command: `${JSON.stringify(process.execPath)} -e "process.on('SIGTERM',()=>{}); setInterval(()=>process.stdout.write('x'.repeat(1024)),1)"`,
+        command: `${process.platform === 'win32' ? '& ' : ''}${JSON.stringify(process.execPath)} -e "process.on('SIGTERM',()=>{}); setInterval(()=>process.stdout.write('x'.repeat(1024)),1)"`,
         timeout_ms: 15000
       }
     });
@@ -827,7 +833,7 @@ async function runMinimalHandoffStress(root) {
       name: 'codexpro',
       arguments: { action: 'write', args: { path: 'demo.txt', content: 'bypass\n' } }
     });
-    assert(blockedWrite.isError === true && String(blockedWrite.structuredContent.error).includes('not available'), 'minimal handoff supertool allowed disabled write');
+    assert(blockedWrite.isError === true && structuredErrorMessage(blockedWrite).includes('not available'), 'minimal handoff supertool allowed disabled write');
   } finally {
     await client.close();
   }

@@ -528,7 +528,7 @@ async function runAnalysisCli(command, argv) {
     printWorkspaceInspection(await analysis.inspectWorkspace(config, guard, workspace), Boolean(args.json));
     return;
   }
-  const status = git.gitDiffStatus(config, guard, workspace, args.path, Boolean(args.staged));
+  const status = await git.gitDiffStatus(config, guard, workspace, args.path, Boolean(args.staged));
   assertGitStatusAvailable(status);
   const changedPaths = analysisChangedPaths(status);
   const review = await analysis.reviewWorkspaceChanges(config, guard, workspace, { changedPaths });

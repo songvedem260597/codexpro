@@ -339,13 +339,13 @@ function registerToolCompat(
       const status = result?.isError ? "error" : "ok";
       const durationMs = Date.now() - started;
       logToolCall(name, status, started);
-      await recordMcpUsage(name, usageArgs, result, status, durationMs);
+      recordMcpUsage(name, usageArgs, result, status, durationMs);
       return result;
     } catch (error) {
       const result = tagToolResult(errorResult(error), name, options);
       const durationMs = Date.now() - started;
       logToolCall(name, "error", started);
-      await recordMcpUsage(name, usageArgs, result, "error", durationMs);
+      recordMcpUsage(name, usageArgs, result, "error", durationMs);
       return result;
     }
   };
@@ -1300,7 +1300,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
 
       try {
-        const status = gitStatus(config, workspace);
+        const status = await gitStatus(config, workspace);
         const gitFailed = looksLikeGitError(status);
         const changed = gitFailed ? 0 : changedStatusLines(status).length;
         check("git status", gitFailed ? "warn" : "pass", gitFailed ? status : `${changed} changed entries`);
@@ -1326,7 +1326,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
             await editTextFile(config, guard, workspace, probePath, "marker: before", "marker: after", { expectedReplacements: 1 });
             const readBack = await readTextFile(config, guard, workspace, probePath, { maxBytes: 20_000 });
             if (!readBack.text.includes("marker: after")) throw new CodexProError("self-test edit marker was not found after edit.");
-            const scopedStatus = gitStatus(config, workspace, guard, probePath);
+            const scopedStatus = await gitStatus(config, workspace, guard, probePath);
             const scopedFiles = changedStatusLines(scopedStatus);
             filesTouched.push(probePath);
             check(
@@ -2512,7 +2512,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const scopedPath = typeof args.path === "string" ? args.path : undefined;
-      const status = gitStatus(config, workspace, guard, scopedPath);
+      const status = await gitStatus(config, workspace, guard, scopedPath);
       const statusError = looksLikeGitError(status) ? status : "";
       const changedFiles = statusError ? [] : changedStatusLines(status);
       return textResult(status, {
@@ -2549,7 +2549,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false)));
+      const rawDiff = normalizeGitOutput(await gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false)));
       const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
       const stats = diffError ? { additions: 0, deletions: 0, changed: false } : diffStats(rawDiff);
       const includeDiff = parseBool(args.include_diff, true);
@@ -2609,9 +2609,9 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       const scopedPath = typeof args.path === "string" ? args.path : undefined;
       const staged = parseBool(args.staged, false);
       const normalizedScopedPath = scopedPath?.trim() ? guard.resolve(workspace, scopedPath).relPath : undefined;
-      const status = normalizeGitOutput(gitDiffStatus(config, guard, workspace, normalizedScopedPath, staged));
+      const status = normalizeGitOutput(await gitDiffStatus(config, guard, workspace, normalizedScopedPath, staged));
       const includeDiff = parseBool(args.include_diff, true);
-      const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, normalizedScopedPath, staged));
+      const rawDiff = normalizeGitOutput(await gitDiff(config, guard, workspace, normalizedScopedPath, staged));
       const statusError = looksLikeGitError(status) ? status : "";
       const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
       const diff = diffError ? "" : rawDiff;
