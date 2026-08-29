@@ -6,13 +6,20 @@ import type { PathGuard, Workspace } from "../guard.js";
 import { classifyFileRole, classifyLanguage, isEntrypoint, isGeneratedFile } from "./classify.js";
 import type { InventoryFile, InventoryResult } from "./types.js";
 
+const INVENTORY_SCHEMA_VERSION = 2;
+
 function shouldContentHash(file: Pick<InventoryFile, "role" | "generated">): boolean {
   return !file.generated && (file.role === "source" || file.role === "test" || file.role === "config");
 }
 
 export async function inventoryWorkspace(config: CodexProConfig, guard: PathGuard, workspace: Workspace): Promise<InventoryResult> {
   const maxFiles = config.analysisLimits.maxInventoryFiles;
-  const candidates = await listFiles(guard, workspace, { root: ".", includeHidden: true, maxFiles: maxFiles + 1 });
+  const candidates = await listFiles(guard, workspace, {
+    root: ".",
+    includeHidden: true,
+    maxFiles: maxFiles + 1,
+    excludePrefixes: [".ai-bridge"]
+  });
   const truncated = candidates.length > maxFiles;
   const files: InventoryFile[] = [];
 
@@ -46,7 +53,7 @@ export async function inventoryWorkspace(config: CodexProConfig, guard: PathGuar
 
   files.sort((a, b) => a.path.localeCompare(b.path));
   const fingerprint = createHash("sha256")
-    .update(files.map((file) => `${file.path}:${file.bytes}:${file.modifiedMs}:${file.contentHash ?? "metadata"}`).join("\n"))
+    .update(`inventory-v${INVENTORY_SCHEMA_VERSION}\n${files.map((file) => `${file.path}:${file.bytes}:${file.modifiedMs}:${file.contentHash ?? "metadata"}`).join("\n")}`)
     .digest("hex");
   const warnings = truncated ? [`Inventory truncated at ${maxFiles} files.`] : [];
   return {

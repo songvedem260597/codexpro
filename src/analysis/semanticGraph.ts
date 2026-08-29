@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import ts from "typescript";
 import { buildTypeScriptCompilerGroups } from "./compilerProjects.js";
@@ -120,7 +121,28 @@ function sameAnonymousCall(a: AnonymousCallIdentity, b: AnonymousCallIdentity): 
   return a.kind === b.kind && a.callee === b.callee && a.channel === b.channel && a.argumentIndex === b.argumentIndex;
 }
 
-function anonymousCallOrdinal(node: ts.FunctionExpression | ts.ArrowFunction, sourceFile: ts.SourceFile, identity: AnonymousCallIdentity): number {
+function anonymousAnchorNode(node: ts.FunctionExpression | ts.ArrowFunction): ts.Node {
+  let current: ts.Node = node.parent;
+  while (current.parent && !ts.isSourceFile(current.parent) && !ts.isBlock(current.parent)) current = current.parent;
+  return current;
+}
+
+function anonymousCallAnchorKey(node: ts.FunctionExpression | ts.ArrowFunction, sourceFile: ts.SourceFile, identity: AnonymousCallIdentity): string {
+  const anchor = anonymousAnchorNode(node);
+  const anchorStart = anchor.getStart(sourceFile);
+  const anchorEnd = anchor.getEnd();
+  const nodeStart = node.getStart(sourceFile);
+  const nodeEnd = node.getEnd();
+  const outerText = nodeStart >= anchorStart && nodeEnd <= anchorEnd
+    ? `${sourceFile.text.slice(anchorStart, nodeStart)}<callback>${sourceFile.text.slice(nodeEnd, anchorEnd)}`
+    : node.parent.getText(sourceFile).replace(node.getText(sourceFile), "<callback>");
+  const parameters = node.parameters.map((parameter) => parameter.name.getText(sourceFile)).join(",");
+  const callbackShape = node.getText(sourceFile).replace(/\s+/g, "");
+  const material = `${identity.kind}\u0000${identity.callee}\u0000${identity.channel}\u0000${identity.argumentIndex}\u0000${outerText.replace(/\s+/g, "")}\u0000${parameters}\u0000${callbackShape}`;
+  return createHash("sha256").update(material).digest("hex").slice(0, 12);
+}
+
+function anonymousCallOrdinal(node: ts.FunctionExpression | ts.ArrowFunction, sourceFile: ts.SourceFile, identity: AnonymousCallIdentity, anchorKey: string): number {
   const scope = anonymousScope(node, sourceFile);
   let ordinal = 0;
   let found = false;
@@ -132,7 +154,7 @@ function anonymousCallOrdinal(node: ts.FunctionExpression | ts.ArrowFunction, so
     }
     if (ts.isFunctionExpression(candidate) || ts.isArrowFunction(candidate)) {
       const candidateIdentity = anonymousCallIdentity(candidate, sourceFile);
-      if (candidateIdentity && sameAnonymousCall(identity, candidateIdentity)) ordinal += 1;
+      if (candidateIdentity && sameAnonymousCall(identity, candidateIdentity) && anonymousCallAnchorKey(candidate, sourceFile, candidateIdentity) === anchorKey) ordinal += 1;
       if (candidate !== scope) return;
     }
     ts.forEachChild(candidate, visit);
@@ -144,8 +166,9 @@ function anonymousCallOrdinal(node: ts.FunctionExpression | ts.ArrowFunction, so
 function anonymousFunctionName(node: ts.FunctionExpression | ts.ArrowFunction, sourceFile: ts.SourceFile): string {
   const identity = anonymousCallIdentity(node, sourceFile);
   if (identity) {
-    const ordinal = anonymousCallOrdinal(node, sourceFile, identity);
-    return `callback:${identity.kind}:${identity.callee}:${identity.channel}:arg${identity.argumentIndex}:occ${ordinal}`;
+    const anchorKey = anonymousCallAnchorKey(node, sourceFile, identity);
+    const ordinal = anonymousCallOrdinal(node, sourceFile, identity, anchorKey);
+    return `callback:${identity.kind}:${identity.callee}:${identity.channel}:arg${identity.argumentIndex}:key${anchorKey}:occ${ordinal}`;
   }
   return `callback:${anonymousStructuralPath(node)}`;
 }
