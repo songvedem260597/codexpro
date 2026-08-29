@@ -32,6 +32,7 @@ const MAX_REQUEST_TEXT_PREVIEW_BYTES = 512 * 1024;
 
 const WORKER_EXTENSION_VERSION = "0.5.64";
 const RUNTIME_BASE_CACHE_MS = 10000;
+const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
 const GIT_SUMMARY_CACHE_MS = 2 * 60 * 1000;
 const GIT_SUMMARY_CACHE_RETENTION_MS = 30 * 60 * 1000;
@@ -1247,8 +1248,12 @@ function connectorLink(config, token) {
   return url.toString();
 }
 
-async function runtimeBaseStatus() {
-  if (runtimeBaseCache && Date.now() - runtimeBaseCache.cachedAt < RUNTIME_BASE_CACHE_MS) return runtimeBaseCache.value;
+async function runtimeBaseStatus(options = {}) {
+  const forceRefresh = options?.forceRefresh === true;
+  const cacheAge = runtimeBaseCache ? Date.now() - runtimeBaseCache.cachedAt : Number.POSITIVE_INFINITY;
+  const cacheTtl = runtimeBaseCache?.value?.local?.ok ? RUNTIME_BASE_CACHE_MS : RUNTIME_BASE_FAILURE_CACHE_MS;
+  if (!forceRefresh && runtimeBaseCache && cacheAge < cacheTtl) return runtimeBaseCache.value;
+  if (forceRefresh) runtimeBaseCache = null;
   if (runtimeBasePromise) return runtimeBasePromise;
   runtimeBasePromise = (async () => {
     const task = await scheduledTask();
@@ -1291,8 +1296,8 @@ async function runtimeBaseStatus() {
   }
 }
 
-async function runtimeStatus() {
-  const base = await runtimeBaseStatus();
+async function runtimeStatus(options = {}) {
+  const base = await runtimeBaseStatus(options);
   const browserProfilesRaw = base.local.ok
     ? await listBrowserProfilesThroughMcp(base.config, base.token).catch(() => [])
     : [];
@@ -1313,6 +1318,14 @@ async function runtimeStatus() {
     tokenConfigured: base.tokenConfigured,
     autoStart: base.autoStart
   };
+}
+
+async function readyRuntimeBaseStatus() {
+  let base = await runtimeBaseStatus();
+  if (base.local.ok) return base;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  base = await runtimeBaseStatus({ forceRefresh: true });
+  return base;
 }
 
 function jsonFiles(dir) {
@@ -2119,7 +2132,7 @@ async function sendProfileRequest(payload) {
 async function getRepoTaskStatus(payload) {
   const taskId = String(payload?.taskId || "").trim();
   if (!/^cpt_[a-f0-9]{24}$/.test(taskId)) throw new Error("CodexPro task id không hợp lệ.");
-  const base = await runtimeBaseStatus();
+  const base = await readyRuntimeBaseStatus();
   if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   return await localMcpTool(base.config, base.token, "repo_task_status", { task_id: taskId }, 15000);
 }
@@ -2154,7 +2167,7 @@ async function getProfileResponse(payload) {
   const conversationId = String(payload?.conversationId || "").trim();
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
-  const base = await runtimeBaseStatus();
+  const base = await readyRuntimeBaseStatus();
   if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   return await localMcpTool(base.config, base.token, "browser_control", {
     action: "get_chat_response",
@@ -2200,8 +2213,9 @@ async function inspectThroughMcp(root) {
 
 async function controlServer(action) {
   if (!["start", "restart"].includes(action)) throw new Error("Thao tác server không hợp lệ.");
-  const current = await runtimeStatus();
+  const current = await runtimeStatus({ forceRefresh: true });
   if (action === "start" && current.local.ok) return current;
+  runtimeBaseCache = null;
   if (action === "restart") {
     const task = await scheduledTask();
     const config = parseTaskArguments(task.arguments);
@@ -2220,7 +2234,8 @@ async function controlServer(action) {
     await runPowerShell("Start-ScheduledTask -TaskName 'CodexPro' -ErrorAction Stop");
   }
   await new Promise((resolve) => setTimeout(resolve, 2400));
-  return runtimeStatus();
+  runtimeBaseCache = null;
+  return runtimeStatus({ forceRefresh: true });
 }
 
 ipcMain.handle("codexpro:status", () => runtimeStatus());
