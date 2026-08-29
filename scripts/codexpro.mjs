@@ -700,6 +700,15 @@ function readJsonFile(filePath) {
   }
 }
 
+function managerMaxSubagentsSetting() {
+  try {
+    const settings = readJsonFile(path.join(codexProHome(), 'manager-settings.json'));
+    return numberOption(settings?.maxSubagents, 1, 1, 1);
+  } catch {
+    return 1;
+  }
+}
+
 function loadWorkspaceProfile(root) {
   const profilePath = profilePathForRoot(root);
   if (!fs.existsSync(profilePath)) return {};
@@ -1569,7 +1578,7 @@ function buildExecutorCommand(args, root, planPath, planText) {
   const agent = String(args.agent ?? 'opencode').trim().toLowerCase();
   const model = String(args.model ?? process.env.CODEXPRO_AGENT_MODEL ?? '').trim();
   const subagentsRequested = args.subagents === true;
-  const maxSubagents = subagentsRequested ? numberOption(args.maxSubagents ?? process.env.CODEXPRO_MAX_SUBAGENTS, 1, 1, 1) : 0;
+  const maxSubagents = subagentsRequested ? numberOption(args.maxSubagents ?? process.env.CODEXPRO_MAX_SUBAGENTS ?? managerMaxSubagentsSetting(), managerMaxSubagentsSetting(), 1, 1) : 0;
   const replacements = {
     model,
     plan_file: planPath,
@@ -3308,7 +3317,7 @@ async function runDoctor(argv) {
       ? `${CODEXPRO_ORCHESTRATOR_AGENT} -> ${CODEXPRO_EXPLORE_AGENT}`
       : capability.reasons.join('; '));
     record(capability.subagentDepth >= 1 ? 'ok' : 'warn', 'OC child depth', `subagent_depth=${capability.subagentDepth}`);
-    record('ok', 'OC handoff cap', `max_subagents=${numberOption(args.maxSubagents ?? process.env.CODEXPRO_MAX_SUBAGENTS, 1, 1, 1)}`);
+    record('ok', 'OC handoff cap', `max_subagents=${numberOption(args.maxSubagents ?? process.env.CODEXPRO_MAX_SUBAGENTS ?? managerMaxSubagentsSetting(), managerMaxSubagentsSetting(), 1, 1)} (Manager setting)`);
     record(capability.taskPermission === 'allow' ? 'ok' : 'warn', 'OC Task access', `${CODEXPRO_EXPLORE_AGENT}: ${capability.taskPermission || 'not allowed'}`);
     record(capability.explorerEdit === 'deny' && capability.explorerBash === 'deny' && capability.explorerTask === 'deny' ? 'ok' : 'warn', 'OC child safety', `edit=${capability.explorerEdit || '?'} bash=${capability.explorerBash || '?'} task=${capability.explorerTask || '?'}`);
 

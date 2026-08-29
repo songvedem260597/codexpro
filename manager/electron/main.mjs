@@ -535,6 +535,7 @@ function createWindow() {
               };
             })()`, true);
             await win.webContents.executeJavaScript(`(async () => {
+              await window.codexpro.saveManagerSettings({ maxSubagents: 8 });
               const range = document.querySelector('.settings-range:not(.chat-height-range)');
               const heightRange = document.querySelector('.chat-height-range');
               const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
@@ -589,8 +590,9 @@ function createWindow() {
               settingsVisible: !settingsView?.hidden,
               rangeValue: document.querySelector('.settings-range:not(.chat-height-range)')?.value || '',
               heightRangeValue: document.querySelector('.chat-height-range')?.value || '',
-              numberValue: document.querySelectorAll('.settings-number-field input')?.[0]?.value || '',
-              heightNumberValue: document.querySelectorAll('.settings-number-field input')?.[1]?.value || '',
+              numberValue: document.querySelector('input[aria-label="Độ rộng popup chat"]')?.value || '',
+              heightNumberValue: document.querySelector('input[aria-label="Chiều cao khung chat bên trong"]')?.value || '',
+              subagentValue: document.querySelector('.subagent-limit-field input')?.value || '',
               fontValue: document.querySelector('.font-setting-row .settings-dropdown-value strong')?.textContent?.trim() || '',
               profileLayoutValue: document.querySelector('.profile-layout-select .settings-dropdown-value strong')?.textContent?.trim() || '',
               profileLayoutClass: document.querySelector('.profile-list')?.className || '',
@@ -603,16 +605,16 @@ function createWindow() {
             };
           })()`, true);
           settingsProbe = {
-            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "tahoma" && afterSettings.profileLayout === "cards" && /Tahoma/i.test(uiSettings.fontValue) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
-            before: { chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout },
-            saved: { chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily, profileLayout: afterSettings.profileLayout },
+            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && uiSettings.subagentValue === "1" && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.maxSubagents === 1 && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "tahoma" && afterSettings.profileLayout === "cards" && /Tahoma/i.test(uiSettings.fontValue) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
+            before: { maxSubagents: beforeSettings.maxSubagents, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout },
+            saved: { maxSubagents: afterSettings.maxSubagents, chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily, profileLayout: afterSettings.profileLayout },
             chatModalWidth,
             chatResponseHeight,
             ui: uiSettings,
             workerPackProbe
           };
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
-            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout })})`, true);
+            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ maxSubagents: beforeSettings.maxSubagents, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout })})`, true);
           }
         }
         const chatSmokeRequested = [
