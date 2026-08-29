@@ -23,6 +23,36 @@ const ROLLOVER_CONTEXT_MAX_CHARS = 9000;
 const REPO_TASK_VERIFICATION_RETRY_MS = 1500;
 const LATEST_RESPONSE_RECOVERY_POLL_MS = 3000;
 const PROJECTS_PER_PAGE = 8;
+const PROFILE_TASK_LABELS_STORAGE_KEY = "codexpro.profileTaskLabels.v1";
+
+function shortTaskLabel(value) {
+  const normalized = String(value || "")
+    .replace(/\r?\n+/g, " ")
+    .replace(/[`*_#>]/g, "")
+    .replace(/^\s*(?:hãy\s+|vui lòng\s+|giúp\s+|cần\s+biết\s+|cái\s+)/i, "")
+    .replace(/\s+làm\s+là\s+gì.*$/i, "")
+    .replace(/\s+(?:để|nhằm)\s+.+$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+  const firstClause = normalized.split(/\s*[:.!?]\s*/)[0] || normalized;
+  const allWords = firstClause.split(/\s+/).filter(Boolean);
+  const words = allWords.slice(0, 8);
+  let label = words.join(" ").replace(/\s+(?:đi|nhé|nha|dùm|giúp)$/i, "").trim();
+  if (!label) label = firstClause.slice(0, 52).trim();
+  if (allWords.length > words.length || label.length > 52) label = `${label.slice(0, 49).trimEnd()}…`;
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+function loadProfileTaskLabels() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(PROFILE_TASK_LABELS_STORAGE_KEY) || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 
 function Dot({ ok }) {
   return <span className={`dot ${ok ? "ok" : "bad"}`} aria-hidden="true" />;
@@ -649,6 +679,7 @@ function App() {
   const [requestFiles, setRequestFiles] = useState({});
   const [attachmentPreview, setAttachmentPreview] = useState(null);
   const [requestResponses, setRequestResponses] = useState({});
+  const [profileTaskLabels, setProfileTaskLabels] = useState(() => loadProfileTaskLabels());
   const [responseSelection, setResponseSelection] = useState({ key: "", text: "" });
   const [clearedResponseTargets, setClearedResponseTargets] = useState({});
   const [requestSendErrors, setRequestSendErrors] = useState({});
@@ -712,6 +743,14 @@ function App() {
   useEffect(() => {
     setProjectPage((current) => Math.min(current, Math.max(0, Math.ceil(projects.length / PROJECTS_PER_PAGE) - 1)));
   }, [projects.length]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PROFILE_TASK_LABELS_STORAGE_KEY, JSON.stringify(profileTaskLabels));
+    } catch {
+      // Convenience UI only; storage failure must not affect request sending.
+    }
+  }, [profileTaskLabels]);
 
   const notify = useCallback((message) => {
     setToast(message);
@@ -1876,6 +1915,10 @@ function App() {
         window.setTimeout(() => void refresh(false), 500);
         return;
       }
+      const taskLabel = shortTaskLabel(text);
+      if (taskLabel) {
+        setProfileTaskLabels((current) => ({ ...current, [profile.profile_id]: taskLabel }));
+      }
       if (newChat && resolvedConversationId && resolvedConversationId !== NEW_CHAT_TARGET) {
         setRequestTargets((current) => ({ ...current, [profile.profile_id]: resolvedConversationId }));
       }
@@ -2749,6 +2792,7 @@ function App() {
               const repoProject = directProject || fallbackProject;
               const repoLabel = String(profile.current_workspace_repo || repoProject?.githubRepo || (repoProject ? `Local · ${repoProject.name}` : "")).trim();
               const repoTitle = repoProject?.githubUrl || repoProject?.remoteUrl || workspaceRoot || repoProject?.root || "Worker chưa xác định được repo GitHub";
+              const profileTaskLabel = String(profileTaskLabels[profile.profile_id] || "").trim();
               return (
                 <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`} key={profile.profile_id}>
                   <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
@@ -2776,6 +2820,12 @@ function App() {
                       <span>{profile.tab_count} tab</span>
                       {connectorMessage && <span className={connectorInstalled ? "ready-text" : "profile-warning"}>{connectorMessage}</span>}
                     </div>
+                    {profileTaskLabel && (
+                      <div className="profile-task-summary" title={profileTaskLabel}>
+                        <span>{working || settling ? "Task hi\u1ec7n t\u1ea1i" : "Task g\u1ea7n nh\u1ea5t"}</span>
+                        <strong>{profileTaskLabel}</strong>
+                      </div>
+                    )}
                     {(working || settling) && <div className="profile-live-activity" role="status" aria-live="polite"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{liveActivityText || (settling ? "ChatGPT đang hoàn tất tác vụ" : "ChatGPT đang xử lý")}</span></div>}
                   </div>
                   <div className="profile-actions">
