@@ -24,7 +24,7 @@ const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
 
-const WORKER_EXTENSION_VERSION = "0.5.45";
+const WORKER_EXTENSION_VERSION = "0.5.46";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
@@ -1925,7 +1925,9 @@ async function reloadChromeProfiles() {
   };
 }
 
-async function sendProfileRequest(payload) {
+const profileSendOperations = new Map();
+
+async function sendProfileRequestUnlocked(payload) {
   const sendDebug = process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1";
   if (sendDebug) console.error('[manager-send] start');
   const profileId = String(payload?.profileId || "").trim();
@@ -2025,9 +2027,18 @@ async function sendProfileRequest(payload) {
     new_chat: newChat,
     text: taskText,
     attachments
-  }, 120000);
+  }, 190000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
   return { ...result, repo_task_id: taskId, repo_task_scope: requestScope, repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount };
+}
+
+async function sendProfileRequest(payload) {
+  const profileId = String(payload?.profileId || "").trim();
+  if(profileSendOperations.has(profileId))throw new Error("Profile này đang gửi một yêu cầu khác. Hãy chờ network ACK trước khi gửi tiếp.");
+  const operation=sendProfileRequestUnlocked(payload);
+  profileSendOperations.set(profileId,operation);
+  try{return await operation;}
+  finally{if(profileSendOperations.get(profileId)===operation)profileSendOperations.delete(profileId);}
 }
 
 async function getRepoTaskStatus(payload) {
