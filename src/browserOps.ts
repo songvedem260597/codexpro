@@ -25,6 +25,13 @@ export interface BrowserControlOptions {
   targetId?: string;
   url?: string;
   selector?: string;
+  ref?: string;
+  role?: string;
+  name?: string;
+  placeholder?: string;
+  label?: string;
+  testId?: string;
+  nth?: number;
   text?: string;
   key?: string;
   expression?: string;
@@ -35,6 +42,9 @@ export interface BrowserControlOptions {
   steps?: BrowserControlOptions[];
   maxChars?: number;
   fullPage?: boolean;
+  delta?: boolean;
+  trace?: boolean;
+  traceMs?: number;
 }
 
 interface BrowserTarget {
@@ -47,9 +57,13 @@ interface BrowserTarget {
 
 interface CdpResponse {
   id?: number;
+  method?: string;
+  params?: Record<string, any>;
   result?: Record<string, any>;
   error?: { code?: number; message?: string };
 }
+
+type CdpEventListener = (event: { method: string; params: Record<string, any>; receivedAt: number }) => void;
 
 export function normalizeBrowserDebugUrl(value: string): string {
   let parsed: URL;
@@ -136,6 +150,7 @@ async function targetFor(debugUrl: string, targetId?: string): Promise<BrowserTa
 class CdpClient {
   private nextId = 1;
   private readonly pending = new Map<number, { resolve: (value: Record<string, any>) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  private readonly listeners = new Map<string, Set<CdpEventListener>>();
 
   private constructor(private readonly socket: WebSocket) {
     socket.addEventListener("message", (event: MessageEvent) => {
@@ -143,6 +158,13 @@ class CdpClient {
       try {
         message = JSON.parse(String(event.data)) as CdpResponse;
       } catch {
+        return;
+      }
+      if (typeof message.method === "string") {
+        const payload = { method: message.method, params: message.params ?? {}, receivedAt: Date.now() };
+        for (const listener of [...(this.listeners.get(message.method) ?? []), ...(this.listeners.get("*") ?? [])]) {
+          try { listener(payload); } catch {}
+        }
         return;
       }
       if (typeof message.id !== "number") return;
@@ -185,14 +207,24 @@ class CdpClient {
     return this.socket.readyState === WebSocket.OPEN;
   }
 
-  send(method: string, params: Record<string, unknown> = {}): Promise<Record<string, any>> {
+  on(method: string, listener: CdpEventListener): () => void {
+    const listeners = this.listeners.get(method) ?? new Set<CdpEventListener>();
+    listeners.add(listener);
+    this.listeners.set(method, listeners);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size) this.listeners.delete(method);
+    };
+  }
+
+  send(method: string, params: Record<string, unknown> = {}, timeoutMs = 12_000): Promise<Record<string, any>> {
     if (!this.isOpen()) return Promise.reject(new CodexProError("Chrome DevTools connection is not open."));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new CodexProError(`Chrome DevTools timed out running ${method}.`));
-      }, 12_000);
+      }, Math.max(100, timeoutMs));
       this.pending.set(id, { resolve, reject, timer });
       this.socket.send(JSON.stringify({ id, method, params }));
     });
@@ -248,23 +280,17 @@ async function withTarget<T>(debugUrl: string, targetId: string | undefined, fn:
   }
 }
 
-async function evaluate(client: CdpClient, expression: string): Promise<any> {
+async function evaluate(client: CdpClient, expression: string, timeoutMs = 12_000): Promise<any> {
   const response = await client.send("Runtime.evaluate", {
     expression,
     awaitPromise: true,
     returnByValue: true,
     userGesture: true
-  });
+  }, timeoutMs);
   if (response.exceptionDetails) {
     throw new CodexProError(`Browser page script failed: ${response.exceptionDetails.text ?? "unknown error"}`);
   }
   return response.result?.value;
-}
-
-function selectorExpression(selector: string): string {
-  const value = boundedText(selector, 2_000).trim();
-  if (!value) throw new CodexProError("A CSS selector is required. Call action=snapshot to obtain selectors.");
-  return JSON.stringify(value);
 }
 
 function keyCode(key: string): number {
@@ -274,6 +300,136 @@ function keyCode(key: string): number {
     Home: 36, End: 35, PageUp: 33, PageDown: 34, Space: 32
   };
   return codes[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
+}
+
+function locatorPayload(options: BrowserControlOptions): Record<string, unknown> {
+  const selector = boundedText(options.selector, 2_000).trim();
+  const ref = boundedText(options.ref || (selector.startsWith("@e") ? selector : ""), 80).trim();
+  return {
+    selector: ref ? "" : selector,
+    ref,
+    role: boundedText(options.role, 80).trim(),
+    name: boundedText(options.name, 500).trim(),
+    placeholder: boundedText(options.placeholder, 500).trim(),
+    label: boundedText(options.label, 500).trim(),
+    testId: boundedText(options.testId, 500).trim(),
+    nth: Number.isInteger(options.nth) && Number(options.nth) >= 0 ? Number(options.nth) : 0
+  };
+}
+
+function hasLocator(options: BrowserControlOptions): boolean {
+  const locator = locatorPayload(options);
+  return Boolean(locator.selector || locator.ref || locator.role || locator.name || locator.placeholder || locator.label || locator.testId);
+}
+
+function locatorExpression(options: BrowserControlOptions): string {
+  if (!hasLocator(options)) throw new CodexProError("A selector, semantic ref, or locator is required. Call action=snapshot to obtain @e refs.");
+  const locator = JSON.stringify(locatorPayload(options));
+  return `(() => {
+    const locator=${locator};
+    const registry=globalThis.__codexproSemanticRegistry;
+    if(locator.ref){const direct=registry?.refs?.get(locator.ref);return direct?.isConnected?direct:null;}
+    if(locator.selector){try{return document.querySelector(locator.selector);}catch{return null;}}
+    const implicitRole=(el)=>el.getAttribute('role')||({BUTTON:'button',A:'link',INPUT:(el.type==='checkbox'?'checkbox':el.type==='radio'?'radio':'textbox'),TEXTAREA:'textbox',SELECT:'combobox'}[el.tagName]||'');
+    const accessibleName=(el)=>String(el.getAttribute('aria-label')||el.getAttribute('title')||el.labels?.[0]?.innerText||el.innerText||el.textContent||el.getAttribute('placeholder')||el.getAttribute('name')||'').trim();
+    let candidates=Array.from(document.querySelectorAll('a,button,input,textarea,select,[role],[contenteditable="true"],[data-testid],[data-test]'));
+    if(locator.role)candidates=candidates.filter(el=>implicitRole(el).toLowerCase()===locator.role.toLowerCase());
+    if(locator.name)candidates=candidates.filter(el=>accessibleName(el).toLowerCase().includes(locator.name.toLowerCase()));
+    if(locator.placeholder)candidates=candidates.filter(el=>String(el.getAttribute('placeholder')||'').toLowerCase().includes(locator.placeholder.toLowerCase()));
+    if(locator.label)candidates=candidates.filter(el=>String(el.labels?.[0]?.innerText||el.getAttribute('aria-label')||'').toLowerCase().includes(locator.label.toLowerCase()));
+    if(locator.testId)candidates=candidates.filter(el=>String(el.getAttribute('data-testid')||el.getAttribute('data-test')||'')===locator.testId);
+    return candidates[locator.nth]||null;
+  })()`;
+}
+
+function semanticSnapshotExpression(maxChars: number, delta: boolean): string {
+  return `(() => {
+    const registry=globalThis.__codexproSemanticRegistry||(globalThis.__codexproSemanticRegistry={next:1,sequence:0,refs:new Map(),reverse:new WeakMap(),previous:new Map(),previousText:''});
+    const visible=(el)=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none';};
+    const selectorFor=(el)=>{if(el.id)return '#'+CSS.escape(el.id);for(const attr of ['data-testid','data-test','name','aria-label']){const value=el.getAttribute(attr);if(value){const candidate=el.tagName.toLowerCase()+'['+attr+'='+JSON.stringify(value)+']';try{if(document.querySelectorAll(candidate).length===1)return candidate;}catch{}}}return '';};
+    const implicitRole=(el)=>el.getAttribute('role')||({BUTTON:'button',A:'link',INPUT:(el.type==='checkbox'?'checkbox':el.type==='radio'?'radio':'textbox'),TEXTAREA:'textbox',SELECT:'combobox'}[el.tagName]||'');
+    const accessibleName=(el)=>String(el.getAttribute('aria-label')||el.getAttribute('title')||el.labels?.[0]?.innerText||el.innerText||el.textContent||el.getAttribute('placeholder')||el.getAttribute('name')||'').trim().slice(0,300);
+    const current=new Map();
+    const elements=Array.from(document.querySelectorAll('a,button,input,textarea,select,[role],[contenteditable="true"],[data-testid],[data-test]')).filter(visible).slice(0,500).map(el=>{
+      let ref=registry.reverse.get(el);if(!ref){ref='@e'+registry.next++;registry.reverse.set(el,ref);}registry.refs.set(ref,el);
+      const item={ref,tag:el.tagName.toLowerCase(),role:implicitRole(el),name:accessibleName(el),selector:selectorFor(el),type:el.getAttribute('type'),placeholder:String(el.getAttribute('placeholder')||'').slice(0,300),test_id:String(el.getAttribute('data-testid')||el.getAttribute('data-test')||'').slice(0,300),disabled:Boolean(el.disabled),checked:Boolean(el.checked),aria_pressed:el.getAttribute('aria-pressed'),data_state:el.getAttribute('data-state'),value_length:typeof el.value==='string'?el.value.length:0};
+      current.set(ref,JSON.stringify(item));return item;
+    });
+    for(const [ref,el] of registry.refs){if(!el?.isConnected)registry.refs.delete(ref);}
+    const removed_refs=[...registry.previous.keys()].filter(ref=>!current.has(ref));
+    const changed_elements=${delta ? "elements.filter(item=>registry.previous.get(item.ref)!==current.get(item.ref))" : "elements"};
+    const bodyText=String(document.body?.innerText||'').slice(0,${maxChars});
+    const textChanged=bodyText!==registry.previousText;
+    registry.previous=current;registry.previousText=bodyText;registry.sequence+=1;
+    return {title:document.title,url:location.href,text:${delta ? "(textChanged?bodyText:'')" : "bodyText"},text_changed:textChanged,elements:changed_elements,element_count:elements.length,removed_refs,semantic_refs:true,delta:${delta ? "true" : "false"},snapshot_sequence:registry.sequence};
+  })()`;
+}
+
+function sanitizedTraceUrl(value: unknown): string {
+  const raw = boundedText(value, 8_000);
+  try {
+    const url = new URL(raw);
+    url.username = "";
+    url.password = "";
+    url.hash = "";
+    for (const key of [...url.searchParams.keys()]) url.searchParams.set(key, "<redacted>");
+    return boundedText(url.toString(), 2_000);
+  } catch {
+    return boundedText(raw.split(/[?#]/, 1)[0], 2_000);
+  }
+}
+
+function sanitizeTraceEvent(event: { method: string; params: Record<string, any>; receivedAt: number }): Record<string, unknown> | null {
+  const { method, params, receivedAt } = event;
+  if (method === "Network.requestWillBeSent") return { at: receivedAt, event: method, request_id: boundedText(params.requestId, 160), method: boundedText(params.request?.method, 16), url: sanitizedTraceUrl(params.request?.url), resource_type: boundedText(params.type, 40) };
+  if (method === "Network.responseReceived") return { at: receivedAt, event: method, request_id: boundedText(params.requestId, 160), status: Number(params.response?.status) || 0, url: sanitizedTraceUrl(params.response?.url), mime_type: boundedText(params.response?.mimeType, 160), resource_type: boundedText(params.type, 40) };
+  if (method === "Network.loadingFinished") return { at: receivedAt, event: method, request_id: boundedText(params.requestId, 160), encoded_bytes: Number(params.encodedDataLength) || 0 };
+  if (method === "Network.loadingFailed") return { at: receivedAt, event: method, request_id: boundedText(params.requestId, 160), error: boundedText(params.errorText, 500), canceled: Boolean(params.canceled) };
+  if (method === "Runtime.consoleAPICalled") return { at: receivedAt, event: method, level: boundedText(params.type, 40), text: (Array.isArray(params.args) ? params.args.map((item: any) => boundedText(item?.value ?? item?.description, 300)).join(" ") : "").slice(0, 1_000) };
+  if (method === "Log.entryAdded") return { at: receivedAt, event: method, level: boundedText(params.entry?.level, 40), source: boundedText(params.entry?.source, 80), text: boundedText(params.entry?.text, 1_000), url: sanitizedTraceUrl(params.entry?.url) };
+  if (["Page.lifecycleEvent", "Page.domContentEventFired", "Page.loadEventFired", "Page.frameNavigated"].includes(method)) return { at: receivedAt, event: method, name: boundedText(params.name, 80), url: sanitizedTraceUrl(params.frame?.url) };
+  return null;
+}
+
+async function withCdpTrace<T extends Record<string, any>>(client: CdpClient, options: BrowserControlOptions, operation: () => Promise<T>): Promise<T> {
+  if (!options.trace) return await operation();
+  const events: Record<string, unknown>[] = [];
+  const startedAt = Date.now();
+  const unsubscribe = client.on("*", (event) => {
+    const safe = sanitizeTraceEvent(event);
+    if (safe && events.length < 500) events.push(safe);
+  });
+  await Promise.allSettled([client.send("Network.enable"), client.send("Runtime.enable"), client.send("Log.enable"), client.send("Page.enable"), client.send("Page.setLifecycleEventsEnabled", { enabled: true })]);
+  try {
+    const result = await operation();
+    const traceMs = Math.max(0, Math.min(10_000, Math.floor(options.traceMs ?? 750)));
+    if (traceMs) await new Promise((resolve) => setTimeout(resolve, traceMs));
+    return { ...result, cdp_trace: { started_at: new Date(startedAt).toISOString(), duration_ms: Date.now() - startedAt, event_count: events.length, truncated: events.length >= 500, events } };
+  } finally {
+    unsubscribe();
+  }
+}
+
+const targetMutationTails = new Map<string, Promise<void>>();
+
+function mutatesPage(options: BrowserControlOptions): boolean {
+  if (options.action === "batch") return (options.steps ?? []).some(mutatesPage);
+  return ["navigate", "click", "trusted_click", "type", "press", "hover", "scroll"].includes(options.action);
+}
+
+async function serializeTargetMutation<T>(targetId: string, options: BrowserControlOptions, operation: () => Promise<T>): Promise<T> {
+  if (!mutatesPage(options)) return await operation();
+  const previous = targetMutationTails.get(targetId) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.catch(() => {}).then(() => gate);
+  targetMutationTails.set(targetId, tail);
+  await previous.catch(() => {});
+  try { return await operation(); }
+  finally {
+    release();
+    if (targetMutationTails.get(targetId) === tail) targetMutationTails.delete(targetId);
+  }
 }
 
 export async function runBrowserControl(debugUrlInput: string, options: BrowserControlOptions): Promise<Record<string, any>> {
@@ -304,6 +460,8 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
   }
 
   return await withTarget(debugUrl, options.targetId, async (client, target) => {
+    const executeResolved = async (options: BrowserControlOptions): Promise<Record<string, any>> => {
+      const action = options.action;
     if (action === "batch") {
       const steps = Array.isArray(options.steps) ? options.steps.slice(0, 50) : [];
       if (!steps.length) throw new CodexProError("batch requires at least one step.");
@@ -313,41 +471,14 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
         if (!step || step.action === "batch" || ["status", "list_tabs", "open_tab", "activate_tab", "close_tab"].includes(step.action)) {
           throw new CodexProError(`Unsupported batch step at index ${index}: ${step?.action ?? "missing"}`);
         }
-        results.push(await runBrowserControl(debugUrl, { ...step, targetId: target.id }));
+        results.push(await executeResolved({ ...step, targetId: target.id, trace: false }));
       }
       return { action, target_id: target.id, ok: true, step_count: results.length, results };
     }
 
     if (action === "snapshot") {
       const maxChars = Math.max(500, Math.min(50_000, Math.floor(options.maxChars ?? 20_000)));
-      const snapshot = await evaluate(client, `(() => {
-        const visible = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
-        const selectorFor = (el) => {
-          if (el.id) return '#' + CSS.escape(el.id);
-          for (const attr of ['data-testid','data-test','name','aria-label']) {
-            const value = el.getAttribute(attr);
-            if (value) { const candidate = el.tagName.toLowerCase() + '[' + attr + '=' + JSON.stringify(value) + ']'; try { if (document.querySelectorAll(candidate).length === 1) return candidate; } catch {} }
-          }
-          const parts = [];
-          let node = el;
-          while (node && node.nodeType === 1 && node !== document.documentElement) {
-            let part = node.tagName.toLowerCase();
-            const siblings = node.parentElement ? Array.from(node.parentElement.children).filter((child) => child.tagName === node.tagName) : [];
-            if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')';
-            parts.unshift(part);
-            const candidate = parts.join(' > ');
-            try { if (document.querySelectorAll(candidate).length === 1) return candidate; } catch {}
-            node = node.parentElement;
-          }
-          return parts.join(' > ');
-        };
-        const elements = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role="button"],[contenteditable="true"]'))
-          .filter(visible).slice(0, 250).map((el) => ({
-            tag: el.tagName.toLowerCase(), selector: selectorFor(el), type: el.getAttribute('type'),
-            text: (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('name') || '').trim().slice(0, 300)
-          }));
-        return { title: document.title, url: location.href, text: (document.body?.innerText || '').slice(0, ${maxChars}), elements };
-      })()`);
+      const snapshot = await evaluate(client, semanticSnapshotExpression(maxChars, Boolean(options.delta)));
       return { action, target_id: target.id, ...snapshot };
     }
 
@@ -363,25 +494,25 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
     }
 
     if (action === "click" || action === "trusted_click") {
-      const selector = selectorExpression(options.selector ?? "");
-      const located = await evaluate(client, `(() => { const el = document.querySelector(${selector}); if (!el) return {ok:false,error:'Element not found'}; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {ok:true,x:r.left+r.width/2,y:r.top+r.height/2,tag:el.tagName.toLowerCase(),text:(el.innerText||el.getAttribute('aria-label')||'').slice(0,300)}; })()`);
+      const element = locatorExpression(options);
+      const located = await evaluate(client, `(() => { const el = ${element}; if (!el) return {ok:false,error:'Element not found'}; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {ok:true,x:r.left+r.width/2,y:r.top+r.height/2,tag:el.tagName.toLowerCase(),text:(el.innerText||el.getAttribute('aria-label')||'').slice(0,300)}; })()`);
       if (!located?.ok) throw new CodexProError(`Browser ${action} failed: ${located?.error ?? "unknown error"}`);
       if (action === "click") {
-        const result = await evaluate(client, `(() => { const el = document.querySelector(${selector}); if (!el) return {ok:false,error:'Element not found'}; el.click(); return {ok:true}; })()`);
+        const result = await evaluate(client, `(() => { const el = ${element}; if (!el) return {ok:false,error:'Element not found'}; el.click(); return {ok:true}; })()`);
         if (!result?.ok) throw new CodexProError(`Browser click failed: ${result?.error ?? "unknown error"}`);
       } else {
         await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: located.x, y: located.y, button: "none" });
         await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: located.x, y: located.y, button: "left", buttons: 1, clickCount: 1 });
         await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: located.x, y: located.y, button: "left", buttons: 0, clickCount: 1 });
       }
-      return { action, target_id: target.id, selector: options.selector, ok: true, tag: located.tag, text: located.text };
+      return { action, target_id: target.id, selector: options.selector, ref: options.ref || (String(options.selector || "").startsWith("@e") ? options.selector : undefined), ok: true, tag: located.tag, text: located.text };
     }
 
     if (action === "type") {
-      const selector = selectorExpression(options.selector ?? "");
+      const element = locatorExpression(options);
       const text = JSON.stringify(boundedText(options.text, 100_000));
       const result = await evaluate(client, `(() => {
-        const el = document.querySelector(${selector}); if (!el) return {ok:false,error:'Element not found'};
+        const el = ${element}; if (!el) return {ok:false,error:'Element not found'};
         el.scrollIntoView({block:'center',inline:'center'}); el.focus(); const value = ${text};
         if (el.isContentEditable) { el.textContent = value; }
         else { const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; const setter = Object.getOwnPropertyDescriptor(proto,'value')?.set; if (setter) setter.call(el,value); else el.value=value; }
@@ -402,8 +533,8 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
     }
 
     if (action === "hover") {
-      const selector = selectorExpression(options.selector ?? "");
-      const point = await evaluate(client, `(() => { const el=document.querySelector(${selector}); if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,tag:el.tagName.toLowerCase()}; })()`);
+      const element = locatorExpression(options);
+      const point = await evaluate(client, `(() => { const el=${element}; if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,tag:el.tagName.toLowerCase()}; })()`);
       if (!point) throw new CodexProError("Browser hover failed: Element not found");
       await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none" });
       return { action, target_id: target.id, selector: options.selector, ok: true, tag: point.tag };
@@ -411,9 +542,9 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
 
     if (action === "scroll") {
       let point = await evaluate(client, "({x:innerWidth/2,y:innerHeight/2})");
-      if (options.selector) {
-        const selector = selectorExpression(options.selector);
-        point = await evaluate(client, `(() => { const el=document.querySelector(${selector}); if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
+      if (hasLocator(options)) {
+        const element = locatorExpression(options);
+        point = await evaluate(client, `(() => { const el=${element}; if(!el)return null; el.scrollIntoView({block:'center',inline:'center'}); const r=el.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
         if (!point) throw new CodexProError("Browser scroll failed: Element not found");
       }
       const deltaX = Number.isFinite(options.deltaX) ? Number(options.deltaX) : 0;
@@ -425,21 +556,21 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
     if (action === "wait_for") {
       const state = options.state ?? "visible";
       const timeoutMs = Math.max(100, Math.min(60_000, Math.floor(options.timeoutMs ?? 10_000)));
-      const selector = options.selector ? JSON.stringify(boundedText(options.selector, 2_000)) : "null";
       const wantedText = options.text ? JSON.stringify(boundedText(options.text, 10_000)) : "null";
-      const deadline = Date.now() + timeoutMs;
-      let last: any = null;
-      while (Date.now() <= deadline) {
-        last = await evaluate(client, `(() => { const selector=${selector},wanted=${wantedText},state=${JSON.stringify(state)}; const el=selector?document.querySelector(selector):null; const attached=Boolean(el); const visible=Boolean(el&&(()=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';})()); const haystack=selector?(el?.innerText||el?.textContent||''):(document.body?.innerText||''); const textMatched=!wanted||String(haystack).includes(wanted); const matched=state==='attached'?attached&&textMatched:state==='visible'?visible&&textMatched:state==='hidden'?!visible:state==='detached'?!attached:false; return {matched,attached,visible,text_matched:textMatched}; })()`);
-        if (last?.matched) return { action, target_id: target.id, selector: options.selector, text: options.text, state, waited_ms: timeoutMs - Math.max(0, deadline - Date.now()), ...last };
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      throw new CodexProError(`Browser wait_for timed out after ${timeoutMs} ms.`);
+      const element = hasLocator(options) ? locatorExpression(options) : "document.body";
+      const startedAt = Date.now();
+      const last = await evaluate(client, `new Promise((resolve) => {
+        const wanted=${wantedText},state=${JSON.stringify(state)},deadline=Date.now()+${timeoutMs};
+        const check=()=>{const el=${element};const attached=Boolean(el);const visible=Boolean(el&&(()=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden';})());const haystack=el?(el.innerText||el.textContent||''):(document.body?.innerText||'');const textMatched=!wanted||String(haystack).includes(wanted);const matched=state==='attached'?attached&&textMatched:state==='visible'?visible&&textMatched:state==='hidden'?!visible:state==='detached'?!attached:false;if(matched){cleanup();resolve({matched,attached,visible,text_matched:textMatched});return true;}return false;};
+        let timer;const observer=new MutationObserver(()=>check());const cleanup=()=>{observer.disconnect();clearTimeout(timer);};if(check())return;observer.observe(document.documentElement||document,{subtree:true,childList:true,attributes:true,characterData:true});timer=setTimeout(()=>{cleanup();resolve({matched:false,timed_out:true});},Math.max(0,deadline-Date.now()));
+      })`, timeoutMs + 2_000);
+      if (!last?.matched) throw new CodexProError(`Browser wait_for timed out after ${timeoutMs} ms.`);
+      return { action, target_id: target.id, selector: options.selector, ref: options.ref, text: options.text, state, waited_ms: Date.now() - startedAt, ...last };
     }
 
     if (action === "inspect_element") {
-      const selector = selectorExpression(options.selector ?? "");
-      const result = await evaluate(client, `(() => { const el=document.querySelector(${selector}); if(!el)return {ok:false,error:'Element not found'}; const r=el.getBoundingClientRect(),s=getComputedStyle(el); return {ok:true,tag:el.tagName.toLowerCase(),text:(el.innerText||el.textContent||'').trim().slice(0,1000),value:typeof el.value==='string'?el.value.slice(0,1000):'',disabled:Boolean(el.disabled),checked:Boolean(el.checked),rect:{x:r.x,y:r.y,width:r.width,height:r.height},style:{display:s.display,visibility:s.visibility,opacity:s.opacity,pointerEvents:s.pointerEvents,position:s.position,zIndex:s.zIndex},attributes:Object.fromEntries(Array.from(el.attributes||[]).slice(0,40).map(a=>[a.name,String(a.value).slice(0,500)]))}; })()`);
+      const element = locatorExpression(options);
+      const result = await evaluate(client, `(() => { const el=${element}; if(!el)return {ok:false,error:'Element not found'}; const r=el.getBoundingClientRect(),s=getComputedStyle(el); return {ok:true,tag:el.tagName.toLowerCase(),text:(el.innerText||el.textContent||'').trim().slice(0,1000),value:typeof el.value==='string'?el.value.slice(0,1000):'',disabled:Boolean(el.disabled),checked:Boolean(el.checked),rect:{x:r.x,y:r.y,width:r.width,height:r.height},style:{display:s.display,visibility:s.visibility,opacity:s.opacity,pointerEvents:s.pointerEvents,position:s.position,zIndex:s.zIndex},attributes:Object.fromEntries(Array.from(el.attributes||[]).slice(0,40).map(a=>[a.name,String(a.value).slice(0,500)]))}; })()`);
       if (!result?.ok) throw new CodexProError(`Browser inspect_element failed: ${result?.error ?? "unknown error"}`);
       return { action, target_id: target.id, selector: options.selector, ...result };
     }
@@ -457,6 +588,8 @@ export async function runBrowserControl(debugUrlInput: string, options: BrowserC
       return { action, target_id: target.id, mime_type: "image/png", image_base64: capture.data };
     }
 
-    throw new CodexProError(`Unsupported browser action: ${action}`);
+      throw new CodexProError(`Unsupported browser action: ${action}`);
+    };
+    return await serializeTargetMutation(target.id, options, () => withCdpTrace(client, options, () => executeResolved(options)));
   });
 }

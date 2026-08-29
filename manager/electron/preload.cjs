@@ -1,9 +1,16 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload);
+const subscribe = (channel, callback) => {
+  if (typeof callback !== "function") return () => {};
+  const listener = (_event, payload) => callback(payload);
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
+};
 
 contextBridge.exposeInMainWorld("codexpro", {
   getStatus: () => invoke("codexpro:status"),
+  onBrowserProfiles: (callback) => subscribe("codexpro:browser-profiles", callback),
   controlServer: (action) => invoke("codexpro:control", action),
   copyText: (text) => invoke("codexpro:copy", text),
   rotateLink: () => invoke("codexpro:rotate-link"),

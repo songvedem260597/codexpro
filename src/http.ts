@@ -20,7 +20,7 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
-import { ensureBrowserExtensionBridge } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, subscribeBrowserExtensionProfiles } from "./browserExtensionBridge.js";
 
 const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
 
@@ -1680,6 +1680,32 @@ async function main(): Promise<void> {
       contextDir: config.contextDir,
       authEnabled: Boolean(config.authToken),
       authRequired: Boolean(config.authToken)
+    });
+  });
+
+  app.get("/browser-events", (req, res) => {
+    if (!config.browserControl) {
+      res.status(404).json({ error: "Browser control is disabled." });
+      return;
+    }
+    res.status(200);
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders?.();
+    const send = (profiles = listBrowserExtensionProfiles()) => {
+      if (res.writableEnded) return;
+      res.write(`event: browser-profiles\ndata: ${JSON.stringify({ checked_at: new Date().toISOString(), profiles })}\n\n`);
+    };
+    send();
+    const unsubscribe = subscribeBrowserExtensionProfiles(send);
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded) res.write(`: heartbeat ${Date.now()}\n\n`);
+    }, 15_000);
+    heartbeat.unref();
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
     });
   });
 
