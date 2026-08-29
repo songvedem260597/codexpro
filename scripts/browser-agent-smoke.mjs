@@ -84,6 +84,8 @@ const recoveredLatestResponse = replaceCanonicalTranscript(missingLatestResponse
 assert.equal(recoveredLatestResponse.at(-1).text, "Response mới phải được nối vào", "canonical recovery must append the missing latest response after the newest user");
 assert.equal(transcriptAwaitingAssistant(recoveredLatestResponse), false, "canonical recovery must close the previously incomplete latest exchange");
 assert.equal(completedResponseNeedsDomFallback({ network_state: "completed", response_ready: false, messages: missingLatestResponse }), true, "a completed request whose canonical transcript still ends at the user must fall back to the live DOM");
+assert.equal(completedResponseNeedsDomFallback({ network_state: "idle", canonical_available: true, response_ready: false, messages: missingLatestResponse }), true, "an expired network record must not suppress DOM recovery when the canonical transcript still ends at the newest user");
+assert.equal(completedResponseNeedsDomFallback({ network_state: "idle", canonical_available: false, response_ready: false, messages: [] }), true, "a transient canonical miss must fall back to the live DOM while Manager is still awaiting the latest assistant response");
 assert.equal(completedResponseNeedsDomFallback({ network_state: "completed", response_ready: true, messages: recoveredLatestResponse }), false, "a completed canonical response must not trigger a redundant DOM read");
 const fourExchanges = [1, 2, 3, 4].flatMap((turn) => [
   { id: `user-${turn}`, role: "user", text: `User ${turn}` },
