@@ -77,6 +77,22 @@ if (/Scout|subagents=explore,scout/i.test(subagentDryRun.stdout)) {
   throw new Error(`subagent dry-run still advertised the removed fake Scout path\n${subagentDryRun.stdout}`);
 }
 
+const cappedSubagentDryRun = run([
+  'execute-handoff',
+  '--root',
+  root,
+  '--agent',
+  'opencode',
+  '--subagents',
+  '--max-subagents',
+  '8',
+  '--dry-run'
+]);
+requireSuccess(cappedSubagentDryRun, 'execute-handoff hard subagent cap dry-run');
+if (!cappedSubagentDryRun.stdout.includes('max=1')) {
+  throw new Error(`subagent hard cap did not clamp a larger requested value to 1\n${cappedSubagentDryRun.stdout}`);
+}
+
 const missingPlaceholder = run([
   'execute-handoff',
   '--root',
