@@ -223,6 +223,8 @@ assert.match(managerUi, /const scrollOpenChatToBottom = useCallback\([\s\S]*?mod
 assert.match(managerUi, /function openChat\(profile\)[\s\S]*?responseScrollPositions\.current\.delete\(profile\.profile_id\)[\s\S]*?scrollOpenChatToBottom\(profile\.profile_id\)[\s\S]*?hydrateCachedResponse\(profile, conversationId\)\.finally/, "opening Chat must hydrate the cached transcript before finishing both modal/transcript at the bottom");
 assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?network_last_completed_at/, "Chat reopening must compare the persisted response against the latest network completion before re-reading transcript content");
 assert.match(managerPreload, /getChatResponseCache[\s\S]*?saveChatResponseCache/, "Manager preload must expose persistent chat-response cache access");
+assert.match(managerPreload, /logChatLayout[\s\S]*?codexpro:log-chat-layout/, "Manager preload must expose fire-and-forget chat layout tracing");
+assert.match(managerMain, /manager-chat-layout\.jsonl[\s\S]*?appendManagerChatLayoutLog[\s\S]*?codexpro:log-chat-layout/, "Manager must persist bounded chat layout traces");
 assert.match(managerMain, /manager-chat-cache\.json[\s\S]*?MAX_CHAT_CACHE_ENTRIES = 30/, "Manager must persist a bounded local response cache instead of rebuilding every transcript on open");
 assert.match(managerUi, /!tab\.busy && !tab\.settling && currentResponse\?\.repoTaskId/, "CodexPro verification must wait until the ChatGPT turn has visibly settled");
 assert.match(managerUi, /ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước/, "send must reject attempts that would steer the active turn");
@@ -239,6 +241,12 @@ assert.match(managerUi, /const openChatScrollKey = useMemo\([\s\S]*?lastMessage[
 assert.match(managerUi, /useLayoutEffect\(\(\) => \{[\s\S]*?openChatScrollKey[\s\S]*?scrollResponseToBottom\(chatProfileId\)/, "chat auto-scroll must settle before paint to avoid a visible second jump");
 const sendRequestSource = managerUi.slice(managerUi.indexOf("async function sendRequest(profile)"), managerUi.indexOf("async function rolloverFullConversation"));
 assert.doesNotMatch(sendRequestSource, /requestAnimationFrame\(\(\) => scrollResponseToBottom/, "sendRequest must not schedule a duplicate transcript scroll");
+assert.match(managerUi, /responseTurnActive[\s\S]*?is-response-runway/, "an active send must reserve a half-height response runway before stream content arrives");
+assert.ok(managerUi.indexOf("const selectedSettling =") < managerUi.indexOf("const responseTurnActive ="), "response cage activity must be derived only after busy/settling state is initialized");
+assert.match(managerUi, /logChatLayout[\s\S]*?MutationObserver[\s\S]*?ResizeObserver/, "Manager chat must trace intermittent DOM and height changes behind layout jumps");
+assert.match(managerStyles, /\.chat-transcript-message\.is-response-cage \{[^}]*min-height: 108px;[^}]*padding-bottom: 24px;/, "the reserved response cage must keep enough vertical space to prevent transcript jumps");
+assert.match(managerStyles, /\.chat-transcript-message\.is-response-runway \{[^}]*--chat-response-runway-height/, "the newest turn must keep a half-height runway below the sent message");
+assert.match(managerStyles, /\.chat-transcript-message \{[^}]*flex: 0 0 auto;/, "response runway must never shrink older messages and overlap their content");
 assert.doesNotMatch(managerStyles, /\.message-send-indicator\s*\{/, "the old standalone send status panel must be removed");
 assert.match(managerUi, /className="toast-icon"[\s\S]*?<svg viewBox="0 0 24 24"/, "success toasts must use the custom vector status icon");
 assert.match(managerStyles, /\.toast-message \{[^}]*font-family: var\(--app-font-family,[^}]*font-weight: var\(--weight-semibold\)/, "toast typography must match the Manager interface");

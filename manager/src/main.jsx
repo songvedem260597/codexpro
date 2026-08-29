@@ -655,6 +655,7 @@ function App() {
   const requestTargetsRef = useRef({});
   const responseBodyRefs = useRef(new Map());
   const chatModalRef = useRef(null);
+  const chatResponseRef = useRef(null);
   const responseScrollLocked = useRef(new Map());
   const responseScrollPositions = useRef(new Map());
 
@@ -1109,6 +1110,114 @@ function App() {
     if (responseScrollLocked.current.get(chatProfileId)) return;
     scrollResponseToBottom(chatProfileId);
   }, [chatProfileId, openChatScrollKey, scrollResponseToBottom]);
+
+  useEffect(() => {
+    if (!chatProfileId || typeof api.logChatLayout !== "function") return undefined;
+    const panel = chatResponseRef.current;
+    if (!panel) return undefined;
+    let animationFrame = 0;
+    let flushTimer = 0;
+    let previousSnapshot = null;
+    const pendingChanges = [];
+    const describeNode = (node) => {
+      if (!(node instanceof Element)) return { nodeType: node?.nodeType || 0 };
+      return {
+        tag: node.tagName.toLowerCase(),
+        className: String(node.className || "").slice(0, 180),
+        height: Math.round(node.getBoundingClientRect().height),
+        children: node.childElementCount,
+        textLength: String(node.textContent || "").length
+      };
+    };
+    const captureSnapshot = (cause) => {
+      const transcript = panel.querySelector(".chat-transcript");
+      const panelNodes = [...panel.children].map(describeNode);
+      const transcriptNodes = transcript ? [...transcript.children].map(describeNode) : [];
+      const snapshot = {
+        at: new Date().toISOString(),
+        profileId: chatProfileId,
+        conversationId: String(panel.dataset.layoutConversationId || ""),
+        cause,
+        state: {
+          sending: panel.dataset.layoutSending === "1",
+          busy: panel.dataset.layoutBusy === "1",
+          settling: panel.dataset.layoutSettling === "1",
+          stream: panel.dataset.layoutStream === "1",
+          hasContent: panel.dataset.layoutHasContent === "1",
+          networkState: String(panel.dataset.layoutNetworkState || ""),
+          messageCount: Number(panel.dataset.layoutMessageCount || 0)
+        },
+        panel: {
+          height: Math.round(panel.getBoundingClientRect().height),
+          scrollHeight: panel.scrollHeight,
+          clientHeight: panel.clientHeight
+        },
+        transcript: transcript ? {
+          height: Math.round(transcript.getBoundingClientRect().height),
+          scrollTop: Math.round(transcript.scrollTop),
+          scrollHeight: transcript.scrollHeight,
+          clientHeight: transcript.clientHeight,
+          locked: Boolean(responseScrollLocked.current.get(chatProfileId))
+        } : null,
+        panelNodes,
+        transcriptNodes,
+        changes: pendingChanges.splice(0, pendingChanges.length)
+      };
+      const layoutPanelNodes = panelNodes.map(({ textLength: _textLength, ...node }) => node);
+      const layoutTranscriptNodes = transcriptNodes.map(({ textLength: _textLength, ...node }) => node);
+      const signature = JSON.stringify({ state: snapshot.state, panel: snapshot.panel, transcript: snapshot.transcript, panelNodes: layoutPanelNodes, transcriptNodes: layoutTranscriptNodes });
+      if (!previousSnapshot || previousSnapshot.signature !== signature) {
+        snapshot.delta = previousSnapshot ? {
+          panelHeight: snapshot.panel.height - previousSnapshot.panelHeight,
+          transcriptHeight: (snapshot.transcript?.height || 0) - previousSnapshot.transcriptHeight,
+          scrollTop: (snapshot.transcript?.scrollTop || 0) - previousSnapshot.scrollTop
+        } : null;
+        api.logChatLayout(snapshot);
+        previousSnapshot = {
+          signature,
+          panelHeight: snapshot.panel.height,
+          transcriptHeight: snapshot.transcript?.height || 0,
+          scrollTop: snapshot.transcript?.scrollTop || 0
+        };
+      }
+    };
+    const scheduleSnapshot = (cause) => {
+      window.clearTimeout(flushTimer);
+      window.cancelAnimationFrame(animationFrame);
+      flushTimer = window.setTimeout(() => {
+        animationFrame = window.requestAnimationFrame(() => captureSnapshot(cause));
+      }, 80);
+    };
+    const mutationObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        pendingChanges.push({
+          type: record.type,
+          attribute: record.attributeName || "",
+          target: describeNode(record.target),
+          added: [...record.addedNodes].map(describeNode),
+          removed: [...record.removedNodes].map(describeNode)
+        });
+      }
+      if (pendingChanges.length > 24) pendingChanges.splice(0, pendingChanges.length - 24);
+      scheduleSnapshot("mutation");
+    });
+    const resizeObserver = new ResizeObserver(() => scheduleSnapshot("resize"));
+    mutationObserver.observe(panel, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class", "data-layout-sending", "data-layout-busy", "data-layout-settling", "data-layout-stream", "data-layout-has-content", "data-layout-network-state", "data-layout-message-count"]
+    });
+    resizeObserver.observe(panel);
+    scheduleSnapshot("attach");
+    return () => {
+      window.clearTimeout(flushTimer);
+      window.cancelAnimationFrame(animationFrame);
+      mutationObserver.disconnect();
+      resizeObserver.disconnect();
+    };
+  }, [chatProfileId, requestTargets[chatProfileId]]);
+
 
   useEffect(() => {
     if (!chatProfileId) return undefined;
@@ -2065,6 +2174,7 @@ function App() {
       ? { id: "codexpro-live-tool-activity", role: "assistant", text: fallbackToolActivity, truncated: false, toolActivity: true }
       : { id: "latest-assistant", role: "assistant", text: response?.text || "", truncated: response?.truncated };
     const hasResponseContent = !responseCleared && Boolean(fallbackResponseMessage.text || displayResponseMessages.length);
+
     const responseVerifiedComplete = Boolean(responseCurrent && response?.responseReady && hasResponseContent);
     const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${selectedTarget}`));
     const selectedActivityText = String((responseCurrent && response?.networkStreamActivityText) || selectedTab?.activity_text || "").trim();
@@ -2084,6 +2194,7 @@ function App() {
       responseCurrent,
       responseIncomplete: response?.incomplete
     });
+    const responseTurnActive = Boolean(sending || selectedBusy || selectedSettling || response?.busy || response?.loading);
     const turnReady = canAcceptNextChatMessage({
       networkState: selectedNetworkState,
       tabBusy: selectedTab?.busy,
@@ -2134,11 +2245,11 @@ function App() {
           </div>
 
           <article className={`request-card chat-popup-card ${profile.connected ? "is-online" : "is-offline"}`}>
-            <label className="request-label">Dự án / đường dẫn cần làm <small>chọn phạm vi cho profile/chat hiện tại</small></label>
+            <label className="request-label">Chọn repo và đường dẫn</label>
             <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating} />
             {!workspaceProjects.length && selectedProjectRoot !== ALL_ALLOWED_WORKSPACES && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
             <label className="request-label">Tin nhắn gần nhất</label>
-            <div className={`chat-response is-inline ${sending || selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`}>
+            <div className={`chat-response is-inline ${sending || selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
               <div className="chat-response-head">
                 <div><span className="response-status-dot" /><strong title={responseHeadline}>{responseHeadline}</strong>{sending && <span className="chat-response-send-state"><span>Đang gửi tin nhắn</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span>}{!sending && !isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
                 <div className="response-head-actions">
@@ -2172,11 +2283,12 @@ function App() {
                 <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, event.deltaY)} onTouchMove={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
                   {(displayResponseMessages.length ? displayResponseMessages : [fallbackResponseMessage]).map((message, messageIndex, allMessages) => {
                     const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
+                    const responseSpaceClass = !isLastAssistant ? "" : responseTurnActive && !(response.networkStreamAvailable && hasResponseContent) ? "is-response-cage" : "is-response-runway";
                     if (message.toolActivity) {
                       return <div className="chat-transcript-message is-tool-activity" key={message.id}><div className="tool-activity-live"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{message.text}</span></div></div>;
                     }
                     return (
-                      <div className={`chat-transcript-message is-${message.role}`} key={message.id}>
+                      <div className={`chat-transcript-message is-${message.role} ${responseSpaceClass}`} key={message.id}>
                         <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
                         <div className="latest-response-content" onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
                           <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
@@ -2185,7 +2297,7 @@ function App() {
                       </div>
                     );
                   })}
-                  {response.busy && !(response.networkStreamAvailable && hasResponseContent) && <div className="chat-transcript-message is-assistant is-typing"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">ChatGPT</span><span className="thinking-state latest-response-typing"><span>Thinking</span><span className="typing-dots"><i /><i /><i /></span></span></div></div>}
+                  {responseTurnActive && !(response.networkStreamAvailable && hasResponseContent) && <div className="chat-transcript-message is-assistant is-typing is-response-runway"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">ChatGPT</span><span className="thinking-state latest-response-typing"><span>Thinking</span><span className="typing-dots"><i /><i /><i /></span></span></div></div>}
                 </div>
               ) : <div className="response-empty">Đoạn chat này chưa có tin nhắn.</div>}
             </div>
@@ -2196,7 +2308,7 @@ function App() {
                 id={`request-${profile.profile_id}`}
                 value={draft}
                 maxLength={12000}
-                placeholder={rolloverCreating ? "Chat cũ đã đầy · đang tạo chat mới để tiếp tục dự án…" : "Nhập tin nhắn hoặc Ctrl+V ảnh như ChatGPT…"}
+                placeholder={rolloverCreating ? "Chat cũ đã đầy · đang tạo chat mới để tiếp tục dự án…" : "Nhập file hoặc tin nhắn"}
                 onPaste={(event) => void pasteRequestImage(profile.profile_id, event)}
                 onChange={(event) => { setRequestDrafts((current) => ({ ...current, [profile.profile_id]: event.target.value })); if (sendError) setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" })); }}
                 onKeyDown={(event) => {
@@ -2228,7 +2340,7 @@ function App() {
             {sendError && <div className="request-send-error">{sendError}</div>}
             <SendDebugEvidence evidence={sendEvidence} />
             <div className="request-card-foot">
-              <span>{selectedBusy ? "Đang nhận phản hồi · realtime ~1 giây" : "Realtime phản hồi ~1 giây"}</span>
+              {selectedBusy && <span>Đang nhận phản hồi</span>}
               <div className="request-card-actions">
                 <button type="button" className="button secondary" onClick={() => setChatProfileId("")}>Đóng</button>
                 <button type="button" className="button secondary" onClick={() => openProfile(profile)} disabled={Boolean(busy) || !profile.connected || isNewChat || !(profile.conversation_tabs?.length)}>Mở Chrome</button>
@@ -2245,6 +2357,7 @@ function App() {
   const appStyle = {
     "--chat-modal-width": `${managerSettings.chatWidth}px`,
     "--chat-response-height": `${managerSettings.chatHeight}px`,
+    "--chat-response-runway-height": `${Math.max(108, Math.round((managerSettings.chatHeight - 45) / 2))}px`,
     "--app-font-family": selectedFont.css,
     "--font-xs": `${Math.max(10, managerSettings.fontSize - 2)}px`,
     "--font-base": `${managerSettings.fontSize}px`,
