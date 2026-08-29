@@ -9,12 +9,19 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env CODEXPRO_MANAGER_DEV_URL=http://127.0.0.1:5173 electron .\"",
     "build": "vite build",
+    "test:markdown": "node scripts/markdown-response-smoke.mjs",
     "dist": "npm run build && electron-builder --win nsis --x64",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "katex": "^0.18.4",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.2",

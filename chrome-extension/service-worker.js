@@ -387,12 +387,17 @@ function probeChatActivityPage() {
   return {busy:Boolean(stopControl||thinkingPlaceholder),source:stopControl?'dom_stop':thinkingPlaceholder?'dom_thinking':'',activity_text:activityText,observed_at:Date.now()};
 }
 
-async function chatDomActivityState(tabId,conversationId) {
+async function chatDomActivityState(tabId,conversationId,options={}) {
   if(!Number.isInteger(tabId)||!conversationId)return {available:false,busy:false,source:'',activity_text:''};
   const now=Date.now();
-  const cached=chatDomActivityByTab.get(tabId);
-  if(cached?.promise)return await cached.promise;
-  if(cached?.value&&now-Number(cached.at||0)<DOM_ACTIVITY_PROBE_CACHE_MS)return cached.value;
+  const fresh=options?.fresh===true;
+  let cached=chatDomActivityByTab.get(tabId);
+  if(cached?.promise){
+    const pendingValue=await cached.promise;
+    if(!fresh)return pendingValue;
+    cached=chatDomActivityByTab.get(tabId);
+  }
+  if(!fresh&&cached?.value&&now-Number(cached.at||0)<DOM_ACTIVITY_PROBE_CACHE_MS)return cached.value;
   const promise=(async()=>{
     try{
       const [injected]=await promiseWithTimeout(
@@ -1150,7 +1155,7 @@ async function execute(command) {
     if(!tab?.id)throw new Error('Profile này không có đoạn chat dự án đang mở.');
     const networkCaptureInstalled=await ensureChatNetworkStreamCapture(tab.id);
     if((await chatRequestState(tab.id,conversationId)).busy)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
-    if(!newChat&&(await chatDomActivityState(tab.id,conversationId)).busy)throw new Error('Đoạn chat vẫn đang hoàn tất lượt trước. Chờ ChatGPT về trạng thái rảnh để không nhập tin nhắn mới vào turn cũ.');
+    if(!newChat&&(await chatDomActivityState(tab.id,conversationId,{fresh:true})).busy)throw new Error('Đoạn chat vẫn đang hoàn tất lượt trước. Chờ ChatGPT về trạng thái rảnh để không nhập tin nhắn mới vào turn cũ.');
     const targetTemporarilyActivated=false;
     const submitStartedAt=Date.now();
     const attemptId=crypto.randomUUID();

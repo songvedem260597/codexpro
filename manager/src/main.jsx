@@ -4,8 +4,9 @@ import "./styles.css";
 import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
-import { canAcceptNextChatMessage, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
+import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 
+const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
 const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
@@ -14,6 +15,7 @@ const REALTIME_WATCHDOG_MS = 30000;
 const NEW_CHAT_TARGET = "__codexpro_new_chat__";
 const ALL_ALLOWED_WORKSPACES = "__codexpro_all_allowed__";
 const ROLLOVER_CONTEXT_MAX_CHARS = 9000;
+const REPO_TASK_VERIFICATION_RETRY_MS = 1500;
 const PROJECTS_PER_PAGE = 8;
 
 function Dot({ ok }) {
@@ -388,138 +390,6 @@ function compactToolActivityMessages(messages) {
   return output;
 }
 
-function safeMarkdownHref(value) {
-  const href = String(value || "").trim();
-  return /^(?:https?:\/\/|mailto:)/i.test(href) ? href : "";
-}
-
-function renderInlineMarkdown(text, keyPrefix = "md") {
-  const source = String(text || "");
-  const tokenPattern = /(`[^`\n]+`|\*\*[^\n]+?\*\*|__[^\n]+?__|~~[^\n]+?~~|\[[^\]\n]+\]\((?:https?:\/\/|mailto:)[^)\n]+\)|(?<!\*)\*[^*\n]+\*(?!\*)|(?<!_)_[^_\n]+_(?!_))/g;
-  const nodes = [];
-  let cursor = 0;
-  let match;
-  let tokenIndex = 0;
-
-  while ((match = tokenPattern.exec(source))) {
-    if (match.index > cursor) nodes.push(source.slice(cursor, match.index));
-    const token = match[0];
-    const key = `${keyPrefix}-${tokenIndex++}`;
-
-    if (token.startsWith("`") && token.endsWith("`")) {
-      nodes.push(<code className="response-inline-code" key={key}>{token.slice(1, -1)}</code>);
-    } else if ((token.startsWith("**") && token.endsWith("**")) || (token.startsWith("__") && token.endsWith("__"))) {
-      nodes.push(<strong key={key}>{renderInlineMarkdown(token.slice(2, -2), `${key}-strong`)}</strong>);
-    } else if (token.startsWith("~~") && token.endsWith("~~")) {
-      nodes.push(<del key={key}>{renderInlineMarkdown(token.slice(2, -2), `${key}-del`)}</del>);
-    } else if (token.startsWith("[") && token.includes("](")) {
-      const link = token.match(/^\[([^\]]+)\]\((.+)\)$/);
-      const href = safeMarkdownHref(link?.[2]);
-      nodes.push(href
-        ? <a href={href} target="_blank" rel="noreferrer" key={key}>{renderInlineMarkdown(link?.[1] || href, `${key}-link`)}</a>
-        : token);
-    } else {
-      nodes.push(<em key={key}>{renderInlineMarkdown(token.slice(1, -1), `${key}-em`)}</em>);
-    }
-    cursor = match.index + token.length;
-  }
-
-  if (cursor < source.length) nodes.push(source.slice(cursor));
-  return nodes;
-}
-
-function ResponseText({ text, truncated }) {
-  const cleanText = String(text || "").replace(/[^\r\n]*/g, "").replace(/[ \t]+\n/g, "\n");
-  const source = `${cleanText}${truncated ? "\n\n[Đã rút gọn khi hiển thị]" : ""}`;
-  const lines = source.split(/\r?\n/);
-  const blocks = [];
-  let index = 0;
-
-  while (index < lines.length) {
-    const line = lines[index];
-    if (!line.trim()) {
-      index += 1;
-      continue;
-    }
-
-    const fence = line.match(/^\s*```([^`]*)$/);
-    if (fence) {
-      const language = String(fence[1] || "").trim();
-      const codeLines = [];
-      index += 1;
-      while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
-        codeLines.push(lines[index]);
-        index += 1;
-      }
-      if (index < lines.length) index += 1;
-      blocks.push(
-        <pre className="response-code-block" key={`code-${index}`} data-language={language || undefined}>
-          <code>{codeLines.join("\n")}</code>
-        </pre>
-      );
-      continue;
-    }
-
-    const heading = line.match(/^\s*(#{1,6})\s+(.+)$/);
-    if (heading) {
-      const level = Math.min(6, heading[1].length);
-      const Tag = `h${level}`;
-      blocks.push(<Tag className="response-heading" key={`h-${index}`}>{renderInlineMarkdown(heading[2], `h-${index}`)}</Tag>);
-      index += 1;
-      continue;
-    }
-
-    const quote = line.match(/^\s*>\s?(.*)$/);
-    if (quote) {
-      const quoteLines = [];
-      while (index < lines.length) {
-        const match = lines[index].match(/^\s*>\s?(.*)$/);
-        if (!match) break;
-        quoteLines.push(match[1]);
-        index += 1;
-      }
-      blocks.push(<blockquote className="response-quote" key={`quote-${index}`}>{renderInlineMarkdown(quoteLines.join("\n"), `quote-${index}`)}</blockquote>);
-      continue;
-    }
-
-    const bullet = line.match(/^\s*[•*-]\s+(.+)$/);
-    if (bullet) {
-      const items = [];
-      while (index < lines.length) {
-        const match = lines[index].match(/^\s*[•*-]\s+(.+)$/);
-        if (!match) break;
-        items.push(match[1]);
-        index += 1;
-      }
-      blocks.push(<ul className="response-list response-bullets" key={`ul-${index}`}>{items.map((item, itemIndex) => <li key={`${itemIndex}-${item}`}>{renderInlineMarkdown(item, `ul-${index}-${itemIndex}`)}</li>)}</ul>);
-      continue;
-    }
-
-    const numbered = line.match(/^\s*(\d+)[.)]\s+(.+)$/);
-    if (numbered) {
-      const items = [];
-      const start = Number(numbered[1]) || 1;
-      while (index < lines.length) {
-        const match = lines[index].match(/^\s*(\d+)[.)]\s+(.+)$/);
-        if (!match) break;
-        items.push(match[2]);
-        index += 1;
-      }
-      blocks.push(<ol className="response-list response-numbered" start={start} key={`ol-${index}`}>{items.map((item, itemIndex) => <li key={`${itemIndex}-${item}`}>{renderInlineMarkdown(item, `ol-${index}-${itemIndex}`)}</li>)}</ol>);
-      continue;
-    }
-
-    const paragraph = [];
-    while (index < lines.length && lines[index].trim() && !/^\s*[•*-]\s+/.test(lines[index]) && !/^\s*\d+[.)]\s+/.test(lines[index]) && !/^\s*```/.test(lines[index]) && !/^\s*#{1,6}\s+/.test(lines[index]) && !/^\s*>\s?/.test(lines[index])) {
-      paragraph.push(lines[index].trim());
-      index += 1;
-    }
-    blocks.push(<p key={`p-${index}`}>{renderInlineMarkdown(paragraph.join("\n"), `p-${index}`)}</p>);
-  }
-
-  return <div className="chat-message-text response-rich-text">{blocks}</div>;
-}
-
 function sendDebugEvidence(result = {}, error = null) {
   const details = error?.details && typeof error.details === "object" ? error.details : {};
   const source = result && typeof result === "object" ? result : {};
@@ -582,7 +452,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.52";
+const WORKER_EXTENSION_VERSION = "0.5.53";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -1572,8 +1442,9 @@ function App() {
     const taskId = String(response?.repoTaskId || "");
     if (!taskId || response?.conversationId !== conversationId) return;
     const verificationKey = `${taskId}:${networkCompletedAt}`;
-    if (repoTaskVerificationReads.current.has(verificationKey)) return;
-    repoTaskVerificationReads.current.set(verificationKey, Date.now());
+    const verificationState = repoTaskVerificationReads.current.get(verificationKey);
+    if (verificationState === "running" || verificationState === "done" || Number(verificationState) > Date.now()) return;
+    repoTaskVerificationReads.current.set(verificationKey, "running");
     setRequestResponses((current) => {
       const previous = current[profile.profile_id] || {};
       return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "checking" } } : current;
@@ -1581,6 +1452,8 @@ function App() {
     try {
       const proof = await api.getRepoTaskStatus({ taskId });
       if (proof?.verified) {
+        repoTaskVerificationReads.current.set(verificationKey, "done");
+        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
         setRequestResponses((current) => {
           const previous = current[profile.profile_id] || {};
           return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskScope: String(proof?.scope || previous.repoTaskScope || "workspace"), repoTaskStatus: "verified", repoTaskVerified: true, repoTaskProof: proof } } : current;
@@ -1636,6 +1509,7 @@ function App() {
               repoTaskRequest: original
             }
           }));
+          repoTaskVerificationReads.current.set(verificationKey, "done");
           notify("Đã tạo chat mới · @CodexPro được gọi lại đúng một lần");
           window.setTimeout(() => void refresh(false), 500);
           return;
@@ -1645,6 +1519,7 @@ function App() {
           const previous = current[profile.profile_id] || {};
           return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "failed", repoTaskVerified: false } } : current;
         });
+        repoTaskVerificationReads.current.set(verificationKey, "done");
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: message }));
         notify("ChatGPT né gọi CodexPro · đã chặn phản hồi");
         return;
@@ -1666,6 +1541,8 @@ function App() {
         previousTaskId: taskId
       });
       if (String(retried?.submission_state || "") === "uncertain") throw new Error("Lần bắt buộc gọi CodexPro có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
+      repoTaskVerificationReads.current.set(verificationKey, "done");
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         return previous.repoTaskId === taskId ? {
@@ -1687,6 +1564,17 @@ function App() {
       window.setTimeout(() => void refresh(false), 500);
     } catch (err) {
       const message = err?.message || String(err);
+      if (isRetryableChatTurnBusyError(err)) {
+        repoTaskVerificationReads.current.set(verificationKey, Date.now() + REPO_TASK_VERIFICATION_RETRY_MS);
+        setRequestResponses((current) => {
+          const previous = current[profile.profile_id] || {};
+          return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "waiting", loading: false } } : current;
+        });
+        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+        window.setTimeout(() => void refresh(false), REPO_TASK_VERIFICATION_RETRY_MS + 50);
+        return;
+      }
+      repoTaskVerificationReads.current.set(verificationKey, "done");
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Không xác minh được tool call CodexPro: ${message}` }));
     }
   }
@@ -1983,7 +1871,7 @@ function App() {
                         <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
                         <div className="latest-response-content">
                           <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
-                          {message.role === "assistant" ? <><ResponseText text={message.text} truncated={message.truncated} />{response.busy && response.networkStreamAvailable && isLastAssistant && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}</> : <div className="chat-message-text user-message-text">{message.text}</div>}
+                          {message.role === "assistant" ? <><React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>{response.busy && response.networkStreamAvailable && isLastAssistant && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}</> : <div className="chat-message-text user-message-text">{message.text}</div>}
                         </div>
                       </div>
                     );
