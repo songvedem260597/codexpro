@@ -365,6 +365,21 @@ section { margin-bottom: 38px; }
 .response-rich-text { white-space: normal; }
 .response-rich-text p { margin: 0 0 10px; white-space: pre-wrap; }
 .response-rich-text p:last-child { margin-bottom: 0; }
+.response-rich-text strong { color: #eef3fb; font-weight: 750; }
+.response-rich-text em { color: #d9e1ef; }
+.response-rich-text del { color: #8794a8; text-decoration-thickness: 1px; }
+.response-rich-text a { color: #91adff; text-decoration: underline; text-decoration-color: #91adff66; text-underline-offset: 2px; }
+.response-rich-text a:hover { color: #b8c8ff; text-decoration-color: currentColor; }
+.response-inline-code { display: inline; padding: 1px 5px 2px; border: 1px solid #354057; border-radius: 4px; background: #161e2a; color: #e3e9f4; font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: .92em; white-space: break-spaces; }
+.response-code-block { position: relative; margin: 8px 0 12px; padding: 12px 13px; overflow: auto; border: 1px solid #303a4e; border-radius: var(--radius-control); background: #0d121a; color: #dce5f2; white-space: pre; font: 12px/1.6 "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+.response-code-block[data-language]::before { content: attr(data-language); display: block; margin-bottom: 7px; color: #74849b; font: 700 9px/1.2 Inter, system-ui, sans-serif; letter-spacing: .55px; text-transform: uppercase; }
+.response-heading { margin: 14px 0 7px; color: #eef3fb; font-weight: 780; line-height: 1.35; }
+h1.response-heading { font-size: 18px; }
+h2.response-heading { font-size: 16px; }
+h3.response-heading { font-size: 14px; }
+h4.response-heading, h5.response-heading, h6.response-heading { font-size: 13px; }
+.response-rich-text > .response-heading:first-child { margin-top: 0; }
+.response-quote { margin: 8px 0 12px; padding: 4px 0 4px 12px; border-left: 3px solid #526a9f; color: #aeb9ca; white-space: pre-wrap; }
 .response-list { margin: 5px 0 11px; padding: 0; }
 .response-list:last-child { margin-bottom: 0; }
 .response-list li { margin: 4px 0; padding-left: 2px; }
