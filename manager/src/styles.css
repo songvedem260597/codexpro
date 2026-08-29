@@ -357,13 +357,17 @@ section { margin-bottom: 38px; }
 @keyframes response-pulse { 50% { opacity: .35; transform: scale(.72); } }
 .latest-response { flex: 1; min-height: 0; display: flex; align-items: flex-start; gap: 10px; padding: 15px 14px 18px; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; scrollbar-gutter: stable; scrollbar-width: thin; scroll-behavior: auto; }
 .chat-transcript { flex-direction: column; align-items: stretch; gap: 12px; }
-.chat-transcript-message { width: 100%; display: flex; align-items: flex-start; gap: 10px; }
+.chat-transcript-message { width: 100%; flex: 0 0 auto; display: flex; align-items: flex-start; gap: 10px; }
 .chat-transcript-message.is-user { width: fit-content; max-width: min(82%, 680px); margin-left: auto; flex-direction: row-reverse; padding: 10px 11px; border: 1px solid #344159; border-radius: var(--radius-panel); background: #171e2a; }
 .chat-transcript-message.is-user .latest-response-content { flex: 0 1 auto; }
 .chat-transcript-message.is-user .chat-message-role { text-align: right; }
 .chat-transcript-message.is-user .chat-message-avatar { color: #dbe4ff; border-color: #4b5d8a; background: #202b49; }
 .user-message-text { color: #eef3fb; text-align: left; }
 .chat-transcript-message.is-typing { padding-bottom: 3px; }
+.chat-transcript-message.is-response-cage { min-height: 108px; padding-bottom: 24px; }
+.chat-transcript-message.is-response-cage.is-typing { align-items: flex-start; }
+.chat-transcript-message.is-response-runway { min-height: var(--chat-response-runway-height, 142px); padding-bottom: 24px; }
+.chat-transcript-message.is-response-runway.is-typing { align-items: flex-start; }
 .chat-transcript-message.is-tool-activity { align-items: center; padding: 6px 0; }
 .chat-transcript-message.is-tool-activity .chat-message-avatar { margin-top: 0; }
 .tool-activity-live { display: inline-flex; align-items: center; gap: 8px; color: #aebcff; }
@@ -525,7 +529,7 @@ h4.response-heading, h5.response-heading, h6.response-heading { font-size: 13px;
 .request-label,
 .chat-dropdown-value strong,
 .chat-option-copy strong,
-.chat-response-head strong { font-size: var(--font-base); line-height: 1.4; font-weight: var(--weight-regular); }
+.chat-response-head strong { font-size: var(--font-xs); line-height: 1.4; font-weight: var(--weight-regular); }
 
 .subtitle,
 .section-note,

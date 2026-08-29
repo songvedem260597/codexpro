@@ -17,6 +17,11 @@ const managerProjectsFile = path.join(codexProHome, "manager-projects.json");
 const managerSettingsFile = path.join(codexProHome, "manager-settings.json");
 const managerChatCacheFile = path.join(codexProHome, "manager-chat-cache.json");
 const managerAssetsDir = path.join(codexProHome, "manager-assets");
+const managerChatLayoutLogFile = path.join(codexProHome, "manager-chat-layout.jsonl");
+const managerChatLayoutPreviousLogFile = path.join(codexProHome, "manager-chat-layout.previous.jsonl");
+const MAX_CHAT_LAYOUT_LOG_BYTES = 2 * 1024 * 1024;
+const MAX_CHAT_LAYOUT_LOG_ENTRY_BYTES = 32 * 1024;
+let managerChatLayoutLogWrite = Promise.resolve();
 const MAX_CHAT_CACHE_ENTRIES = 30;
 const MAX_CHAT_CACHE_MESSAGES = 12;
 const MAX_CHAT_CACHE_TEXT_CHARS = 40000;
@@ -50,6 +55,29 @@ function versionAtLeast(version, target = WORKER_EXTENSION_VERSION) {
     if (left !== right) return left > right;
   }
   return true;
+}
+
+function appendManagerChatLayoutLog(payload) {
+  let line = "";
+  try {
+    line = JSON.stringify({ loggedAt: new Date().toISOString(), ...(payload && typeof payload === "object" ? payload : {}) });
+  } catch {
+    return;
+  }
+  if (Buffer.byteLength(line, "utf8") > MAX_CHAT_LAYOUT_LOG_ENTRY_BYTES) return;
+  managerChatLayoutLogWrite = managerChatLayoutLogWrite.then(async () => {
+    await fs.promises.mkdir(codexProHome, { recursive: true });
+    try {
+      const stat = await fs.promises.stat(managerChatLayoutLogFile);
+      if (stat.size >= MAX_CHAT_LAYOUT_LOG_BYTES) {
+        await fs.promises.rm(managerChatLayoutPreviousLogFile, { force: true });
+        await fs.promises.rename(managerChatLayoutLogFile, managerChatLayoutPreviousLogFile);
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await fs.promises.appendFile(managerChatLayoutLogFile, line + "\n", "utf8");
+  }).catch((error) => console.error("[manager-chat-layout]", error?.message || error));
 }
 
 function mimeTypeForFile(filePath) {
@@ -2177,6 +2205,7 @@ ipcMain.handle("codexpro:copy", (_event, text) => {
   clipboard.writeText(String(text || ""));
   return true;
 });
+ipcMain.on("codexpro:log-chat-layout", (_event, payload) => appendManagerChatLayoutLog(payload));
 ipcMain.handle("codexpro:rotate-link", async () => {
   const choice = await dialog.showMessageBox({
     type: "warning",

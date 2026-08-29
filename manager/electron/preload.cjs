@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   onBrowserProfiles: (callback) => subscribe("codexpro:browser-profiles", callback),
   controlServer: (action) => invoke("codexpro:control", action),
   copyText: (text) => invoke("codexpro:copy", text),
+  logChatLayout: (payload) => ipcRenderer.send("codexpro:log-chat-layout", payload),
   rotateLink: () => invoke("codexpro:rotate-link"),
   listProjects: () => invoke("codexpro:projects"),
   checkProfile: (profileId) => invoke("codexpro:check-profile", profileId),
