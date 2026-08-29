@@ -1257,6 +1257,21 @@ async function readCanonicalConversationPage(conversationId) {
   }catch(error){return {ok:false,error:String(error?.message||error)};}
 }
 
+function canonicalResponseSupersedesDom(canonical,domResult) {
+  if(!canonical?.ok)return false;
+  const hasAssistantAfterLatestUser=messages=>{
+    const usable=Array.isArray(messages)?messages:[];
+    const latestUserIndex=usable.findLastIndex(message=>message?.role==='user');
+    return latestUserIndex>=0&&usable.slice(latestUserIndex+1).some(message=>message?.role==='assistant'&&String(message?.text||'').trim());
+  };
+  const canonicalHasResponse=Boolean(canonical.response_ready||hasAssistantAfterLatestUser(canonical.messages));
+  const domHasResponse=hasAssistantAfterLatestUser(domResult?.messages);
+  if(domHasResponse&&!canonicalHasResponse)return false;
+  const canonicalText=String(canonical.text||'').trim();
+  const domText=String(domResult?.text||'').trim();
+  return canonicalHasResponse||canonicalText.length>domText.length;
+}
+
 function readChatNetworkStreamCapturePage(conversationId='') {
   const capture=globalThis.__codexproNetworkStreamCaptureV1;
   if(!capture||typeof capture.read!=='function')return {available:false,capture_installed:false,conversation_id:String(conversationId||'')};
@@ -1810,7 +1825,7 @@ if(action==='rename_chat'){
       let domResult=injected.result;
       const canonicalText=String(canonical.text||'').trim();
       const domTextBeforeMerge=String(domResult.text||'').trim();
-      if(canonical.ok&&(canonical.response_ready||canonical.busy||canonicalText.length>domTextBeforeMerge.length)){
+      if(canonicalResponseSupersedesDom(canonical,domResult)){
         const latestAssistant=[...(canonical.messages||[])].reverse().find(message=>message.role==='assistant');
         domResult={...domResult,text:canonicalText,text_length:canonicalText.length,messages:canonical.messages||domResult.messages,message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,truncated:Boolean(latestAssistant?.truncated),busy:Boolean(canonical.busy),response_ready:Boolean(canonical.response_ready),response_source:'canonical_api',updated_at:new Date().toISOString()};
       }
