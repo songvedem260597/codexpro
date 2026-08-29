@@ -1098,6 +1098,26 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
           await win.webContents.executeJavaScript("document.querySelector('.worker-pack-toolbar')?.scrollIntoView({ block: 'center' })", true);
           await new Promise((resolve) => setTimeout(resolve, 350));
         }
+        let attachmentPreviewProbe = null;
+        if (process.env.CODEXPRO_MANAGER_SMOKE_ATTACHMENT_LIGHTBOX === "1") {
+          await win.webContents.executeJavaScript("document.querySelector('.request-file')?.click()", true);
+          await new Promise((resolve) => setTimeout(resolve, 550));
+          attachmentPreviewProbe = await win.webContents.executeJavaScript(`(() => {
+            const lightbox = document.querySelector('.attachment-lightbox');
+            const image = lightbox?.querySelector('.attachment-lightbox-body.is-image img');
+            const text = lightbox?.querySelector('.attachment-lightbox-body.is-text pre');
+            return {
+              open: Boolean(lightbox),
+              image: Boolean(image),
+              imageSource: Boolean(image?.getAttribute('src')?.startsWith('data:image/')),
+              text: Boolean(text),
+              title: lightbox?.querySelector('.attachment-lightbox-head strong')?.textContent?.trim() || ''
+            };
+          })()`, true);
+          const textPreview = await requestFilePreview(path.resolve(app.getAppPath(), "..", "README.md"));
+          attachmentPreviewProbe.textPreviewKind = String(textPreview?.kind || "");
+          attachmentPreviewProbe.textPreviewHasContent = Boolean(String(textPreview?.text || "").trim());
+        }
         const screenshot = process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT;
         if (screenshot) {
           win.show();
@@ -1105,7 +1125,7 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         }
         const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe }));
+        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe }));
       } catch (error) {
         console.error(error instanceof Error ? error.stack || error.message : String(error));
         process.exitCode = 1;

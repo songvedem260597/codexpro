@@ -1860,6 +1860,23 @@ function App() {
     }
   }
 
+  async function openAttachmentPreview(file) {
+    setAttachmentPreview({ loading: true, name: file.name, size: file.size, mimeType: file.mimeType, path: file.path });
+    try {
+      const preview = await api.getRequestFilePreview(file.path);
+      setAttachmentPreview({ ...preview, loading: false, path: file.path });
+    } catch (err) {
+      setAttachmentPreview({
+        loading: false,
+        name: file.name,
+        size: file.size,
+        mimeType: file.mimeType,
+        path: file.path,
+        kind: "error",
+        error: err?.message || String(err)
+      });
+    }
+  }
   async function pasteRequestImage(profileId, event) {
     const items = Array.from(event.clipboardData?.items || []);
     const files = Array.from(event.clipboardData?.files || []);
@@ -2074,12 +2091,12 @@ function App() {
               {attachments.length > 0 && (
                 <div className="request-files">
                   {attachments.map((file) => (
-                    <div className="request-file" key={file.path} title={file.path}>
+                    <div className="request-file" key={file.path} title={file.path} role="button" tabIndex={0} aria-label={`Xem trước ${file.name}`} onClick={() => void openAttachmentPreview(file)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openAttachmentPreview(file); } }}>
                       {file.previewDataUrl
                         ? <img className="request-file-image" src={file.previewDataUrl} alt="" />
                         : <span className="request-file-icon">▤</span>}
                       <span className="request-file-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span>
-                      <button type="button" aria-label={`Bỏ ${file.name}`} onClick={() => setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== file.path) }))} disabled={sending}>×</button>
+                      <button type="button" aria-label={`Bỏ ${file.name}`} onClick={(event) => { event.stopPropagation(); setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== file.path) })); }} disabled={sending}>×</button>
                     </div>
                   ))}
                 </div>
@@ -2678,6 +2695,31 @@ function App() {
       </main>
 
       {renderChatModal()}
+
+      {attachmentPreview && (
+        <div className="modal-backdrop attachment-lightbox-backdrop" tabIndex={-1} autoFocus onKeyDown={(event) => { if (event.key === "Escape") setAttachmentPreview(null); }} onMouseDown={(event) => event.target === event.currentTarget && setAttachmentPreview(null)}>
+          <div className="attachment-lightbox" role="dialog" aria-modal="true" aria-label={`Xem trước ${attachmentPreview.name || "file"}`}>
+            <div className="attachment-lightbox-head">
+              <div>
+                <strong title={attachmentPreview.name || ""}>{attachmentPreview.name || "File đính kèm"}</strong>
+                <span>{[attachmentPreview.mimeType, formatFileSize(Number(attachmentPreview.size) || 0)].filter(Boolean).join(" · ")}{attachmentPreview.truncated ? " · chỉ hiển thị phần đầu" : ""}</span>
+              </div>
+              <button type="button" aria-label="Đóng xem trước" onClick={() => setAttachmentPreview(null)}>×</button>
+            </div>
+            <div className={`attachment-lightbox-body is-${attachmentPreview.loading ? "loading" : attachmentPreview.kind || "unsupported"}`}>
+              {attachmentPreview.loading ? (
+                <div className="attachment-preview-state"><span className="typing-dots"><i /><i /><i /></span><span>Đang mở file…</span></div>
+              ) : attachmentPreview.kind === "image" ? (
+                <img src={attachmentPreview.dataUrl} alt={attachmentPreview.name || "Ảnh đính kèm"} />
+              ) : attachmentPreview.kind === "text" ? (
+                <pre>{attachmentPreview.text || "(File không có nội dung văn bản.)"}</pre>
+              ) : (
+                <div className="attachment-preview-state is-error"><strong>Không thể xem trước file này</strong><span>{attachmentPreview.error || "CodexPro hiện hỗ trợ lightbox cho ảnh và file văn bản."}</span></div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {workerUpdateConfirmOpen && (
         <div className="modal-backdrop worker-update-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setWorkerUpdateConfirmOpen(false)}>
