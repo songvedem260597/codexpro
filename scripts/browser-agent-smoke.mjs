@@ -172,6 +172,8 @@ assert.match(worker, /for\(const tabId of chatDomActivityByTab\.keys\(\)\)if\(!l
 assert.match(worker, /testId==='stop-button'/, "DOM activity probe must recognize ChatGPT's stop control");
 assert.match(worker, /settling:!networkBusy&&domActivity\.busy/, "completed network requests must remain settling while ChatGPT is visibly active");
 assert.match(worker, /activity_text:streamBusy\?/, "active ChatGPT work must expose one concise network-or-DOM activity line");
+assert.match(worker, /async function confirmConnectorFromLiveToolActivity/, "worker must self-heal stale connector status after observing a real CodexPro tool call");
+assert.match(worker, /await confirmConnectorFromLiveToolActivity\(tabs\)[\s\S]*?const profile=await profileInfo\(\)/, "worker must persist live-tool confirmation before reporting the next profile heartbeat");
 assert.match(worker, /scheduleDomActivityRefresh/, "DOM settling must refresh until ChatGPT becomes idle");
 assert.match(worker, /async function recentConversationList[\s\S]*?promiseWithTimeout\([\s\S]*?fetchRecentConversationsPage[\s\S]*?DOM_ACTION_TIMEOUT_MS/, "a hung active renderer must not block the extension poll loop and heartbeat");
 assert.match(worker, /if\(action==='recover_chat_tab'\)[\s\S]*?WORKER_BUSY:[\s\S]*?replaceUnresponsiveChatTab/, "manual tab recovery must refuse active generations and replace only an idle renderer");
@@ -214,6 +216,8 @@ assert.match(server, /trace_ms/);
 assert.match(server, /delta:/);
 
 assert.match(bridge, /subscribeBrowserExtensionProfiles/);
+assert.match(bridge, /const observedCodexProToolActivity = conversationSummaries\.some/, "bridge must treat live CodexPro tool activity as stronger evidence than a stale connector false-negative");
+assert.match(bridge, /const connectorInstalled = profile\.connectorInstalled \|\| observedCodexProToolActivity/, "profile summaries must not show CodexPro missing while it is actively being used");
 assert.match(bridge, /function pruneExpiredProfiles/);
 assert.match(bridge, /profileWorkspaceRoots\.delete\(id\)[\s\S]*?profileWorkspaceBindings\.delete\(id\)/, "expired extension profiles must release workspace maps");
 assert.match(bridge, /bridgeErrorEnvelope/);
@@ -288,7 +292,7 @@ assert.match(managerUi, /networkState === "generating" \|\| tab\.settling/, "Man
 assert.match(managerUi, /network_stream_activity_text/, "Manager must render live network tool activity without exposing raw tool payloads");
 
 const manifest = JSON.parse(manifestText);
-assert.equal(manifest.version, "0.5.62");
+assert.equal(manifest.version, "0.5.63");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");

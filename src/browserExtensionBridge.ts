@@ -231,13 +231,29 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   profile.label = String(source.label ?? profile.label ?? profile.email ?? `Chrome ${id.slice(0, 8)}`).trim().slice(0, 320);
   profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
   if (source.connector_install && typeof source.connector_install === "object") {
-    profile.connectorInstalled = source.connector_install.ok === true;
-    profile.connectorMessage = String(source.connector_install.message ?? "").trim().slice(0, 500);
-    profile.connectorCheckedAt = String(source.connector_install.at ?? "").trim().slice(0, 64);
+    const incomingInstalled = source.connector_install.ok === true;
+    const incomingCheckedAt = String(source.connector_install.at ?? "").trim().slice(0, 64);
+    const incomingCheckedAtMs = Date.parse(incomingCheckedAt);
+    const currentCheckedAtMs = Date.parse(profile.connectorCheckedAt);
+    const mayDowngrade = !profile.connectorInstalled
+      || (Number.isFinite(incomingCheckedAtMs) && (!Number.isFinite(currentCheckedAtMs) || incomingCheckedAtMs >= currentCheckedAtMs));
+    if (incomingInstalled || mayDowngrade) {
+      profile.connectorInstalled = incomingInstalled;
+      profile.connectorMessage = String(source.connector_install.message ?? "").trim().slice(0, 500);
+      profile.connectorCheckedAt = incomingCheckedAt;
+    }
   }
   profile.lastSeen = Date.now();
   if (Array.isArray(body.tabs)) profile.tabs = body.tabs.slice(0, 500);
   if (Array.isArray(body.recent_conversations)) profile.recentConversations = body.recent_conversations.slice(0, 3);
+  const observedCodexProToolActivity = profile.tabs.some((tab: any) =>
+    Boolean(tab?.busy || tab?.settling) && /^CodexPro đang\b/i.test(String(tab?.activity_text ?? "").trim())
+  );
+  if (observedCodexProToolActivity) {
+    profile.connectorInstalled = true;
+    profile.connectorMessage = "CodexPro đã được xác nhận qua tool activity trong ChatGPT.";
+    profile.connectorCheckedAt = new Date(profile.lastSeen).toISOString();
+  }
   state.profiles.set(id, profile);
   scheduleProfileNotification(state);
   return profile;
@@ -477,13 +493,20 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
         .filter((conversation) => /^[A-Za-z0-9-]{8,160}$/.test(conversation.id))
         .slice(0, 3);
       const activeChatTitle = String(recentConversations.find((conversation) => conversation.id === activeConversationId)?.title ?? titleConversation?.title ?? "").trim().slice(0, 300);
+      const observedCodexProToolActivity = conversationSummaries.some((tab) =>
+        (tab.busy || tab.settling) && /^CodexPro đang\b/i.test(tab.activity_text)
+      );
+      const connectorInstalled = profile.connectorInstalled || observedCodexProToolActivity;
+      const connectorMessage = connectorInstalled && !profile.connectorInstalled && observedCodexProToolActivity
+        ? "CodexPro đang hoạt động trong ChatGPT."
+        : profile.connectorMessage;
       return {
       profile_id: profile.id,
       email: profile.email,
       label: profile.label,
       extension_version: profile.extensionVersion,
-      connector_installed: profile.connectorInstalled,
-      connector_message: profile.connectorMessage,
+      connector_installed: connectorInstalled,
+      connector_message: connectorMessage,
       connector_checked_at: profile.connectorCheckedAt,
       active: state.activeProfileId === profile.id,
       connected: now - profile.lastSeen <= PROFILE_TTL_MS,

@@ -413,6 +413,22 @@ async function profileInfo() {
   return {id:profileId,email,label:email || `Chrome ${profileId.slice(0,8)}`,version:chrome.runtime.getManifest().version,connector_install:stored.connectorInstall||null,active:Boolean(stored.active)};
 }
 
+async function confirmConnectorFromLiveToolActivity(tabs) {
+  const observed=Array.isArray(tabs)&&tabs.some(tab=>Boolean(tab?.busy||tab?.settling)&&/^CodexPro đang\b/i.test(String(tab?.activity_text||'').trim()));
+  if(!observed)return false;
+  const stored=await chrome.storage.local.get(['connectorInstall']);
+  if(stored.connectorInstall?.ok===true)return false;
+  await chrome.storage.local.set({connectorInstall:{
+    ok:true,
+    message:'CodexPro đã được xác nhận qua tool activity trong ChatGPT.',
+    at:new Date().toISOString(),
+    source:'live_tool_activity'
+  }});
+  await chrome.action.setBadgeBackgroundColor({color:'#39d98a'}).catch(()=>{});
+  await chrome.action.setBadgeText({text:'OK'}).catch(()=>{});
+  return true;
+}
+
 async function getConversationTitleOverrides() {
   if(conversationTitleOverrides===null){
     const stored=await chrome.storage.local.get('codexproConversationTitleOverrides');
@@ -2132,8 +2148,9 @@ async function pollLoop() {
   try{
     while(true){
       try{
-        const profile=await profileInfo();
         const [tabs,recentConversations]=await Promise.all([tabList(),recentConversationList(3)]);
+        await confirmConnectorFromLiveToolActivity(tabs);
+        const profile=await profileInfo();
         const response=await fetch(`${BRIDGE}/poll`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,active:profile.active,tabs,recent_conversations:recentConversations})});
         if(!response.ok)throw new Error(`Bridge HTTP ${response.status}`);
         const message=await response.json();
