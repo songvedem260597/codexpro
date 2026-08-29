@@ -1974,11 +1974,17 @@ async function openProfileChat(payload) {
     }, 30000);
   }
 
-  const activation = await localMcpTool(base.config, token, "browser_control", {
-    action: "activate_tab",
-    profile_id: profileId,
-    target_id: targetId
-  }, 20000);
+  let activation = null;
+  let activationError = null;
+  try {
+    activation = await localMcpTool(base.config, token, "browser_control", {
+      action: "activate_tab",
+      profile_id: profileId,
+      target_id: targetId
+    }, 32000);
+  } catch (error) {
+    activationError = error;
+  }
 
   let windowFocus = await focusChromeWindow(title);
   if (!windowFocus?.ok && activation?.window_state === "maximized" && activation?.window_focused) {
@@ -1991,14 +1997,21 @@ async function openProfileChat(payload) {
       window_id: activation.window_id
     };
   }
-  if (!windowFocus?.ok) throw new Error("Đã chọn đúng tab nhưng Windows chưa đưa Chrome lên trước. Hãy thử lại một lần.");
+  if (!windowFocus?.ok) {
+    if (activationError) {
+      const reason = activationError instanceof Error ? activationError.message : String(activationError);
+      throw new Error(`Không mở được profile Chrome vì extension chưa phản hồi lệnh activate tab: ${reason}`);
+    }
+    throw new Error("Đã chọn đúng tab nhưng Windows chưa đưa Chrome lên trước. Hãy thử lại một lần.");
+  }
 
   return {
     ok: true,
     profile_id: profileId,
     conversation_id: conversationId || targetConversationId,
     target_id: Number(targetId),
-    activation,
+    activation: activation || { ok: true, acknowledgement_delayed: true },
+    activation_acknowledgement_delayed: Boolean(activationError),
     window_focus: windowFocus
   };
 }

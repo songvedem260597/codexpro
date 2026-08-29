@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
+import { materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript } from "../manager/src/chat-transcript.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -17,6 +18,36 @@ assert.equal(canAcceptNextChatMessage({ networkState: "completed", tabBusy: fals
 assert.equal(isRetryableChatTurnBusyError(new Error("Đoạn chat vẫn đang hoàn tất lượt trước.")), true, "a fresh worker busy guard must be retried after the turn settles");
 assert.equal(isRetryableChatTurnBusyError(new Error("Đoạn chat này đang xử lý yêu cầu khác.")), true, "a network busy race must be retried after the turn settles");
 assert.equal(isRetryableChatTurnBusyError(new Error("SEND_UNCERTAIN")), false, "an uncertain submission must never be retried as a harmless busy race");
+
+const cachedTranscript = materializeTranscriptMessages({
+  conversationId: "conversation-1",
+  text: "Phản hồi cũ vẫn phải còn",
+  messages: []
+}, "conversation-1");
+assert.equal(cachedTranscript.length, 1, "a cached response must become a transcript message before optimistic send");
+assert.equal(cachedTranscript[0].role, "assistant");
+const newerCachedTranscript = materializeTranscriptMessages({
+  conversationId: "conversation-1",
+  text: "Phản hồi mới chưa vào canonical",
+  messages: cachedTranscript
+}, "conversation-1");
+assert.equal(newerCachedTranscript.length, 2, "a newer cached response must not be hidden just because an older assistant message exists");
+
+const optimisticTranscript = [...cachedTranscript, { id: "optimistic-user-1", role: "user", text: "Yêu cầu mới", pending: true }];
+const firstStreamTranscript = mergeNetworkStreamTranscript(optimisticTranscript, {
+  conversationId: "conversation-1",
+  text: "Đang xử lý"
+});
+const updatedStreamTranscript = mergeNetworkStreamTranscript(firstStreamTranscript, {
+  conversationId: "conversation-1",
+  text: "Đã xử lý gần xong"
+});
+assert.equal(updatedStreamTranscript.filter((message) => message.id === "network-stream-assistant:conversation-1").length, 1, "network events must update one live response instead of flooding the transcript");
+assert.equal(updatedStreamTranscript.at(-1).text, "Đã xử lý gần xong");
+assert.ok(updatedStreamTranscript.some((message) => message.text === "Phản hồi cũ vẫn phải còn"), "network streaming must preserve the previous response");
+assert.ok(updatedStreamTranscript.some((message) => message.text === "Yêu cầu mới"), "network streaming must preserve the optimistic user message");
+assert.deepEqual(replaceCanonicalTranscript(updatedStreamTranscript, []), updatedStreamTranscript, "an empty transient canonical read must not erase the visible transcript");
+assert.deepEqual(replaceCanonicalTranscript(updatedStreamTranscript, [{ id: "canonical-1", role: "assistant", text: "Canonical" }]), [{ id: "canonical-1", role: "assistant", text: "Canonical" }], "a populated canonical transcript must replace temporary stream data");
 const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, manifestText] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
@@ -94,6 +125,11 @@ const extensionBatch = worker.slice(worker.indexOf("if(action==='batch')"), work
 assert.match(extensionBatch, /executeOnTab/);
 assert.doesNotMatch(extensionBatch, /await execute\(/, "extension batch must not resolve the tab again per step");
 assert.doesNotMatch(worker, /if\(action==='press'\)\{\s*const target=\{tabId:tab\.id\};await chrome\.debugger\.attach/, "press must not attach/detach a fresh debugger session per action");
+
+const openProfileChat = managerMain.slice(managerMain.indexOf("async function openProfileChat"), managerMain.indexOf("async function reloadChromeProfiles"));
+assert.match(openProfileChat, /action: "activate_tab"[\s\S]*?}, 32000\)/, "Manager must wait longer than the 25-second extension bridge command timeout");
+assert.match(openProfileChat, /catch \(error\) \{\s*activationError = error;\s*\}[\s\S]*?focusChromeWindow\(title\)/, "a delayed activate acknowledgement must still verify whether Chrome actually opened");
+assert.match(openProfileChat, /activation_acknowledgement_delayed: Boolean\(activationError\)/, "open-profile diagnostics must expose delayed activation acknowledgements");
 
 assert.match(server, /steps: z\.array\(z\.object/);
 assert.match(server, /timeout_ms: z\.number\(\)\.int\(\)\.min\(100\)\.max\(60000\)/);
