@@ -2639,6 +2639,8 @@ function App() {
                 : profile.connector_message;
               const idle = profile.connected && profile.activity === "idle" && (connectorInstalled || !ready);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
+              const profileHasError = rendererUnresponsive || !profile.connected || liveTab?.network_state === "failed" || Boolean(liveTab?.renderer_error) || Boolean(liveTab?.connection_interrupted);
+              const profileBorderState = profileHasError ? "error" : workerState === "working" ? "working" : "idle";
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
               const directProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const fallbackProject = profileRepoProject(profile, projects, profileRepoRoots[profile.profile_id]);
@@ -2646,7 +2648,7 @@ function App() {
               const repoLabel = String(profile.current_workspace_repo || repoProject?.githubRepo || (repoProject ? `Local · ${repoProject.name}` : "")).trim();
               const repoTitle = repoProject?.githubUrl || repoProject?.remoteUrl || workspaceRoot || repoProject?.root || "Worker chưa xác định được repo GitHub";
               return (
-                <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"}`} key={profile.profile_id}>
+                <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`} key={profile.profile_id}>
                   <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
                   <div className="profile-main">
                     <div className="profile-title">
