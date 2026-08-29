@@ -48,6 +48,8 @@ export interface ExtensionProfileSummary {
     network_status_code: number;
     network_error: string;
     network_duration_ms: number;
+    renderer_unresponsive: boolean;
+    renderer_error: string;
   }>;
   recent_conversations: Array<{
     id: string;
@@ -445,6 +447,8 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
           network_status_code: Number(tab.network_status_code) || 0,
           network_error: String(tab.network_error ?? "").trim().slice(0, 500),
           network_duration_ms: Math.max(0, Number(tab.network_duration_ms) || 0),
+          renderer_unresponsive: tab.renderer_unresponsive === true,
+          renderer_error: String(tab.renderer_error ?? "").trim().slice(0, 300),
           network_recent_posts: Array.isArray(tab.network_recent_posts) ? tab.network_recent_posts.slice(-12) : []
         }))
         .filter((tab) => Number.isInteger(tab.id) && tab.id >= 0);

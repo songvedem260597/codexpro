@@ -97,6 +97,37 @@ assert.equal(isChatGenerationRequest({
   url: "https://example.com/backend-api/conversation"
 }), false);
 
+const replaceTabSource = extractFunction("replaceUnresponsiveChatTab");
+const recoveryCalls = [];
+const recoveryNetworkState = new Map([[41, { state: "completed", conversation_id: "12345678-abcd" }]]);
+const recoveryPostLog = new Map([[41, [{ state: "completed" }]]]);
+const recoveryPostVersion = new Map([[41, 3]]);
+const replaceUnresponsiveChatTab = Function(
+  "chrome", "waitForTab", "ensureChatNetworkStreamCapture", "ensureChatNetworkStateLoaded", "chatNetworkStateByTab", "chatNetworkPostLogByTab", "chatNetworkPostVersionByTab", "pendingConversationByTab", "persistChatNetworkState", "scheduleRealtimeProfilePush", "recentConversationCache",
+  `${replaceTabSource.replace(/^function/, "async function")}; return replaceUnresponsiveChatTab;`
+)(
+  { tabs: {
+    create: async (args) => { recoveryCalls.push(["create", args]); return { id: 42, windowId: 7, active: true, url: args.url }; },
+    get: async (id) => { recoveryCalls.push(["get", id]); return { id, windowId: 7, active: true, url: "https://chatgpt.com/c/12345678-abcd" }; },
+    remove: async (id) => { recoveryCalls.push(["remove", id]); }
+  } },
+  async (id) => { recoveryCalls.push(["wait", id]); },
+  async (id) => { recoveryCalls.push(["capture", id]); },
+  async () => { recoveryCalls.push(["state"]); },
+  recoveryNetworkState,
+  recoveryPostLog,
+  recoveryPostVersion,
+  new Map([[41, { conversation_id: "12345678-abcd" }]]),
+  async () => { recoveryCalls.push(["persist"]); },
+  () => { recoveryCalls.push(["push"]); },
+  { at: 1, items: [] }
+);
+const recoveryResult = await replaceUnresponsiveChatTab({ id: 41, windowId: 7, active: true, url: "https://chatgpt.com/c/12345678-abcd" }, "https://chatgpt.com/c/12345678-abcd", 5000);
+assert.equal(recoveryResult.replaced_tab_id, 41);
+assert.equal(recoveryResult.recovery_tab_id, 42);
+assert.ok(recoveryCalls.findIndex(([name]) => name === "wait") < recoveryCalls.findIndex(([name]) => name === "remove"), "the replacement must finish loading before the stuck tab is closed");
+assert.deepEqual(recoveryNetworkState.get(42), recoveryNetworkState.get(41), "completed network evidence must follow the replacement tab");
+
 const sendStart = worker.indexOf("if(action==='send_chat_request'){");
 const sendEnd = worker.indexOf("if(action==='rename_chat'){", sendStart);
 assert.ok(sendStart >= 0 && sendEnd > sendStart, "send_chat_request command block must exist");
