@@ -17,13 +17,18 @@ import {
 } from './cloudflared-release.mjs';
 import {
   CODEXPRO_EXPLORE_AGENT,
-  CODEXPRO_ORCHESTRATOR_AGENT
+  CODEXPRO_ORCHESTRATOR_AGENT,
+  CODEXPRO_SCOUT_ORCHESTRATOR_AGENT,
+  GEMINI_SCOUT_AGENT,
+  inspectOpenCodeScoutCapability
 } from './opencode-subagents.mjs';
 import {
   buildOpenCodeExecutorArgs,
   executorPromptWithInvestigation,
+  inspectGeminiScoutAvailability,
   inspectOpenCodeRuntime,
   runOpenCodeModelProbe,
+  runVerifiedGeminiScout,
   runVerifiedOpenCodeInvestigation
 } from './opencode-subagent-runner.mjs';
 
@@ -150,7 +155,7 @@ Execute handoff options:
   --agent <opencode|pi|codex|custom>
                              Local implementation agent adapter.
   --model <provider/model>  Optional model name passed to the adapter.
-  --subagents               For OpenCode, require a real read-only Task child session before editing; fall back safely if verification fails.
+  --subagents               For OpenCode, require a real read-only repo child; external/API plans may also use verified gemini-scout research.
   --command <template>      Custom command template. Supports {{model}}, {{plan_file}}, {{plan_text}}, {{root}}.
   --dry-run                 Print the command that would run without executing it.
   --timeout-ms <ms>         Execution timeout. Default: 600000.
@@ -208,8 +213,10 @@ Preflight diagnostics:
   codexpro doctor
   codexpro doctor --live-agent-check --model opencode/big-pickle
   codexpro doctor --live-subagent-check --model opencode/big-pickle
+  codexpro doctor --live-scout-check --model opencode/big-pickle
   --live-agent-check        Make one tiny OpenCode model call to verify provider/model readiness.
   --live-subagent-check     Run one read-only OpenCode Task delegation and require child-session evidence.
+  --live-scout-check        Probe the best authenticated Gemini Flash candidate and, if healthy, require a real gemini-scout child session.
 
 Ngrok stable URL mode:
   codexpro ngrok --root /path/to/repo --hostname your-domain.ngrok-free.dev
@@ -366,6 +373,7 @@ function parseArgs(argv) {
     else if (key === 'no-subagents') out.subagents = false;
     else if (key === 'live-agent-check') out.liveAgentCheck = true;
     else if (key === 'live-subagent-check') out.liveSubagentCheck = true;
+    else if (key === 'live-scout-check') out.liveScoutCheck = true;
     else if (key === 'open-chatgpt') out.openChatgpt = true;
     else if (key === 'headless') out.headless = true;
     else if (key === 'no-profile') out.noProfile = true;
@@ -1807,10 +1815,14 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, 
     `Agent: ${commandInfo.agent}`,
     commandInfo.model ? `Model: ${commandInfo.model}` : '',
     commandInfo.subagentRun?.requested ? 'Subagents requested: yes' : '',
-    commandInfo.subagentRun?.requested ? `Subagent verified: ${commandInfo.subagentRun.verified ? 'yes' : 'no'}` : '',
-    commandInfo.subagentRun?.fallbackReason ? `Subagent fallback: ${commandInfo.subagentRun.fallbackReason}` : '',
-    commandInfo.subagentRun?.childSessionId ? `Child session: ${commandInfo.subagentRun.childSessionId}` : '',
-    commandInfo.subagentRun?.filesInspected?.length ? `Files inspected by child: ${commandInfo.subagentRun.filesInspected.join(', ')}` : '',
+    commandInfo.subagentRun?.requested ? `Explore verified: ${commandInfo.subagentRun.verified ? 'yes' : 'no'}` : '',
+    commandInfo.subagentRun?.fallbackReason ? `Explore fallback: ${commandInfo.subagentRun.fallbackReason}` : '',
+    commandInfo.subagentRun?.childSessionId ? `Explore child session: ${commandInfo.subagentRun.childSessionId}` : '',
+    commandInfo.subagentRun?.filesInspected?.length ? `Files inspected by explore child: ${commandInfo.subagentRun.filesInspected.join(', ')}` : '',
+    commandInfo.scoutRun?.requested ? `Gemini scout verified: ${commandInfo.scoutRun.verified ? 'yes' : 'no'}` : '',
+    commandInfo.scoutRun?.childModel ? `Gemini scout model: ${commandInfo.scoutRun.childModel}` : '',
+    commandInfo.scoutRun?.fallbackReason && commandInfo.scoutRun?.requested ? `Gemini scout fallback: ${commandInfo.scoutRun.fallbackReason}` : '',
+    commandInfo.scoutRun?.childSessionId ? `Gemini scout child session: ${commandInfo.scoutRun.childSessionId}` : '',
     `Command: ${commandText}`,
     `Exit code: ${result.exitCode ?? 'null'}`,
     result.signal ? `Signal: ${result.signal}` : '',
@@ -1836,6 +1848,11 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, 
     subagent_fallback: commandInfo.subagentRun?.fallbackReason || undefined,
     child_session_id: commandInfo.subagentRun?.childSessionId || undefined,
     files_inspected: commandInfo.subagentRun?.filesInspected?.length ? commandInfo.subagentRun.filesInspected : undefined,
+    scout_requested: Boolean(commandInfo.scoutRun?.requested),
+    scout_verified: Boolean(commandInfo.scoutRun?.verified),
+    scout_model: commandInfo.scoutRun?.childModel || undefined,
+    scout_fallback: commandInfo.scoutRun?.requested ? commandInfo.scoutRun?.fallbackReason || undefined : undefined,
+    scout_child_session_id: commandInfo.scoutRun?.childSessionId || undefined,
     command: commandText,
     exit_code: result.exitCode,
     signal: result.signal,
@@ -1938,25 +1955,40 @@ async function executeHandoffRequest(request, args, options = {}) {
   });
 
   let subagentRun = { requested: false, verified: false, fallbackReason: '', events: [] };
+  let scoutRun = { requested: false, verified: false, fallbackReason: '', events: [] };
   if (request.commandInfo.agent === 'opencode' && request.commandInfo.subagentsRequested) {
+    const openCodeConfigDir = path.join(projectRoot, '.opencode');
     statusLine('wait', `Verifying OpenCode Task delegation through ${CODEXPRO_EXPLORE_AGENT}...`);
     subagentRun = await runVerifiedOpenCodeInvestigation({
       command: request.commandInfo.command,
       root: request.root,
       planText: request.planText,
       model: request.commandInfo.model,
-      configDir: path.join(projectRoot, '.opencode'),
+      configDir: openCodeConfigDir,
       timeoutMs: request.timeoutMs,
       maxOutputBytes: request.maxOutputBytes
     });
     appendExecutionTelemetry(request.root, request.contextDir, subagentRun.events);
     if (subagentRun.verified) statusLine('ok', `Verified child session ${subagentRun.childSessionId} from ${CODEXPRO_EXPLORE_AGENT}.`);
-    else statusLine('warn', `Subagent unavailable; falling back to single-agent execution: ${subagentRun.fallbackReason}`);
+    else statusLine('warn', `Repository explore unavailable; continuing without child evidence: ${subagentRun.fallbackReason}`);
+
+    scoutRun = await runVerifiedGeminiScout({
+      command: request.commandInfo.command,
+      root: request.root,
+      planText: request.planText,
+      model: request.commandInfo.model,
+      configDir: openCodeConfigDir,
+      timeoutMs: request.timeoutMs,
+      maxOutputBytes: request.maxOutputBytes
+    });
+    appendExecutionTelemetry(request.root, request.contextDir, scoutRun.events);
+    if (scoutRun.verified) statusLine('ok', `Verified ${GEMINI_SCOUT_AGENT} child ${scoutRun.childSessionId} using ${scoutRun.childModel}.`);
+    else if (scoutRun.requested) statusLine('warn', `Gemini scout unavailable; continuing without external scout evidence: ${scoutRun.fallbackReason}`);
   }
 
-  let effectiveCommandInfo = { ...request.commandInfo, subagentRun };
-  if (subagentRun.verified && request.commandInfo.agent === 'opencode') {
-    const prompt = executorPromptWithInvestigation(request.commandInfo.basePlanPrompt, subagentRun);
+  let effectiveCommandInfo = { ...request.commandInfo, subagentRun, scoutRun };
+  if ((subagentRun.verified || scoutRun.verified) && request.commandInfo.agent === 'opencode') {
+    const prompt = executorPromptWithInvestigation(request.commandInfo.basePlanPrompt, [subagentRun, scoutRun]);
     effectiveCommandInfo = {
       ...effectiveCommandInfo,
       args: buildOpenCodeExecutorArgs(request.commandInfo.model, prompt),
@@ -1989,6 +2021,11 @@ async function executeHandoffRequest(request, args, options = {}) {
     subagent_fallback: subagentRun.fallbackReason || undefined,
     child_session_id: subagentRun.childSessionId || undefined,
     files_inspected: subagentRun.filesInspected?.length ? subagentRun.filesInspected : undefined,
+    scout_requested: Boolean(scoutRun.requested),
+    scout_verified: Boolean(scoutRun.verified),
+    scout_model: scoutRun.childModel || undefined,
+    scout_fallback: scoutRun.requested ? scoutRun.fallbackReason || undefined : undefined,
+    scout_child_session_id: scoutRun.childSessionId || undefined,
     exit_code: result.exitCode ?? null,
     timed_out: Boolean(result.timedOut),
     duration_ms: result.durationMs,
@@ -2001,7 +2038,7 @@ async function executeHandoffRequest(request, args, options = {}) {
   console.log(`Status: ${path.relative(request.root, outputs.statusPath)}`);
   console.log(`Diff:   ${path.relative(request.root, outputs.diffPath)}`);
   console.log(`Log:    ${path.relative(request.root, outputs.logPath)}`);
-  return { cancelled: false, result, outputs, subagentRun };
+  return { cancelled: false, result, outputs, subagentRun, scoutRun };
 }
 
 async function runExecuteHandoff(argv) {
@@ -3119,6 +3156,26 @@ async function runDoctor(argv) {
     record(capability.taskPermission === 'allow' ? 'ok' : 'warn', 'OC Task access', `${CODEXPRO_EXPLORE_AGENT}: ${capability.taskPermission || 'not allowed'}`);
     record(capability.explorerEdit === 'deny' && capability.explorerBash === 'deny' && capability.explorerTask === 'deny' ? 'ok' : 'warn', 'OC child safety', `edit=${capability.explorerEdit || '?'} bash=${capability.explorerBash || '?'} task=${capability.explorerTask || '?'}`);
 
+    const scoutCapability = inspectOpenCodeRuntime(opencodeCommand, root, openCodeConfigDir, { inspector: inspectOpenCodeScoutCapability });
+    record(scoutCapability.ready ? 'ok' : 'warn', 'OC Gemini scout', scoutCapability.ready
+      ? `${CODEXPRO_SCOUT_ORCHESTRATOR_AGENT} -> ${GEMINI_SCOUT_AGENT}`
+      : scoutCapability.reasons.join('; '));
+    record(
+      scoutCapability.childPermissions?.read === 'deny' &&
+      scoutCapability.childPermissions?.bash === 'deny' &&
+      scoutCapability.childPermissions?.task === 'deny' &&
+      scoutCapability.childPermissions?.webfetch === 'allow' &&
+      scoutCapability.childPermissions?.websearch === 'allow'
+        ? 'ok'
+        : 'warn',
+      'OC scout safety',
+      `read=${scoutCapability.childPermissions?.read || '?'} bash=${scoutCapability.childPermissions?.bash || '?'} task=${scoutCapability.childPermissions?.task || '?'} webfetch=${scoutCapability.childPermissions?.webfetch || '?'} websearch=${scoutCapability.childPermissions?.websearch || '?'}`
+    );
+    const scoutAvailability = inspectGeminiScoutAvailability(opencodeCommand, root, openCodeConfigDir);
+    record(scoutAvailability.ready ? 'ok' : 'warn', 'OC scout candidate', scoutAvailability.ready
+      ? `${scoutAvailability.selectedModel} (catalog + credential; use --live-scout-check for end-to-end verification)`
+      : scoutAvailability.reason);
+
     const selectedModel = String(args.model ?? capability.model ?? '').trim();
     const modelList = spawnSyncPortable(opencodeCommand, ['models'], { cwd: root, encoding: 'utf8', maxBuffer: 2_000_000, env: { ...process.env, NO_COLOR: '1' } });
     const modelListed = Boolean(selectedModel && modelList.status === 0 && String(modelList.stdout || '').split(/\r?\n/).some((line) => line.trim() === selectedModel));
@@ -3150,6 +3207,22 @@ async function runDoctor(argv) {
       record(liveSubagent.verified ? 'ok' : 'fail', 'OC live child', liveSubagent.verified ? `${liveSubagent.childSessionId}; files=${liveSubagent.filesInspected.join(', ') || '(none reported)'}` : liveSubagent.fallbackReason);
     } else {
       record('warn', 'OC live child', 'not called; use --live-subagent-check to require a real Task child session');
+    }
+
+    if (args.liveScoutCheck) {
+      const liveScout = await runVerifiedGeminiScout({
+        command: opencodeCommand,
+        root,
+        configDir: openCodeConfigDir,
+        model: selectedModel,
+        planText: 'Verify from official OpenCode documentation how subagent_depth controls child-agent nesting and report the source URL. This is an external documentation verification task; do not inspect workspace files.',
+        timeoutMs: 90_000,
+        probeTimeoutMs: 12_000,
+        maxOutputBytes: 120_000
+      });
+      record(liveScout.verified ? 'ok' : 'fail', 'OC live scout', liveScout.verified
+        ? `${liveScout.childSessionId}; model=${liveScout.childModel}; tools=${liveScout.childToolNames.join(', ') || '(none)'}`
+        : liveScout.fallbackReason);
     }
   }
 
