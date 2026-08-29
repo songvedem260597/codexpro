@@ -57,6 +57,20 @@ if (!/opencode(?:\.(?:cmd|exe))?['"]?\s+run/i.test(dryRun.stdout) || !dryRun.std
   throw new Error(`dry-run output did not show adapter command\n${dryRun.stdout}`);
 }
 
+const subagentDryRun = run([
+  'execute-handoff',
+  '--root',
+  root,
+  '--agent',
+  'opencode',
+  '--subagents',
+  '--dry-run'
+]);
+requireSuccess(subagentDryRun, 'execute-handoff subagent dry-run');
+if (!subagentDryRun.stdout.includes('OpenCode Explore + Scout') || !subagentDryRun.stdout.includes('subagents=explore,scout')) {
+  throw new Error(`subagent dry-run did not show delegated investigation\n${subagentDryRun.stdout}`);
+}
+
 const missingPlaceholder = run([
   'execute-handoff',
   '--root',

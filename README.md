@@ -259,8 +259,12 @@ Then you run execution locally:
 
 ```bash
 codexpro execute-handoff --agent codex --yes
-codexpro watch-handoff --agent codex --yes
+codexpro execute-handoff --agent pi --yes
+codexpro execute-handoff --agent opencode --subagents --yes
+codexpro watch-handoff --agent opencode --subagents --yes
 ```
+
+`--subagents` is an OpenCode optimization for bug-fix/repository-reading work: the primary agent is told to delegate independent read-only investigation to Explore/Scout subagents, synthesize the findings, and keep source edits/final verification coordinated centrally.
 
 `handoff_to_agent` is planning-only over MCP. CodexPro does not expose arbitrary local agent execution as a remote ChatGPT tool.
 

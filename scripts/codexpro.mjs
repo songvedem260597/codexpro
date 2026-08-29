@@ -139,6 +139,7 @@ Execute handoff options:
   --agent <opencode|pi|codex|custom>
                              Local implementation agent adapter.
   --model <provider/model>  Optional model name passed to the adapter.
+  --subagents               For OpenCode, delegate investigation to read-only Explore/Scout subagents before editing.
   --command <template>      Custom command template. Supports {{model}}, {{plan_file}}, {{plan_text}}, {{root}}.
   --dry-run                 Print the command that would run without executing it.
   --timeout-ms <ms>         Execution timeout. Default: 600000.
@@ -346,6 +347,8 @@ function parseArgs(argv) {
     else if (key === 'require-human-confirmation') out.requireHumanConfirmation = true;
     else if (key === 'allow-implicit-review-verdict') out.allowImplicitReviewVerdict = true;
     else if (key === 'allow-review-pass-on-failure') out.allowReviewPassOnFailure = true;
+    else if (key === 'subagents') out.subagents = true;
+    else if (key === 'no-subagents') out.subagents = false;
     else if (key === 'open-chatgpt') out.openChatgpt = true;
     else if (key === 'headless') out.headless = true;
     else if (key === 'no-profile') out.noProfile = true;
@@ -1534,6 +1537,7 @@ function applyCommandTemplate(value, replacements) {
 function buildExecutorCommand(args, root, planPath, planText) {
   const agent = String(args.agent ?? 'opencode').trim().toLowerCase();
   const model = String(args.model ?? process.env.CODEXPRO_AGENT_MODEL ?? '').trim();
+  const subagents = args.subagents === true;
   const replacements = {
     model,
     plan_file: planPath,
@@ -1557,14 +1561,24 @@ function buildExecutorCommand(args, root, planPath, planText) {
   }
 
   const relativePlanPath = path.relative(root, planPath) || planPath;
-  const planPrompt = `Read the handoff plan at ${relativePlanPath} and execute it in this workspace.`;
+  const basePlanPrompt = `Read the handoff plan at ${relativePlanPath} and execute it in this workspace.`;
   if (agent === 'opencode') {
+    const planPrompt = subagents
+      ? [
+          basePlanPrompt,
+          'Before editing, delegate independent investigation to OpenCode subagents when useful.',
+          'Use Explore subagents for code architecture, call/data flow, bug localization, and related tests; use Scout for external dependency or upstream documentation research.',
+          'Run independent investigations in parallel when practical, synthesize their findings in the primary agent, then keep implementation and final verification coordinated by the primary agent.',
+          'Do not delegate trivial work or duplicate the same investigation.'
+        ].join(' ')
+      : basePlanPrompt;
     return {
       agent,
       model,
+      subagents,
       command: resolveAgentCommand('opencode'),
       args: ['run', ...(model ? ['--model', model] : []), planPrompt],
-      displayArgs: ['run', ...(model ? ['--model', model] : []), `<read ${relativePlanPath}>`],
+      displayArgs: ['run', ...(model ? ['--model', model] : []), subagents ? `<read ${relativePlanPath}; subagents=explore,scout>` : `<read ${relativePlanPath}>`],
       custom: false
     };
   }
@@ -1572,8 +1586,9 @@ function buildExecutorCommand(args, root, planPath, planText) {
     return {
       agent,
       model,
+      subagents: false,
       command: resolveAgentCommand('pi'),
-      args: [...(model ? ['--model', model] : []), '-p', planPrompt],
+      args: [...(model ? ['--model', model] : []), '-p', basePlanPrompt],
       displayArgs: [...(model ? ['--model', model] : []), '-p', `<read ${relativePlanPath}>`],
       custom: false
     };
@@ -1589,6 +1604,7 @@ function buildExecutorCommand(args, root, planPath, planText) {
     return {
       agent,
       model,
+      subagents: false,
       command: resolveCodexCommand(),
       args: [
         'exec',
@@ -1863,6 +1879,7 @@ function printHandoffDryRun(request, title = 'CodexPro execute-handoff dry run')
     labelValue('Plan', path.relative(request.root, request.planPath)),
     labelValue('Agent', request.commandInfo.agent),
     ...(request.commandInfo.model ? [labelValue('Model', request.commandInfo.model)] : []),
+    ...(request.commandInfo.subagents ? [labelValue('Subagents', 'OpenCode Explore + Scout')] : []),
     labelValue('Command', request.commandText),
     'No command was executed and no .ai-bridge result files were changed.'
   ]);
@@ -1890,6 +1907,7 @@ async function executeHandoffRequest(request, args, options = {}) {
     plan_hash: runPlanHash,
     executor: request.commandInfo.agent,
     model: request.commandInfo.model || undefined,
+    subagents: request.commandInfo.subagents || undefined,
     pid: process.pid
   });
 
@@ -2999,6 +3017,9 @@ async function runDoctor(argv) {
   const tailscalePath = localOrPathCommand(effectiveArgs.tailscale ?? process.env.TAILSCALE_BIN ?? 'tailscale', '');
   const clipboard = clipboardCommand();
   const browser = browserOpenCommand();
+  const opencodeCommand = resolveAgentCommand('opencode');
+  const piCommand = resolveAgentCommand('pi');
+  const codexCommand = resolveCodexCommand();
   const checks = [];
 
   function record(status, label, detail) {
@@ -3025,6 +3046,9 @@ async function runDoctor(argv) {
   record(['minimal', 'standard', 'full'].includes(toolMode) ? 'ok' : 'fail', 'Tool mode', ['minimal', 'standard', 'full'].includes(toolMode) ? toolMode : '--tool-mode must be minimal, standard, or full');
   record(clipboard ? 'ok' : 'warn', 'Clipboard', clipboard || 'not found; URL will be printed for manual copy');
   record(browser ? 'ok' : 'warn', 'Browser open', browser || 'not found; open ChatGPT manually');
+  record(commandAvailableFromRoot(opencodeCommand, root) ? 'ok' : 'warn', 'OpenCode agent', commandAvailableFromRoot(opencodeCommand, root) ? opencodeCommand : 'not found; install opencode-ai to use --agent opencode');
+  record(commandAvailableFromRoot(piCommand, root) ? 'ok' : 'warn', 'Pi agent', commandAvailableFromRoot(piCommand, root) ? piCommand : 'not found; install @mariozechner/pi-coding-agent to use --agent pi');
+  record(commandAvailableFromRoot(codexCommand, root) ? 'ok' : 'warn', 'Codex agent', commandAvailableFromRoot(codexCommand, root) ? codexCommand : 'not found; install Codex CLI to use --agent codex');
 
   try {
     await assertPortAvailable(host, port);
