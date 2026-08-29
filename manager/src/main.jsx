@@ -2530,7 +2530,7 @@ function App() {
                           {message.role === "assistant" ? <>
                             <React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>
                             {responseTurnActive && response.networkStreamAvailable && isLastAssistant && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}
-                            {message.text && !(isLastAssistant && responseTurnActive) && (
+                            {message.text && turnReady && (
                               <div className="chat-message-actions">
                                 <button type="button" className="chat-message-copy" title="Copy response" aria-label="Copy phản hồi" onClick={async () => { await api.copyText(message.text); notify("Đã copy phản hồi"); }}>
                                   <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>
