@@ -52,6 +52,12 @@ export function materializeTranscriptMessages(response, conversationId) {
   ]);
 }
 
+export function transcriptAwaitingAssistant(messages) {
+  const usable = Array.isArray(messages) ? messages.filter((message) => String(message?.text || "").trim()) : [];
+  const latestUserIndex = usable.findLastIndex((message) => message?.role === "user");
+  return latestUserIndex >= 0 && !usable.slice(latestUserIndex + 1).some((message) => message?.role === "assistant");
+}
+
 export function mergeNetworkStreamTranscript(previousMessages, { conversationId, text, truncated = false }) {
   const streamText = String(text || "").trim();
   const messages = Array.isArray(previousMessages) ? [...previousMessages] : [];

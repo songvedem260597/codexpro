@@ -6,7 +6,7 @@ import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
-import { isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, trimRecentTranscriptMessages } from "./chat-transcript.js";
+import { isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -19,6 +19,7 @@ const NEW_CHAT_TARGET = "__codexpro_new_chat__";
 const ALL_ALLOWED_WORKSPACES = "__codexpro_all_allowed__";
 const ROLLOVER_CONTEXT_MAX_CHARS = 9000;
 const REPO_TASK_VERIFICATION_RETRY_MS = 1500;
+const LATEST_RESPONSE_RECOVERY_POLL_MS = 3000;
 const PROJECTS_PER_PAGE = 8;
 
 function Dot({ ok }) {
@@ -394,7 +395,7 @@ function compactToolActivityMessages(messages) {
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.61";
+const WORKER_EXTENSION_VERSION = "0.5.62";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -663,6 +664,14 @@ function App() {
   const projectPageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE));
   const visibleProjects = useMemo(() => projects.slice(projectPage * PROJECTS_PER_PAGE, (projectPage + 1) * PROJECTS_PER_PAGE), [projects, projectPage]);
   const openChatResponse = chatProfileId ? requestResponses[chatProfileId] : null;
+  const openChatMessages = openChatResponse && chatProfileId
+    ? materializeTranscriptMessages(openChatResponse, String(openChatResponse.conversationId || ""))
+    : [];
+  const openChatAwaitingAssistant = transcriptAwaitingAssistant(openChatMessages);
+  const openChatLatestMessage = openChatMessages.at(-1);
+  const openChatLatestMessageKey = openChatLatestMessage
+    ? `${openChatLatestMessage.id || "message"}:${openChatLatestMessage.role || ""}:${String(openChatLatestMessage.text || "").length}`
+    : "";
   const openChatScrollKey = useMemo(() => {
     if (!openChatResponse || !chatProfileId) return "";
     const messages = Array.isArray(openChatResponse.messages) ? openChatResponse.messages : [];
@@ -1094,6 +1103,24 @@ function App() {
   }, [chatProfileId, status?.browserProfiles, requestResponses]);
 
   useEffect(() => {
+    const conversationId = String(openChatResponse?.conversationId || "");
+    if (!chatProfileId || !/^[A-Za-z0-9-]{8,160}$/.test(conversationId) || !openChatAwaitingAssistant) return;
+    let cancelled = false;
+    let timer = 0;
+    const pollLatestResponse = async () => {
+      const profile = profilesRef.current.find((item) => item.profile_id === chatProfileId);
+      if (cancelled) return;
+      if (profile?.connected) await loadResponse(profile, conversationId, true, false, false, true);
+      if (!cancelled) timer = window.setTimeout(pollLatestResponse, LATEST_RESPONSE_RECOVERY_POLL_MS);
+    };
+    timer = window.setTimeout(pollLatestResponse, 500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [chatProfileId, openChatResponse?.conversationId, openChatAwaitingAssistant, openChatLatestMessageKey]);
+
+  useEffect(() => {
     if (!chatProfileId) return;
     responseScrollLocked.current.delete(chatProfileId);
     responseScrollPositions.current.delete(chatProfileId);
@@ -1366,6 +1393,7 @@ function App() {
 
   function cachedResponseIsFresh(profile, conversationId, cached) {
     if (!cached?.messages?.length && !cached?.text) return false;
+    if (transcriptAwaitingAssistant(materializeTranscriptMessages(cached, conversationId))) return false;
     const tab = profileConversationTab(profile, conversationId);
     if (!tab) return false;
     const networkState = String(tab.network_state || (tab.busy ? "generating" : "idle"));
@@ -1443,7 +1471,8 @@ function App() {
         });
       }
       if (!cachedResponseIsFresh(profile, conversationId, cached)) {
-        await loadResponse(profile, conversationId, true, true);
+        const awaitingCachedAssistant = transcriptAwaitingAssistant(materializeTranscriptMessages(cached, conversationId));
+        await loadResponse(profile, conversationId, true, !awaitingCachedAssistant, false, awaitingCachedAssistant);
       }
     } finally {
       responseCacheLoads.current.delete(key);
@@ -2008,7 +2037,7 @@ function App() {
     }
   }
 
-  async function loadResponse(profile, explicitConversationId, silent = false, readDom = false, recoverStaleDom = false) {
+  async function loadResponse(profile, explicitConversationId, silent = false, readDom = false, recoverStaleDom = false, canonicalOnly = false) {
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const conversationId = String(explicitConversationId || requestTargets[profile.profile_id] || defaultTarget || "");
@@ -2018,8 +2047,10 @@ function App() {
       setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
     }
     try {
-      const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId, readDom, recoverStaleDom });
+      const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId, readDom, recoverStaleDom, canonicalOnly });
       const domAvailable = result.dom_available !== false;
+      const canonicalAvailable = result.canonical_available === true;
+      const contentAvailable = domAvailable || canonicalAvailable;
       const networkStreamPayloadAvailable = Boolean(result.network_stream_available && (result.text || result.messages?.length || result.network_stream_activity_text));
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
@@ -2040,7 +2071,7 @@ function App() {
             })).filter((message) => message.text))
           : [];
         let nextMessages = sameConversation ? materializeTranscriptMessages(previous, conversationId) : [];
-        if (domAvailable) nextMessages = replaceCanonicalTranscript(nextMessages, incomingMessages);
+        if (contentAvailable) nextMessages = replaceCanonicalTranscript(nextMessages, incomingMessages);
         else if (networkStreamAvailable) nextMessages = mergeNetworkStreamTranscript(nextMessages, {
           conversationId,
           text: result.text,
@@ -2054,16 +2085,17 @@ function App() {
             loading: false,
             error: "",
             conversationId,
-            text: domAvailable || networkStreamAvailable ? (result.text || "") : (sameConversation ? previous.text || "" : ""),
+            text: contentAvailable || networkStreamAvailable ? (result.text || "") : (sameConversation ? previous.text || "" : ""),
             messages: nextMessages,
             busy: networkTerminal && !networkStreamInProgress ? false : Boolean(result.busy || networkStreamInProgress),
-            truncated: domAvailable || networkStreamAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
-            incomplete: networkTerminal ? false : domAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
-            incompleteReason: networkTerminal ? "" : domAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
+            truncated: contentAvailable || networkStreamAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
+            incomplete: networkTerminal ? false : contentAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
+            incompleteReason: networkTerminal ? "" : contentAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
             conversationLimitReached: Boolean(previous.conversationLimitReached),
             conversationLimitMessage: previous.conversationLimitMessage || "",
             domAvailable,
             domSkipped: Boolean(result.dom_skipped),
+            canonicalAvailable,
             networkStreamAvailable,
             networkStreamEndpoint: String(result.network_stream_endpoint || previous.networkStreamEndpoint || ""),
             networkStreamEventCount: Number(result.network_stream_event_count) || Number(previous.networkStreamEventCount) || 0,
@@ -2075,7 +2107,7 @@ function App() {
               ? false
               : result.dom_skipped
               ? String(result.network_state || previous.networkState || "") === "completed"
-              : domAvailable
+              : contentAvailable
                 ? false
                 : Boolean(previous.contentNeedsRefresh),
             domError: result.dom_error || "",
@@ -2088,7 +2120,8 @@ function App() {
             networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
             responseReady: Boolean(result.response_ready && !networkStreamInProgress),
             responseSource: String(result.response_source || previous.responseSource || ''),
-            messageCount: domAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
+            messageCount: contentAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
+            awaitingAssistant: transcriptAwaitingAssistant(nextMessages),
             updatedAt: result.updated_at || new Date().toISOString()
           }
         };

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
-import { isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript } from "../manager/src/chat-transcript.js";
+import { isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, transcriptAwaitingAssistant } from "../manager/src/chat-transcript.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -68,6 +68,21 @@ const partialCanonicalTranscript = replaceCanonicalTranscript(previousCompleteTr
   { id: "canonical-user-2", role: "user", text: "Yêu cầu đang xử lý" }
 ]);
 assert.deepEqual(partialCanonicalTranscript, previousCompleteTranscript, "a canonical snapshot ending at the latest user must not erase prior or streaming assistant responses while ChatGPT is still working");
+assert.equal(transcriptAwaitingAssistant(partialCanonicalTranscript), false, "an existing live stream assistant counts as the response for the latest user");
+const missingLatestResponse = [
+  { id: "cached-user", role: "user", text: "Yêu cầu cũ" },
+  { id: "cached-assistant", role: "assistant", text: "Phản hồi cũ" },
+  { id: "optimistic-user-latest", role: "user", text: "Yêu cầu mới đang thiếu response" }
+];
+assert.equal(transcriptAwaitingAssistant(missingLatestResponse), true, "a cache ending at the newest user must be treated as incomplete even when network tracking is idle");
+const recoveredLatestResponse = replaceCanonicalTranscript(missingLatestResponse, [
+  { id: "canonical-user-old", role: "user", text: "Yêu cầu cũ" },
+  { id: "canonical-assistant-old", role: "assistant", text: "Phản hồi cũ" },
+  { id: "canonical-user-latest", role: "user", text: "Yêu cầu mới đang thiếu response" },
+  { id: "canonical-assistant-latest", role: "assistant", text: "Response mới phải được nối vào" }
+]);
+assert.equal(recoveredLatestResponse.at(-1).text, "Response mới phải được nối vào", "canonical recovery must append the missing latest response after the newest user");
+assert.equal(transcriptAwaitingAssistant(recoveredLatestResponse), false, "canonical recovery must close the previously incomplete latest exchange");
 const fourExchanges = [1, 2, 3, 4].flatMap((turn) => [
   { id: `user-${turn}`, role: "user", text: `User ${turn}` },
   { id: `assistant-${turn}`, role: "assistant", text: `Assistant ${turn}` }
@@ -229,6 +244,8 @@ assert.match(managerUi, /responseScrollLocked\.current\.get\(chatProfileId\)/, "
 assert.match(managerUi, /responseScrollLocked\.current\.delete\(profile\.profile_id\)/, "sending a new message must resume auto-scroll");
 assert.match(managerUi, /const scrollOpenChatToBottom = useCallback\([\s\S]*?modal\.scrollTop = modal\.scrollHeight/, "opening Chat must drive the outer modal scrollbar to the real bottom");
 assert.match(managerUi, /function openChat\(profile\)[\s\S]*?responseScrollPositions\.current\.delete\(profile\.profile_id\)[\s\S]*?scrollOpenChatToBottom\(profile\.profile_id\)[\s\S]*?hydrateCachedResponse\(profile, conversationId\)\.finally/, "opening Chat must hydrate the cached transcript before finishing both modal/transcript at the bottom");
+assert.match(managerUi, /openChatAwaitingAssistant[\s\S]*?pollLatestResponse[\s\S]*?canonicalOnly/, "Manager must poll canonical data without DOM while the newest user is still missing an assistant response");
+assert.match(worker, /args\.read_dom===false&&args\.canonical_only!==true[\s\S]*?args\.canonical_only===true[\s\S]*?canonical_available:true/, "worker must expose authenticated canonical response reads without querying transcript DOM");
 assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?network_last_completed_at/, "Chat reopening must compare the persisted response against the latest network completion before re-reading transcript content");
 assert.match(managerPreload, /getChatResponseCache[\s\S]*?saveChatResponseCache/, "Manager preload must expose persistent chat-response cache access");
 assert.match(managerPreload, /logChatLayout[\s\S]*?codexpro:log-chat-layout/, "Manager preload must expose fire-and-forget chat layout tracing");
@@ -265,7 +282,7 @@ assert.match(managerUi, /networkState === "generating" \|\| tab\.settling/, "Man
 assert.match(managerUi, /network_stream_activity_text/, "Manager must render live network tool activity without exposing raw tool payloads");
 
 const manifest = JSON.parse(manifestText);
-assert.equal(manifest.version, "0.5.61");
+assert.equal(manifest.version, "0.5.62");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");
