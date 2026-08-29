@@ -150,6 +150,7 @@ function defaultManagerSettings() {
     fontFamily: "system",
     fontSize: 14,
     profileLayout: "rows",
+    maxSubagents: 1,
     repoSelections: {},
     selectedWorkerPackId: DEFAULT_WORKER_PACK_ID,
     workerImagePacks: [],
@@ -178,6 +179,7 @@ function readManagerSettings() {
       fontFamily: MANAGER_FONT_CHOICES.has(String(parsed?.fontFamily || "")) ? String(parsed.fontFamily) : defaults.fontFamily,
       fontSize: Math.max(12, Math.min(18, Number(parsed?.fontSize) || defaults.fontSize)),
       profileLayout: parsed?.profileLayout === "cards" ? "cards" : defaults.profileLayout,
+      maxSubagents: Math.max(1, Math.min(1, Number(parsed?.maxSubagents) || defaults.maxSubagents)),
       repoSelections: Object.fromEntries(Object.entries(parsed?.repoSelections && typeof parsed.repoSelections === "object" ? parsed.repoSelections : {})
         .filter(([profileId, root]) => /^[A-Za-z0-9._-]{1,160}$/.test(profileId) && typeof root === "string" && root.trim())
         .slice(0, 40)
@@ -254,6 +256,9 @@ function saveManagerSettingsPatch(patch = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(patch, "profileLayout")) {
     next.profileLayout = patch.profileLayout === "cards" ? "cards" : "rows";
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "maxSubagents")) {
+    next.maxSubagents = Math.max(1, Math.min(1, Number(patch.maxSubagents) || current.maxSubagents));
   }
   if (patch?.repoSelections && typeof patch.repoSelections === "object") {
     next.repoSelections = { ...(current.repoSelections || {}) };
