@@ -18,6 +18,12 @@ const responses = [
     { p: "/message/content/parts/0", o: "append", v: "Patch " },
     { v: "stream" },
     { p: "", o: "patch", v: [{ p: "/message/content/parts/0", o: "append", v: " realtime" }] }
+  ],
+  [
+    { conversation_id: "conversation-old-1234", message: { id: "assistant-current", author: { role: "assistant" }, status: "in_progress", content: { content_type: "text", parts: ["Phản hồi mới"] } } }
+  ],
+  [
+    { conversation_id: "conversation-tools-3456", message: { id: "assistant-tool", author: { role: "assistant" }, status: "in_progress", content: { content_type: "text", parts: [JSON.stringify({ path: "/CodexPro/read", args: { path: "src/editor.js" } })] } } }
   ]
 ];
 let call = 0;
@@ -31,13 +37,18 @@ const context = {
   console,
   setTimeout,
   clearTimeout,
-  fetch: async () => {
+  fetch: async (_input, init = {}) => {
     const events = responses[call++] || [];
     const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
     return new Response(new ReadableStream({
       start(controller) {
-        controller.enqueue(encoder.encode(body));
-        controller.close();
+        const deliver = () => {
+          controller.enqueue(encoder.encode(body));
+          if (String(init.body || "").includes('"hold":true')) setTimeout(() => controller.close(), 20);
+          else controller.close();
+        };
+        if (String(init.body || "").includes('"delay":true')) setTimeout(deliver, 20);
+        else deliver();
       }
     }), { headers: { "content-type": "text/event-stream" } });
   }
@@ -45,7 +56,7 @@ const context = {
 context.globalThis = context;
 
 vm.runInNewContext(source, context, { filename: "network-capture.js" });
-assert.equal(context.__codexproNetworkStreamCaptureV1?.version, 1);
+assert.equal(context.__codexproNetworkStreamCaptureV1?.version, 3);
 
 const legacyResponse = await context.fetch("https://chatgpt.com/backend-api/f/conversation", { method: "POST" });
 await legacyResponse.text();
@@ -72,6 +83,31 @@ const patch = context.__codexproNetworkStreamCaptureV1.read("conversation-patch-
 assert.equal(patch.available, true);
 assert.equal(patch.text, "Patch stream realtime");
 assert.equal(patch.event_count, 4);
+
+const nextResponse = await context.fetch("https://chatgpt.com/backend-api/f/conversation", {
+  method: "POST",
+  body: JSON.stringify({ conversation_id: "conversation-old-1234", delay: true })
+});
+const beforeNextChunk = context.__codexproNetworkStreamCaptureV1.read("conversation-old-1234");
+assert.equal(beforeNextChunk.available, false, "a new generation must hide the previous stream before its first response chunk arrives");
+await nextResponse.text();
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(context.__codexproNetworkStreamCaptureV1.read("conversation-old-1234").text, "Phản hồi mới");
+
+const toolResponse = await context.fetch("https://chatgpt.com/backend-api/f/conversation", {
+  method: "POST",
+  body: JSON.stringify({ conversation_id: "conversation-tools-3456", hold: true })
+});
+await new Promise((resolve) => setTimeout(resolve, 0));
+const toolActivity = context.__codexproNetworkStreamCaptureV1.read("conversation-tools-3456");
+assert.equal(toolActivity.available, true);
+assert.equal(toolActivity.text, "", "raw tool-call JSON must never be exposed as assistant response text");
+assert.equal(toolActivity.messages.length, 0, "raw tool-call JSON must never be exposed in the visible transcript");
+assert.equal(toolActivity.activity_text, "CodexPro đang đọc src/editor.js");
+assert.equal(toolActivity.in_progress, true, "the UI must keep showing tool activity while the stream is open");
+await toolResponse.text();
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(context.__codexproNetworkStreamCaptureV1.read("conversation-tools-3456").in_progress, false);
 
 assert.equal(context.__codexproNetworkStreamCaptureV1.read("missing-conversation").available, false);
 console.log("✓ ChatGPT live network stream capture smoke test passed");

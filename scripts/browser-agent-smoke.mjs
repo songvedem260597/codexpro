@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
-import { materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript } from "../manager/src/chat-transcript.js";
+import { isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript } from "../manager/src/chat-transcript.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -11,12 +11,14 @@ assert.equal(shouldShowChatSettling({ networkState: "completed", tabSettling: fa
 assert.equal(shouldShowChatSettling({ networkState: "failed", tabSettling: true, responseCurrent: true, responseIncomplete: true }), true, "fresh tab settling must override a terminal network request");
 assert.equal(shouldShowChatSettling({ networkState: "generating", tabSettling: true, responseCurrent: true, responseIncomplete: true }), true, "active generation may remain settling");
 assert.equal(shouldShowChatBusy({ networkState: "completed", tabBusy: false, responseCurrent: true, responseBusy: true }), false, "completed network state must clear stale DOM busy state");
+assert.equal(shouldShowChatBusy({ networkState: "completed", tabBusy: false, responseCurrent: true, responseBusy: true, streamBusy: true }), true, "a live tool stream must remain busy after the initial generation request completes");
 assert.equal(shouldShowChatBusy({ networkState: "failed", tabBusy: true, responseCurrent: true, responseBusy: true }), true, "fresh tab busy state must override a terminal network request");
 assert.equal(shouldShowChatBusy({ networkState: "generating", tabBusy: false, responseCurrent: true, responseBusy: false }), true, "generating network state must remain busy");
 assert.equal(canAcceptNextChatMessage({ networkState: "completed", tabBusy: false, tabSettling: true, responseCurrent: true, responseBusy: false, responseIncomplete: false }), false, "a visibly settling turn must reject the next message so ChatGPT cannot steer the old turn");
 assert.equal(canAcceptNextChatMessage({ networkState: "completed", tabBusy: false, tabSettling: false, responseCurrent: true, responseBusy: false, responseIncomplete: false }), true, "a fully completed and settled turn may accept the next message");
 assert.equal(isRetryableChatTurnBusyError(new Error("Đoạn chat vẫn đang hoàn tất lượt trước.")), true, "a fresh worker busy guard must be retried after the turn settles");
 assert.equal(isRetryableChatTurnBusyError(new Error("Đoạn chat này đang xử lý yêu cầu khác.")), true, "a network busy race must be retried after the turn settles");
+assert.equal(isRetryableChatTurnBusyError(new Error("Profile này đang gửi một yêu cầu khác. Hãy chờ network ACK trước khi gửi tiếp.")), true, "a profile-level send race must be retried without showing a false verification error");
 assert.equal(isRetryableChatTurnBusyError(new Error("SEND_UNCERTAIN")), false, "an uncertain submission must never be retried as a harmless busy race");
 
 const cachedTranscript = materializeTranscriptMessages({
@@ -47,7 +49,41 @@ assert.equal(updatedStreamTranscript.at(-1).text, "Đã xử lý gần xong");
 assert.ok(updatedStreamTranscript.some((message) => message.text === "Phản hồi cũ vẫn phải còn"), "network streaming must preserve the previous response");
 assert.ok(updatedStreamTranscript.some((message) => message.text === "Yêu cầu mới"), "network streaming must preserve the optimistic user message");
 assert.deepEqual(replaceCanonicalTranscript(updatedStreamTranscript, []), updatedStreamTranscript, "an empty transient canonical read must not erase the visible transcript");
-assert.deepEqual(replaceCanonicalTranscript(updatedStreamTranscript, [{ id: "canonical-1", role: "assistant", text: "Canonical" }]), [{ id: "canonical-1", role: "assistant", text: "Canonical" }], "a populated canonical transcript must replace temporary stream data");
+const laggingCanonicalTranscript = replaceCanonicalTranscript(updatedStreamTranscript, [{ id: "canonical-1", role: "assistant", text: "Canonical" }]);
+assert.deepEqual(laggingCanonicalTranscript.map((message) => message.text), ["Canonical", "Yêu cầu mới"], "a populated but lagging canonical read must preserve a just-submitted optimistic user message");
+const materializedCanonicalTranscript = replaceCanonicalTranscript(updatedStreamTranscript, [
+  { id: "canonical-user-1", role: "user", text: "  Yêu cầu\u00a0mới  " },
+  { id: "canonical-assistant-1", role: "assistant", text: "Đã nhận" }
+]);
+assert.deepEqual(materializedCanonicalTranscript.map((message) => message.id), ["canonical-user-1", "canonical-assistant-1"], "canonical materialization must replace the matching optimistic message without duplication");
+const previousCompleteTranscript = [
+  { id: "previous-user-1", role: "user", text: "Yêu cầu cũ" },
+  { id: "previous-assistant-1", role: "assistant", text: "Phản hồi cũ phải còn" },
+  { id: "optimistic-user-2", role: "user", text: "Yêu cầu đang xử lý" },
+  { id: "network-stream-assistant:conversation-1", role: "assistant", text: "Đang gọi tool" }
+];
+const partialCanonicalTranscript = replaceCanonicalTranscript(previousCompleteTranscript, [
+  { id: "canonical-user-1", role: "user", text: "Yêu cầu cũ" },
+  { id: "canonical-assistant-1", role: "assistant", text: "Phản hồi cũ phải còn" },
+  { id: "canonical-user-2", role: "user", text: "Yêu cầu đang xử lý" }
+]);
+assert.deepEqual(partialCanonicalTranscript, previousCompleteTranscript, "a canonical snapshot ending at the latest user must not erase prior or streaming assistant responses while ChatGPT is still working");
+const fourExchanges = [1, 2, 3, 4].flatMap((turn) => [
+  { id: `user-${turn}`, role: "user", text: `User ${turn}` },
+  { id: `assistant-${turn}`, role: "assistant", text: `Assistant ${turn}` }
+]);
+const recentThreeExchanges = replaceCanonicalTranscript([], fourExchanges);
+assert.deepEqual(recentThreeExchanges.map((message) => message.id), ["user-2", "assistant-2", "user-3", "assistant-3", "user-4", "assistant-4"], "Manager transcript must keep only the three most recent user/assistant exchanges");
+const consecutiveUserFollowups = replaceCanonicalTranscript([], [
+  { id: "user-1", role: "user", text: "Yêu cầu trước" },
+  { id: "assistant-1", role: "assistant", text: "Phản hồi trước phải còn" },
+  { id: "user-2", role: "user", text: "Sửa thêm phần A" },
+  { id: "user-3", role: "user", text: "Sửa thêm phần B" },
+  { id: "user-4", role: "user", text: "Sửa thêm phần C" }
+]);
+assert.deepEqual(consecutiveUserFollowups.map((message) => message.id), ["user-1", "assistant-1", "user-2", "user-3", "user-4"], "consecutive user follow-ups before one assistant response must count as one open exchange and must not evict prior responses");
+assert.equal(isNetworkStreamCurrentGeneration({ networkStartedAt: "2026-08-29T14:00:10.000Z", streamUpdatedAt: "2026-08-29T14:00:09.999Z" }), false, "a stream from the previous generation must never be appended after a new optimistic user message");
+assert.equal(isNetworkStreamCurrentGeneration({ networkStartedAt: "2026-08-29T14:00:10.000Z", streamUpdatedAt: "2026-08-29T14:00:10.001Z" }), true, "a stream updated by the current generation may be rendered live");
 const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, manifestText] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
@@ -100,11 +136,14 @@ assert.match(worker, /if\(action==='evaluate'\)/);
 assert.match(worker, /WORKER_BUSY:/, "extension reload must refuse while a worker is generating");
 assert.match(worker, /reconcileChatNetworkCompletion/, "canonical/stream completion must reconcile stuck network state");
 assert.match(worker, /networkStream\.completed/, "stream completion must end a generation without waiting for CDP loadingFinished");
+assert.match(worker, /network_stream_activity_text:networkStreamActivityText/, "worker responses must expose live CodexPro tool activity separately from assistant text");
+assert.match(worker, /network_stream_in_progress:networkStreamInProgress/, "worker responses must expose whether the tool stream is still open");
+assert.match(worker, /streamBusy\?\(streamActivity\|\|'CodexPro đang sử dụng tool'\)/, "profile status must prefer live tool activity over stale DOM activity");
 assert.match(worker, /probeCanonicalCompletion/, "tracker timeout must verify canonical response before reporting failure");
 assert.match(worker, /function probeChatActivityPage/, "profile status must supplement network state with a lightweight DOM activity probe");
 assert.match(worker, /testId==='stop-button'/, "DOM activity probe must recognize ChatGPT's stop control");
 assert.match(worker, /settling:!networkBusy&&domActivity\.busy/, "completed network requests must remain settling while ChatGPT is visibly active");
-assert.match(worker, /activity_text:domActivity\.busy\?domActivity\.activity_text:''/, "active ChatGPT work must expose one concise activity line");
+assert.match(worker, /activity_text:streamBusy\?/, "active ChatGPT work must expose one concise network-or-DOM activity line");
 assert.match(worker, /scheduleDomActivityRefresh/, "DOM settling must refresh until ChatGPT becomes idle");
 assert.match(worker, /conversation\|steer_turn/, "ChatGPT steer_turn must be tracked as a generation request");
 assert.match(worker, /const staleActivity=Boolean\(injected\.result\.busy\)/, "canonical completion must recover a tab whose DOM is still stuck busy");
@@ -169,9 +208,11 @@ assert.match(managerStyles, /\.chat-response-head strong \{[^}]*text-overflow: e
 assert.match(managerUi, /className="toast-icon"[\s\S]*?<svg viewBox="0 0 24 24"/, "success toasts must use the custom vector status icon");
 assert.match(managerStyles, /\.toast-message \{[^}]*font-family: var\(--app-font-family,[^}]*font-weight: var\(--weight-semibold\)/, "toast typography must match the Manager interface");
 assert.doesNotMatch(managerUi, /RESPONSE_AUTO_SCROLL_RESUME_MS/, "manual transcript scrolling must not auto-resume on a timer");
+assert.match(managerUi, /networkState === "generating" \|\| tab\.settling/, "Manager must keep polling tool activity after the initial generation request completes");
+assert.match(managerUi, /network_stream_activity_text/, "Manager must render live network tool activity without exposing raw tool payloads");
 
 const manifest = JSON.parse(manifestText);
-assert.equal(manifest.version, "0.5.53");
+assert.equal(manifest.version, "0.5.59");
 assert.ok(manifest.permissions.includes("debugger"));
 
 console.log("✓ Browser agent persistent-session/batch/wait smoke test passed");

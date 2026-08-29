@@ -170,6 +170,17 @@ assert.match(prepareSource, /internal_submit_found:false/, "runtime result must 
 assert.match(prepareSource, /new DataTransfer\(\)/, "attachment preparation must keep the existing DOM upload path");
 assert.match(prepareSource, /new ClipboardEvent\('paste'/, "attachment preparation must fall back to ChatGPT's paste upload handler when a file input change produces no preview");
 assert.match(prepareSource, /attachmentPreparePath='paste-fallback'/, "attachment diagnostics must expose the paste upload fallback");
+assert.match(prepareSource, /staleAttachmentsOwned&&staleDraftOwned/, "a retry may clean only stale attachments and draft text proven to belong to CodexPro");
+assert.match(prepareSource, /existingAttachments\.length&&!reusableExistingAttachments/, "attachments not owned or exactly matched to the incoming files must remain protected");
+assert.match(prepareSource, /attachment_prepare_path:ownedExistingAttachments\?'existing-attempt'/, "an internal prepare retry must reuse its already uploaded attachment instead of rejecting itself");
+assert.match(prepareSource, /!draft&&existingAttachments\.length===expectedAttachmentNames\.length/, "an orphaned React preview may be reused only when the composer is empty and file counts match");
+assert.match(prepareSource, /expectedAttachmentNames\.every\(name=>existingAttachmentLabels\.some\(label=>label\.includes\(name\)\)\)/, "an orphaned React preview may be reused only when every incoming filename matches");
+assert.match(sendBlock, /attachments\.length&&!injected\.result\.attachment_reused/, "reused attachment previews must not wait for a second upload request that will never occur");
+assert.match(prepareSource, /codexproDraftText/, "attachment ownership must retain the exact draft text for safe stale-attempt recovery");
+assert.match(worker, /CHAT_ATTACHMENT_OWNERSHIP_KEY/, "attachment ownership must survive React rerenders and extension worker restarts outside the DOM");
+assert.match(prepareSource, /persistedOwnershipMatches/, "stale CodexPro attachments must only be removed when persisted ownership matches every visible file and the composer has no user draft");
+assert.match(sendBlock, /rememberChatAttachmentOwnership/, "the worker must persist attachment ownership before attempting submit");
+assert.match(sendBlock, /clearChatAttachmentOwnership\(tab\.id,attemptId\)/, "network ACK must clear persisted attachment ownership");
 assert.match(prepareSource, /const currentComposer=findComposer\(\)/, "composer verification must survive ChatGPT replacing the React node");
 
 const clickSource = extractFunction("prepareTrustedClickFallbackPage");
