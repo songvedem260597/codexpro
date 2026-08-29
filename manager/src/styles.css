@@ -166,6 +166,10 @@ section { margin-bottom: 38px; }
 .profile-meta > span { display: inline-flex; align-items: center; gap: 6px; }
 .profile-meta .ready-text { color: #70d99a; }
 .profile-meta .profile-warning { color: #ffb26c; }
+.profile-task-summary { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 8px; color: #d8def0; font-size: 12px; }
+.profile-task-summary > span { flex: 0 0 auto; color: #7588bd; font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.profile-task-summary > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
+.profile-list.is-card-layout .profile-task-summary { justify-content: center; max-width: 100%; }
 .profile-live-activity { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 7px; color: #aebcff; font-size: 12px; }
 .profile-live-activity > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge.connected { color: #9df0bd; border-color: #34734e; background: #163622; }
