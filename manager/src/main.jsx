@@ -2520,6 +2520,8 @@ function App() {
                 : profile.connector_message;
               const idle = profile.connected && profile.activity === "idle" && (connectorInstalled || !ready);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
+              const profileHasError = rendererUnresponsive || !profile.connected || liveTab?.network_state === "failed" || Boolean(liveTab?.renderer_error) || Boolean(liveTab?.connection_interrupted);
+              const profileBorderState = profileHasError ? "error" : workerState === "working" ? "working" : "idle";
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
               const profileProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const profileRepoLabel = String(profile.current_workspace_repo || profileProject?.githubRepo || profileProject?.name || "").trim();
@@ -2528,7 +2530,7 @@ function App() {
                 title: profileProject?.remoteUrl || workspaceRoot || profileRepoLabel
               } : null;
               return (
-                <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"}`} key={profile.profile_id}>
+                <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`} key={profile.profile_id}>
                   <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
                   <div className="profile-main">
                     <div className="profile-title">
