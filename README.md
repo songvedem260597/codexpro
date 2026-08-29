@@ -266,6 +266,8 @@ codexpro watch-handoff --agent opencode --subagents --yes
 
 `--subagents` runs a verified OpenCode investigation phase before implementation. CodexPro requires a real `task` tool event, a real child session ID, an exportable read-only child session, and returned evidence before it marks delegation as successful. If any of those checks fail, execution falls back to the normal single-agent path and records the reason instead of claiming a subagent ran.
 
+For handoffs that mention APIs, SDKs, dependencies, providers, releases, upstream projects, or external documentation, CodexPro can also route a separate read-only `gemini-scout` child for external research. It discovers Gemini Flash models from the local OpenCode catalog, prefers candidates with a visible provider credential, performs a bounded live probe, injects the selected model only at runtime, and verifies from the exported child session that the exact model was actually used. If no Gemini Flash candidate is healthy, the scout records a fallback reason and the normal repository investigation/fixer continues. Set `CODEXPRO_GEMINI_SCOUT_MODEL` to prefer a specific locally available authenticated Gemini Flash model, and use `codexpro doctor --live-scout-check --model <working-parent-model>` for an end-to-end scout check.
+
 `handoff_to_agent` is planning-only over MCP. CodexPro does not expose arbitrary local agent execution as a remote ChatGPT tool.
 
 ## Troubleshooting

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added verifiable OpenCode subagent-assisted handoff execution for repository exploration and bug localization: CodexPro now requires a real `task` child session, exportable read-only evidence, and records fallback reasons when delegation cannot be verified. `codexpro doctor` can optionally run live model and live child-session checks.
+- Added `gemini-scout` external-research routing for API/SDK/dependency/upstream handoffs. CodexPro discovers authenticated Gemini Flash candidates, uses bounded live probes and runtime-only per-agent model overrides, verifies the exact model from the exported child session, and falls back without blocking repository investigation when the Gemini provider is unavailable. Windows probe timeouts now terminate the full OpenCode process tree.
 - Added cross-platform safe Git writes: explicit-file staging, hook-disabled unsigned commits, and option-free pushes of verified local branches to HTTPS `origin` remotes, while continuing to block broad staging, force, deleting, tag, and alternate-remote pushes.
 - Added saved additional projects with `codexpro settings set --project <path>`, session-local workspace selection through the existing `open_workspace` tool, and `--clear-projects` for removing the saved allowlist.
 - Isolated workspace selection between HTTP MCP sessions while preserving explicit workspace-id access for configured roots, with stdio, HTTP, profile, and regression coverage.
