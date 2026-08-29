@@ -1,6 +1,6 @@
 {
   "name": "codexpro-manager",
-  "version": "0.2.74",
+  "version": "0.2.78",
   "private": true,
   "description": "Windows desktop manager for a local CodexPro MCP server.",
   "author": "CodexPro contributors",
@@ -15,6 +15,9 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@react-sigma/core": "^5.0.6",
+    "@react-sigma/layout-forceatlas2": "^5.0.6",
+    "graphology": "^0.26.0",
     "katex": "^0.18.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",

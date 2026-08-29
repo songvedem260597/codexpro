@@ -119,6 +119,7 @@ interface BridgeState {
   connectorInfo?: (profileId: string) => BrowserExtensionConnectorInfo;
   profileListeners: Set<(profiles: ExtensionProfileSummary[]) => void>;
   profileNotifyTimer?: NodeJS.Timeout;
+  profileExpiryTimer?: NodeJS.Timeout;
 }
 
 const profileWorkspaceRoots = new Map<string, string>();
@@ -137,6 +138,23 @@ function scheduleProfileNotification(state: BridgeState): void {
     }
   }, 25);
   state.profileNotifyTimer.unref?.();
+}
+
+function scheduleProfileExpiryNotification(state: BridgeState): void {
+  if (state.profileExpiryTimer) clearTimeout(state.profileExpiryTimer);
+  state.profileExpiryTimer = undefined;
+  const now = Date.now();
+  const nextExpiry = [...state.profiles.values()]
+    .map((profile) => profile.lastSeen + PROFILE_TTL_MS)
+    .filter((expiresAt) => expiresAt > now)
+    .sort((left, right) => left - right)[0];
+  if (!Number.isFinite(nextExpiry)) return;
+  state.profileExpiryTimer = setTimeout(() => {
+    state.profileExpiryTimer = undefined;
+    scheduleProfileNotification(state);
+    scheduleProfileExpiryNotification(state);
+  }, Math.max(1, nextExpiry - Date.now() + 25));
+  state.profileExpiryTimer.unref?.();
 }
 
 function isLoopbackAddress(value: string | undefined): boolean {
@@ -265,6 +283,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   }
   state.profiles.set(id, profile);
   scheduleProfileNotification(state);
+  scheduleProfileExpiryNotification(state);
   return profile;
 }
 
@@ -465,7 +484,12 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
   const state = ensureBrowserExtensionBridge();
   const now = Date.now();
   pruneExpiredProfiles(state, now);
-  return [...state.profiles.values()]
+  const visibleProfiles = [...state.profiles.values()]
+    .filter((profile) => now - profile.lastSeen <= PROFILE_TTL_MS);
+  if (state.activeProfileId && !visibleProfiles.some((profile) => profile.id === state.activeProfileId)) {
+    state.activeProfileId = undefined;
+  }
+  return visibleProfiles
     .map((profile) => {
       const tabs = profile.tabs
         .filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value));
@@ -552,7 +576,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       connector_message: connectorMessage,
       connector_checked_at: profile.connectorCheckedAt,
       active: state.activeProfileId === profile.id,
-      connected: now - profile.lastSeen <= PROFILE_TTL_MS,
+      connected: true,
       last_seen: new Date(profile.lastSeen).toISOString(),
       tab_count: profile.tabs.length,
       chatgpt_tab_count: chatgptTabs.length,
@@ -598,7 +622,6 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
   else profileTaskTitles.delete(id);
   if (singleton) scheduleProfileNotification(singleton);
 }
-
 export function setBrowserExtensionProfileWorkspaceBinding(profileId: string, root: string): void {
   const id = String(profileId || "").trim();
   const workspaceRoot = String(root || "").trim();

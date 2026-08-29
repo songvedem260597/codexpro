@@ -42,6 +42,10 @@ type GraphContext = {
   symbolById: Map<string, AnalysisSymbol>;
   nodeToId: Map<ts.Node, string>;
   relationKeys: Set<string>;
+  reactContextByDeclarationId: Map<string, string>;
+  stateStoreByDeclarationId: Map<string, string>;
+  refByDeclarationId: Map<string, string>;
+  forwardedRefByComponentId: Map<string, string>;
   maxSymbols: number;
   maxRelationships: number;
   truncated: boolean;
@@ -140,6 +144,7 @@ function anonymousCallAnchorKey(node: ts.FunctionExpression | ts.ArrowFunction, 
   const callbackShape = node.getText(sourceFile).replace(/\s+/g, "");
   const material = `${identity.kind}\u0000${identity.callee}\u0000${identity.channel}\u0000${identity.argumentIndex}\u0000${outerText.replace(/\s+/g, "")}\u0000${parameters}\u0000${callbackShape}`;
   return createHash("sha256").update(material).digest("hex").slice(0, 12);
+
 }
 
 function anonymousCallOrdinal(node: ts.FunctionExpression | ts.ArrowFunction, sourceFile: ts.SourceFile, identity: AnonymousCallIdentity, anchorKey: string): number {
@@ -258,11 +263,21 @@ function moduleSymbol(relPath: string): AnalysisSymbol {
   };
 }
 
-function virtualPath(kind: "ipc" | "event" | "route", key: string): string {
+type VirtualNamespace = "ipc" | "event" | "route" | "react-context" | "state-store" | "react-ref";
+
+function virtualPath(kind: VirtualNamespace, key: string): string {
   return `@virtual/${kind}/${encodeURIComponent(key)}`;
 }
 
-function ensureVirtualSymbol(context: GraphContext, kind: "channel" | "event" | "route", namespace: "ipc" | "event" | "route", key: string, label: string, confidence: AnalysisConfidence): AnalysisSymbol | undefined {
+function ensureVirtualSymbol(
+  context: GraphContext,
+  kind: "channel" | "event" | "route" | "context" | "store" | "ref",
+  namespace: VirtualNamespace,
+  key: string,
+  label: string,
+  confidence: AnalysisConfidence,
+  source?: string
+): AnalysisSymbol | undefined {
   const id = `virtual:${namespace}:${key}`;
   const existing = context.symbolById.get(id);
   if (existing) return existing;
@@ -275,7 +290,7 @@ function ensureVirtualSymbol(context: GraphContext, kind: "channel" | "event" | 
     exported: false,
     confidence,
     virtual: true,
-    source: namespace === "ipc" ? "electron-ipc-literal" : namespace === "route" ? "express-route-literal" : "event-literal"
+    source: source ?? (namespace === "ipc" ? "electron-ipc-literal" : namespace === "route" ? "express-route-literal" : namespace === "event" ? "event-literal" : "framework-semantic")
   };
   return addSymbol(context, symbol) ? symbol : undefined;
 }
@@ -321,6 +336,99 @@ function stringLiteralValue(node: ts.Expression | undefined): string | undefined
   return undefined;
 }
 
+type ImportBinding = { module: string; imported: string };
+
+function importBindings(sourceFile: ts.SourceFile): Map<string, ImportBinding> {
+  const bindings = new Map<string, ImportBinding>();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier) || !statement.importClause) continue;
+    const module = statement.moduleSpecifier.text;
+    const clause = statement.importClause;
+    if (clause.name) bindings.set(clause.name.text, { module, imported: "default" });
+    const named = clause.namedBindings;
+    if (named && ts.isNamespaceImport(named)) {
+      bindings.set(named.name.text, { module, imported: "*" });
+    } else if (named && ts.isNamedImports(named)) {
+      for (const element of named.elements) {
+        bindings.set(element.name.text, { module, imported: element.propertyName?.text ?? element.name.text });
+      }
+    }
+  }
+  return bindings;
+}
+
+function frameworkMethod(
+  expression: ts.LeftHandSideExpression,
+  bindings: Map<string, ImportBinding>,
+  moduleMatches: (module: string) => boolean,
+  method: string
+): boolean {
+  if (ts.isIdentifier(expression)) {
+    const binding = bindings.get(expression.text);
+    return Boolean(binding && moduleMatches(binding.module) && binding.imported === method);
+  }
+  if (!ts.isPropertyAccessExpression(expression) || expression.name.text !== method) return false;
+  const receiver = expression.expression;
+  if (!ts.isIdentifier(receiver)) return false;
+  const binding = bindings.get(receiver.text);
+  return Boolean(binding && moduleMatches(binding.module) && (binding.imported === "*" || binding.imported === "default"));
+}
+
+function isReactMethod(expression: ts.LeftHandSideExpression, bindings: Map<string, ImportBinding>, method: string): boolean {
+  return frameworkMethod(expression, bindings, (module) => module === "react", method);
+}
+
+function isZustandMethod(expression: ts.LeftHandSideExpression, bindings: Map<string, ImportBinding>, methods: Set<string>): boolean {
+  for (const method of methods) {
+    if (frameworkMethod(expression, bindings, (module) => module === "zustand" || module.startsWith("zustand/"), method)) return true;
+  }
+  return false;
+}
+
+function isZustandCreateCall(call: ts.CallExpression, bindings: Map<string, ImportBinding>): boolean {
+  const methods = new Set(["create", "createStore"]);
+  if (isZustandMethod(call.expression, bindings, methods)) return true;
+  return ts.isCallExpression(call.expression) && isZustandMethod(call.expression.expression, bindings, methods);
+}
+
+function jsxAttributeName(name: ts.JsxAttributeName): string {
+  return ts.isIdentifier(name) ? name.text : name.getText();
+}
+
+function jsxExpression(initializer: ts.JsxAttribute["initializer"]): ts.Expression | undefined {
+  return initializer && ts.isJsxExpression(initializer) ? initializer.expression : undefined;
+}
+
+function jsxTagText(tagName: ts.JsxTagNameExpression, sourceFile: ts.SourceFile): string {
+  return tagName.getText(sourceFile).replace(/\s+/g, "");
+}
+
+function jsxTagTargetId(checker: ts.TypeChecker, context: GraphContext, tagName: ts.JsxTagNameExpression): string | undefined {
+  if (ts.isIdentifier(tagName)) return graphIdForSymbol(checker, context.nodeToId, tagName);
+  if (ts.isPropertyAccessExpression(tagName)) return graphIdForSymbol(checker, context.nodeToId, tagName.name);
+  return undefined;
+}
+
+function jsxTagReceiverId(checker: ts.TypeChecker, context: GraphContext, tagName: ts.JsxTagNameExpression): string | undefined {
+  if (!ts.isPropertyAccessExpression(tagName)) return undefined;
+  const receiver = tagName.expression;
+  return graphIdForSymbol(checker, context.nodeToId, ts.isPropertyAccessExpression(receiver) ? receiver.name : receiver);
+}
+
+function expressionIsCallable(checker: ts.TypeChecker, expression: ts.Expression): boolean {
+  try {
+    return checker.getSignaturesOfType(checker.getTypeAtLocation(expression), ts.SignatureKind.Call).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function declarationResourceId(checker: ts.TypeChecker, context: GraphContext, expression: ts.Expression, resources: Map<string, string>): string | undefined {
+  const targetLocation = ts.isPropertyAccessExpression(expression) ? expression.expression : expression;
+  const declarationId = graphIdForSymbol(checker, context.nodeToId, targetLocation);
+  return declarationId ? resources.get(declarationId) : undefined;
+}
+
 function memberCall(node: ts.CallExpression): { receiver: ts.Expression; receiverText: string; method: string } | undefined {
   if (!ts.isPropertyAccessExpression(node.expression)) return undefined;
   return { receiver: node.expression.expression, receiverText: node.expression.expression.getText(), method: node.expression.name.text };
@@ -359,6 +467,55 @@ function relationshipBetweenSymbols(context: GraphContext, kind: AnalysisRelatio
     toLine: to.line,
     detail
   });
+}
+
+function discoverFrameworkResources(
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  context: GraphContext,
+  bindings: Map<string, ImportBinding>
+): void {
+  const visit = (node: ts.Node): void => {
+    const declaration = ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node) ? node : undefined;
+    if (declaration?.initializer && ts.isCallExpression(declaration.initializer)) {
+      const declarationId = context.nodeToId.get(declaration);
+      const name = propertyNameText(declaration.name, sourceFile);
+      if (declarationId && name) {
+        const call = declaration.initializer;
+        const line = sourceLocation(sourceFile, declaration).line;
+        if (isReactMethod(call.expression, bindings, "createContext")) {
+          const resource = ensureVirtualSymbol(context, "context", "react-context", declarationId, `Context ${name}`, "strong", "react-context");
+          if (resource?.id) {
+            context.reactContextByDeclarationId.set(declarationId, resource.id);
+            relationshipBetweenSymbols(context, "stores", declarationId, resource.id, "strong", "react-context", "createContext", line);
+          }
+        } else if (isZustandCreateCall(call, bindings)) {
+          const resource = ensureVirtualSymbol(context, "store", "state-store", declarationId, `Store ${name}`, "strong", "zustand-store");
+          if (resource?.id) {
+            context.stateStoreByDeclarationId.set(declarationId, resource.id);
+            relationshipBetweenSymbols(context, "stores", declarationId, resource.id, "strong", "zustand-store", call.expression.getText(sourceFile), line);
+          }
+        } else if (isReactMethod(call.expression, bindings, "useRef") || isReactMethod(call.expression, bindings, "createRef")) {
+          const resource = ensureVirtualSymbol(context, "ref", "react-ref", declarationId, `Ref ${name}`, "strong", "react-ref");
+          if (resource?.id) {
+            context.refByDeclarationId.set(declarationId, resource.id);
+            relationshipBetweenSymbols(context, "stores", declarationId, resource.id, "strong", "react-ref", call.expression.getText(sourceFile), line);
+          }
+        } else if (isReactMethod(call.expression, bindings, "forwardRef")) {
+          const resource = ensureVirtualSymbol(context, "ref", "react-ref", `forwarded:${declarationId}`, `Forwarded ref ${name}`, "strong", "react-forward-ref");
+          if (resource?.id) {
+            context.forwardedRefByComponentId.set(declarationId, resource.id);
+            relationshipBetweenSymbols(context, "provides", declarationId, resource.id, "strong", "react-forward-ref", "forwardRef", line);
+            const callback = call.arguments[0];
+            const callbackId = callback && ts.isExpression(callback) ? graphIdForHandler(checker, context, callback) : undefined;
+            if (callbackId) relationshipBetweenSymbols(context, "passes", resource.id, callbackId, "strong", "react-forward-ref", "forwarded ref callback", line);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(sourceFile, visit);
 }
 
 function isDeclarationName(node: ts.Identifier): boolean {
@@ -412,6 +569,10 @@ export function analyzeTypeScriptSemanticGraph(root: string, inventoryFiles: Inv
     symbolById: new Map(),
     nodeToId: new Map(),
     relationKeys: new Set(),
+    reactContextByDeclarationId: new Map(),
+    stateStoreByDeclarationId: new Map(),
+    refByDeclarationId: new Map(),
+    forwardedRefByComponentId: new Map(),
     maxSymbols,
     maxRelationships,
     truncated: false
@@ -464,6 +625,14 @@ export function analyzeTypeScriptSemanticGraph(root: string, inventoryFiles: Inv
     }
   }
 
+  for (const { program, checker } of compilerPrograms) {
+    for (const sourceFile of program.getSourceFiles()) {
+      const absolute = path.resolve(sourceFile.fileName);
+      if (!workspaceFiles.has(normalizedAbsolute(absolute)) || sourceFile.isDeclarationFile) continue;
+      discoverFrameworkResources(sourceFile, checker, context, importBindings(sourceFile));
+    }
+  }
+
   const roleForSymbol = (id: string) => context.roleByPath.get(context.symbolById.get(id)?.path ?? "") ?? "other";
 
   for (const { program, checker } of compilerPrograms) {
@@ -474,6 +643,7 @@ export function analyzeTypeScriptSemanticGraph(root: string, inventoryFiles: Inv
       const relPath = posixRelative(root, absolute);
       const moduleId = `module:${relPath}`;
       if (!context.symbolById.has(moduleId)) continue;
+      const bindings = importBindings(sourceFile);
 
       const visitEdges = (node: ts.Node, currentId: string): void => {
         const ownId = context.nodeToId.get(node);
@@ -487,6 +657,45 @@ export function analyzeTypeScriptSemanticGraph(root: string, inventoryFiles: Inv
             for (const type of clause.types) {
               const targetId = graphIdForSymbol(checker, context.nodeToId, type.expression);
               if (targetId) relationshipBetweenSymbols(context, kind, ownId, targetId, "strong", "typescript-type-checker", undefined, location.line);
+            }
+          }
+        }
+
+        const jsxNode = ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node) ? node : undefined;
+        if (jsxNode) {
+          const tagName = jsxNode.tagName;
+          const tagText = jsxTagText(tagName, sourceFile);
+          const tagTargetId = jsxTagTargetId(checker, context, tagName);
+          const receiverId = jsxTagReceiverId(checker, context, tagName);
+          if (receiverId && ts.isPropertyAccessExpression(tagName)) {
+            const contextResource = context.reactContextByDeclarationId.get(receiverId);
+            if (contextResource && tagName.name.text === "Provider") {
+              relationshipBetweenSymbols(context, "provides", nextCurrent, contextResource, "strong", "react-context", `${tagText} provider`, location.line);
+            } else if (contextResource && tagName.name.text === "Consumer") {
+              relationshipBetweenSymbols(context, "consumes", nextCurrent, contextResource, "strong", "react-context", `${tagText} consumer`, location.line);
+            }
+          }
+
+          const forwardedRef = tagTargetId ? context.forwardedRefByComponentId.get(tagTargetId) : undefined;
+          for (const property of jsxNode.attributes.properties) {
+            if (!ts.isJsxAttribute(property)) continue;
+            const expression = jsxExpression(property.initializer);
+            if (!expression) continue;
+            const propName = jsxAttributeName(property.name);
+            const handlerId = graphIdForHandler(checker, context, expression);
+            const handler = handlerId ? context.symbolById.get(handlerId) : undefined;
+            const callable = expressionIsCallable(checker, expression) || Boolean(handler && (handler.kind === "function" || handler.kind === "method"));
+            if (callable && handlerId) {
+              relationshipBetweenSymbols(context, "passes", nextCurrent, handlerId, "strong", "react-jsx-prop", `${tagText}.${propName}`, location.line);
+            }
+            if (propName === "ref") {
+              const localRef = declarationResourceId(checker, context, expression, context.refByDeclarationId);
+              if (localRef) {
+                relationshipBetweenSymbols(context, "passes", nextCurrent, localRef, "strong", "react-ref", `ref -> ${tagText}`, location.line);
+                if (forwardedRef) relationshipBetweenSymbols(context, "passes", localRef, forwardedRef, "strong", "react-forward-ref", `ref -> ${tagText}`, location.line);
+              } else if (forwardedRef) {
+                relationshipBetweenSymbols(context, "passes", nextCurrent, forwardedRef, "strong", "react-forward-ref", `ref -> ${tagText}`, location.line);
+              }
             }
           }
         }
@@ -515,7 +724,33 @@ export function analyzeTypeScriptSemanticGraph(root: string, inventoryFiles: Inv
           }
 
           if (ts.isCallExpression(node)) {
+            const firstArgument = node.arguments[0] && ts.isExpression(node.arguments[0]) ? node.arguments[0] : undefined;
+            if (isReactMethod(node.expression, bindings, "useContext") && firstArgument) {
+              const contextResource = declarationResourceId(checker, context, firstArgument, context.reactContextByDeclarationId);
+              if (contextResource) relationshipBetweenSymbols(context, "consumes", nextCurrent, contextResource, "strong", "react-context", "useContext", location.line);
+            }
+            if (isReactMethod(node.expression, bindings, "useImperativeHandle") && firstArgument) {
+              const refResource = declarationResourceId(checker, context, firstArgument, context.refByDeclarationId);
+              if (refResource) relationshipBetweenSymbols(context, "writes", nextCurrent, refResource, "strong", "react-ref", "useImperativeHandle", location.line);
+            }
+            if (ts.isIdentifier(node.expression)) {
+              const storeResource = declarationResourceId(checker, context, node.expression, context.stateStoreByDeclarationId);
+              if (storeResource) relationshipBetweenSymbols(context, "consumes", nextCurrent, storeResource, "strong", "zustand-store", "store hook", location.line);
+            }
+            if (isZustandMethod(node.expression, bindings, new Set(["useStore"])) && firstArgument) {
+              const storeResource = declarationResourceId(checker, context, firstArgument, context.stateStoreByDeclarationId);
+              if (storeResource) relationshipBetweenSymbols(context, "consumes", nextCurrent, storeResource, "strong", "zustand-store", "useStore", location.line);
+            }
+
             const member = memberCall(node);
+            if (member) {
+              const storeResource = declarationResourceId(checker, context, member.receiver, context.stateStoreByDeclarationId);
+              if (storeResource && member.method === "setState") {
+                relationshipBetweenSymbols(context, "writes", nextCurrent, storeResource, "strong", "zustand-store", member.method, location.line);
+              } else if (storeResource && ["getState", "subscribe"].includes(member.method)) {
+                relationshipBetweenSymbols(context, "reads", nextCurrent, storeResource, "strong", "zustand-store", member.method, location.line);
+              }
+            }
             const channel = stringLiteralValue(node.arguments[0]);
             if (member && channel) {
               const receiverTail = member.receiverText.split(".").at(-1) ?? member.receiverText;

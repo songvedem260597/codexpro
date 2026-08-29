@@ -22,8 +22,13 @@ function codexProHome(): string {
   return configured ? path.resolve(configured) : path.join(os.homedir(), ".codexpro");
 }
 
+function normalizedRoot(root: string): string {
+  const resolved = path.resolve(root);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
 function workspaceKey(workspace: Workspace): string {
-  return createHash("sha256").update(`${workspace.id}\u0000${path.resolve(workspace.root)}`).digest("hex").slice(0, 24);
+  return createHash("sha256").update(`${workspace.id}\u0000${normalizedRoot(workspace.root)}`).digest("hex").slice(0, 24);
 }
 
 export function persistentGraphPath(workspace: Workspace): string {
@@ -36,7 +41,7 @@ async function readEnvelope(workspace: Workspace): Promise<GraphStoreEnvelope | 
     const stat = await fsp.stat(filePath);
     if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_PERSISTED_BYTES) return undefined;
     const parsed = JSON.parse(await fsp.readFile(filePath, "utf8")) as Partial<GraphStoreEnvelope>;
-    if (parsed.schemaVersion !== STORE_SCHEMA_VERSION || parsed.workspaceId !== workspace.id || path.resolve(String(parsed.root ?? "")) !== path.resolve(workspace.root) || !parsed.current) return undefined;
+    if (parsed.schemaVersion !== STORE_SCHEMA_VERSION || parsed.workspaceId !== workspace.id || normalizedRoot(String(parsed.root ?? "")) !== normalizedRoot(workspace.root) || !parsed.current) return undefined;
     return parsed as GraphStoreEnvelope;
   } catch {
     return undefined;

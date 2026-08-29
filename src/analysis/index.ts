@@ -12,7 +12,7 @@ import { loadPersistentWorkspaceAnalysis, savePersistentWorkspaceAnalysis } from
 import { analyzeTypeScriptSemanticGraph } from "./semanticGraph.js";
 import type { AnalysisSearchIntent, StructuredSearchMatch, StructuredSearchResult, WorkspaceAnalysis } from "./types.js";
 
-const CODEXGRAPH_ENGINE_VERSION = 2;
+const CODEXGRAPH_ENGINE_VERSION = 3;
 
 function cacheKey(workspace: Workspace, fingerprint: string, config: CodexProConfig): string {
   return `${workspace.id}:graph-v${CODEXGRAPH_ENGINE_VERSION}:${fingerprint}:${JSON.stringify(config.analysisLimits)}`;

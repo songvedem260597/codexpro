@@ -126,6 +126,27 @@ assert.equal(shouldReloadChatRecovery({ domBusy: true, networkBusy: false }), fa
 assert.equal(shouldReloadChatRecovery({ connectionInterrupted: true, networkBusy: false }), true, "an interrupted terminal turn may reload after its checkpoint is saved");
 assert.equal(shouldReloadChatRecovery({ staleContent: true, canonicalReady: true, networkBusy: false }), true, "completed canonical content may repair a stale DOM after network settles");
 
+const conversationLimitProbeSource = extractFunction("probeConversationLimitPage");
+const limitPanel = {
+  innerText: "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat. Start new chat",
+  textContent: "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat. Start new chat",
+  parentElement: null
+};
+const startNewChatButton = {
+  innerText: "Start new chat",
+  textContent: "Start new chat",
+  parentElement: limitPanel,
+  getAttribute: () => "",
+  getBoundingClientRect: () => ({ width: 120, height: 36 })
+};
+const probeConversationLimitPage = Function("document", "getComputedStyle", `${conversationLimitProbeSource.replace(/^function/, "async function")}; return probeConversationLimitPage;`)(
+  { querySelectorAll: () => [startNewChatButton] },
+  () => ({ display: "block", visibility: "visible" })
+);
+const conversationLimit = await probeConversationLimitPage();
+assert.equal(conversationLimit.reached, true, "the exact ChatGPT maximum-length banner must be treated as a terminal conversation");
+assert.equal(conversationLimit.button_label, "Start new chat", "the detector must require the visible new-chat action in the same banner");
+
 const mergeRecoverySource = extractFunction("mergeChatRecoveryResponse");
 const mergeChatRecoveryResponse = Function(`${mergeRecoverySource}; return mergeChatRecoveryResponse;`)();
 const recoveredCheckpoint = mergeChatRecoveryResponse({
@@ -199,6 +220,8 @@ assert.ok(earlyAck > enterPrimary, "primary Enter must wait for generation ACK b
 assert.ok(clickFallback > earlyAck, "trusted Send click must only occur after the Enter ACK window");
 assert.match(sendBlock, /submitted_by:'trusted-enter'/);
 assert.match(sendBlock, /submitted_by:'trusted-click-fallback'/);
+assert.match(sendBlock, /Promise\.all\(\[[\s\S]*?probeConversationLimit\(tab\.id\)[\s\S]*?if\(conversationLimit\.reached\)throw new Error\('CONVERSATION_LIMIT_REACHED:/, "send preflight must detect a full conversation before touching its old composer");
+assert.ok(sendBlock.indexOf("if(conversationLimit.reached)") < sendBlock.indexOf("sendChatRequestPage"), "the old conversation must be rejected before any draft or attachment is injected");
 assert.doesNotMatch(sendBlock, /chrome\.tabs\.update\(tab\.id,\{active:true\}\)/, "background send must not activate the target tab");
 assert.doesNotMatch(sendBlock, /restorePreviouslyActiveTab/, "background send must not need to restore tabs because it never activates them");
 assert.match(sendBlock, /SEND_UNCERTAIN:/);

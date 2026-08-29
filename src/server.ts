@@ -19,6 +19,7 @@ import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
+import { projectCompactGraph } from "./analysis/projection.js";
 import { createRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
@@ -308,6 +309,114 @@ const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
 
 const registeredToolHandlersByServer = new WeakMap<object, Map<string, CodexToolHandler>>();
 const runtimeTraceWorkspaceByServer = new WeakMap<object, () => Workspace | undefined>();
+const repoTaskGateRequiredByServer = new WeakMap<object, boolean>();
+const repoTaskGateProfileByServer = new WeakMap<object, string>();
+type ActiveRepoTask = {
+  taskId: string;
+  taskTitle: string;
+  root: string;
+  workspaceId: string;
+  scope: "workspace" | "all_allowed";
+  globalRulesSha256: string;
+};
+const activeRepoTaskByServer = new WeakMap<object, ActiveRepoTask>();
+const activeRepoTaskByProfile = new Map<string, ActiveRepoTask>();
+const repoTaskWorkspaceSelectorByServer = new WeakMap<object, (root: string) => Workspace>();
+type ExpectedRepoTask = {
+  taskId: string;
+  root: string;
+  scope: "workspace" | "all_allowed";
+  preparedAt: number;
+};
+const expectedRepoTaskByProfile = new Map<string, ExpectedRepoTask>();
+
+
+function sameResolvedRoot(left: string, right: string): boolean {
+  const resolvedLeft = path.resolve(left);
+  const resolvedRight = path.resolve(right);
+  return process.platform === "win32"
+    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+    : resolvedLeft === resolvedRight;
+}
+
+function expectedRepoTask(profileId: string): ExpectedRepoTask | undefined {
+  return expectedRepoTaskByProfile.get(profileId);
+}
+
+function rememberExpectedRepoTask(profileId: string, expected: Omit<ExpectedRepoTask, "preparedAt">): ExpectedRepoTask {
+  const prepared = { ...expected, preparedAt: Date.now() };
+  activeRepoTaskByProfile.delete(profileId);
+  expectedRepoTaskByProfile.delete(profileId);
+  expectedRepoTaskByProfile.set(profileId, prepared);
+  if (expectedRepoTaskByProfile.size > 500) {
+    for (const staleProfileId of [...expectedRepoTaskByProfile.keys()].slice(0, expectedRepoTaskByProfile.size - 400)) {
+      expectedRepoTaskByProfile.delete(staleProfileId);
+    }
+  }
+  return prepared;
+}
+
+function sameRepoTask(left: ActiveRepoTask | undefined, right: ExpectedRepoTask | ActiveRepoTask | undefined): boolean {
+  return Boolean(
+    left
+    && right
+    && left.taskId === right.taskId
+    && left.scope === right.scope
+    && sameResolvedRoot(left.root, right.root)
+  );
+}
+
+const REPO_TASK_GATE_EXEMPT_TOOLS = new Set<string>([
+  SUPERTOOL_NAME,
+  "begin_repo_task",
+  "repo_task_status"
+]);
+
+function assertRepoTaskGate(server: McpServer, name: string): void {
+  if (!repoTaskGateRequiredByServer.get(server as object) || REPO_TASK_GATE_EXEMPT_TOOLS.has(name)) return;
+  const profileId = repoTaskGateProfileByServer.get(server as object) || "";
+  const expected = profileId ? expectedRepoTask(profileId) : undefined;
+  const active = profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
+  if (!active || !sameRepoTask(active, expected)) {
+    activeRepoTaskByServer.delete(server as object);
+    if (profileId) activeRepoTaskByProfile.delete(profileId);
+    throw new CodexProError(
+      `BEGIN_REPO_TASK_REQUIRED: ${name} is blocked until the current CodexPro Manager task is activated with begin_repo_task.`,
+      {
+        code: "BEGIN_REPO_TASK_REQUIRED",
+        details: {
+          tool: name,
+          profile_id: profileId || undefined,
+          expected_task_id: expected?.taskId,
+          active_task_id: active?.taskId
+        }
+      }
+    );
+  }
+  const latestRules = readGlobalRulesSnapshotSync();
+  if (latestRules.sha256 !== active.globalRulesSha256) {
+    activeRepoTaskByServer.delete(server as object);
+    if (profileId) activeRepoTaskByProfile.delete(profileId);
+    throw new CodexProError(
+      `BEGIN_REPO_TASK_RULES_CHANGED: ${CODEXPRO_GLOBAL_RULES_FILE} changed after task ${active.taskId} began. Call begin_repo_task again before using ${name}.`,
+      {
+        code: "BEGIN_REPO_TASK_RULES_CHANGED",
+        details: {
+          tool: name,
+          task_id: active.taskId,
+          previous_global_rules_sha256: active.globalRulesSha256,
+          current_global_rules_sha256: latestRules.sha256,
+          global_rules_path: latestRules.path
+        }
+      }
+    );
+  }
+  const sessionActive = activeRepoTaskByServer.get(server as object);
+  if (!sameRepoTask(sessionActive, active) || sessionActive?.globalRulesSha256 !== active.globalRulesSha256) {
+    repoTaskWorkspaceSelectorByServer.get(server as object)?.(active.root);
+    activeRepoTaskByServer.set(server as object, active);
+  }
+}
 
 function rememberRegisteredToolHandler(server: McpServer, name: string, handler: CodexToolHandler): void {
   const key = server as object;
@@ -441,6 +550,7 @@ const MINIMAL_TOOL_NAMES = [
   SUPERTOOL_NAME,
   "server_config",
   "codexpro_self_test",
+  "prepare_repo_task",
   "begin_repo_task",
   "repo_task_status",
   "open_current_workspace",
@@ -456,6 +566,7 @@ const MINIMAL_TOOL_NAMES = [
 const STANDARD_TOOL_NAMES = [
   ...MINIMAL_TOOL_NAMES,
   "inspect_workspace",
+  "code_graph",
   "tree",
   "search",
   "load_skill",
@@ -471,6 +582,7 @@ const FULL_TOOL_NAMES = [
   SUPERTOOL_NAME,
   "server_config",
   "codexpro_self_test",
+  "prepare_repo_task",
   "begin_repo_task",
   "repo_task_status",
   "codexpro_inventory",
@@ -480,6 +592,7 @@ const FULL_TOOL_NAMES = [
   "open_workspace",
   "workspace_snapshot",
   "inspect_workspace",
+  "code_graph",
   "tree",
   "search",
   "read",
@@ -503,6 +616,7 @@ const FULL_TOOL_NAMES = [
 const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   SUPERTOOL_NAME,
   "codexpro_self_test",
+  "prepare_repo_task",
   "write",
   "edit",
   "apply_patch",
@@ -519,13 +633,17 @@ function codexSessionToolNames(config: CodexProConfig): string[] {
     : ["codex_sessions"];
 }
 
-function toolNamesForMode(config: CodexProConfig): string[] {
+function toolNamesForMode(config: CodexProConfig, requireRepoTask = false): string[] {
   const names: string[] =
     config.toolMode === "full"
       ? [...FULL_TOOL_NAMES]
       : config.toolMode === "minimal"
         ? [...MINIMAL_TOOL_NAMES]
         : [...STANDARD_TOOL_NAMES];
+  if (requireRepoTask) {
+    const prepareIndex = names.indexOf("prepare_repo_task");
+    if (prepareIndex !== -1) names.splice(prepareIndex, 1);
+  }
   if (config.bashMode === "off") {
     const bashIndex = names.indexOf("bash");
     if (bashIndex !== -1) names.splice(bashIndex, 1);
@@ -538,8 +656,10 @@ function toolNamesForMode(config: CodexProConfig): string[] {
   }
   if (config.writeMode === "handoff" && !names.includes("handoff_to_agent")) names.push("handoff_to_agent");
   if (!config.analysisEnabled) {
-    const analysisIndex = names.indexOf("inspect_workspace");
-    if (analysisIndex !== -1) names.splice(analysisIndex, 1);
+    for (const analysisTool of ["inspect_workspace", "code_graph"]) {
+      const analysisIndex = names.indexOf(analysisTool);
+      if (analysisIndex !== -1) names.splice(analysisIndex, 1);
+    }
   }
   if (!config.browserControl || config.connectionTest || config.toolMode === "minimal") {
     const browserIndex = names.indexOf("browser_control");
@@ -578,7 +698,7 @@ function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if ((name === "write" || name === "edit" || name === "apply_patch") && config.writeMode !== "workspace") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
-  if (name === "inspect_workspace" && !config.analysisEnabled) return false;
+  if ((name === "inspect_workspace" || name === "code_graph") && !config.analysisEnabled) return false;
   if (name === "browser_control") return config.browserControl && !config.connectionTest && config.toolMode !== "minimal";
   if (name === "handoff_to_agent" && config.writeMode === "handoff") return true;
   if (config.toolMode === "full") return true;
@@ -594,13 +714,16 @@ function registerCodexTool(
   handler: CodexToolHandler
 ): void {
   if (!shouldRegisterTool(config, name)) return;
-  const validatedHandler: CodexToolHandler = (args) => handler(validateToolArgs(name, options, args));
+  const validatedHandler: CodexToolHandler = (args) => {
+    assertRepoTaskGate(server, name);
+    return handler(validateToolArgs(name, options, args));
+  };
   registerToolCompat(server, name, descriptorOptionsForConfig(config, name, options), validatedHandler);
   rememberRegisteredTool(server, name);
   rememberRegisteredToolHandler(server, name, validatedHandler);
 }
 
-function serverInstructions(config: CodexProConfig): string {
+function serverInstructions(config: CodexProConfig, requireRepoTask = false): string {
   const globalRules = readGlobalRulesSnapshotSync();
   const editInstruction =
     config.connectionTest
@@ -624,9 +747,15 @@ function serverInstructions(config: CodexProConfig): string {
     globalRules.text || "(No global rules configured.)",
     "",
     "Preferred workflow:",
-    "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
-    `2. The mandatory global rules above come from ${path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE)} and are loaded when the MCP server/session starts. begin_repo_task, open_current_workspace, and open_workspace also return the latest file contents before repo-local AGENTS.md-style instructions.`,
-    "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
+    requireRepoTask
+      ? "1. This profile-bound ChatGPT MCP session is repo-task gated. CodexPro Manager first prepares the exact task id/root/scope; call begin_repo_task with that exact prepared task before any repository/workspace tool. A newly prepared Manager request invalidates the previous active task immediately. The codexpro wrapper may be used for action=list_actions/help and action=begin_repo_task; repo_task_status is also available before activation."
+      : "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
+    requireRepoTask
+      ? `2. begin_repo_task loads the latest mandatory global rules from ${path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE)} and binds their SHA-256 to this MCP session. If that file changes, the next gated tool fails closed until begin_repo_task runs again.`
+      : `2. The mandatory global rules above come from ${path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE)} and are loaded when the MCP server/session starts. begin_repo_task, open_current_workspace, and open_workspace also return the latest file contents before repo-local AGENTS.md-style instructions.`,
+    requireRepoTask
+      ? "3. After begin_repo_task succeeds, use open_current_workspace/open_workspace as needed, then inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading."
+      : "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
     editInstruction,
     bashInstruction,
     "6. Prioritize correctness over minimizing tool calls or context. For non-trivial edits, use structured search with intent=impact/references to inspect CodexGraph callers, state, framework links, and related tests before changing code.",
@@ -688,6 +817,22 @@ function compactMutationCodexGraphImpact(impact: Awaited<ReturnType<typeof revie
     risk_signals: impact.riskSignals,
     graph_diff: impact.graphDiff,
     warnings: impact.warnings.slice(-8)
+  };
+}
+
+async function requireCodexGraphForWorkspace(config: CodexProConfig, guard: PathGuard, workspace: Workspace) {
+  if (!config.analysisEnabled) {
+    throw new CodexProError("CodexGraph is required for CodexPro Manager repo tasks, but repository analysis is disabled by CODEXPRO_ANALYSIS=0.");
+  }
+  const analysis = await inspectWorkspace(config, guard, workspace);
+  return {
+    required: true,
+    active: true,
+    cache_key: analysis.cache.key,
+    cache_hit: analysis.cache.hit,
+    fingerprint: analysis.fingerprint,
+    coverage: analysis.coverage,
+    warnings: analysis.warnings.slice(-8)
   };
 }
 
@@ -1080,16 +1225,29 @@ const SESSION_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, des
 const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false };
 const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
-const repoTaskProofs = new Map<string, { taskId: string; taskTitle: string; root: string; workspaceId: string; startedAt: string; scope: "workspace" | "all_allowed"; globalRulesPath: string; globalRulesSha256: string }>();
+type RepoTaskProof = {
+  taskId: string;
+  taskTitle: string;
+  root: string;
+  workspaceId: string;
+  startedAt: string;
+  scope: "workspace" | "all_allowed";
+  globalRulesPath: string;
+  globalRulesSha256: string;
+  codexGraph: Awaited<ReturnType<typeof requireCodexGraphForWorkspace>>;
+};
 
-function rememberRepoTaskProof(proof: { taskId: string; taskTitle: string; root: string; workspaceId: string; startedAt: string; scope: "workspace" | "all_allowed"; globalRulesPath: string; globalRulesSha256: string }): void {
+const repoTaskProofs = new Map<string, RepoTaskProof>();
+
+function rememberRepoTaskProof(proof: RepoTaskProof): void {
   repoTaskProofs.set(proof.taskId, proof);
   if (repoTaskProofs.size <= 500) return;
   for (const taskId of [...repoTaskProofs.keys()].slice(0, repoTaskProofs.size - 400)) repoTaskProofs.delete(taskId);
 }
 
-export function createCodexProServer(config: CodexProConfig, options: { browserProfileId?: string } = {}): McpServer {
+export function createCodexProServer(config: CodexProConfig, options: { browserProfileId?: string; requireRepoTask?: boolean } = {}): McpServer {
   const browserProfileId = String(options.browserProfileId || "").trim();
+  const requireRepoTask = options.requireRepoTask ?? Boolean(browserProfileId);
   let selectedRuntimeTraceWorkspace: Workspace | undefined;
   const workspaces = new WorkspaceManager(
     config,
@@ -1101,8 +1259,11 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
   );
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
+  const server = new McpServer({ name: "CodexPro", version: "0.29.2" }, { instructions: serverInstructions(config, requireRepoTask) });
   runtimeTraceWorkspaceByServer.set(server as object, () => selectedRuntimeTraceWorkspace ?? workspaces.defaultWorkspace());
+  repoTaskWorkspaceSelectorByServer.set(server as object, (root) => workspaces.openWorkspace(root));
+  repoTaskGateRequiredByServer.set(server as object, requireRepoTask);
+  if (browserProfileId) repoTaskGateProfileByServer.set(server as object, browserProfileId);
   if (config.browserControl) ensureBrowserExtensionBridge();
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
@@ -1283,7 +1444,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       };
 
       check("workspace", "pass", workspace.root);
-      check("tool mode", config.toolMode === "full" ? "pass" : "warn", `${config.toolMode}; expected tools: ${toolNamesForMode(config).length}`);
+      check("tool mode", config.toolMode === "full" ? "pass" : "warn", `${config.toolMode}; expected tools: ${toolNamesForMode(config, requireRepoTask).length}`);
       check("write mode", config.writeMode === "off" ? "warn" : "pass", config.writeMode);
       check("bash mode", config.bashMode === "full" ? "warn" : "pass", config.bashMode);
       check(
@@ -1295,7 +1456,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             ? "token required when serving HTTP"
             : "token auth explicitly disabled"
       );
-      const expectedTools = toolNamesForMode(config).sort();
+      const expectedTools = toolNamesForMode(config, requireRepoTask).sort();
       const actualTools = registeredToolNames(server).sort();
       const missingTools = expectedTools.filter((name) => !actualTools.includes(name));
       const extraTools = actualTools.filter((name) => !expectedTools.includes(name));
@@ -1648,6 +1809,42 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     }
   );
 
+  if (!requireRepoTask) registerCodexTool(
+    config,
+    server,
+    "prepare_repo_task",
+    {
+      title: "Prepare Manager Repo Task",
+      description: "Manager-only control-plane action. Bind the next CodexPro Manager task id/root/scope to a Chrome profile before the request is dispatched to ChatGPT.",
+      inputSchema: {
+        profile_id: z.string().regex(/^[A-Za-z0-9._-]{1,160}$/).describe("Chrome profile id receiving the Manager request."),
+        task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).describe("Exact task id generated by CodexPro Manager."),
+        root: z.string().min(1).describe("Initial workspace root for this task."),
+        scope: z.enum(["workspace", "all_allowed"]).optional().describe("Task scope. Default: workspace.")
+      },
+      annotations: HANDOFF_WRITE_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.openWorkspace(args.root, { select: false });
+      const scope: "workspace" | "all_allowed" = args.scope === "all_allowed" ? "all_allowed" : "workspace";
+      const expected: ExpectedRepoTask = {
+        taskId: args.task_id,
+        root: workspace.root,
+        scope,
+        preparedAt: Date.now()
+      };
+      rememberExpectedRepoTask(args.profile_id, expected);
+      return textResult(`# Repo Task Prepared\n\nProfile: ${args.profile_id}\nTask: ${expected.taskId}\nRoot: ${expected.root}\nScope: ${expected.scope}`, {
+        prepared: true,
+        profile_id: args.profile_id,
+        task_id: expected.taskId,
+        root: expected.root,
+        scope: expected.scope,
+        prepared_at: new Date(expected.preparedAt).toISOString()
+      });
+    }
+  );
+
   registerCodexTool(
     config,
     server,
@@ -1669,13 +1866,61 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
     },
     async (args) => {
-      const workspace = workspaces.openWorkspace(args.root);
       const scope: "workspace" | "all_allowed" = args.scope === "all_allowed" ? "all_allowed" : "workspace";
+      const gateProfileId = repoTaskGateProfileByServer.get(server as object) || "";
+      const expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
+      if (requireRepoTask) {
+        if (!gateProfileId || !expected) {
+          throw new CodexProError(
+            "REPO_TASK_NOT_PREPARED: CodexPro Manager has not prepared a current task for this Chrome profile.",
+            { code: "REPO_TASK_NOT_PREPARED", details: { profile_id: gateProfileId || undefined, task_id: args.task_id } }
+          );
+        }
+        if (expected.taskId !== args.task_id || expected.scope !== scope) {
+          throw new CodexProError(
+            `REPO_TASK_MISMATCH: begin_repo_task must use the exact task id and scope prepared by CodexPro Manager (${expected.taskId}, ${expected.scope}).`,
+            {
+              code: "REPO_TASK_MISMATCH",
+              details: {
+                profile_id: gateProfileId,
+                expected_task_id: expected.taskId,
+                received_task_id: args.task_id,
+                expected_scope: expected.scope,
+                received_scope: scope
+              }
+            }
+          );
+        }
+      }
+      const workspace = workspaces.openWorkspace(args.root);
+      if (expected && !sameResolvedRoot(workspace.root, expected.root)) {
+        throw new CodexProError(
+          `REPO_TASK_ROOT_MISMATCH: begin_repo_task must open the exact workspace prepared by CodexPro Manager: ${expected.root}`,
+          {
+            code: "REPO_TASK_ROOT_MISMATCH",
+            details: { profile_id: gateProfileId, task_id: args.task_id, expected_root: expected.root, received_root: workspace.root }
+          }
+        );
+      }
       const globalRules = await readGlobalRulesSnapshot();
-      const proof = { taskId: args.task_id, taskTitle: args.task_title.trim(), root: workspace.root, workspaceId: workspace.id, startedAt: new Date().toISOString(), scope, globalRulesPath: globalRules.path, globalRulesSha256: globalRules.sha256 };
-      if (browserProfileId) setBrowserExtensionProfileTask(browserProfileId, proof.taskId, proof.taskTitle);
+      const codexGraph = await requireCodexGraphForWorkspace(config, guard, workspace);
+      const proof: RepoTaskProof = { taskId: args.task_id, taskTitle: args.task_title.trim(), root: workspace.root, workspaceId: workspace.id, startedAt: new Date().toISOString(), scope, globalRulesPath: globalRules.path, globalRulesSha256: globalRules.sha256, codexGraph };
+      if (gateProfileId) setBrowserExtensionProfileTask(gateProfileId, proof.taskId, proof.taskTitle);
       rememberRepoTaskProof(proof);
-      return textResult(withGlobalRules(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}`, globalRules), {
+      const activeTask: ActiveRepoTask = {
+        taskId: proof.taskId,
+        taskTitle: proof.taskTitle,
+        root: proof.root,
+        workspaceId: proof.workspaceId,
+        scope: proof.scope,
+        globalRulesSha256: proof.globalRulesSha256
+      };
+      activeRepoTaskByServer.set(server as object, activeTask);
+      if (gateProfileId) {
+        activeRepoTaskByProfile.delete(gateProfileId);
+        activeRepoTaskByProfile.set(gateProfileId, activeTask);
+      }
+      return textResult(withGlobalRules(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}\nCodexGraph: active (${codexGraph.coverage.symbolCount} symbols, ${codexGraph.coverage.relationshipCount} relationships)`, globalRules), {
         task_id: proof.taskId,
         task_title: proof.taskTitle,
         verified: true,
@@ -1686,7 +1931,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         global_rules_path: globalRules.path,
         global_rules_sha256: globalRules.sha256,
         global_rules_source: globalRules.source,
-        global_rules: globalRules.text
+        global_rules: globalRules.text,
+        codexgraph: codexGraph
       });
     }
   );
@@ -1703,10 +1949,21 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     },
     async (args) => {
       const proof = repoTaskProofs.get(args.task_id);
-      return textResult(proof ? `# Repo Task Verified\n\n${proof.taskId} opened ${proof.root} with scope ${proof.scope}.` : `# Repo Task Missing\n\nNo begin_repo_task call was received for ${args.task_id}.`, {
+      const gateProfileId = repoTaskGateProfileByServer.get(server as object) || "";
+      const expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
+      const active = gateProfileId ? activeRepoTaskByProfile.get(gateProfileId) : activeRepoTaskByServer.get(server as object);
+      const rulesMatch = Boolean(active && readGlobalRulesSnapshotSync().sha256 === active.globalRulesSha256);
+      const gateActive = requireRepoTask
+        ? Boolean(proof && expected?.taskId === args.task_id && sameRepoTask(active, expected) && rulesMatch)
+        : Boolean(proof);
+      return textResult(gateActive ? `# Repo Task Verified\n\n${proof!.taskId} opened ${proof!.root} with scope ${proof!.scope}.` : `# Repo Task Missing\n\nNo active begin_repo_task gate was found for ${args.task_id}.`, {
         task_id: args.task_id,
-        verified: Boolean(proof),
-        ...(proof ? { task_title: proof.taskTitle, root: proof.root, workspace_id: proof.workspaceId, started_at: proof.startedAt, scope: proof.scope } : {})
+        verified: gateActive,
+        gate_active: gateActive,
+        profile_id: gateProfileId || undefined,
+        expected_task_id: expected?.taskId,
+        active_task_id: active?.taskId,
+        ...(proof ? { task_title: proof.taskTitle, root: proof.root, workspace_id: proof.workspaceId, started_at: proof.startedAt, scope: proof.scope, codexgraph: proof.codexGraph } : {})
       });
     }
   );
@@ -1900,6 +2157,78 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         warnings: outputWarnings,
         output_limited: outputLimited,
         returned: { files: files.length, symbols: symbols.length, relationships: relationships.length },
+        cache: result.cache
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "code_graph",
+    {
+      title: "CodexGraph Map",
+      description: "Return a compact node/edge projection of the live CodexGraph for interactive visualization without duplicating the repository analysis engine.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        path: z.string().optional().describe("Optional workspace-relative area to visualize. Default: entire workspace."),
+        max_nodes: z.number().int().min(1).max(50000).optional().describe("Maximum compact graph nodes. Default: 15000."),
+        max_edges: z.number().int().min(1).max(100000).optional().describe("Maximum compact graph edges. Default: 40000."),
+        max_payload_bytes: z.number().int().min(262144).max(8388608).optional().describe("Maximum compact graph payload bytes. Default: 6291456 (6 MiB).")
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Building compact CodexGraph map...",
+        "openai/toolInvocation/invoked": "CodexGraph map ready"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      if (args.path) guard.resolve(workspace, args.path);
+      const result = await inspectWorkspace(config, guard, workspace);
+      const prefix = typeof args.path === "string" && args.path.trim()
+        ? guard.resolve(workspace, args.path).relPath.replace(/^\.\/?$/, "")
+        : "";
+      const inScope = (filePath: string) => !prefix || filePath === prefix || filePath.startsWith(`${prefix}/`);
+      const nodeLimit = limitInt(args.max_nodes, 15000, 1, Math.min(50000, config.analysisLimits.maxSymbols));
+      const edgeLimit = limitInt(args.max_edges, 40000, 1, Math.min(100000, config.analysisLimits.maxRelationships));
+      const payloadLimit = limitInt(args.max_payload_bytes, 6 * 1024 * 1024, 256 * 1024, 8 * 1024 * 1024);
+      const scopedSymbols = result.symbols.filter((symbol) => Boolean(symbol.id) && inScope(symbol.path));
+      const projection = projectCompactGraph(scopedSymbols, result.relationships, {
+        maxNodes: nodeLimit,
+        maxEdges: edgeLimit,
+        maxPayloadBytes: payloadLimit
+      });
+      const { nodes, edges } = projection;
+      const outputLimited = projection.outputLimited || result.coverage.truncated;
+      const outputWarnings = [
+        ...result.warnings,
+        ...(outputLimited ? [projection.byteLimited
+          ? "CodexGraph map payload reached the byte cap; high-priority nodes and edges were preserved first."
+          : "CodexGraph map payload was limited by max_nodes/max_edges or repository analysis limits; high-priority nodes and edges were preserved first."] : [])
+      ];
+      const text = [
+        "# CodexGraph Map",
+        "",
+        `Workspace: ${workspace.root}`,
+        `Source: CodexGraph engine (${result.coverage.symbolCount} symbols, ${result.coverage.relationshipCount} relationships)`,
+        `Returned: ${nodes.length} compact nodes, ${edges.length} compact edges${outputLimited ? " (partial)" : ""}`
+      ].join("\n");
+      return textResult(text, {
+        schema_version: 1,
+        source: "CodexGraph",
+        workspace_id: workspace.id,
+        root: workspace.root,
+        path: args.path ?? ".",
+        nodes,
+        edges,
+        coverage: result.coverage,
+        warnings: outputWarnings,
+        output_limited: outputLimited,
+        returned: { nodes: nodes.length, edges: edges.length },
+        eligible: { nodes: projection.eligibleNodes, edges: projection.eligibleEdges },
+        limits: projection.limits,
         cache: result.cache
       });
     }

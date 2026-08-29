@@ -63,8 +63,8 @@ export interface InventoryResult {
   coverage: AnalysisCoverage;
 }
 
-export type AnalysisSymbolKind = "module" | "function" | "method" | "class" | "interface" | "enum" | "struct" | "trait" | "protocol" | "type" | "variable" | "property" | "channel" | "event" | "route";
-export type AnalysisRelationshipKind = "imports" | "references" | "tests" | "package" | "contains" | "calls" | "reads" | "writes" | "extends" | "implements" | "emits" | "listens" | "routes" | "ipc";
+export type AnalysisSymbolKind = "module" | "function" | "method" | "class" | "interface" | "enum" | "struct" | "trait" | "protocol" | "type" | "variable" | "property" | "channel" | "event" | "route" | "context" | "store" | "ref";
+export type AnalysisRelationshipKind = "imports" | "references" | "tests" | "package" | "contains" | "calls" | "reads" | "writes" | "extends" | "implements" | "emits" | "listens" | "routes" | "ipc" | "provides" | "consumes" | "passes" | "stores";
 
 export interface AnalysisSymbol {
   name: string;
