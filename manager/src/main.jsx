@@ -7,6 +7,7 @@ import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
 import { completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
+import { projectSelectionChanged } from "./chat-project.js";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -1265,6 +1266,34 @@ function App() {
       .catch((err) => setRequestSendErrors((current) => ({ ...current, [profileId]: err?.message || String(err) })));
   }
 
+  function changeProjectForProfile(profile, root) {
+    const profileId = profile.profile_id;
+    const previousRoot = projectRootForProfile(profile);
+    selectProjectForProfile(profileId, root);
+    if (!projectSelectionChanged(previousRoot, root)) return;
+
+    requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: NEW_CHAT_TARGET };
+    setRequestTargets((current) => ({ ...current, [profileId]: NEW_CHAT_TARGET }));
+    setRequestResponses((current) => ({
+      ...current,
+      [profileId]: {
+        visible: true,
+        loading: false,
+        error: "",
+        conversationId: NEW_CHAT_TARGET,
+        text: "",
+        messages: [],
+        busy: false
+      }
+    }));
+    setRequestSendErrors((current) => ({ ...current, [profileId]: "" }));
+    setRequestSendEvidence((current) => ({ ...current, [profileId]: null }));
+    setRenameChat(null);
+    responseScrollLocked.current.delete(profileId);
+    responseScrollPositions.current.delete(profileId);
+    notify("Đã đổi dự án · tin nhắn tiếp theo sẽ mở chat mới");
+  }
+
   async function setupProfile(profile) {
     setBusy(`profile:${profile.profile_id}`);
     setError("");
@@ -2211,7 +2240,7 @@ function App() {
 
           <article className={`request-card chat-popup-card ${profile.connected ? "is-online" : "is-offline"}`}>
             <label className="request-label">Chọn repo và đường dẫn</label>
-            <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => selectProjectForProfile(profile.profile_id, root)} disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating} />
+            <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => changeProjectForProfile(profile, root)} disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating} />
             {!workspaceProjects.length && selectedProjectRoot !== ALL_ALLOWED_WORKSPACES && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
             <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${sending || selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
