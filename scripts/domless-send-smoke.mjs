@@ -97,6 +97,54 @@ assert.equal(isChatGenerationRequest({
   url: "https://example.com/backend-api/conversation"
 }), false);
 
+const canonicalPrioritySource = extractFunction("canonicalResponseSupersedesDom");
+const canonicalResponseSupersedesDom = Function(`${canonicalPrioritySource}; return canonicalResponseSupersedesDom;`)();
+assert.equal(canonicalResponseSupersedesDom({
+  ok: true,
+  response_ready: true,
+  messages: [{ role: "user", text: "Yêu cầu" }, { role: "assistant", text: "Phản hồi" }],
+  text: "Phản hồi"
+}, {
+  messages: [{ role: "user", text: "Yêu cầu" }, { role: "assistant", text: "Phản hồi đang hiển thị đầy đủ hơn" }],
+  text: "Phản hồi đang hiển thị đầy đủ hơn"
+}), false, "a shorter canonical snapshot must not overwrite a fuller ChatGPT UI response before checkpointing");
+assert.equal(canonicalResponseSupersedesDom({
+  ok: true,
+  response_ready: true,
+  messages: [{ role: "user", text: "Yêu cầu" }, { role: "assistant", text: "Phản hồi canonical đầy đủ hơn" }],
+  text: "Phản hồi canonical đầy đủ hơn"
+}, {
+  messages: [{ role: "user", text: "Yêu cầu" }, { role: "assistant", text: "Phản hồi" }],
+  text: "Phản hồi"
+}), true, "a fuller completed canonical response may repair a shorter UI snapshot");
+
+const reloadDecisionSource = extractFunction("shouldReloadChatRecovery");
+const shouldReloadChatRecovery = Function(`${reloadDecisionSource}; return shouldReloadChatRecovery;`)();
+assert.equal(shouldReloadChatRecovery({ connectionInterrupted: true, networkBusy: true }), false, "an interrupted placeholder must not reload while ChatGPT is still streaming");
+assert.equal(shouldReloadChatRecovery({ messageDeliveryTimedOut: true, networkBusy: true }), false, "a delivery-timeout banner must wait for active network/tool work to settle");
+assert.equal(shouldReloadChatRecovery({ domBusy: true, networkBusy: false }), false, "DOM busy/thinking alone must never authorize a blind reload");
+assert.equal(shouldReloadChatRecovery({ connectionInterrupted: true, networkBusy: false }), true, "an interrupted terminal turn may reload after its checkpoint is saved");
+assert.equal(shouldReloadChatRecovery({ staleContent: true, canonicalReady: true, networkBusy: false }), true, "completed canonical content may repair a stale DOM after network settles");
+
+const mergeRecoverySource = extractFunction("mergeChatRecoveryResponse");
+const mergeChatRecoveryResponse = Function(`${mergeRecoverySource}; return mergeChatRecoveryResponse;`)();
+const recoveredCheckpoint = mergeChatRecoveryResponse({
+  text: "Phản hồi đã thấy trước reload",
+  messages: [
+    { id: "checkpoint-user", role: "user", text: "Kiểm tra lỗi" },
+    { id: "checkpoint-assistant", role: "assistant", text: "Phản hồi đã thấy trước reload" }
+  ]
+}, {
+  text: "Phản hồi",
+  messages: [
+    { id: "reload-user", role: "user", text: "Kiểm tra lỗi" },
+    { id: "reload-assistant", role: "assistant", text: "Phản hồi" }
+  ]
+});
+assert.equal(recoveredCheckpoint.text, "Phản hồi đã thấy trước reload", "reload recovery must never regress the visible checkpoint");
+assert.equal(recoveredCheckpoint.messages.at(-1).id, "checkpoint-assistant", "reload recovery must preserve the active assistant identity");
+assert.equal(recoveredCheckpoint.response_checkpoint_applied, true, "diagnostics must show when the saved checkpoint repaired a reload snapshot");
+
 const replaceTabSource = extractFunction("replaceUnresponsiveChatTab");
 const recoveryCalls = [];
 const recoveryNetworkState = new Map([[41, { state: "completed", conversation_id: "12345678-abcd" }]]);
@@ -160,10 +208,10 @@ assert.match(sendBlock, /definitelyNotDispatched&&!attachmentSubmit&&remainingCo
 assert.match(sendBlock, /trusted-enter-pre-dispatch','trusted-click-fallback'/, "a definitely-unsent focus failure may use one trusted-click fallback");
 assert.match(worker, /expectedText&&normalized\(composerText\)===normalized\(expectedText\)/, "trusted click fallback must recover a React-replaced composer only for an exact owned payload");
 assert.match(sendBlock, /cleanup_skipped:!definitelyUnsent/, "ambiguous attempts must not delete a possibly submitted draft");
-assert.match(sendBlock, /await chrome\.tabs\.remove\(hungTabId\)/, "a hard renderer hang must close the exact unresponsive tab");
-assert.match(sendBlock, /chrome\.tabs\.create\(\{windowId:recoveryWindowId,url:recoveryUrl,active:recoveryActive\}\)/, "hard-hang recovery must reopen the exact conversation URL in the same window");
-assert.match(sendBlock, /await chrome\.tabs\.reload\(tab\.id\)/, "a soft pre-submit expiry must reload the exact conversation tab once");
-assert.match(sendBlock, /path_attempted:\['prepare',preparationRecovery\.renderer_replaced\?'replace-tab':'reload','prepare'\]/, "pre-submit recovery must expose its bounded recovery path");
+assert.match(sendBlock, /replaceUnresponsiveChatTab\(tab,recoveryUrl/, "only a confirmed renderer hang may replace the exact unresponsive conversation tab");
+assert.doesNotMatch(sendBlock, /chrome\.tabs\.reload\(tab\.id\)/, "a missing or slow composer must wait and retry instead of blindly reloading an active response");
+assert.match(sendBlock, /prepare_waited:true/, "a soft pre-submit failure must expose its bounded wait-and-retry path");
+assert.match(sendBlock, /preparationRecovery\.renderer_replaced\?\['prepare','replace-tab','prepare'\]:preparationRecovery\.prepare_waited\?\['prepare','wait','prepare'\]/, "pre-submit diagnostics must distinguish safe waiting from hard renderer replacement");
 assert.match(sendBlock, /submission_state:'failed'.*PREPARE_FAILED:/s, "a second pre-submit failure is definitely unsent, not SEND_UNCERTAIN");
 assert.match(worker, /const ATTACHMENT_PREPARE_TIMEOUT_MS = 60000;/, "attachment preparation must allow ChatGPT enough time to render and stabilize uploaded files");
 assert.match(sendBlock, /const prepareTimeoutMs=attachments\.length\?ATTACHMENT_PREPARE_TIMEOUT_MS:DOM_PREPARE_TIMEOUT_MS;/, "attachment sends must use the dedicated preparation deadline");

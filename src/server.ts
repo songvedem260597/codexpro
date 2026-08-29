@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -25,8 +26,61 @@ import { codexPatchToUnifiedDiff, codexPatchTouchedPaths, isCodexPatchEnvelope }
 import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
+import { codexProHome } from "./profileStore.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
+const CODEXPRO_GLOBAL_RULES_FILE = "CODEXPRO.md";
+const DEFAULT_CODEXPRO_GLOBAL_RULES = `# CodexPro Global Rules
+
+<!-- Rule trong file này áp dụng cho mọi repo/dự án được thao tác qua MCP CodexPro. -->
+<!-- Thêm hoặc sửa rule bên dưới. Không lưu password, token hoặc API key trong file này. -->
+
+- Đọc và tuân thủ file này trước khi đọc rule riêng của từng repo/dự án.
+- Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
+`;
+
+type GlobalRulesSnapshot = {
+  path: string;
+  text: string;
+  sha256: string;
+  source: "file" | "template";
+};
+
+function readGlobalRulesSnapshotSync(): GlobalRulesSnapshot {
+  const filePath = path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE);
+  let text = DEFAULT_CODEXPRO_GLOBAL_RULES;
+  let source: GlobalRulesSnapshot["source"] = "template";
+  try {
+    text = fs.readFileSync(filePath, "utf8").replace(/\r\n/g, "\n").slice(0, STRUCTURED_STRING_MAX_CHARS);
+    source = "file";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+  }
+  return {
+    path: filePath,
+    text,
+    sha256: createHash("sha256").update(text).digest("hex"),
+    source
+  };
+}
+
+async function readGlobalRulesSnapshot(): Promise<GlobalRulesSnapshot> {
+  return readGlobalRulesSnapshotSync();
+}
+
+function withGlobalRules(text: string, rules: GlobalRulesSnapshot): string {
+  return [
+    "# Mandatory CodexPro Global Rules",
+    "",
+    `Source: ${rules.path}`,
+    `SHA-256: ${rules.sha256}`,
+    "Read and follow these rules before repository-specific AGENTS.md instructions or project decisions.",
+    "",
+    rules.text || "(No global rules configured.)",
+    "",
+    text
+  ].join("\n");
+}
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return redactSensitiveText(`${error.name}: ${error.message}`);
@@ -565,39 +619,46 @@ function registerCodexTool(
 }
 
 function serverInstructions(config: CodexProConfig): string {
+  const globalRules = readGlobalRulesSnapshotSync();
   const editInstruction =
     config.connectionTest
-      ? "4. Connection test mode is read-only. Write, patch, export, and handoff-writing tools are unavailable."
+      ? "5. Connection test mode is read-only. Write, patch, export, and handoff-writing tools are unavailable."
       : config.writeMode === "workspace"
-      ? "4. Create new source files with create; edit existing files with write/edit/apply_patch. After edits, call show_changes once for git status, diff stats, and review diff."
+      ? "5. Create new source files with create; edit existing files with write/edit/apply_patch. After edits, call show_changes once for git status, diff stats, and review diff."
       : config.writeMode === "handoff"
-        ? "4. Source writes are disabled and generic write/edit/apply_patch tools are unavailable. Use handoff_to_agent/handoff_to_codex for plans."
-        : "4. Write/edit/apply_patch tools are disabled. Do not attempt direct file writes; use handoff or context export workflows instead.";
+        ? "5. Source writes are disabled and generic write/edit/apply_patch tools are unavailable. Use handoff_to_agent/handoff_to_codex for plans."
+        : "5. Write/edit/apply_patch tools are disabled. Do not attempt direct file writes; use handoff or context export workflows instead.";
   const bashInstruction =
     config.bashMode === "off"
-      ? "5. Bash is disabled and the bash tool is unavailable. Do not attempt shell commands."
-      : "5. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.";
+      ? "6. Bash is disabled and the bash tool is unavailable. Do not attempt shell commands."
+      : "6. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.";
 
   return [
     "CodexPro connects ChatGPT to explicitly allowed local development workspaces.",
+    "",
+    "MANDATORY GLOBAL RULES — loaded before any repository/project tool work:",
+    `Source: ${globalRules.path}`,
+    `SHA-256: ${globalRules.sha256}`,
+    globalRules.text || "(No global rules configured.)",
     "",
     "Preferred workflow:",
     config.controlPlaneUrl && config.toolMode !== "minimal"
       ? "1. In a role-bound CodexPro Worker Chat, call worker_cycle_start exactly once for each Control Plane wake job. It automatically ACKs governance and claims the next role-compatible task without a schedule. If it returns TASK_CLAIMED, open_workspace with the returned workerBinding.worktreePath and continue tool calls until its nextAction and pendingInstructions are completed or a real blocker is recorded; do not stop after narrating what you will do. If it returns IDLE, stop cleanly. In an ordinary session, start with open_current_workspace."
       : "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
-    "2. Follow any AGENTS.md-style instructions returned by the workspace open call before editing files.",
-    "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
+    `2. The mandatory global rules above come from ${path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE)} and are loaded when the MCP server/session starts. begin_repo_task, open_current_workspace, and open_workspace also return the latest file contents before repo-local AGENTS.md-style instructions.`,
+    "3. Follow any AGENTS.md-style instructions returned by the workspace open call before editing files.",
+    "4. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
     editInstruction,
     bashInstruction,
-    "6. For rendered web UI verification, call browser_open, use refs from browser_snapshot with browser_click/browser_type/browser_select, and close the browser when finished.",
-    "7. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
+    "7. For rendered web UI verification, call browser_open, use refs from browser_snapshot with browser_click/browser_type/browser_select, and close the browser when finished.",
+    "8. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
-      ? `8. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
+      ? `9. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
       : "",
     config.requireBashSession && config.bashSessionId
-      ? `9. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
+      ? `10. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
       : config.bashSessionId
-        ? `9. Bash session label for this server is "${config.bashSessionId}".`
+        ? `10. Bash session label for this server is "${config.bashSessionId}".`
         : "",
     "",
     `Current modes: tool=${config.toolMode}, bash=${config.bashMode}, write=${config.writeMode}.`
@@ -1033,9 +1094,9 @@ const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructive
 const BROWSER_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: true, destructiveHint: false, idempotentHint: false };
 const BROWSER_ACTION_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
-const repoTaskProofs = new Map<string, { taskId: string; root: string; workspaceId: string; startedAt: string; scope: "workspace" | "all_allowed" }>();
+const repoTaskProofs = new Map<string, { taskId: string; root: string; workspaceId: string; startedAt: string; scope: "workspace" | "all_allowed"; globalRulesPath: string; globalRulesSha256: string }>();
 
-function rememberRepoTaskProof(proof: { taskId: string; root: string; workspaceId: string; startedAt: string; scope: "workspace" | "all_allowed" }): void {
+function rememberRepoTaskProof(proof: { taskId: string; root: string; workspaceId: string; startedAt: string; scope: "workspace" | "all_allowed"; globalRulesPath: string; globalRulesSha256: string }): void {
   repoTaskProofs.set(proof.taskId, proof);
   if (repoTaskProofs.size <= 500) return;
   for (const taskId of [...repoTaskProofs.keys()].slice(0, repoTaskProofs.size - 400)) repoTaskProofs.delete(taskId);
@@ -1603,6 +1664,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
     },
     async (args) => {
       const workspace = workspaces.selectDefaultWorkspace();
+      const globalRules = await readGlobalRulesSnapshot();
       const summary = await workspaceSummary(config, guard, workspace, {
         includeTree: parseBool(args.include_tree, false),
         maxDepth: limitInt(args.max_depth, 2, 1, 8),
@@ -1610,7 +1672,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         includeGlobalSkills: parseBool(args.include_global_skills, false),
         bootstrapContext: false
       });
-      return textResult(summary.text, {
+      return textResult(withGlobalRules(summary.text, globalRules), {
         workspace_id: summary.workspaceId,
         selected_workspace_id: summary.workspaceId,
         root: summary.root,
@@ -1650,15 +1712,20 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
     async (args) => {
       const workspace = workspaces.openWorkspace(args.root);
       const scope: "workspace" | "all_allowed" = args.scope === "all_allowed" ? "all_allowed" : "workspace";
-      const proof = { taskId: args.task_id, root: workspace.root, workspaceId: workspace.id, startedAt: new Date().toISOString(), scope };
+      const globalRules = await readGlobalRulesSnapshot();
+      const proof = { taskId: args.task_id, root: workspace.root, workspaceId: workspace.id, startedAt: new Date().toISOString(), scope, globalRulesPath: globalRules.path, globalRulesSha256: globalRules.sha256 };
       rememberRepoTaskProof(proof);
-      return textResult(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}`, {
+      return textResult(withGlobalRules(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}`, globalRules), {
         task_id: proof.taskId,
         verified: true,
         root: proof.root,
         workspace_id: proof.workspaceId,
         started_at: proof.startedAt,
-        scope: proof.scope
+        scope: proof.scope,
+        global_rules_path: globalRules.path,
+        global_rules_sha256: globalRules.sha256,
+        global_rules_source: globalRules.source,
+        global_rules: globalRules.text
       });
     }
   );
@@ -1713,6 +1780,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         throw new CodexProError("open_workspace accepts either root or path. If both are provided, they must match.");
       }
       const workspace = workspaces.openWorkspace(args.root ?? args.path);
+      const globalRules = await readGlobalRulesSnapshot();
       const summary = await workspaceSummary(config, guard, workspace, {
         includeTree: args.include_tree !== false,
         maxDepth: limitInt(args.max_depth, 3, 1, 8),
@@ -1721,7 +1789,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         includeGlobalSkills: parseBool(args.include_global_skills, false),
         bootstrapContext: false
       });
-      return textResult(summary.text, {
+      return textResult(withGlobalRules(summary.text, globalRules), {
         workspace_id: summary.workspaceId,
         selected_workspace_id: summary.workspaceId,
         root: summary.root,
@@ -1770,7 +1838,8 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         includeGlobalSkills: parseBool(args.include_global_skills, false)
       });
       const ai = await readAiBridgeContext(config, guard, workspace);
-      const text = `${summary.text}\n\n## AI handoff context\n\n${ai.text}`;
+      const globalRules = await readGlobalRulesSnapshot();
+      const text = withGlobalRules(`${summary.text}\n\n## AI handoff context\n\n${ai.text}`, globalRules);
       return textResult(text, {
         workspace_id: workspace.id,
         root: workspace.root,
@@ -2923,6 +2992,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
+      const globalRules = await readGlobalRulesSnapshot();
       const context = await readCodexContext(config, guard, workspace, {
         targetPath: args.target_path,
         includeAiBridge: args.include_ai_bridge,
@@ -2930,7 +3000,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         includeDiff: parseBool(args.include_diff, false),
         maxAgentBytes: args.max_agent_bytes
       });
-      return textResult(context.text, {
+      return textResult(withGlobalRules(context.text, globalRules), {
         workspace_id: context.workspaceId,
         root: context.root,
         target_path: context.targetPath,

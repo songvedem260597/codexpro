@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   controlServer: (action) => invoke("codexpro:control", action),
   copyText: (text) => invoke("codexpro:copy", text),
   logChatLayout: (payload) => ipcRenderer.send("codexpro:log-chat-layout", payload),
+  logChatResponseAudit: (payload) => ipcRenderer.send("codexpro:log-chat-response-audit", payload),
   rotateLink: () => invoke("codexpro:rotate-link"),
   listProjects: () => invoke("codexpro:projects"),
   checkProfile: (profileId) => invoke("codexpro:check-profile", profileId),

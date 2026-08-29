@@ -19,13 +19,19 @@ const isWindows = process.platform === "win32";
 const isMac = process.platform === "darwin";
 const platformLabel = isWindows ? "Windows" : isMac ? "macOS" : process.platform;
 const managerSettingsFile = path.join(codexProHome, "manager-settings.json");
+const globalRulesFile = path.join(codexProHome, "CODEXPRO.md");
 const managerChatCacheFile = path.join(codexProHome, "manager-chat-cache.json");
 const managerAssetsDir = path.join(codexProHome, "manager-assets");
 const managerChatLayoutLogFile = path.join(codexProHome, "manager-chat-layout.jsonl");
 const managerChatLayoutPreviousLogFile = path.join(codexProHome, "manager-chat-layout.previous.jsonl");
+const managerChatResponseAuditLogFile = path.join(codexProHome, "manager-chat-response-audit.jsonl");
+const managerChatResponseAuditPreviousLogFile = path.join(codexProHome, "manager-chat-response-audit.previous.jsonl");
 const MAX_CHAT_LAYOUT_LOG_BYTES = 2 * 1024 * 1024;
 const MAX_CHAT_LAYOUT_LOG_ENTRY_BYTES = 32 * 1024;
 let managerChatLayoutLogWrite = Promise.resolve();
+const MAX_CHAT_RESPONSE_AUDIT_LOG_BYTES = 4 * 1024 * 1024;
+const MAX_CHAT_RESPONSE_AUDIT_LOG_ENTRY_BYTES = 48 * 1024;
+let managerChatResponseAuditLogWrite = Promise.resolve();
 const MAX_CHAT_CACHE_ENTRIES = 30;
 const MAX_CHAT_CACHE_MESSAGES = 12;
 const MAX_CHAT_CACHE_TEXT_CHARS = 40000;
@@ -33,8 +39,17 @@ const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
 const MAX_REQUEST_TEXT_PREVIEW_BYTES = 512 * 1024;
+const MAX_GLOBAL_RULES_CHARS = 30000;
+const DEFAULT_GLOBAL_RULES = `# CodexPro Global Rules
 
-const WORKER_EXTENSION_VERSION = "0.5.65";
+<!-- Rule trong file này áp dụng cho mọi repo/dự án được thao tác qua MCP CodexPro. -->
+<!-- Thêm hoặc sửa rule bên dưới. Không lưu password, token hoặc API key trong file này. -->
+
+- Đọc và tuân thủ file này trước khi đọc rule riêng của từng repo/dự án.
+- Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
+`;
+
+const WORKER_EXTENSION_VERSION = "0.5.67";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
 const GIT_SUMMARY_CACHE_MS = 2 * 60 * 1000;
@@ -86,6 +101,29 @@ function appendManagerChatLayoutLog(payload) {
     }
     await fs.promises.appendFile(managerChatLayoutLogFile, line + "\n", "utf8");
   }).catch((error) => console.error("[manager-chat-layout]", error?.message || error));
+}
+
+function appendManagerChatResponseAuditLog(payload) {
+  let line = "";
+  try {
+    line = JSON.stringify({ loggedAt: new Date().toISOString(), ...(payload && typeof payload === "object" ? payload : {}) });
+  } catch {
+    return;
+  }
+  if (Buffer.byteLength(line, "utf8") > MAX_CHAT_RESPONSE_AUDIT_LOG_ENTRY_BYTES) return;
+  managerChatResponseAuditLogWrite = managerChatResponseAuditLogWrite.then(async () => {
+    await fs.promises.mkdir(codexProHome, { recursive: true });
+    try {
+      const stat = await fs.promises.stat(managerChatResponseAuditLogFile);
+      if (stat.size >= MAX_CHAT_RESPONSE_AUDIT_LOG_BYTES) {
+        await fs.promises.rm(managerChatResponseAuditPreviousLogFile, { force: true });
+        await fs.promises.rename(managerChatResponseAuditLogFile, managerChatResponseAuditPreviousLogFile);
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await fs.promises.appendFile(managerChatResponseAuditLogFile, line + "\n", "utf8");
+  }).catch((error) => console.error("[manager-chat-response-audit]", error?.message || error));
 }
 
 function mimeTypeForFile(filePath) {
@@ -218,6 +256,28 @@ function normalizeWorkerPacks(value) {
 
 const ALL_ALLOWED_WORKSPACES = "__codexpro_all_allowed__";
 
+function normalizeGlobalRules(value) {
+  return String(value ?? "").replace(/\r\n/g, "\n").slice(0, MAX_GLOBAL_RULES_CHARS);
+}
+
+function readGlobalRulesFile() {
+  try {
+    return normalizeGlobalRules(fs.readFileSync(globalRulesFile, "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") return DEFAULT_GLOBAL_RULES;
+    fs.mkdirSync(codexProHome, { recursive: true });
+    fs.writeFileSync(globalRulesFile, DEFAULT_GLOBAL_RULES, "utf8");
+    return DEFAULT_GLOBAL_RULES;
+  }
+}
+
+function writeGlobalRulesFile(value) {
+  const rules = normalizeGlobalRules(value);
+  fs.mkdirSync(codexProHome, { recursive: true });
+  fs.writeFileSync(globalRulesFile, rules.endsWith("\n") || !rules ? rules : `${rules}\n`, "utf8");
+  return rules;
+}
+
 function defaultManagerSettings() {
   return {
     chatWidth: 940,
@@ -226,6 +286,7 @@ function defaultManagerSettings() {
     fontSize: 14,
     profileLayout: "rows",
     maxSubagents: 1,
+    globalRules: readGlobalRulesFile(),
     repoSelections: {},
     selectedWorkerPackId: DEFAULT_WORKER_PACK_ID,
     workerImagePacks: [],
@@ -255,6 +316,7 @@ function readManagerSettings() {
       fontSize: Math.max(12, Math.min(18, Number(parsed?.fontSize) || defaults.fontSize)),
       profileLayout: parsed?.profileLayout === "cards" ? "cards" : defaults.profileLayout,
       maxSubagents: Math.max(1, Math.min(1, Number(parsed?.maxSubagents) || defaults.maxSubagents)),
+      globalRules: readGlobalRulesFile(),
       repoSelections: Object.fromEntries(Object.entries(parsed?.repoSelections && typeof parsed.repoSelections === "object" ? parsed.repoSelections : {})
         .filter(([profileId, root]) => /^[A-Za-z0-9._-]{1,160}$/.test(profileId) && typeof root === "string" && root.trim())
         .slice(0, 40)
@@ -270,7 +332,9 @@ function readManagerSettings() {
 
 function writeManagerSettings(settings) {
   fs.mkdirSync(codexProHome, { recursive: true });
-  fs.writeFileSync(managerSettingsFile, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  const { globalRules, ...storedSettings } = settings;
+  writeGlobalRulesFile(globalRules);
+  fs.writeFileSync(managerSettingsFile, `${JSON.stringify(storedSettings, null, 2)}\n`, "utf8");
 }
 
 function chatCacheKey(profileId, conversationId) {
@@ -409,6 +473,9 @@ function saveManagerSettingsPatch(patch = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(patch, "maxSubagents")) {
     next.maxSubagents = Math.max(1, Math.min(1, Number(patch.maxSubagents) || current.maxSubagents));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "globalRules")) {
+    next.globalRules = normalizeGlobalRules(patch.globalRules);
   }
   if (patch?.repoSelections && typeof patch.repoSelections === "object") {
     next.repoSelections = { ...(current.repoSelections || {}) };
@@ -693,7 +760,7 @@ function createWindow() {
               };
             })()`, true);
             await win.webContents.executeJavaScript(`(async () => {
-              await window.codexpro.saveManagerSettings({ maxSubagents: 8 });
+              await window.codexpro.saveManagerSettings({ maxSubagents: 8, globalRules: '# CodexPro Global Rules\n\n- smoke-global-rule\n' });
               const range = document.querySelector('.settings-range:not(.chat-height-range)');
               const heightRange = document.querySelector('.chat-height-range');
               const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
@@ -751,6 +818,7 @@ function createWindow() {
               numberValue: document.querySelector('input[aria-label="Độ rộng popup chat"]')?.value || '',
               heightNumberValue: document.querySelector('input[aria-label="Chiều cao khung chat bên trong"]')?.value || '',
               subagentValue: document.querySelector('.subagent-limit-field input')?.value || '',
+              globalRulesValue: document.querySelector('.global-rules-editor')?.value || '',
               fontValue: document.querySelector('.font-setting-row .settings-dropdown-value strong')?.textContent?.trim() || '',
               profileLayoutValue: document.querySelector('.profile-layout-select .settings-dropdown-value strong')?.textContent?.trim() || '',
               profileLayoutClass: document.querySelector('.profile-list')?.className || '',
@@ -763,7 +831,7 @@ function createWindow() {
             };
           })()`, true);
           settingsProbe = {
-            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && uiSettings.subagentValue === "1" && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.maxSubagents === 1 && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "tahoma" && afterSettings.profileLayout === "cards" && /Tahoma/i.test(uiSettings.fontValue) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
+            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && uiSettings.subagentValue === "1" && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.maxSubagents === 1 && /smoke-global-rule/.test(afterSettings.globalRules || '') && /smoke-global-rule/.test(uiSettings.globalRulesValue || '') && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "tahoma" && afterSettings.profileLayout === "cards" && /Tahoma/i.test(uiSettings.fontValue) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
             before: { maxSubagents: beforeSettings.maxSubagents, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout },
             saved: { maxSubagents: afterSettings.maxSubagents, chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily, profileLayout: afterSettings.profileLayout },
             chatModalWidth,
@@ -772,7 +840,7 @@ function createWindow() {
             workerPackProbe
           };
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
-            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ maxSubagents: beforeSettings.maxSubagents, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout })})`, true);
+            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ maxSubagents: beforeSettings.maxSubagents, globalRules: beforeSettings.globalRules, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout })})`, true);
           }
         }
         const chatSmokeRequested = [
@@ -1586,6 +1654,22 @@ async function runtimeStatus() {
   };
 }
 
+async function readyRuntimeBaseStatus() {
+  let base = await runtimeBaseStatus();
+  if (base.local.ok) return base;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  base = await runtimeBaseStatus({ forceRefresh: true });
+  return base;
+}
+
+async function readyRuntimeStatus() {
+  let status = await runtimeStatus();
+  if (status.local.ok) return status;
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  status = await runtimeStatus({ forceRefresh: true });
+  return status;
+}
+
 function jsonFiles(dir) {
   try {
     return fs.readdirSync(dir, { withFileTypes: true })
@@ -2039,7 +2123,7 @@ async function listBrowserProfilesThroughMcp(config, token) {
 async function setupChatGptProfile(profileId) {
   const id = String(profileId || "").trim();
   if (!id || id.length > 160 || !/^[A-Za-z0-9._-]+$/.test(id)) throw new Error("Chrome profile id không hợp lệ.");
-  const status = await runtimeStatus();
+  const status = await readyRuntimeStatus();
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const profile = status.browserProfiles.find((item) => item.profile_id === id);
   if (!profile?.connected) throw new Error("Chrome profile này đang offline. Hãy mở Chrome và bật extension CodexPro.");
@@ -2056,7 +2140,7 @@ async function setupChatGptProfile(profileId) {
 async function checkChatGptProfile(profileId) {
   const id = String(profileId || "").trim();
   if (!id || id.length > 160 || !/^[A-Za-z0-9._-]+$/.test(id)) throw new Error("Chrome profile id không hợp lệ.");
-  const status = await runtimeStatus();
+  const status = await readyRuntimeStatus();
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const profile = status.browserProfiles.find((item) => item.profile_id === id);
   if (!profile?.connected) throw new Error("Chrome profile này đang offline.");
@@ -2163,7 +2247,7 @@ async function openProfileChat(payload) {
   if (conversationId && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome của profile này.");
 
-  const base = await runtimeBaseStatus();
+  const base = await readyRuntimeBaseStatus();
   if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const token = base.token;
 
@@ -2226,7 +2310,7 @@ async function recoverProfileChatTab(payload) {
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat cần khôi phục không hợp lệ.");
   if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome cần khôi phục.");
-  const base = await runtimeBaseStatus();
+  const base = await readyRuntimeBaseStatus();
   if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const result = await localMcpTool(base.config, base.token, "browser_control", {
     action: "recover_chat_tab",
@@ -2239,7 +2323,7 @@ async function recoverProfileChatTab(payload) {
 }
 
 async function reloadChromeProfiles() {
-  const status = await runtimeStatus();
+  const status = await readyRuntimeStatus();
   const connectedProfiles = status.browserProfiles.filter((profile) => profile.connected);
   if (!connectedProfiles.length) throw new Error("Không có Chrome profile nào đang kết nối.");
   const outdated = connectedProfiles.filter((profile) => !versionAtLeast(profile.extension_version));
@@ -2355,9 +2439,9 @@ async function sendProfileRequestUnlocked(payload) {
     mime_type: file.mimeType,
     data_base64: (await fs.promises.readFile(file.path)).toString("base64")
   })));
-  if (sendDebug) console.error('[manager-send] before runtimeStatus');
-  let status = await runtimeStatus();
-  if (sendDebug) console.error('[manager-send] after runtimeStatus');
+  if (sendDebug) console.error('[manager-send] before readyRuntimeStatus');
+  let status = await readyRuntimeStatus();
+  if (sendDebug) console.error('[manager-send] after readyRuntimeStatus');
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const allowedRoots = allowedWorkspaceRoots(status.config);
   if (!allowedRoots.length) throw new Error("CodexPro chưa có vùng workspace nào được cấp quyền.");
@@ -2370,14 +2454,18 @@ async function sendProfileRequestUnlocked(payload) {
     initialWorkspaceRoot = selectedProject.root;
   }
   let profile = status.browserProfiles.find((item) => item.profile_id === profileId);
-  if (!profile?.connected) throw new Error("Extension của profile này đang mất heartbeat với CodexPro.");
+  if (!profile?.connected) {
+    status = await runtimeStatus({ forceRefresh: true });
+    profile = status.browserProfiles.find((item) => item.profile_id === profileId);
+  }
+  if (!profile) throw new Error("Profile Chrome này không còn được CodexPro nhận diện.");
   const token = readToken(status.config.tokenFile);
   if (!versionAtLeast(profile.extension_version)) {
     if (sendDebug) console.error(`[manager-send] updating worker ${profile.extension_version || "unknown"} -> ${WORKER_EXTENSION_VERSION}`);
     await localMcpTool(status.config, token, "browser_control", {
       action: "reload_extension",
       profile_id: profileId
-    }, 20000);
+    }, 75000);
     const updateDeadline = Date.now() + 15000;
     while (Date.now() < updateDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -2400,6 +2488,11 @@ async function sendProfileRequestUnlocked(payload) {
     if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
   }
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
+  await localMcpTool(status.config, token, "browser_control", {
+    action: "select_workspace",
+    profile_id: profileId,
+    root: initialWorkspaceRoot
+  }, 75000);
   const taskScopeLines = requestScope === "all_allowed"
     ? [
         "CodexPro Manager đang ở chế độ TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN. Không có repo hoặc đường dẫn cụ thể bị khóa cho yêu cầu này.",
@@ -2430,7 +2523,7 @@ async function sendProfileRequestUnlocked(payload) {
     new_chat: newChat,
     text: taskText,
     attachments
-  }, 190000);
+  }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
   return { ...result, repo_task_id: taskId, repo_task_scope: requestScope, repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount };
 }
@@ -2459,7 +2552,7 @@ async function renameProfileChat(payload) {
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!title || title.length > 120) throw new Error("Tên đoạn chat phải từ 1 đến 120 ký tự.");
-  const status = await runtimeStatus();
+  const status = await readyRuntimeStatus();
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const profile = status.browserProfiles.find((item) => item.profile_id === profileId);
   if (!profile?.connected) throw new Error("Extension của profile này đang mất heartbeat với CodexPro.");
@@ -2498,7 +2591,7 @@ async function getProfileResponse(payload) {
 }
 
 async function inspectThroughMcp(root) {
-  const status = await runtimeStatus();
+  const status = await readyRuntimeStatus();
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const profile = profileForRoot(status.config.root);
   const fileToken = readToken(status.config.tokenFile);
@@ -2588,6 +2681,7 @@ ipcMain.handle("codexpro:copy", (_event, text) => {
   return true;
 });
 ipcMain.on("codexpro:log-chat-layout", (_event, payload) => appendManagerChatLayoutLog(payload));
+ipcMain.on("codexpro:log-chat-response-audit", (_event, payload) => appendManagerChatResponseAuditLog(payload));
 ipcMain.handle("codexpro:rotate-link", async () => {
   const choice = await dialog.showMessageBox({
     type: "warning",

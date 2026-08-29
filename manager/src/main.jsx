@@ -6,8 +6,9 @@ import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
-import { completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
+import { completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
+import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -57,6 +58,15 @@ const FONT_OPTIONS = [
   { value: "cascadia", label: "Cascadia Code", css: '"Cascadia Code", Consolas, monospace' }
 ];
 
+const GLOBAL_RULES_TEMPLATE = `# CodexPro Global Rules
+
+<!-- Rule trong file này áp dụng cho mọi repo/dự án được thao tác qua MCP CodexPro. -->
+<!-- Thêm hoặc sửa rule bên dưới. Không lưu password, token hoặc API key trong file này. -->
+
+- Đọc và tuân thủ file này trước khi đọc rule riêng của từng repo/dự án.
+- Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
+`;
+
 const DEFAULT_MANAGER_SETTINGS = {
   chatWidth: 940,
   chatHeight: 330,
@@ -64,6 +74,7 @@ const DEFAULT_MANAGER_SETTINGS = {
   fontSize: 14,
   profileLayout: "rows",
   maxSubagents: 1,
+  globalRules: GLOBAL_RULES_TEMPLATE,
   repoSelections: {},
   selectedWorkerPackId: "default",
   workerImagePacks: [],
@@ -396,7 +407,7 @@ function compactToolActivityMessages(messages) {
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.63";
+const WORKER_EXTENSION_VERSION = "0.5.67";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -606,6 +617,7 @@ function App() {
   const [managerSettings, setManagerSettings] = useState(DEFAULT_MANAGER_SETTINGS);
   const [chatWidthInput, setChatWidthInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatWidth));
   const [chatHeightInput, setChatHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatHeight));
+  const [globalRulesDraft, setGlobalRulesDraft] = useState(DEFAULT_MANAGER_SETTINGS.globalRules);
   const [settingsBusy, setSettingsBusy] = useState("");
   const [headlessState, setHeadlessState] = useState({ supported: false, chromePath: "", chromeUserDataRoot: "", sourceProfiles: [], workers: [] });
   const [headlessBusy, setHeadlessBusy] = useState("");
@@ -662,6 +674,7 @@ function App() {
   const chatResponseRef = useRef(null);
   const responseScrollLocked = useRef(new Map());
   const responseScrollPositions = useRef(new Map());
+  const responseAuditSignatures = useRef(new Map());
 
   const projectPageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE));
   const visibleProjects = useMemo(() => projects.slice(projectPage * PROJECTS_PER_PAGE, (projectPage + 1) * PROJECTS_PER_PAGE), [projects, projectPage]);
@@ -786,6 +799,10 @@ function App() {
   useEffect(() => {
     setChatHeightInput(String(managerSettings.chatHeight));
   }, [managerSettings.chatHeight]);
+
+  useEffect(() => {
+    setGlobalRulesDraft(managerSettings.globalRules || GLOBAL_RULES_TEMPLATE);
+  }, [managerSettings.globalRules]);
 
   const commitChatWidthInput = useCallback(() => {
     const parsed = Number(chatWidthInput);
@@ -1163,6 +1180,49 @@ function App() {
     persistResponseCache(chatProfileId, response);
   }, [chatProfileId, requestResponses]);
 
+  useEffect(() => {
+    if (!chatProfileId || !openChatResponse?.responseAudit || typeof api.logChatResponseAudit !== "function") return undefined;
+    const conversationId = String(openChatResponse.conversationId || "");
+    const timer = window.setTimeout(() => {
+      const transcript = responseBodyRefs.current.get(chatProfileId);
+      const renderedMessages = transcript ? [...transcript.querySelectorAll(".chat-transcript-message[data-audit-role]")].map((node) => {
+        const content = node.querySelector(".chat-message-text");
+        const visibleText = String(content?.innerText || content?.textContent || "").replace(/\s+/g, " ").trim();
+        return {
+          role: String(node.dataset.auditRole || ""),
+          fingerprint: String(node.dataset.auditFingerprint || ""),
+          length: Number(node.dataset.auditLength) || 0,
+          preview: visibleText.slice(-180)
+        };
+      }) : [];
+      const record = buildChatResponseAuditRecord({
+        profileId: chatProfileId,
+        conversationId,
+        requestId: openChatResponse.repoTaskId,
+        fetchMode: openChatResponse.responseAuditFetchMode,
+        sourceAudit: openChatResponse.responseAudit,
+        managerMessages: materializeTranscriptMessages(openChatResponse, conversationId),
+        renderedMessages,
+        networkState: openChatResponse.networkState,
+        networkStartedAt: openChatResponse.networkStartedAt,
+        networkCompletedAt: openChatResponse.networkCompletedAt
+      });
+      const key = `${chatProfileId}:${conversationId}`;
+      const signature = JSON.stringify({
+        comparison: record.comparison,
+        basis: record.comparisonBasis,
+        selectedSource: record.selectedSource,
+        source: record.sources[record.comparisonBasis === "chatgpt_dom" ? "chatgptDom" : record.comparisonBasis === "canonical_api" ? "canonical" : "networkStream"],
+        managerState: record.managerState,
+        managerUi: record.managerUi
+      });
+      if (responseAuditSignatures.current.get(key) === signature) return;
+      responseAuditSignatures.current.set(key, signature);
+      api.logChatResponseAudit(record);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [chatProfileId, openChatResponse?.conversationId, openChatResponse?.responseAuditKey, openChatLatestMessageKey]);
+
   useLayoutEffect(() => {
     if (!chatProfileId || !openChatScrollKey) return;
     if (responseScrollLocked.current.get(chatProfileId)) return;
@@ -1466,11 +1526,12 @@ function App() {
     const messages = trimRecentTranscriptMessages(response?.messages);
     const text = String(response?.text || "").trim();
     const networkState = String(response?.networkState || "");
-    if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId) || (!messages.length && !text) || response?.loading || response?.busy || networkState === "generating") return;
+    if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId) || (!messages.length && !text)) return;
     const key = responseCacheKey(profileId, conversationId);
     const signature = JSON.stringify([
       String(response?.networkCompletedAt || ""),
       Boolean(response?.truncated),
+      text,
       messages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated)])
     ]);
     if (responseCacheSaveSignatures.current.get(key) === signature) return;
@@ -1502,6 +1563,7 @@ function App() {
         responseCacheSaveSignatures.current.set(key, JSON.stringify([
           String(cached.networkCompletedAt || ""),
           Boolean(cached.truncated),
+          String(cached.text || "").trim(),
           cachedMessages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated)])
         ]));
         setRequestResponses((current) => {
@@ -1873,6 +1935,9 @@ function App() {
         });
       }
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: conversationLimitReached ? "Chat đã đầy và chưa chuyển được sang chat mới." : message }));
+      if (/heartbeat|offline|did not reconnect|không còn được CodexPro nhận diện/i.test(message)) {
+        window.setTimeout(() => void refreshStatus(), 0);
+      }
     } finally {
       setBusy("");
     }
@@ -2117,6 +2182,9 @@ function App() {
       const canonicalAvailable = result.canonical_available === true;
       const contentAvailable = domAvailable || canonicalAvailable;
       const networkStreamPayloadAvailable = Boolean(result.network_stream_available && (result.text || result.messages?.length || result.network_stream_activity_text));
+      const responseAudit = result.response_audit && typeof result.response_audit === "object" ? result.response_audit : null;
+      const responseAuditFetchMode = canonicalOnly ? "canonical_only" : readDom ? (recoverStaleDom ? "dom_recovery" : "dom") : "network_only";
+      const responseAuditKey = responseAudit ? JSON.stringify([responseAuditFetchMode, responseAudit]) : "";
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         const sameConversation = previous.conversationId === conversationId;
@@ -2142,6 +2210,7 @@ function App() {
           text: result.text,
           truncated: result.truncated
         });
+        const nextAssistantText = String([...nextMessages].reverse().find((message) => message?.role === "assistant")?.text || "").trim();
         return {
           ...current,
           [profile.profile_id]: {
@@ -2150,7 +2219,9 @@ function App() {
             loading: false,
             error: "",
             conversationId,
-            text: contentAvailable || networkStreamAvailable ? (result.text || "") : (sameConversation ? previous.text || "" : ""),
+            text: contentAvailable || networkStreamAvailable
+              ? nextAssistantText || mergeProgressiveResponseText(sameConversation ? previous.text : "", result.text)
+              : (sameConversation ? previous.text || "" : ""),
             messages: nextMessages,
             busy: networkTerminal && !networkStreamInProgress ? false : Boolean(result.busy || networkStreamInProgress),
             truncated: contentAvailable || networkStreamAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
@@ -2185,6 +2256,9 @@ function App() {
             networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
             responseReady: Boolean(result.response_ready && !networkStreamInProgress),
             responseSource: String(result.response_source || previous.responseSource || ''),
+            responseAudit,
+            responseAuditFetchMode,
+            responseAuditKey,
             messageCount: contentAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
             awaitingAssistant: transcriptAwaitingAssistant(nextMessages),
             updatedAt: result.updated_at || new Date().toISOString()
@@ -2431,11 +2505,21 @@ function App() {
                       return <div className="chat-transcript-message is-tool-activity" key={message.id}><div className="tool-activity-live"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{message.text}</span></div></div>;
                     }
                     return (
-                      <div className={`chat-transcript-message is-${message.role} ${responseSpaceClass}`} key={message.id}>
+                      <div className={`chat-transcript-message is-${message.role} ${responseSpaceClass}`} key={message.id} data-audit-role={message.role} data-audit-fingerprint={responseAuditTextFingerprint(message.text)} data-audit-length={String(message.text || "").length}>
                         <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
                         <div className="latest-response-content" onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
                           <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
-                          {message.role === "assistant" ? <><React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>{responseTurnActive && response.networkStreamAvailable && isLastAssistant && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}</> : <div className="chat-message-text user-message-text">{message.text}</div>}
+                          {message.role === "assistant" ? <>
+                            <React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>
+                            {responseTurnActive && response.networkStreamAvailable && isLastAssistant && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}
+                            {message.text && !(isLastAssistant && responseTurnActive) && (
+                              <div className="chat-message-actions">
+                                <button type="button" className="chat-message-copy" title="Copy response" aria-label="Copy phản hồi" onClick={async () => { await api.copyText(message.text); notify("Đã copy phản hồi"); }}>
+                                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>
+                                </button>
+                              </div>
+                            )}
+                          </> : <div className="chat-message-text user-message-text">{message.text}</div>}
                         </div>
                       </div>
                     );
@@ -2857,6 +2941,32 @@ function App() {
                   </article>
                 );
               })}
+            </div>
+          </section>
+
+          <section className="settings-panel global-rules-panel">
+            <div className="settings-panel-head global-rules-head">
+              <div>
+                <p className="eyebrow">GLOBAL MCP RULES</p>
+                <h2>Rule bắt buộc cho mọi repo</h2>
+                <p className="section-note">CodexPro sẽ nạp <code>~/.codexpro/CODEXPRO.md</code> trước rule riêng của repo/dự án mỗi khi bắt đầu hoặc mở workspace.</p>
+              </div>
+              <span className="global-rules-badge">BẮT BUỘC</span>
+            </div>
+            <textarea
+              className="global-rules-editor"
+              value={globalRulesDraft}
+              maxLength={30000}
+              spellCheck={false}
+              aria-label="CodexPro global rules"
+              disabled={settingsBusy === "save"}
+              onChange={(event) => setGlobalRulesDraft(event.target.value)}
+              placeholder={GLOBAL_RULES_TEMPLATE}
+            />
+            <div className="global-rules-actions">
+              <span>{globalRulesDraft.length.toLocaleString("vi-VN")} / 30.000 ký tự · áp dụng toàn bộ repo/dự án</span>
+              <button type="button" className="button ghost" disabled={settingsBusy === "save"} onClick={() => setGlobalRulesDraft(GLOBAL_RULES_TEMPLATE)}>Dùng template</button>
+              <button type="button" className="button primary" disabled={settingsBusy === "save" || globalRulesDraft === managerSettings.globalRules} onClick={() => void saveManagerSetting({ globalRules: globalRulesDraft }, "Đã lưu CODEXPRO.md")}>{settingsBusy === "save" ? "Đang lưu…" : "Lưu rule"}</button>
             </div>
           </section>
 
