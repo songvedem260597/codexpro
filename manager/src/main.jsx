@@ -4,6 +4,7 @@ import "./styles.css";
 import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
+import { isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 
 const api = window.codexpro;
 const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
@@ -388,8 +389,49 @@ function compactToolActivityMessages(messages) {
   return output;
 }
 
+function safeMarkdownHref(value) {
+  const href = String(value || "").trim();
+  return /^(?:https?:\/\/|mailto:)/i.test(href) ? href : "";
+}
+
+function renderInlineMarkdown(text, keyPrefix = "md") {
+  const source = String(text || "");
+  const tokenPattern = /(`[^`\n]+`|\*\*[^\n]+?\*\*|__[^\n]+?__|~~[^\n]+?~~|\[[^\]\n]+\]\((?:https?:\/\/|mailto:)[^)\n]+\)|(?<!\*)\*[^*\n]+\*(?!\*)|(?<!_)_[^_\n]+_(?!_))/g;
+  const nodes = [];
+  let cursor = 0;
+  let match;
+  let tokenIndex = 0;
+
+  while ((match = tokenPattern.exec(source))) {
+    if (match.index > cursor) nodes.push(source.slice(cursor, match.index));
+    const token = match[0];
+    const key = `${keyPrefix}-${tokenIndex++}`;
+
+    if (token.startsWith("`") && token.endsWith("`")) {
+      nodes.push(<code className="response-inline-code" key={key}>{token.slice(1, -1)}</code>);
+    } else if ((token.startsWith("**") && token.endsWith("**")) || (token.startsWith("__") && token.endsWith("__"))) {
+      nodes.push(<strong key={key}>{renderInlineMarkdown(token.slice(2, -2), `${key}-strong`)}</strong>);
+    } else if (token.startsWith("~~") && token.endsWith("~~")) {
+      nodes.push(<del key={key}>{renderInlineMarkdown(token.slice(2, -2), `${key}-del`)}</del>);
+    } else if (token.startsWith("[") && token.includes("](")) {
+      const link = token.match(/^\[([^\]]+)\]\((.+)\)$/);
+      const href = safeMarkdownHref(link?.[2]);
+      nodes.push(href
+        ? <a href={href} target="_blank" rel="noreferrer" key={key}>{renderInlineMarkdown(link?.[1] || href, `${key}-link`)}</a>
+        : token);
+    } else {
+      nodes.push(<em key={key}>{renderInlineMarkdown(token.slice(1, -1), `${key}-em`)}</em>);
+    }
+    cursor = match.index + token.length;
+  }
+
+  if (cursor < source.length) nodes.push(source.slice(cursor));
+  return nodes;
+}
+
 function ResponseText({ text, truncated }) {
-  const source = `${String(text || "")}${truncated ? "\n\n[Đã rút gọn khi hiển thị]" : ""}`;
+  const cleanText = String(text || "").replace(/[^\r\n]*/g, "").replace(/[ \t]+\n/g, "\n");
+  const source = `${cleanText}${truncated ? "\n\n[Đã rút gọn khi hiển thị]" : ""}`;
   const lines = source.split(/\r?\n/);
   const blocks = [];
   let index = 0;
@@ -398,6 +440,46 @@ function ResponseText({ text, truncated }) {
     const line = lines[index];
     if (!line.trim()) {
       index += 1;
+      continue;
+    }
+
+    const fence = line.match(/^\s*```([^`]*)$/);
+    if (fence) {
+      const language = String(fence[1] || "").trim();
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push(
+        <pre className="response-code-block" key={`code-${index}`} data-language={language || undefined}>
+          <code>{codeLines.join("\n")}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const heading = line.match(/^\s*(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const level = Math.min(6, heading[1].length);
+      const Tag = `h${level}`;
+      blocks.push(<Tag className="response-heading" key={`h-${index}`}>{renderInlineMarkdown(heading[2], `h-${index}`)}</Tag>);
+      index += 1;
+      continue;
+    }
+
+    const quote = line.match(/^\s*>\s?(.*)$/);
+    if (quote) {
+      const quoteLines = [];
+      while (index < lines.length) {
+        const match = lines[index].match(/^\s*>\s?(.*)$/);
+        if (!match) break;
+        quoteLines.push(match[1]);
+        index += 1;
+      }
+      blocks.push(<blockquote className="response-quote" key={`quote-${index}`}>{renderInlineMarkdown(quoteLines.join("\n"), `quote-${index}`)}</blockquote>);
       continue;
     }
 
@@ -410,7 +492,7 @@ function ResponseText({ text, truncated }) {
         items.push(match[1]);
         index += 1;
       }
-      blocks.push(<ul className="response-list response-bullets" key={`ul-${index}`}>{items.map((item, itemIndex) => <li key={`${itemIndex}-${item}`}>{item}</li>)}</ul>);
+      blocks.push(<ul className="response-list response-bullets" key={`ul-${index}`}>{items.map((item, itemIndex) => <li key={`${itemIndex}-${item}`}>{renderInlineMarkdown(item, `ul-${index}-${itemIndex}`)}</li>)}</ul>);
       continue;
     }
 
@@ -424,16 +506,16 @@ function ResponseText({ text, truncated }) {
         items.push(match[2]);
         index += 1;
       }
-      blocks.push(<ol className="response-list response-numbered" start={start} key={`ol-${index}`}>{items.map((item, itemIndex) => <li key={`${itemIndex}-${item}`}>{item}</li>)}</ol>);
+      blocks.push(<ol className="response-list response-numbered" start={start} key={`ol-${index}`}>{items.map((item, itemIndex) => <li key={`${itemIndex}-${item}`}>{renderInlineMarkdown(item, `ol-${index}-${itemIndex}`)}</li>)}</ol>);
       continue;
     }
 
     const paragraph = [];
-    while (index < lines.length && lines[index].trim() && !/^\s*[•*-]\s+/.test(lines[index]) && !/^\s*\d+[.)]\s+/.test(lines[index])) {
+    while (index < lines.length && lines[index].trim() && !/^\s*[•*-]\s+/.test(lines[index]) && !/^\s*\d+[.)]\s+/.test(lines[index]) && !/^\s*```/.test(lines[index]) && !/^\s*#{1,6}\s+/.test(lines[index]) && !/^\s*>\s?/.test(lines[index])) {
       paragraph.push(lines[index].trim());
       index += 1;
     }
-    blocks.push(<p key={`p-${index}`}>{paragraph.join("\n")}</p>);
+    blocks.push(<p key={`p-${index}`}>{renderInlineMarkdown(paragraph.join("\n"), `p-${index}`)}</p>);
   }
 
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
@@ -1720,6 +1802,8 @@ function App() {
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         const sameConversation = previous.conversationId === conversationId;
+        const nextNetworkState = String(result.network_state || previous.networkState || (result.busy ? "generating" : "idle"));
+        const networkTerminal = isTerminalChatNetworkState(nextNetworkState);
         const incomingMessages = Array.isArray(result.messages)
           ? result.messages.slice(-20).map((message, index) => ({
               id: String(message?.id || `${message?.role || "message"}-${index}`),
@@ -1749,10 +1833,10 @@ function App() {
             conversationId,
             text: domAvailable || networkStreamAvailable ? (result.text || "") : (sameConversation ? previous.text || "" : ""),
             messages: nextMessages,
-            busy: Boolean(result.busy),
+            busy: networkTerminal ? false : Boolean(result.busy),
             truncated: domAvailable || networkStreamAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
-            incomplete: domAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
-            incompleteReason: domAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
+            incomplete: networkTerminal ? false : domAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
+            incompleteReason: networkTerminal ? "" : domAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
             conversationLimitReached: Boolean(previous.conversationLimitReached),
             conversationLimitMessage: previous.conversationLimitMessage || "",
             domAvailable,
@@ -1767,7 +1851,7 @@ function App() {
                 ? false
                 : Boolean(previous.contentNeedsRefresh),
             domError: result.dom_error || "",
-            networkState: String(result.network_state || previous.networkState || (result.busy ? "generating" : "idle")),
+            networkState: nextNetworkState,
             networkSource: String(result.network_source || previous.networkSource || ""),
             networkStartedAt: result.network_last_started_at || previous.networkStartedAt || "",
             networkCompletedAt: result.network_last_completed_at || previous.networkCompletedAt || "",
@@ -1881,8 +1965,18 @@ function App() {
     const selectedNetworkState = String(selectedTab?.network_state || (responseCurrent ? response?.networkState : "") || (selectedTab?.busy ? "generating" : "idle"));
     const selectedNetworkCompleted = selectedNetworkState === "completed";
     const selectedNetworkFailed = selectedNetworkState === "failed";
-    const selectedBusy = selectedNetworkState === "generating" || Boolean(selectedTab?.busy || (responseCurrent && response?.busy));
-    const selectedSettling = Boolean(selectedTab?.settling || (responseCurrent && response?.incomplete));
+    const selectedBusy = shouldShowChatBusy({
+      networkState: selectedNetworkState,
+      tabBusy: selectedTab?.busy,
+      responseCurrent,
+      responseBusy: response?.busy
+    });
+    const selectedSettling = shouldShowChatSettling({
+      networkState: selectedNetworkState,
+      tabSettling: selectedTab?.settling,
+      responseCurrent,
+      responseIncomplete: response?.incomplete
+    });
     const domUnavailable = Boolean(responseCurrent && response?.domAvailable === false && !response?.domSkipped);
     const contentNeedsRefresh = Boolean(responseCurrent && response?.contentNeedsRefresh);
     const rolloverCreating = Boolean(responseCurrent && response?.rolloverStatus === "creating");
