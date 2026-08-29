@@ -20,6 +20,11 @@ These instructions apply to local implementation/review agents working on the Co
 - Keep source modifications and final verification coordinated by one primary implementation agent unless the task explicitly partitions files cleanly.
 - Avoid delegating trivial work or asking multiple agents to repeat the same search.
 
+## Windows -> macOS synchronization
+
+- Before pulling, cherry-picking, or merging changes from `win` into `mac`, read and follow `docs/MAC_SYNC_CHECKLIST.md` completely.
+- Treat that checklist as a required completion gate for preserving macOS-specific behavior and verification.
+
 ## Repository boundaries
 
 - Treat `.ai-bridge/current-plan.md` as task input when present; do not rewrite it unless acting as the designated reviewer/orchestrator.
