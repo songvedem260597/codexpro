@@ -651,6 +651,7 @@ function App() {
   const responseCacheSaveSignatures = useRef(new Map());
   const networkStreamReads = useRef(new Map());
   const networkCompletionReads = useRef(new Map());
+  const connectionRecoveryReads = useRef(new Map());
   const repoTaskVerificationReads = useRef(new Map());
   const conversationRollovers = useRef(new Map());
   const profilesRef = useRef([]);
@@ -1061,6 +1062,15 @@ function App() {
             }
           };
         });
+        if (tab.connection_interrupted) {
+          const recoveryKey = `${profile.profile_id}:${conversationId}`;
+          const lastRecovery = Number(connectionRecoveryReads.current.get(recoveryKey) || 0);
+          if (Date.now() - lastRecovery >= 15000) {
+            connectionRecoveryReads.current.set(recoveryKey, Date.now());
+            void loadResponse(profile, conversationId, true, true, true);
+          }
+          continue;
+        }
         if (networkState === "generating" || tab.settling) {
           const streamKey = `${profile.profile_id}:${conversationId}`;
           const lastStreamRead = Number(networkStreamReads.current.get(streamKey) || 0);
