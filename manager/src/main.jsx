@@ -4,7 +4,7 @@ import "./styles.css";
 import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
-import { canAcceptNextChatMessage, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
+import { canAcceptNextChatMessage, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
 import { completedResponseNeedsDomFallback, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
@@ -953,6 +953,21 @@ function App() {
           }
           continue;
         }
+        const recoverableAbort = isRecoverableAbortedChatNetworkFailure({
+          networkState,
+          networkError: tab.network_error,
+          networkCompletedAt,
+          responseReady: Boolean(currentResponse?.responseReady)
+        });
+        if (recoverableAbort) {
+          const recoveryKey = `network-abort:${profile.profile_id}:${conversationId}`;
+          const lastRecovery = Number(connectionRecoveryReads.current.get(recoveryKey) || 0);
+          if (Date.now() - lastRecovery >= LATEST_RESPONSE_RECOVERY_POLL_MS) {
+            connectionRecoveryReads.current.set(recoveryKey, Date.now());
+            void loadResponse(profile, conversationId, true, false, false, true);
+          }
+          continue;
+        }
         if (networkState === "generating" || tab.settling) {
           const streamKey = `${profile.profile_id}:${conversationId}`;
           const lastStreamRead = Number(networkStreamReads.current.get(streamKey) || 0);
@@ -1575,7 +1590,13 @@ function App() {
       const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${conversationId}`));
       const currentResponse = requestResponses[profile.profile_id];
       const networkState = String(selectedTab?.network_state || currentResponse?.networkState || (selectedTab?.busy ? "generating" : "idle"));
-      const turnReady = canAcceptNextChatMessage({
+      const selectedRecoveringNetworkAbort = isRecoverableAbortedChatNetworkFailure({
+        networkState,
+        networkError: currentResponse?.networkError || selectedTab?.network_error || "",
+        networkCompletedAt: currentResponse?.networkCompletedAt || selectedTab?.network_last_completed_at || "",
+        responseReady: Boolean(currentResponse?.responseReady)
+      });
+      const turnReady = !selectedRecoveringNetworkAbort && canAcceptNextChatMessage({
         networkState,
         tabBusy: selectedTab?.busy,
         tabSettling: selectedTab?.settling,
@@ -2175,7 +2196,14 @@ function App() {
     const selectedNetworkState = String(selectedTab?.network_state || (responseCurrent ? response?.networkState : "") || (selectedTab?.busy ? "generating" : "idle"));
     const selectedNetworkCompleted = selectedNetworkState === "completed";
     const selectedNetworkFailed = selectedNetworkState === "failed";
-    const selectedBusy = shouldShowChatBusy({
+    const selectedNetworkError = String((responseCurrent && response?.networkError) || selectedTab?.network_error || "");
+    const selectedRecoveringNetworkAbort = isRecoverableAbortedChatNetworkFailure({
+      networkState: selectedNetworkState,
+      networkError: selectedNetworkError,
+      networkCompletedAt: (responseCurrent && response?.networkCompletedAt) || selectedTab?.network_last_completed_at || "",
+      responseReady: responseVerifiedComplete
+    });
+    const selectedBusy = selectedRecoveringNetworkAbort || shouldShowChatBusy({
       networkState: selectedNetworkState,
       tabBusy: selectedTab?.busy,
       responseCurrent,
@@ -2188,8 +2216,8 @@ function App() {
       responseCurrent,
       responseIncomplete: response?.incomplete
     });
-    const responseTurnActive = !isTerminalChatNetworkState(selectedNetworkState) && Boolean(sending || selectedBusy || selectedSettling || response?.busy || response?.loading);
-    const turnReady = canAcceptNextChatMessage({
+    const responseTurnActive = selectedRecoveringNetworkAbort || (!isTerminalChatNetworkState(selectedNetworkState) && Boolean(sending || selectedBusy || selectedSettling || response?.busy || response?.loading));
+    const turnReady = !selectedRecoveringNetworkAbort && canAcceptNextChatMessage({
       networkState: selectedNetworkState,
       tabBusy: selectedTab?.busy,
       tabSettling: selectedTab?.settling,
@@ -2207,10 +2235,12 @@ function App() {
       ? "Chat đã được dọn"
       : isNewChat
       ? "Chat mới"
-      : selectedBusy || selectedSettling
+      : selectedRecoveringNetworkAbort
+        ? "AI vẫn đang xử lý · đang xác minh sau khi transport bị hủy"
+        : selectedBusy || selectedSettling
         ? selectedActivityText || (selectedBusy ? "AI đang xử lý · theo dõi bằng network" : "AI đang hoàn tất tác vụ")
         : selectedNetworkFailed && responseVerifiedComplete
-          ? "AI đã phản hồi xong · network tracker quá thời gian"
+          ? "AI đã phản hồi xong · canonical xác nhận"
           : selectedNetworkFailed
             ? "Request AI kết thúc với lỗi network"
             : selectedNetworkCompleted && domUnavailable
@@ -2268,12 +2298,12 @@ function App() {
               )}
               {responseCurrent && !responseCleared && !isNewChat && selectedNetworkState !== "idle" && !selectedNetworkCompleted && !responseVerifiedComplete && (
                 <div className={`network-response-notice is-${selectedNetworkState}`}>
-                  <strong>{selectedBusy ? "Network: AI đang xử lý" : "Network: request thất bại"}</strong>
-                  <span>{selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
+                  <strong>{selectedRecoveringNetworkAbort ? "Network: transport cũ bị hủy · đang xác minh" : selectedBusy ? "Network: AI đang xử lý" : "Network: request thất bại"}</strong>
+                  <span>{selectedRecoveringNetworkAbort ? "Chrome đã hủy transport cũ nhưng ChatGPT có thể vẫn tiếp tục ở backend. CodexPro đang kiểm tra transcript canonical trước khi kết luận lỗi." : selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
                 </div>
               )}
               {/* Trạng thái gửi nằm ngay trên thanh trạng thái phản hồi. */}
-              {responseCleared ? <div className="response-empty">Chat đã được dọn.</div> : !profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
+              {responseCleared ? <div className="response-empty">Chat đã được dọn.</div> : !profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedRecoveringNetworkAbort && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang xác minh phản hồi sau khi Chrome hủy transport cũ…</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
                 <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, event.deltaY)} onTouchMove={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, -1)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
                   {(displayResponseMessages.length ? displayResponseMessages : [fallbackResponseMessage]).map((message, messageIndex, allMessages) => {
                     const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
