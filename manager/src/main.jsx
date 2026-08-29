@@ -420,7 +420,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.45";
+const WORKER_EXTENSION_VERSION = "0.5.46";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);

@@ -4,7 +4,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
-const worker = await readFile(join(root, "chrome-extension", "service-worker.js"), "utf8");
+const [worker, bridge, managerMain] = await Promise.all([
+  readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
+  readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
+  readFile(join(root, "manager", "electron", "main.mjs"), "utf8")
+]);
 
 function extractFunction(name) {
   const marker = `function ${name}(`;
@@ -98,11 +102,12 @@ const sendEnd = worker.indexOf("if(action==='rename_chat'){", sendStart);
 assert.ok(sendStart >= 0 && sendEnd > sendStart, "send_chat_request command block must exist");
 const sendBlock = worker.slice(sendStart, sendEnd);
 const timeoutCatch = sendBlock.indexOf("}catch(error){");
-const networkRecovery = sendBlock.indexOf("waitForNetworkGeneration(tab.id,submitStartedAt-100,5000)", timeoutCatch);
+const networkRecovery = sendBlock.indexOf("networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100", timeoutCatch);
 const acknowledgedReturn = sendBlock.indexOf("if(networkAck)return await resultForNetwork", networkRecovery);
 const cleanup = sendBlock.indexOf("await cleanupAttempt()", timeoutCatch);
 const enterPrimary = sendBlock.indexOf("trustedSubmitChatComposerTab(tab.id,attemptId,text)");
-const earlyAck = sendBlock.indexOf("waitForNetworkGeneration(tab.id,submitStartedAt-100,6000)", enterPrimary);
+const earlyAckBlock = sendBlock.indexOf("let earlyAck=null", enterPrimary);
+const earlyAck = sendBlock.indexOf("waitForNetworkGeneration(tab.id,submitStartedAt-100", earlyAckBlock);
 const clickFallback = sendBlock.indexOf("trustedActivateChatSendButtonTab(tab.id,attemptId)", earlyAck);
 
 assert.ok(timeoutCatch >= 0, "DOM send timeout must be handled");
@@ -110,6 +115,7 @@ assert.ok(networkRecovery > timeoutCatch, "DOM timeout must check the network tr
 assert.ok(acknowledgedReturn > networkRecovery, "a tracked generation must count as submitted");
 assert.ok(cleanup > acknowledgedReturn, "draft cleanup must only happen after network recovery fails");
 assert.ok(enterPrimary >= 0, "trusted Enter must exist in the primary send path");
+assert.ok(earlyAckBlock > enterPrimary, "primary Enter must establish its bounded ACK window");
 assert.ok(earlyAck > enterPrimary, "primary Enter must wait for generation ACK before fallback");
 assert.ok(clickFallback > earlyAck, "trusted Send click must only occur after the Enter ACK window");
 assert.match(sendBlock, /submitted_by:'trusted-enter'/);
@@ -119,6 +125,7 @@ assert.doesNotMatch(sendBlock, /restorePreviouslyActiveTab/, "background send mu
 assert.match(sendBlock, /SEND_UNCERTAIN:/);
 assert.match(sendBlock, /shouldUseTrustedClickFallback\(attemptState\?\.result,earlyEvidence\)/, "fallback must require an owned draft and no submit lifecycle evidence");
 assert.match(sendBlock, /trustedSubmitError\.startsWith\(attachmentSubmit\?'ATTACHMENT_DOM_CLICK_PRE_DISPATCH:':'TRUSTED_ENTER_PRE_DISPATCH:'\)/, "each submit mechanism must recognize its definitely-unsent pre-dispatch failure");
+assert.match(sendBlock, /definitelyNotDispatched&&!attachmentSubmit&&remainingCommandMs\(\)>1500/, "an expired pre-dispatch attempt must not start a late click fallback");
 assert.match(sendBlock, /trusted-enter-pre-dispatch','trusted-click-fallback'/, "a definitely-unsent focus failure may use one trusted-click fallback");
 assert.match(worker, /expectedText&&normalized\(composerText\)===normalized\(expectedText\)/, "trusted click fallback must recover a React-replaced composer only for an exact owned payload");
 assert.match(sendBlock, /cleanup_skipped:!definitelyUnsent/, "ambiguous attempts must not delete a possibly submitted draft");
@@ -141,7 +148,11 @@ assert.match(worker, /const heartbeat=setInterval\(\(\)=>\{void fetch\(`\$\{BRID
 assert.match(worker, /network_generation_endpoint/, "generation ACK must expose the matched endpoint");
 assert.match(worker, /network_recent_posts/, "safe POST path diagnostics must be exposed without request bodies");
 assert.match(worker, /CDP_NETWORK_TRACKER_MAX_MS/, "CDP tracking must have a bounded maximum lifetime");
-assert.match(sendBlock, /waitForAttachmentUploadNetwork\(tab\.id,submitStartedAt-100\)/, "attachment sends must wait for upload network completion before submit");
+assert.match(worker, /const CDP_NETWORK_START_TIMEOUT_MS = 15000;/, "the pre-armed CDP tracker must remain alive through the bounded Enter-to-click fallback window");
+const networkWaitSource = extractFunction("waitForNetworkGeneration");
+assert.match(networkWaitSource, /chatNetworkWaitersByTab/, "generation ACK waits must subscribe to network state changes");
+assert.doesNotMatch(networkWaitSource, /setTimeout\(resolve,50\)/, "generation ACK waits must not spin every 50 ms");
+assert.match(sendBlock, /waitForAttachmentUploadNetwork\(tab\.id,submitStartedAt-100,/, "attachment sends must wait for upload network completion before submit");
 assert.doesNotMatch(sendBlock, /attachmentSubmit\?trustedSubmitChatSendButtonTab/, "attachment primary submit must not depend on a background mouse click");
 assert.match(sendBlock, /submitted_by:'dom-click-attachment'/, "attachment sends must honestly report their page-context submit path");
 assert.match(sendBlock, /attachmentSubmit\?submitChatAttachmentButtonTab\(tab\.id,attemptId,text\):trustedSubmitChatComposerTab/, "attachment sends must use a scoped background page click after upload ACK while text keeps trusted Enter");
@@ -171,6 +182,8 @@ assert.match(enterSource, /Input\.dispatchKeyEvent/, "trusted Enter must use CDP
 assert.doesNotMatch(enterSource, /Page\.bringToFront/, "trusted Enter must not bring the Chrome profile to the foreground");
 assert.match(enterSource, /Emulation\.setFocusEmulationEnabled/, "trusted Enter must emulate focus without depending on the OS foreground window");
 assert.match(enterSource, /background_submit:true/, "trusted Enter must report background submission metadata");
+assert.match(enterSource, /cdp_tracker_armed:true/, "trusted Enter must return after dispatch while leaving the CDP tracker armed");
+assert.doesNotMatch(enterSource, /await tracker\.started/, "trusted Enter must not hide the dispatch result behind a second network wait");
 assert.match(enterSource, /const \[refocused\]/, "trusted Enter must re-focus the composer after bringing a background page forward");
 assert.doesNotMatch(enterSource, /dispatchMouseEvent|composer-submit-button|send-button/, "trusted Enter must not depend on mouse or Send DOM");
 const trustedKeySource = extractFunction("trustedKeyTab");
@@ -189,6 +202,11 @@ assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: f
 assert.match(sendBlock, /const newChat=Boolean\(args\.new_chat\)/, "new chat path must remain supported");
 assert.match(sendBlock, /conversationId/, "existing conversation path must remain supported");
 assert.match(worker, /readCanonicalConversationPage/, "canonical conversation reading must remain available");
+assert.match(bridge, /expires_at_ms: number/, "bridge commands must carry an explicit expiry");
+assert.match(bridge, /profile\.queued = profile\.queued\.filter\(\(queued\) => queued\.id !== command\.id\)/, "timed-out commands must be removed from the extension queue");
+assert.match(bridge, /command\.expires_at_ms<=Date\.now\(\)\|\|!state\.pending\.has\(command\.id\)/, "poll must discard expired or orphaned commands before delivery");
+assert.match(managerMain, /const profileSendOperations = new Map\(\)/, "Manager must reject concurrent sends for the same profile");
+assert.match(managerMain, /Profile này đang gửi một yêu cầu khác/, "concurrent profile sends must fail explicitly instead of queueing a duplicate");
 const responseSource = extractFunction("readChatResponsePage");
 assert.match(responseSource, /thinkingPlaceholder/, "DOM fallback must classify the Thinking placeholder as incomplete");
 assert.match(responseSource, /generation_in_progress/, "DOM fallback must expose active generation rather than treating it as a completed answer");

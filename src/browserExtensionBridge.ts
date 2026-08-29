@@ -9,7 +9,8 @@ const PROFILE_TTL_MS = 45_000;
 const COMMAND_TIMEOUT_MS = 25_000;
 const CHECK_COMMAND_TIMEOUT_MS = 60_000;
 const SETUP_COMMAND_TIMEOUT_MS = 300_000;
-const SEND_COMMAND_TIMEOUT_MS = 120_000;
+const SEND_COMMAND_TIMEOUT_MS = 180_000;
+const COMMAND_EXPIRY_HEADROOM_MS = 5_000;
 const READ_RESPONSE_TIMEOUT_MS = 75_000;
 const MAX_BODY_BYTES = 12 * 1024 * 1024;
 
@@ -88,6 +89,8 @@ interface BridgeCommand {
   id: string;
   action: string;
   args: Record<string, unknown>;
+  created_at_ms: number;
+  expires_at_ms: number;
 }
 
 interface PendingResult {
@@ -213,6 +216,15 @@ function deliver(state: BridgeState, profile: ExtensionProfile, command: BridgeC
   return true;
 }
 
+function nextLiveCommand(state: BridgeState, profile: ExtensionProfile): BridgeCommand | null {
+  while(profile.queued.length){
+    const command=profile.queued.shift()!;
+    if(command.expires_at_ms<=Date.now()||!state.pending.has(command.id))continue;
+    return command;
+  }
+  return null;
+}
+
 function syncWaiters(state: BridgeState): void {
   for (const profile of state.profiles.values()) deliver(state, profile, null);
 }
@@ -271,8 +283,9 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
   if (req.url === "/poll") {
     const profile = profileFromBody(state, body);
     if (body.active === true && !state.activeProfileId) state.activeProfileId = profile.id;
-    if (profile.queued.length) {
-      sendJson(req, res, 200, { command: profile.queued.shift(), active_profile_id: state.activeProfileId ?? null });
+    const queuedCommand = nextLiveCommand(state, profile);
+    if (queuedCommand) {
+      sendJson(req, res, 200, { command: queuedCommand, active_profile_id: state.activeProfileId ?? null });
       return;
     }
     if (profile.waiter) {
@@ -456,19 +469,27 @@ export async function runBrowserExtensionCommand(
   if (!profile || Date.now() - profile.lastSeen > PROFILE_TTL_MS) {
     throw new CodexProError("The selected Chrome profile bridge is offline. Open that profile and verify the CodexPro extension is enabled.");
   }
-  const command: BridgeCommand = { id: randomUUID(), action, args };
+  const timeoutMs = action === "setup_chatgpt"
+    ? SETUP_COMMAND_TIMEOUT_MS
+    : action === "check_chatgpt"
+      ? CHECK_COMMAND_TIMEOUT_MS
+      : action === "send_chat_request"
+        ? SEND_COMMAND_TIMEOUT_MS
+        : action === "get_chat_response"
+          ? READ_RESPONSE_TIMEOUT_MS
+      : COMMAND_TIMEOUT_MS;
+  const createdAtMs = Date.now();
+  const command: BridgeCommand = {
+    id: randomUUID(),
+    action,
+    args,
+    created_at_ms: createdAtMs,
+    expires_at_ms: createdAtMs + Math.max(1_000, timeoutMs - COMMAND_EXPIRY_HEADROOM_MS)
+  };
   const result = new Promise<Record<string, any>>((resolve, reject) => {
-    const timeoutMs = action === "setup_chatgpt"
-      ? SETUP_COMMAND_TIMEOUT_MS
-      : action === "check_chatgpt"
-        ? CHECK_COMMAND_TIMEOUT_MS
-        : action === "send_chat_request"
-          ? SEND_COMMAND_TIMEOUT_MS
-          : action === "get_chat_response"
-            ? READ_RESPONSE_TIMEOUT_MS
-        : COMMAND_TIMEOUT_MS;
     const timer = setTimeout(() => {
       state.pending.delete(command.id);
+      profile.queued = profile.queued.filter((queued) => queued.id !== command.id);
       reject(new CodexProError(`Timed out waiting for Chrome profile ${profile.label}.`));
     }, timeoutMs);
     state.pending.set(command.id, { resolve, reject, timer });
