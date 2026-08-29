@@ -49,6 +49,21 @@ function compactStructuredContent<T>(value: T, depth = 0): T {
   return out as T;
 }
 
+function errorEnvelope(error: unknown): Record<string, unknown> {
+  const message = errorText(error);
+  if (!(error instanceof Error)) return { name: "Error", message };
+  const source = error as Error & { code?: unknown; details?: unknown; cause?: unknown };
+  return redactStructured({
+    name: error.name || "Error",
+    message,
+    code: typeof source.code === "string" ? source.code : undefined,
+    details: source.details && typeof source.details === "object" && !Array.isArray(source.details)
+      ? compactStructuredContent(source.details as Record<string, unknown>)
+      : undefined,
+    cause: source.cause instanceof Error ? `${source.cause.name}: ${source.cause.message}` : undefined
+  }) as Record<string, unknown>;
+}
+
 function textResult(text: string, structuredContent: Record<string, unknown> = {}, meta: Record<string, unknown> = {}): any {
   return {
     content: [{ type: "text", text: redactSensitiveText(text) }],
@@ -119,7 +134,7 @@ function errorResult(error: unknown): any {
   return {
     isError: true,
     content: [{ type: "text", text: errorText(error) }],
-    structuredContent: { error: errorText(error) }
+    structuredContent: { error: errorEnvelope(error) }
   };
 }
 

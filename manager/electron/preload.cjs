@@ -1,6 +1,16 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload);
+const invokeResult = async (channel, payload) => {
+  const response = await invoke(channel, payload);
+  if (response?.ok) return response.value;
+  const envelope = response?.error || { message: "CodexPro Manager action failed." };
+  const error = new Error(String(envelope.message || "CodexPro Manager action failed."));
+  error.name = String(envelope.name || "CodexProManagerError");
+  error.code = String(envelope.code || "MANAGER_ACTION_FAILED");
+  error.details = envelope.details && typeof envelope.details === "object" ? envelope.details : {};
+  throw error;
+};
 const subscribe = (channel, callback) => {
   if (typeof callback !== "function") return () => {};
   const listener = (_event, payload) => callback(payload);
@@ -36,7 +46,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   setHeadlessWorkerAutoStart: (payload) => invoke("codexpro:set-headless-worker-autostart", payload),
   chooseRequestFiles: () => invoke("codexpro:choose-request-files"),
   captureClipboardImage: () => invoke("codexpro:capture-clipboard-image"),
-  sendProfileRequest: (payload) => invoke("codexpro:send-profile-request", payload),
+  sendProfileRequest: (payload) => invokeResult("codexpro:send-profile-request", payload),
   renameProfileChat: (payload) => invoke("codexpro:rename-profile-chat", payload),
   getProfileResponse: (payload) => invoke("codexpro:get-profile-response", payload),
   getRepoTaskStatus: (payload) => invoke("codexpro:get-repo-task-status", payload),

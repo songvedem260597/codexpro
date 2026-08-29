@@ -118,6 +118,25 @@ function ProfileSummaryItem({ state, count, label, missing = false }) {
   );
 }
 
+function WorkingBadge() {
+  return (
+    <span className="badge profile-working">
+      <span className="working-motion-icon" aria-hidden="true">
+        <svg className="working-terminal-icon" viewBox="0 0 22 16">
+          <rect x="1" y="1" width="17" height="13" rx="3" />
+          <path d="m4.5 5 2.5 2-2.5 2" />
+          <path className="working-terminal-caret" d="M9 9h4" />
+        </svg>
+        <svg className="working-cog-icon" viewBox="0 0 16 16">
+          <path d="M6.8 1.4h2.4l.5 1.5 1.3.6 1.5-.6 1.2 2.1-1.1 1.1.1 1.5 1.3.9-1.2 2.1-1.6-.3-1.2.8-.3 1.6H7.3L7 11.1l-1.2-.8-1.6.3L3 8.5l1.3-.9.1-1.5L3.3 5l1.2-2.1 1.5.6 1.3-.6.5-1.5Z" />
+          <circle cx="8" cy="7.7" r="2" />
+        </svg>
+      </span>
+      <span>ĐANG LÀM VIỆC</span>
+    </span>
+  );
+}
+
 function SettingsDropdown({ value, options, disabled, onChange, ariaLabel = "Chọn font chữ", selectedHint = "" }) {
   const [open, setOpen] = useState(false);
   const root = useRef(null);
@@ -420,7 +439,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.48";
+const WORKER_EXTENSION_VERSION = "0.5.49";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -472,6 +491,68 @@ function profileRepoProject(profile, projects, cachedRoot) {
   return strongProfileRepoMatch(profile, projects)
     || projects.find((project) => cachedRoot && project.root === cachedRoot)
     || null;
+}
+
+function sendDebugEvidence(result = {}, error = null) {
+  const details = error?.details && typeof error.details === "object" ? error.details : {};
+  const source = result && typeof result === "object" ? result : {};
+  const evidence = Array.isArray(source.network_evidence)
+    ? source.network_evidence.slice(-12)
+    : Array.isArray(details.network_evidence)
+      ? details.network_evidence.slice(-12)
+      : [];
+  return {
+    recordedAt: new Date().toISOString(),
+    attemptId: String(source.attempt_id || details.attempt_id || details.command_id || ""),
+    state: String(source.submission_state || (error ? "failed" : "")),
+    path: String(source.submitted_by || source.submit_path || details.submitted_by || details.stage || ""),
+    pathAttempted: Array.isArray(source.path_attempted) ? source.path_attempted : [],
+    networkAck: source.network_acknowledged === true,
+    endpoint: String(source.network_generation_endpoint || details.network_generation_endpoint || ""),
+    statusCode: Number(source.network_status_code || details.network_status_code) || 0,
+    message: String(source.error || error?.message || details.message || ""),
+    code: String(error?.code || details.code || ""),
+    trustedEnterError: String(source.trusted_enter_error || details.trusted_enter_error || ""),
+    trustedClickError: String(source.trusted_click_error || details.trusted_click_error || ""),
+    fallbackReason: String(source.fallback_reason || details.fallback_reason || ""),
+    evidence
+  };
+}
+
+function SendDebugEvidence({ evidence }) {
+  if (!evidence) return null;
+  const rows = [
+    ["Attempt", evidence.attemptId || "—"],
+    ["Submission", evidence.state || "—"],
+    ["Path", evidence.path || "—"],
+    ["Path attempted", evidence.pathAttempted?.join(" → ") || "—"],
+    ["Network ACK", evidence.networkAck ? "yes" : "no"],
+    ["Endpoint", evidence.endpoint || "—"],
+    ["HTTP", evidence.statusCode || "—"],
+    ["Fallback", evidence.fallbackReason || "—"],
+    ["Enter error", evidence.trustedEnterError || "—"],
+    ["Click error", evidence.trustedClickError || "—"],
+    ["Error", evidence.message || "—"]
+  ];
+  return (
+    <details className="send-debug-evidence">
+      <summary>Debug Evidence <span>{evidence.networkAck ? "network ACK" : evidence.state || "attempt"}</span></summary>
+      <div className="send-debug-grid">
+        {rows.map(([label, value]) => <div className="send-debug-row" key={label}><strong>{label}</strong><code>{String(value)}</code></div>)}
+      </div>
+      {evidence.evidence?.length > 0 && (
+        <ol className="send-debug-timeline">
+          {evidence.evidence.map((item, index) => (
+            <li key={`${item.observed_at || index}-${item.endpoint || index}`}>
+              <time>{item.observed_at ? new Date(item.observed_at).toLocaleTimeString("vi-VN") : "—"}</time>
+              <code>{item.phase || "event"}</code>
+              <span>{item.endpoint || "unknown endpoint"}{item.status_code ? ` · HTTP ${item.status_code}` : ""}{item.error ? ` · ${item.error}` : ""}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </details>
+  );
 }
 
 function extensionReady(version) {
@@ -599,6 +680,7 @@ function App() {
   const [requestResponses, setRequestResponses] = useState({});
   const [clearedResponseTargets, setClearedResponseTargets] = useState({});
   const [requestSendErrors, setRequestSendErrors] = useState({});
+  const [requestSendEvidence, setRequestSendEvidence] = useState({});
   const [renameChat, setRenameChat] = useState(null);
   const conversationTitleOverridesRef = useRef({});
   const refreshInFlight = useRef(false);
@@ -1270,6 +1352,7 @@ function App() {
     setBusy(`request:${profile.profile_id}`);
     setError("");
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+    setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: null }));
     const clearKey = `${profile.profile_id}:${conversationId}`;
     setClearedResponseTargets((current) => {
       if (!current[clearKey]) return current;
@@ -1296,6 +1379,7 @@ function App() {
     try {
       const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
       const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, text, attachments });
+      setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence(result) }));
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
       const resolvedConversationId = String(result?.conversation_id || conversationId);
@@ -1380,6 +1464,7 @@ function App() {
       window.setTimeout(() => void refresh(false), 500);
     } catch (err) {
       const message = err?.message || String(err);
+      setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence({}, err) }));
       const conversationLimitReached = !newChat && message.includes("CONVERSATION_LIMIT_REACHED:");
       if (conversationLimitReached) {
         const previous = requestResponses[profile.profile_id] || {};
@@ -1689,6 +1774,8 @@ function App() {
             networkStatusCode: Number(result.network_status_code) || Number(previous.networkStatusCode) || 0,
             networkError: String(result.network_error || previous.networkError || ""),
             networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
+            responseReady: Boolean(result.response_ready),
+            responseSource: String(result.response_source || previous.responseSource || ''),
             messageCount: domAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
             updatedAt: result.updated_at || new Date().toISOString()
           }
@@ -1778,6 +1865,7 @@ function App() {
     const attachments = requestFiles[profile.profile_id] || [];
     const response = requestResponses[profile.profile_id];
     const sendError = requestSendErrors[profile.profile_id] || "";
+    const sendEvidence = requestSendEvidence[profile.profile_id] || null;
     const responseCurrent = response?.conversationId === selectedTarget;
     const clearedKey = `${profile.profile_id}:${selectedTarget}`;
     const responseCleared = Boolean(clearedResponseTargets[clearedKey]);
@@ -1788,6 +1876,7 @@ function App() {
       ? { id: "codexpro-live-tool-activity", role: "assistant", text: fallbackToolActivity, truncated: false, toolActivity: true }
       : { id: "latest-assistant", role: "assistant", text: response?.text || "", truncated: response?.truncated };
     const hasResponseContent = !responseCleared && Boolean(fallbackResponseMessage.text || displayResponseMessages.length);
+    const responseVerifiedComplete = Boolean(responseCurrent && response?.responseReady && hasResponseContent);
     const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${selectedTarget}`));
     const selectedNetworkState = String(selectedTab?.network_state || (responseCurrent ? response?.networkState : "") || (selectedTab?.busy ? "generating" : "idle"));
     const selectedNetworkCompleted = selectedNetworkState === "completed";
@@ -1806,9 +1895,11 @@ function App() {
       ? "Chat mới"
       : selectedBusy
         ? "AI đang xử lý · theo dõi bằng network"
-        : selectedNetworkFailed
-          ? "Request AI kết thúc với lỗi network"
-          : selectedNetworkCompleted && domUnavailable
+        : selectedNetworkFailed && responseVerifiedComplete
+          ? "AI đã phản hồi xong · network tracker quá thời gian"
+          : selectedNetworkFailed
+            ? "Request AI kết thúc với lỗi network"
+            : selectedNetworkCompleted && domUnavailable
             ? "AI đã phản hồi xong · Chrome UI đang treo"
             : selectedNetworkCompleted && contentNeedsRefresh
               ? "AI đã phản hồi xong · nội dung chưa đọc"
@@ -1826,7 +1917,7 @@ function App() {
               <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
               <div>
                 <p className="eyebrow">CHATGPT · {profile.label}</p>
-                <div className="profile-title"><strong>{profile.email || profile.label}</strong>{selectedSettling ? <span className="badge profile-settling">ĐANG HOÀN TẤT</span> : working ? <span className="badge profile-working">ĐANG LÀM VIỆC</span> : profile.connected ? <span className="badge connected">ĐANG RẢNH</span> : <span className="badge profile-hung">MẤT KẾT NỐI</span>}</div>
+                <div className="profile-title"><strong>{profile.email || profile.label}</strong>{selectedSettling ? <span className="badge profile-settling">ĐANG HOÀN TẤT</span> : working ? <WorkingBadge /> : profile.connected ? <span className="badge connected">ĐANG RẢNH</span> : <span className="badge profile-hung">MẤT KẾT NỐI</span>}</div>
                 <code>{profile.profile_id}</code>
               </div>
             </div>
@@ -1860,7 +1951,7 @@ function App() {
                   <span>{response.repoTaskStatus === "verified" ? (response.repoTaskScope === "all_allowed" ? `Đã xác minh phạm vi toàn bộ vùng được cấp quyền · task ${response.repoTaskId}` : `Workspace đã được mở thật · task ${response.repoTaskId}`) : response.repoTaskStatus === "failed" ? "ChatGPT không gọi CodexPro nên Manager không công nhận phản hồi này." : "Manager chỉ công nhận công việc sau khi server nhận begin_repo_task."}</span>
                 </div>
               )}
-              {responseCurrent && !responseCleared && !isNewChat && selectedNetworkState !== "idle" && !selectedNetworkCompleted && (
+              {responseCurrent && !responseCleared && !isNewChat && selectedNetworkState !== "idle" && !selectedNetworkCompleted && !responseVerifiedComplete && (
                 <div className={`network-response-notice is-${selectedNetworkState}`}>
                   <strong>{selectedBusy ? "Network: AI đang xử lý" : "Network: request thất bại"}</strong>
                   <span>{selectedBusy ? "Theo dõi trực tiếp vòng đời request của ChatGPT." : (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`)}</span>
@@ -1930,6 +2021,7 @@ function App() {
               </div>
             </div>
             {sendError && <div className="request-send-error">{sendError}</div>}
+            <SendDebugEvidence evidence={sendEvidence} />
             <div className="request-card-foot">
               <span>{selectedBusy ? "Đang nhận phản hồi · realtime ~1 giây" : "Realtime phản hồi ~1 giây"}</span>
               <div className="request-card-actions">
@@ -2093,7 +2185,7 @@ function App() {
                       {profile.active && <span className="badge">ACTIVE</span>}
                       {hung && <span className="badge profile-hung">MẤT KẾT NỐI</span>}
                       {settling && <span className="badge profile-settling">ĐANG HOÀN TẤT</span>}
-                      {working && <span className="badge profile-working">ĐANG LÀM VIỆC</span>}
+                      {working && <WorkingBadge />}
                       {idle && <span className="badge connected">ĐANG RẢNH</span>}
                       {!profile.connector_installed && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
                       <span
