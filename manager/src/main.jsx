@@ -58,6 +58,7 @@ const DEFAULT_MANAGER_SETTINGS = {
   fontFamily: "system",
   fontSize: 14,
   profileLayout: "rows",
+  maxSubagents: 1,
   repoSelections: {},
   selectedWorkerPackId: "default",
   workerImagePacks: [],
@@ -2193,6 +2194,32 @@ function App() {
               <button className="button secondary" onClick={copyLink} disabled={!status?.mcpLink}>Copy link</button>
               <button className="button danger-quiet" onClick={rotateLink} disabled={Boolean(busy)}>{busy === "rotate" ? "Đang tạo..." : "Tạo token + link mới"}</button>
               <button className="text-button" onClick={() => api.openExternal("https://chatgpt.com/plugins?q=CodexPro")}>Mở Plugins ChatGPT ↗</button>
+            </div>
+          </section>
+
+          <section className="settings-panel subagent-limit-panel">
+            <div className="settings-panel-head">
+              <div>
+                <p className="eyebrow">AGENT EXECUTION</p>
+                <h2>Số lượng subagent chạy</h2>
+                <p className="section-note">Agent chính luôn chạy một phiên. Setting này giới hạn số agent con CodexPro được phép gọi trong mỗi handoff.</p>
+              </div>
+              <span className="subagent-test-badge">TEST CAP</span>
+            </div>
+            <div className="subagent-limit-row">
+              <div className="subagent-limit-copy">
+                <strong>Tối đa mỗi handoff</strong>
+                <span>Đang khóa 1 subagent để kiểm thử ổn định. Explore dùng slot duy nhất; Gemini scout sẽ được bỏ qua.</span>
+              </div>
+              <div className="settings-number-field subagent-limit-field" aria-label="Số subagent tối đa">
+                <input type="number" min="1" max="1" value={managerSettings.maxSubagents} readOnly aria-readonly="true" />
+                <span>agent</span>
+              </div>
+            </div>
+            <div className="subagent-limit-meter" aria-hidden="true">
+              <span className="is-active"><b>1</b><small>Explore</small></span>
+              <i />
+              <span className="is-locked"><b>2+</b><small>Đang khóa</small></span>
             </div>
           </section>
 
