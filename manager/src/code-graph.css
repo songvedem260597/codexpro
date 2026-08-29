@@ -74,6 +74,142 @@
 .codexgraph-toolbar input:focus,
 .codexgraph-toolbar select:focus { border-color: #4b8065; box-shadow: 0 0 0 3px #56d18c12; }
 
+.codexgraph-filter {
+  position: relative;
+  min-width: 0;
+  align-self: end;
+}
+.codexgraph-filter.is-open { z-index: 30; }
+.codexgraph-filter-label {
+  display: block;
+  margin: 0 0 5px 2px;
+  color: #7f8b9b;
+  font-size: 11px;
+  line-height: 1.2;
+}
+.codexgraph-filter-trigger {
+  width: 100%;
+  height: 38px;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) 12px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 11px;
+  border: 1px solid #2b3543;
+  border-radius: 8px;
+  outline: none;
+  background: linear-gradient(180deg, #0f151e 0%, #0b1017 100%);
+  color: #d7e0ea;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 #ffffff05;
+  transition: border-color .14s ease, background .14s ease, box-shadow .14s ease;
+}
+.codexgraph-filter-trigger:hover {
+  border-color: #3a4859;
+  background: linear-gradient(180deg, #131b25 0%, #0e141c 100%);
+}
+.codexgraph-filter-trigger:focus-visible,
+.codexgraph-filter.is-open .codexgraph-filter-trigger {
+  border-color: #47775f;
+  box-shadow: 0 0 0 3px #56d18c12, inset 0 1px 0 #ffffff08;
+}
+.codexgraph-filter-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codexgraph-filter-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #748196;
+  box-shadow: 0 0 0 3px #74819618;
+}
+.codexgraph-filter-dot.is-all { background: #6fd69d; box-shadow: 0 0 0 3px #6fd69d1a; }
+.codexgraph-filter-dot.is-area { background: #78a8e8; box-shadow: 0 0 0 3px #78a8e81a; }
+.codexgraph-filter-dot.is-flow { background: #73d7a3; box-shadow: 0 0 0 3px #73d7a31a; }
+.codexgraph-filter-dot.is-structure { background: #c59cff; box-shadow: 0 0 0 3px #c59cff1a; }
+.codexgraph-filter-chevron {
+  width: 7px;
+  height: 7px;
+  justify-self: end;
+  border-right: 1.5px solid #7f8c9d;
+  border-bottom: 1.5px solid #7f8c9d;
+  transform: rotate(45deg) translateY(-2px);
+  transform-origin: center;
+  transition: transform .15s ease, border-color .15s ease;
+}
+.codexgraph-filter.is-open .codexgraph-filter-chevron {
+  border-color: #b7c4d2;
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+.codexgraph-filter-menu {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  width: max(100%, 250px);
+  max-height: 310px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid #2e3a48;
+  border-radius: 10px;
+  background: #0d131bf5;
+  box-shadow: 0 18px 50px #000b, inset 0 1px 0 #ffffff08;
+  backdrop-filter: blur(14px);
+  animation: codexgraph-filter-in .12s ease-out;
+}
+@keyframes codexgraph-filter-in {
+  from { opacity: 0; transform: translateY(-4px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.codexgraph-filter-option {
+  width: 100%;
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #c9d4df;
+  text-align: left;
+  cursor: pointer;
+}
+.codexgraph-filter-option:hover { background: #17212c; }
+.codexgraph-filter-option.is-active { background: #14231c; }
+.codexgraph-filter-option-copy { min-width: 0; display: grid; gap: 2px; }
+.codexgraph-filter-option-copy strong {
+  overflow: hidden;
+  color: #dbe4ed;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codexgraph-filter-option.is-active .codexgraph-filter-option-copy strong { color: #9ce1b8; }
+.codexgraph-filter-option-copy small {
+  overflow: hidden;
+  color: #647386;
+  font-size: 9px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codexgraph-filter-check {
+  justify-self: center;
+  color: transparent;
+  font-size: 12px;
+  font-weight: 800;
+}
+.codexgraph-filter-option.is-active .codexgraph-filter-check { color: #66dc99; }
+
 .codexgraph-search { position: relative; align-self: end; }
 .codexgraph-search > span {
   position: absolute;

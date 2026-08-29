@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ControlsContainer,
   FullScreenControl,
@@ -291,6 +291,72 @@ function GraphInteraction({ query, area, relationGroup, selectedNode, onSelectNo
   return null;
 }
 
+function GraphDropdown({ label, value, options, onChange }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const selected = options.find((option) => option.value === value) || options[0];
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event) => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false);
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div className={`codexgraph-filter${open ? " is-open" : ""}`} ref={rootRef}>
+      <span className="codexgraph-filter-label">{label}</span>
+      <button
+        type="button"
+        className="codexgraph-filter-trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className={`codexgraph-filter-dot is-${selected?.tone || "default"}`} aria-hidden="true" />
+        <span className="codexgraph-filter-value">{selected?.label || value}</span>
+        <span className="codexgraph-filter-chevron" aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="codexgraph-filter-menu" role="listbox" aria-label={label}>
+          {options.map((option) => {
+            const active = option.value === value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="option"
+                aria-selected={active}
+                className={`codexgraph-filter-option${active ? " is-active" : ""}`}
+                onClick={() => {
+                  onChange(option.value);
+                  setOpen(false);
+                }}
+              >
+                <span className={`codexgraph-filter-dot is-${option.tone || "default"}`} aria-hidden="true" />
+                <span className="codexgraph-filter-option-copy">
+                  <strong>{option.label}</strong>
+                  {option.hint && <small>{option.hint}</small>}
+                </span>
+                <span className="codexgraph-filter-check" aria-hidden="true">✓</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DetailPanel({ graphData, selectedNode }) {
   const symbols = Array.isArray(graphData?.nodes) ? graphData.nodes : Array.isArray(graphData?.symbols) ? graphData.symbols : [];
   const relationships = Array.isArray(graphData?.edges) ? graphData.edges : Array.isArray(graphData?.relationships) ? graphData.relationships : [];
@@ -363,6 +429,15 @@ export function CodeGraphView({ graphData }) {
     const values = new Set(graph.nodes().map((node) => graph.getNodeAttribute(node, "area")).filter(Boolean));
     return [...values].sort((a, b) => a.localeCompare(b));
   }, [graph]);
+  const areaOptions = useMemo(() => [
+    { value: "all", label: "Tất cả khu vực", hint: `${graph.order.toLocaleString()} nodes`, tone: "all" },
+    ...areas.map((value) => ({ value, label: value, hint: "Lọc theo thư mục gốc", tone: "area" }))
+  ], [areas, graph.order]);
+  const relationOptions = useMemo(() => [
+    { value: "all", label: "Tất cả quan hệ", hint: "Hiển thị mọi edge", tone: "all" },
+    { value: "flow", label: "Luồng gọi / state / IPC", hint: "Calls, reads, writes, events…", tone: "flow" },
+    { value: "structure", label: "Cấu trúc / import", hint: "Contains, imports, extends…", tone: "structure" }
+  ], []);
 
   const visibleSymbols = Array.isArray(graphData?.nodes) ? graphData.nodes.length : Array.isArray(graphData?.symbols) ? graphData.symbols.length : 0;
   const visibleRelationships = Array.isArray(graphData?.edges) ? graphData.edges.length : Array.isArray(graphData?.relationships) ? graphData.relationships.length : 0;
@@ -399,21 +474,21 @@ export function CodeGraphView({ graphData }) {
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm function, class, file..." />
           {query && <button type="button" onClick={() => setQuery("")} aria-label="Xóa tìm kiếm">×</button>}
         </label>
-        <label>
-          <span>Khu vực</span>
-          <select value={area} onChange={(event) => { setArea(event.target.value); setSelectedNode(""); }}>
-            <option value="all">Tất cả</option>
-            {areas.map((value) => <option key={value} value={value}>{value}</option>)}
-          </select>
-        </label>
-        <label>
-          <span>Edge</span>
-          <select value={relationGroup} onChange={(event) => setRelationGroup(event.target.value)}>
-            <option value="all">Tất cả quan hệ</option>
-            <option value="flow">Luồng gọi / state / IPC</option>
-            <option value="structure">Cấu trúc / import</option>
-          </select>
-        </label>
+        <GraphDropdown
+          label="Khu vực"
+          value={area}
+          options={areaOptions}
+          onChange={(nextArea) => {
+            setArea(nextArea);
+            setSelectedNode("");
+          }}
+        />
+        <GraphDropdown
+          label="Edge"
+          value={relationGroup}
+          options={relationOptions}
+          onChange={setRelationGroup}
+        />
         <div className="codexgraph-live"><i />CodexGraph active</div>
       </div>
 
