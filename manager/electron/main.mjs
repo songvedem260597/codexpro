@@ -1089,7 +1089,8 @@ function currentRuntime() {
 }
 
 async function portableServiceStatus() {
-  const runtime = currentRuntime();
+  const recordedRuntime = currentRuntime();
+  const runtime = recordedRuntime?.active ? recordedRuntime : await discoverPortableRuntime() || recordedRuntime;
   const profile = profileForRoot(runtime?.root);
   const root = runtime?.root || profile?.root || managerProjects()[0] || "";
   return {
@@ -1195,6 +1196,46 @@ async function processCommandForPid(pid) {
   }
 }
 
+async function discoverPortableRuntime() {
+  if (isWindows) return null;
+  try {
+    const { stdout } = await execFileAsync("ps", ["-Ao", "pid=,ppid=,command="], { maxBuffer: 4 * 1024 * 1024 });
+    const rows = String(stdout || "")
+      .split(/\r?\n/)
+      .map((line) => {
+        const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);
+        return match ? { pid: Number(match[1]), ppid: Number(match[2]), command: match[3].trim() } : null;
+      })
+      .filter(Boolean);
+    const launchers = rows
+      .filter((row) => row.pid !== process.pid && /\bcodexpro(?:\.mjs)?\s+start\b/i.test(row.command))
+      .sort((left, right) => right.pid - left.pid);
+    for (const launcher of launchers) {
+      if (!processAlive(launcher.pid)) continue;
+      const root = processOption(launcher.command, "root");
+      if (!root) continue;
+      const port = Number(processOption(launcher.command, "port")) || 8787;
+      const hostname = processOption(launcher.command, "hostname");
+      const server = rows.find((row) => row.ppid === launcher.pid && /[\\/]dist[\\/]http\.js(?:\s|$)/i.test(row.command));
+      const tunnelChild = rows.find((row) => row.ppid === launcher.pid && /\bcloudflared\b.*\btunnel\b/i.test(row.command));
+      return {
+        version: 1,
+        root: path.resolve(root),
+        pid: launcher.pid,
+        runtimePid: server?.pid || null,
+        tunnelPid: tunnelChild?.pid || null,
+        updatedAt: "",
+        endpoint: hostname ? `${hostname.includes("://") ? hostname : `https://${hostname}`}/mcp` : "",
+        localBase: `http://127.0.0.1:${port}`,
+        tunnel: processOption(launcher.command, "tunnel") || "none",
+        active: true,
+        discovered: true
+      };
+    }
+  } catch {}
+  return null;
+}
+
 function stripShellQuotes(value) {
   const text = String(value || "").trim();
   if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) return text.slice(1, -1);
@@ -1241,7 +1282,8 @@ async function runtimeBaseStatus() {
     const task = await scheduledTask();
 
     if (!isWindows) {
-      const runtime = currentRuntime();
+      const recordedRuntime = currentRuntime();
+      const runtime = recordedRuntime?.active ? recordedRuntime : await discoverPortableRuntime() || recordedRuntime;
       const processCommand = await processCommandForPid(runtime?.pid);
       const profile = profileForRoot(runtime?.root || task.root);
       const root = processOption(processCommand, "root") || runtime?.root || profile?.root || task.root || managerProjects()[0] || "";
@@ -2225,7 +2267,8 @@ async function inspectThroughMcp(root) {
 async function controlServer(action) {
   if (!["start", "restart"].includes(action)) throw new Error("Thao tác server không hợp lệ.");
   if (!isWindows) {
-    const runtime = currentRuntime();
+    const recordedRuntime = currentRuntime();
+    const runtime = recordedRuntime?.active ? recordedRuntime : await discoverPortableRuntime() || recordedRuntime;
     const processCommand = await processCommandForPid(runtime?.pid);
     const profile = profileForRoot(runtime?.root);
     const root = processOption(processCommand, "root") || runtime?.root || profile?.root || managerProjects()[0] || "";
