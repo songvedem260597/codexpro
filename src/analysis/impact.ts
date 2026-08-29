@@ -4,6 +4,8 @@ import type { CodexProConfig } from "../config.js";
 import type { PathGuard, Workspace } from "../guard.js";
 import { detectRiskSignals } from "./classify.js";
 import { inspectWorkspace } from "./index.js";
+import { relationshipIdentity, reverseSymbolNeighborhood } from "./graph.js";
+import { loadPreviousWorkspaceAnalysis } from "./persistent.js";
 import type { ChangeAnalysis, AnalysisCommandRecommendation, AnalysisRiskSignal } from "./types.js";
 
 const RISK_LABELS: Record<AnalysisRiskSignal["id"], string> = {
@@ -12,7 +14,8 @@ const RISK_LABELS: Record<AnalysisRiskSignal["id"], string> = {
   storage: "Storage or persistence",
   migration: "Schema or migration",
   build: "Build or dependency configuration",
-  configuration: "Runtime configuration"
+  configuration: "Runtime configuration",
+  "graph-integrity": "Dependency graph integrity"
 };
 
 const SCRIPT_PRIORITY = ["test", "test:unit", "typecheck", "lint", "build", "check"];
@@ -113,12 +116,28 @@ export async function reviewWorkspaceChanges(
   const changed = new Set(changedPaths);
   const dependents = new Map<string, Set<string>>();
   const tests = new Map<string, Set<string>>();
+  const roleByPath = new Map(analysis.files.map((file) => [file.path, file.role]));
   for (const relationship of analysis.relationships) {
-    if (!changed.has(relationship.to)) continue;
+    if (!changed.has(relationship.to) || !roleByPath.has(relationship.from)) continue;
     const target = relationship.kind === "tests" ? tests : dependents;
     const reasons = target.get(relationship.from) ?? new Set<string>();
     reasons.add(`${relationship.kind} ${relationship.to}`);
     target.set(relationship.from, reasons);
+  }
+
+  const changedSymbolIds = analysis.symbols
+    .filter((symbol) => changed.has(symbol.path) && symbol.id)
+    .map((symbol) => symbol.id as string);
+  const graphNeighborhood = reverseSymbolNeighborhood(analysis.symbols, analysis.relationships, changedSymbolIds, { maxDepth: 4 });
+  const symbolsById = new Map(analysis.symbols.filter((symbol) => symbol.id).map((symbol) => [symbol.id as string, symbol]));
+  for (const [symbolId, distance] of graphNeighborhood.distance) {
+    if (distance === 0) continue;
+    const symbol = symbolsById.get(symbolId);
+    if (!symbol || symbol.virtual || changed.has(symbol.path)) continue;
+    const target = roleByPath.get(symbol.path) === "test" ? tests : dependents;
+    const reasons = target.get(symbol.path) ?? new Set<string>();
+    reasons.add(distance === 1 ? `direct CodexGraph dependency on changed symbol` : `transitive CodexGraph dependency (${distance} hops)`);
+    target.set(symbol.path, reasons);
   }
 
   const directTestCandidates = analysis.files.filter((file) => file.role === "test" && changedPaths.some((changedPath) => {
@@ -131,6 +150,28 @@ export async function reviewWorkspaceChanges(
     tests.set(test.path, reasons);
   }
 
+  const previousAnalysis = await loadPreviousWorkspaceAnalysis(workspace);
+  let graphDiff: ChangeAnalysis["graphDiff"];
+  if (previousAnalysis && previousAnalysis.fingerprint !== analysis.fingerprint) {
+    const relevant = (relationship: typeof analysis.relationships[number]) => changed.has(relationship.from) || changed.has(relationship.to);
+    const previousRelationships = new Map(previousAnalysis.relationships.filter(relevant).map((relationship) => [relationshipIdentity(relationship), relationship]));
+    const currentRelationships = new Map(analysis.relationships.filter(relevant).map((relationship) => [relationshipIdentity(relationship), relationship]));
+    const addedRelationships = [...currentRelationships.entries()].filter(([key]) => !previousRelationships.has(key)).map(([, relationship]) => relationship);
+    const removedRelationships = [...previousRelationships.entries()].filter(([key]) => !currentRelationships.has(key)).map(([, relationship]) => relationship);
+    const currentSymbolIds = new Set(analysis.symbols.map((symbol) => symbol.id).filter((id): id is string => Boolean(id)));
+    const removedSymbols = previousAnalysis.symbols.filter((symbol) => changed.has(symbol.path) && symbol.id && !currentSymbolIds.has(symbol.id));
+    graphDiff = {
+      previousFingerprint: previousAnalysis.fingerprint,
+      currentFingerprint: analysis.fingerprint,
+      addedRelationships: addedRelationships.length,
+      removedRelationships: removedRelationships.length,
+      removedSymbols: removedSymbols.length,
+      addedSamples: addedRelationships.slice(0, 20),
+      removedSamples: removedRelationships.slice(0, 20),
+      removedSymbolSamples: removedSymbols.slice(0, 20)
+    };
+  }
+
   const risks = new Map<AnalysisRiskSignal["id"], Set<string>>();
   for (const changedPath of changedPaths) {
     for (const risk of detectRiskSignals(changedPath) as AnalysisRiskSignal["id"][]) {
@@ -139,12 +180,17 @@ export async function reviewWorkspaceChanges(
       risks.set(risk, paths);
     }
   }
+  if (graphDiff && (graphDiff.removedRelationships > 0 || graphDiff.removedSymbols > 0)) {
+    risks.set("graph-integrity", new Set(changedPaths));
+  }
   const riskSignals: AnalysisRiskSignal[] = [...risks.entries()].map(([id, paths]) => ({
     id,
     label: RISK_LABELS[id],
     confidence: "inferred",
     paths: [...paths].sort(),
-    reasons: [`path pattern matched ${id}`]
+    reasons: id === "graph-integrity" && graphDiff
+      ? [`CodexGraph observed ${graphDiff.removedRelationships} removed dependency edge(s) and ${graphDiff.removedSymbols} removed symbol(s) around changed files; verify removals are intentional.`]
+      : [`path pattern matched ${id}`]
   }));
   const resultLimit = Math.max(1, config.maxSearchResults);
   const dependentFiles = [...dependents.entries()]
@@ -162,11 +208,13 @@ export async function reviewWorkspaceChanges(
     dependentFiles: dependentFiles.slice(0, resultLimit),
     relatedTests: relatedTests.slice(0, resultLimit),
     riskSignals,
+    graphDiff,
     recommendedCommands: [...await packageRecommendations(guard, workspace), ...await nativeRecommendations(guard, workspace)],
     coverage: analysis.coverage,
     warnings: [
       ...analysis.warnings,
       ...pathWarnings,
+      ...(graphDiff && (graphDiff.removedRelationships > 0 || graphDiff.removedSymbols > 0) ? [`CodexGraph diff detected ${graphDiff.removedRelationships} removed dependency edge(s) and ${graphDiff.removedSymbols} removed symbol(s) around changed files.`] : []),
       ...(impactLimited ? [`Change-impact output was limited to ${resultLimit} dependent files and ${resultLimit} related tests.`] : [])
     ],
     cache: analysis.cache

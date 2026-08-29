@@ -44,6 +44,7 @@ export interface InventoryFile {
   role: AnalysisFileRole;
   generated: boolean;
   entrypoint: boolean;
+  contentHash?: string;
 }
 
 export interface AnalysisCoverage {
@@ -62,8 +63,8 @@ export interface InventoryResult {
   coverage: AnalysisCoverage;
 }
 
-export type AnalysisSymbolKind = "function" | "class" | "interface" | "enum" | "struct" | "trait" | "protocol" | "type" | "variable";
-export type AnalysisRelationshipKind = "imports" | "references" | "tests" | "package";
+export type AnalysisSymbolKind = "module" | "function" | "method" | "class" | "interface" | "enum" | "struct" | "trait" | "protocol" | "type" | "variable" | "property" | "channel" | "event" | "route";
+export type AnalysisRelationshipKind = "imports" | "references" | "tests" | "package" | "contains" | "calls" | "reads" | "writes" | "extends" | "implements" | "emits" | "listens" | "routes" | "ipc";
 
 export interface AnalysisSymbol {
   name: string;
@@ -71,6 +72,14 @@ export interface AnalysisSymbol {
   path: string;
   line: number;
   exported: boolean;
+  id?: string;
+  endLine?: number;
+  column?: number;
+  endColumn?: number;
+  containerId?: string;
+  signature?: string;
+  virtual?: boolean;
+  source?: string;
   confidence: AnalysisConfidence;
 }
 
@@ -78,6 +87,11 @@ export interface AnalysisRelationship {
   from: string;
   to: string;
   kind: AnalysisRelationshipKind;
+  fromSymbolId?: string;
+  toSymbolId?: string;
+  fromLine?: number;
+  toLine?: number;
+  detail?: string;
   confidence: AnalysisConfidence;
   source: string;
 }
@@ -149,7 +163,7 @@ export interface ImpactFile {
 }
 
 export interface AnalysisRiskSignal {
-  id: "public-api" | "authentication" | "storage" | "migration" | "build" | "configuration";
+  id: "public-api" | "authentication" | "storage" | "migration" | "build" | "configuration" | "graph-integrity";
   label: string;
   confidence: AnalysisConfidence;
   paths: string[];
@@ -162,6 +176,17 @@ export interface AnalysisCommandRecommendation {
   reasons: string[];
 }
 
+export interface AnalysisGraphDiff {
+  previousFingerprint?: string;
+  currentFingerprint: string;
+  addedRelationships: number;
+  removedRelationships: number;
+  removedSymbols: number;
+  addedSamples: AnalysisRelationship[];
+  removedSamples: AnalysisRelationship[];
+  removedSymbolSamples: AnalysisSymbol[];
+}
+
 export interface ChangeAnalysis {
   schemaVersion: 1;
   changedPaths: string[];
@@ -169,6 +194,7 @@ export interface ChangeAnalysis {
   dependentFiles: ImpactFile[];
   relatedTests: ImpactFile[];
   riskSignals: AnalysisRiskSignal[];
+  graphDiff?: AnalysisGraphDiff;
   recommendedCommands: AnalysisCommandRecommendation[];
   coverage: AnalysisCoverage;
   warnings: string[];

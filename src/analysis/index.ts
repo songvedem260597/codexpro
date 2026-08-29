@@ -5,13 +5,17 @@ import { redactSensitiveText } from "../redact.js";
 import { detectProjectTypes } from "./classify.js";
 import { getCachedWorkspaceAnalysis, invalidateWorkspaceAnalysis, setCachedWorkspaceAnalysis } from "./cache.js";
 import { extractWorkspaceFiles } from "./extract.js";
-import { buildRelationships } from "./graph.js";
+import { buildRelationships, mergeRelationships, reverseSymbolNeighborhood } from "./graph.js";
 import { inventoryWorkspace } from "./inventory.js";
 import { classifySearchIntent, emptySearchGroups, groupForFile, sortStructuredMatches } from "./rank.js";
+import { loadPersistentWorkspaceAnalysis, savePersistentWorkspaceAnalysis } from "./persistent.js";
+import { analyzeTypeScriptSemanticGraph } from "./semanticGraph.js";
 import type { AnalysisSearchIntent, StructuredSearchMatch, StructuredSearchResult, WorkspaceAnalysis } from "./types.js";
 
+const CODEXGRAPH_ENGINE_VERSION = 2;
+
 function cacheKey(workspace: Workspace, fingerprint: string, config: CodexProConfig): string {
-  return `${workspace.id}:${fingerprint}:${JSON.stringify(config.analysisLimits)}`;
+  return `${workspace.id}:graph-v${CODEXGRAPH_ENGINE_VERSION}:${fingerprint}:${JSON.stringify(config.analysisLimits)}`;
 }
 
 function areasFor(files: WorkspaceAnalysis["files"]): WorkspaceAnalysis["areas"] {
@@ -32,12 +36,37 @@ export async function inspectWorkspace(config: CodexProConfig, guard: PathGuard,
   const key = cacheKey(workspace, inventory.fingerprint, config);
   const cached = getCachedWorkspaceAnalysis(key);
   if (cached) return { ...cached, cache: { hit: true, key } };
+  const persisted = await loadPersistentWorkspaceAnalysis(workspace, key);
+  if (persisted) {
+    setCachedWorkspaceAnalysis(key, persisted);
+    return { ...persisted, cache: { hit: true, key } };
+  }
 
   const extraction = await extractWorkspaceFiles(config, guard, workspace, inventory.files);
-  const symbols = extraction.files.flatMap((file) => file.symbols).slice(0, config.analysisLimits.maxSymbols);
-  const relationships = buildRelationships(extraction.files, inventory.files, config.analysisLimits.maxRelationships);
+  const legacySymbols = extraction.files.flatMap((file) => file.symbols);
+  let semanticWarnings: string[] = [];
+  let semanticTruncated = false;
+  let semanticSymbols: WorkspaceAnalysis["symbols"] = [];
+  let semanticRelationships: WorkspaceAnalysis["relationships"] = [];
+  let semanticPaths = new Set<string>();
+  try {
+    const semantic = analyzeTypeScriptSemanticGraph(workspace.root, inventory.files, config.analysisLimits.maxSymbols, config.analysisLimits.maxRelationships);
+    semanticWarnings = semantic.warnings;
+    semanticTruncated = semantic.truncated;
+    semanticSymbols = semantic.symbols;
+    semanticRelationships = semantic.relationships;
+    semanticPaths = new Set(semantic.analyzedPaths);
+  } catch (error) {
+    semanticWarnings = [`TypeScript semantic graph unavailable; using declaration/import fallback: ${redactSensitiveText(error instanceof Error ? error.message : String(error))}`];
+  }
+  const fallbackSymbols = legacySymbols
+    .filter((symbol) => !semanticPaths.has(symbol.path))
+    .map((symbol) => ({ ...symbol, id: symbol.id ?? `legacy:${symbol.path}:${symbol.line}:${symbol.kind}:${symbol.name}`, source: symbol.source ?? "built-in declaration extraction" }));
+  const symbols = [...semanticSymbols, ...fallbackSymbols].slice(0, config.analysisLimits.maxSymbols);
+  const fileRelationships = buildRelationships(extraction.files, inventory.files, config.analysisLimits.maxRelationships);
+  const relationships = mergeRelationships([fileRelationships, semanticRelationships], config.analysisLimits.maxRelationships);
   const languages = [...new Set(inventory.files.map((file) => file.language).filter((language) => language !== "unknown"))].sort();
-  const warnings = [...inventory.coverage.warnings, ...extraction.warnings];
+  const warnings = [...inventory.coverage.warnings, ...extraction.warnings, ...semanticWarnings];
   const result: WorkspaceAnalysis = {
     schemaVersion: 1,
     workspaceId: workspace.id,
@@ -56,7 +85,7 @@ export async function inspectWorkspace(config: CodexProConfig, guard: PathGuard,
       scannedBytes: extraction.scannedBytes,
       symbolCount: symbols.length,
       relationshipCount: relationships.length,
-      truncated: inventory.coverage.truncated || extraction.truncated,
+      truncated: inventory.coverage.truncated || extraction.truncated || semanticTruncated || symbols.length < semanticSymbols.length + fallbackSymbols.length || relationships.length < fileRelationships.length + semanticRelationships.length,
       warnings
     },
     warnings,
@@ -64,6 +93,7 @@ export async function inspectWorkspace(config: CodexProConfig, guard: PathGuard,
     cache: { hit: false, key }
   };
   setCachedWorkspaceAnalysis(key, result);
+  await savePersistentWorkspaceAnalysis(workspace, result).catch(() => undefined);
   return result;
 }
 
@@ -169,6 +199,7 @@ export async function searchWorkspaceStructured(
         .map((symbol) => symbol.path)
     );
     for (const relationship of analysis.relationships) {
+      if (relationship.fromSymbolId || relationship.toSymbolId) continue;
       if (!definitionPaths.has(relationship.to)) continue;
       const group = relationship.kind === "tests" ? "tests" : "references";
       if (group === "tests" && !options.includeTests) continue;
@@ -193,6 +224,44 @@ export async function searchWorkspaceStructured(
         reasons: [reason, `${relationship.kind} relationship`],
         confidence: "strong",
         source: relationship.source
+      });
+    }
+  }
+
+  if (intent === "references" || intent === "impact") {
+    const seedIds = analysis.symbols
+      .filter((symbol) => symbol.name.toLowerCase() === lowered && symbol.id)
+      .map((symbol) => symbol.id as string);
+    const neighborhood = reverseSymbolNeighborhood(analysis.symbols, analysis.relationships, seedIds, { maxDepth: intent === "impact" ? 4 : 1 });
+    const symbolsById = new Map(analysis.symbols.filter((symbol) => symbol.id).map((symbol) => [symbol.id as string, symbol]));
+    for (const [symbolId, distance] of neighborhood.distance) {
+      if (distance === 0) continue;
+      const symbol = symbolsById.get(symbolId);
+      if (!symbol || symbol.virtual || symbol.kind === "module" || !inScope(symbol.path)) continue;
+      const file = analysis.files.find((candidate) => candidate.path === symbol.path);
+      const group = file?.role === "test" ? "tests" : "references";
+      if (group === "tests" && !options.includeTests) continue;
+      const reason = distance === 1 ? "direct symbol dependency" : `transitive symbol dependency (${distance} hops)`;
+      const existing = matches.find((match) => match.path === symbol.path && match.group === group);
+      if (existing) {
+        if (!existing.reasons.includes(reason)) existing.reasons.push(reason);
+        existing.score = Math.max(existing.score, Math.max(120, 190 - distance * 10));
+        existing.confidence = symbol.confidence === "inferred" ? existing.confidence : "strong";
+        continue;
+      }
+      if (matches.length >= candidateLimit) {
+        candidateLimitReached = true;
+        continue;
+      }
+      matches.push({
+        path: symbol.path,
+        line: symbol.line,
+        text: `${symbol.kind} ${symbol.name}`,
+        group,
+        score: Math.max(120, 190 - distance * 10),
+        reasons: [reason, "CodexGraph reverse traversal"],
+        confidence: symbol.confidence === "inferred" ? "inferred" : "strong",
+        source: symbol.source ?? "CodexGraph"
       });
     }
   }

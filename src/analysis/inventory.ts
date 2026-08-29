@@ -6,6 +6,10 @@ import type { PathGuard, Workspace } from "../guard.js";
 import { classifyFileRole, classifyLanguage, isEntrypoint, isGeneratedFile } from "./classify.js";
 import type { InventoryFile, InventoryResult } from "./types.js";
 
+function shouldContentHash(file: Pick<InventoryFile, "role" | "generated">): boolean {
+  return !file.generated && (file.role === "source" || file.role === "test" || file.role === "config");
+}
+
 export async function inventoryWorkspace(config: CodexProConfig, guard: PathGuard, workspace: Workspace): Promise<InventoryResult> {
   const maxFiles = config.analysisLimits.maxInventoryFiles;
   const candidates = await listFiles(guard, workspace, { root: ".", includeHidden: true, maxFiles: maxFiles + 1 });
@@ -19,15 +23,22 @@ export async function inventoryWorkspace(config: CodexProConfig, guard: PathGuar
       if (!stat.isFile()) continue;
       await guard.assertTextFile(resolved.absPath, textScanByteLimit(config));
       const language = classifyLanguage(resolved.relPath);
-      files.push({
+      const role = classifyFileRole(resolved.relPath, language);
+      const generated = isGeneratedFile(resolved.relPath);
+      const file: InventoryFile = {
         path: resolved.relPath,
         bytes: stat.size,
         modifiedMs: stat.mtimeMs,
         language,
-        role: classifyFileRole(resolved.relPath, language),
-        generated: isGeneratedFile(resolved.relPath),
+        role,
+        generated,
         entrypoint: isEntrypoint(resolved.relPath)
-      });
+      };
+      if (shouldContentHash(file)) {
+        const content = await fsp.readFile(resolved.absPath);
+        file.contentHash = createHash("sha256").update(content).digest("hex");
+      }
+      files.push(file);
     } catch {
       // Blocked, escaping, unreadable, binary, and oversized files are absent by design.
     }
@@ -35,7 +46,7 @@ export async function inventoryWorkspace(config: CodexProConfig, guard: PathGuar
 
   files.sort((a, b) => a.path.localeCompare(b.path));
   const fingerprint = createHash("sha256")
-    .update(files.map((file) => `${file.path}:${file.bytes}:${file.modifiedMs}`).join("\n"))
+    .update(files.map((file) => `${file.path}:${file.bytes}:${file.modifiedMs}:${file.contentHash ?? "metadata"}`).join("\n"))
     .digest("hex");
   const warnings = truncated ? [`Inventory truncated at ${maxFiles} files.`] : [];
   return {

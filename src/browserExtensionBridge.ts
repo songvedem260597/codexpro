@@ -1,6 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { CodexProError } from "./guard.js";
+import { createRuntimeTraceContext, currentRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext } from "./analysis/runtimeTrace.js";
 
 const BRIDGE_HOST = "127.0.0.1";
 const CODEXPRO_EXTENSION_ORIGIN = "chrome-extension://gndipignbnipohooclcbhjliikamjlpl";
@@ -657,7 +658,7 @@ export function getBrowserExtensionProfileWorkspaceBinding(profileId: string): s
   return profileWorkspaceBindings.get(String(profileId || "").trim()) || "";
 }
 
-export async function runBrowserExtensionCommand(
+async function runBrowserExtensionCommandCore(
   action: string,
   args: Record<string, unknown>,
   profileId?: string
@@ -703,4 +704,49 @@ export async function runBrowserExtensionCommand(
   });
   if (!deliver(state, profile, command)) profile.queued.push(command);
   return await result;
+}
+
+export async function runBrowserExtensionCommand(
+  action: string,
+  args: Record<string, unknown>,
+  profileId?: string
+): Promise<Record<string, any>> {
+  const parent = currentRuntimeTraceContext();
+  if (!parent) return runBrowserExtensionCommandCore(action, args, profileId);
+
+  const workspace = { id: parent.workspaceId };
+  const context = createRuntimeTraceContext(workspace, parent);
+  const startedAtMs = Date.now();
+  try {
+    const result = await runWithRuntimeTraceContext(context, () => runBrowserExtensionCommandCore(action, args, profileId));
+    const endedAtMs = Date.now();
+    await recordRuntimeTraceSpan(workspace, {
+      traceId: context.traceId,
+      spanId: context.spanId,
+      parentSpanId: context.parentSpanId,
+      kind: "browser-extension",
+      name: "extension-command",
+      action: String(action || "").slice(0, 160),
+      source: "browser-extension-bridge",
+      status: "ok",
+      startedAtMs,
+      endedAtMs
+    }).catch(() => undefined);
+    return result;
+  } catch (error) {
+    const endedAtMs = Date.now();
+    await recordRuntimeTraceSpan(workspace, {
+      traceId: context.traceId,
+      spanId: context.spanId,
+      parentSpanId: context.parentSpanId,
+      kind: "browser-extension",
+      name: "extension-command",
+      action: String(action || "").slice(0, 160),
+      source: "browser-extension-bridge",
+      status: "error",
+      startedAtMs,
+      endedAtMs
+    }).catch(() => undefined);
+    throw error;
+  }
 }
