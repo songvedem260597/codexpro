@@ -315,7 +315,7 @@ section { margin-bottom: 38px; }
 .send-debug-timeline time, .send-debug-timeline code { margin-right: 7px; color: #79a7ff; }
 .request-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 11px; }
 .request-card-foot > span { color: #687489; font-size: 12px; }
-.request-card-actions { display: flex; align-items: center; gap: 8px; }
+.request-card-actions { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .chat-response { margin-top: 14px; border: 1px solid #2d3748; border-radius: var(--radius-panel); background: #0b0f15; overflow: hidden; }
 .chat-response.is-inline { height: 260px; min-height: 260px; max-height: 260px; margin-top: 0; display: flex; flex-direction: column; }
 .chat-response.is-streaming { border-color: #3f5690; box-shadow: 0 0 0 1px #668cff19; }
