@@ -6,6 +6,7 @@ import {
   discoverGeminiScoutModels,
   inspectOpenCodeScoutCapability,
   inspectOpenCodeSubagentCapability,
+  parseCodexProAudit,
   parseOpenCodeAgentList,
   parseOpenCodeJsonEvents,
   shouldRunGeminiScout
@@ -93,6 +94,13 @@ assert(preferredModels[0] === 'lan20127/ag/gemini-3.6-flash-low', 'explicit auth
 assert(shouldRunGeminiScout('Check the upstream SDK API release notes before fixing this dependency.'), 'external research signal did not route to Gemini scout');
 assert(!shouldRunGeminiScout('Fix the local parser bug in src/parser.ts and update its unit test.'), 'local-only handoff incorrectly routed to Gemini scout');
 assert(!shouldRunGeminiScout('Bump the package version and update the local changelog.'), 'local package/version maintenance incorrectly routed to Gemini scout');
+
+const auditPass = parseCodexProAudit('CODEXPRO_AUDIT=PASS\nSUMMARY=All acceptance criteria are verified.\nREQUIRED_FIXES=NONE');
+assert(auditPass.valid && auditPass.verdict === 'PASS', 'valid CodexPro PASS audit was not parsed');
+const auditFail = parseCodexProAudit('CODEXPRO_AUDIT=FAIL\nSUMMARY=One requirement is still missing.\nREQUIRED_FIXES:\n- Add the missing retry guard.\n- Cover it with a regression test.');
+assert(auditFail.valid && auditFail.verdict === 'FAIL' && auditFail.fixes.length === 2, 'valid CodexPro FAIL audit was not parsed');
+const invalidAuditFail = parseCodexProAudit('CODEXPRO_AUDIT=FAIL\nSUMMARY=Something is wrong.\nREQUIRED_FIXES=NONE');
+assert(!invalidAuditFail.valid, 'FAIL audit without actionable fixes was incorrectly accepted');
 
 const ndjson = [
   JSON.stringify({ type: 'step_start', sessionID: 'ses_parent', part: { type: 'step-start' } }),

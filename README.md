@@ -307,6 +307,23 @@ codexpro watch-handoff --agent opencode --subagents --yes
 
 For handoffs that mention APIs, SDKs, dependencies, providers, releases, upstream projects, or external documentation, CodexPro can also route a separate read-only `gemini-scout` child for external research. It discovers Gemini Flash models from the local OpenCode catalog, prefers candidates with a visible provider credential, performs a bounded live probe, injects the selected model only at runtime, and verifies from the exported child session that the exact model was actually used. If no Gemini Flash candidate is healthy, the scout records a fallback reason and the normal repository investigation/fixer continues. Set `CODEXPRO_GEMINI_SCOUT_MODEL` to prefer a specific locally available authenticated Gemini Flash model, and use `codexpro doctor --live-scout-check --model <working-parent-model>` for an end-to-end scout check.
 
+For bounded autonomous correction, use `loop-handoff` without `--review-command`. CodexPro preserves the original task as an immutable audit target, lets the executor work, optionally runs the configured test command, then launches the independent read-only `codexpro-auditor`. A FAIL verdict must include actionable fixes; CodexPro writes those fixes into the next `current-plan.md` and runs another iteration. The task completes only after the audit returns PASS and executor/test failures have not invalidated that PASS. An external `--review-command` is still available as an override.
+
+```bash
+codexpro loop-handoff --agent opencode --model opencode/big-pickle --subagents --run-tests "npm test" --max-iters 3 --yes
+```
+
+```mermaid
+flowchart LR
+    CP[CodexPro assigns work] --> AG[Agent executes]
+    AG --> QA[CodexPro audits result]
+    QA --> D{Meets requirements?}
+    D -->|No| CP
+    D -->|Yes| DONE[Task complete]
+```
+
+`npm run audit:live` runs a real read-only OpenCode audit fixture and requires an exportable audit session. Use `--audit-model <provider/model>` or `CODEXPRO_AUDIT_MODEL` when the audit should use a different model from the executor.
+
 `handoff_to_agent` is planning-only over MCP. CodexPro does not expose arbitrary local agent execution as a remote ChatGPT tool.
 
 ## Troubleshooting

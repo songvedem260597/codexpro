@@ -1,18 +1,23 @@
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import {
+  CODEXPRO_AUDITOR_AGENT,
   CODEXPRO_EXPLORE_AGENT,
   CODEXPRO_ORCHESTRATOR_AGENT,
   CODEXPRO_SCOUT_ORCHESTRATOR_AGENT,
   GEMINI_SCOUT_AGENT,
   analyzeOpenCodeSessionExport,
   analyzeOpenCodeSubagentEvents,
+  buildCodexProAuditPrompt,
   buildGeminiScoutPrompt,
   buildOpenCodeInvestigationPrompt,
   buildVerifiedInvestigationContext,
   discoverGeminiScoutModels,
+  effectivePermission,
   inspectOpenCodeScoutCapability,
   inspectOpenCodeSubagentCapability,
+  parseCodexProAudit,
+  parseOpenCodeAgentList,
   parseOpenCodeJsonEvents,
   shouldRunGeminiScout
 } from './opencode-subagents.mjs';
@@ -484,6 +489,105 @@ export async function runVerifiedGeminiScout(options) {
   };
 }
 
+export function inspectCodexProAuditorCapability(command, root, configDir = '') {
+  const result = spawnSyncPortable(command, ['agent', 'list'], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 2_000_000,
+    env: runtimeEnv(configDir)
+  });
+  if (result.error || result.status !== 0) {
+    return { ready: false, reason: result.error?.message || `opencode agent list exited ${result.status ?? 'null'}`, auditor: null };
+  }
+  const auditor = parseOpenCodeAgentList(result.stdout || '').find((agent) => agent.name === CODEXPRO_AUDITOR_AGENT);
+  if (!auditor || auditor.mode !== 'primary') return { ready: false, reason: `${CODEXPRO_AUDITOR_AGENT} is not registered as a primary agent`, auditor };
+  const required = { read: 'allow', edit: 'deny', bash: 'deny', task: 'deny', webfetch: 'deny', websearch: 'deny' };
+  const mismatches = Object.entries(required).filter(([permission, expected]) => effectivePermission(auditor, permission, '*') !== expected);
+  if (mismatches.length) {
+    return {
+      ready: false,
+      reason: mismatches.map(([permission, expected]) => `${permission} must be ${expected}`).join('; '),
+      auditor
+    };
+  }
+  return { ready: true, reason: '', auditor };
+}
+
+export async function runCodexProNativeAudit(options) {
+  const capability = inspectCodexProAuditorCapability(options.command, options.root, options.configDir || '');
+  if (!capability.ready) {
+    return { ok: false, verdict: '', summary: '', fixes: [], reason: capability.reason, capability };
+  }
+  const prompt = buildCodexProAuditPrompt({
+    originalTask: options.originalTask,
+    iterationPlan: options.iterationPlan,
+    diffPath: options.diffPath,
+    statusPath: options.statusPath,
+    testsPath: options.testsPath,
+    testsRan: options.testsRan
+  });
+  const result = await runProcessCaptured(options.command, [
+    'run',
+    '--format',
+    'json',
+    '--agent',
+    CODEXPRO_AUDITOR_AGENT,
+    ...(options.model ? ['--model', options.model] : []),
+    prompt
+  ], {
+    cwd: options.root,
+    configDir: options.configDir || '',
+    timeoutMs: options.timeoutMs ?? 120_000,
+    maxOutputBytes: options.maxOutputBytes ?? 120_000
+  });
+  if (result.exitCode !== 0) {
+    return { ok: false, verdict: '', summary: '', fixes: [], reason: processFailureReason(result), capability, result };
+  }
+  const parsedEvents = parseOpenCodeJsonEvents(result.stdout);
+  const text = parsedEvents.events
+    .filter((entry) => entry?.type === 'text' && typeof entry?.part?.text === 'string')
+    .map((entry) => entry.part.text)
+    .join('\n')
+    .trim();
+  const audit = parseCodexProAudit(text);
+  const sessionId = parsedEvents.events.find((entry) => entry?.sessionID)?.sessionID || '';
+  if (!audit.valid || !sessionId) {
+    return {
+      ok: false,
+      verdict: audit.verdict,
+      summary: audit.summary,
+      fixes: audit.fixes,
+      reason: !sessionId ? 'audit session id was not observed' : 'auditor did not return a valid CODEXPRO_AUDIT verdict',
+      capability,
+      result,
+      raw: text
+    };
+  }
+  const exported = exportChildSession(options.command, options.root, sessionId, options.maxOutputBytes ?? 120_000, options.configDir || '');
+  if (exported.exitCode !== 0 || !exported.analysis?.parsed) {
+    return { ok: false, verdict: audit.verdict, summary: audit.summary, fixes: audit.fixes, reason: 'audit session could not be exported for verification', capability, result, sessionId, raw: text };
+  }
+  if (exported.analysis.forbiddenTools.length) {
+    return { ok: false, verdict: audit.verdict, summary: audit.summary, fixes: audit.fixes, reason: `auditor used forbidden tools: ${exported.analysis.forbiddenTools.join(', ')}`, capability, result, sessionId, raw: text };
+  }
+  if (options.model && exported.analysis.model && exported.analysis.model !== options.model) {
+    return { ok: false, verdict: audit.verdict, summary: audit.summary, fixes: audit.fixes, reason: `auditor used ${exported.analysis.model} instead of ${options.model}`, capability, result, sessionId, raw: text };
+  }
+  return {
+    ok: true,
+    verdict: audit.verdict,
+    summary: audit.summary,
+    fixes: audit.fixes,
+    raw: text,
+    sessionId,
+    model: exported.analysis.model || options.model || '',
+    tools: exported.analysis.toolNames,
+    durationMs: result.durationMs,
+    capability,
+    result
+  };
+}
+
 export function executorPromptWithInvestigation(basePlanPrompt, evidence) {
   const verified = (Array.isArray(evidence) ? evidence : [evidence]).filter((item) => item?.verified);
   if (!verified.length) return basePlanPrompt;
@@ -536,6 +640,7 @@ export function relativeAgentFiles() {
     path.join('.opencode', 'agents', 'codexpro-orchestrator.md'),
     path.join('.opencode', 'agents', 'codexpro-explore.md'),
     path.join('.opencode', 'agents', 'codexpro-scout-orchestrator.md'),
-    path.join('.opencode', 'agents', 'gemini-scout.md')
+    path.join('.opencode', 'agents', 'gemini-scout.md'),
+    path.join('.opencode', 'agents', 'codexpro-auditor.md')
   ];
 }

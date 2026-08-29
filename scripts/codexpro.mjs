@@ -16,6 +16,7 @@ import {
   verifyCloudflaredAsset
 } from './cloudflared-release.mjs';
 import {
+  CODEXPRO_AUDITOR_AGENT,
   CODEXPRO_EXPLORE_AGENT,
   CODEXPRO_ORCHESTRATOR_AGENT,
   CODEXPRO_SCOUT_ORCHESTRATOR_AGENT,
@@ -25,8 +26,10 @@ import {
 import {
   buildOpenCodeExecutorArgs,
   executorPromptWithInvestigation,
+  inspectCodexProAuditorCapability,
   inspectGeminiScoutAvailability,
   inspectOpenCodeRuntime,
+  runCodexProNativeAudit,
   runOpenCodeModelProbe,
   runVerifiedGeminiScout,
   runVerifiedOpenCodeInvestigation
@@ -59,7 +62,7 @@ Usage:
   codexpro review --root /path/to/repo [--staged] [--path src/file.ts] [--json]
   codexpro execute-handoff --agent opencode --model provider/model
   codexpro watch-handoff --agent opencode --model provider/model
-  codexpro loop-handoff --agent opencode --model provider/model --review-command "node ./reviewer.js --status {{status_file}} --diff {{diff_file}} --plan-file {{plan_file}}"
+  codexpro loop-handoff --agent opencode --model provider/model --subagents --run-tests "npm test" --max-iters 3 --yes
   codexpro --root /path/to/repo
   codexpro ngrok --hostname your-domain.ngrok-free.dev
   codexpro tailscale --hostname your-device.your-tailnet.ts.net
@@ -174,12 +177,14 @@ Watch handoff options:
   --yes                     Start automatic local execution without startup confirmation.
 
 Loop handoff options:
-  codexpro loop-handoff --agent opencode --model provider/model --review-command "reviewer --status {{status_file}} --diff {{diff_file}} --plan-file {{plan_file}}"
+  codexpro loop-handoff --agent opencode --model provider/model --subagents --run-tests "npm test" --yes
+  --audit-model <provider/model>
+                             Optional OpenCode model for CodexPro's independent read-only audit. Defaults to the executor model when available.
   --review-command <template>
-                             Local reviewer/orchestrator command. It should print CODEXPRO_REVIEW=PASS or CODEXPRO_REVIEW=FAIL.
-                             On FAIL it must update .ai-bridge/current-plan.md before the next iteration.
-  --max-iters <n>           Maximum execute/review iterations. Default: 3.
-  --run-tests <template>    Optional local verification command before review.
+                             Optional external reviewer override. If omitted, CodexPro runs its built-in read-only auditor and writes follow-up plans on FAIL.
+                             External reviewers should print CODEXPRO_REVIEW=PASS or CODEXPRO_REVIEW=FAIL and update current-plan.md on FAIL.
+  --max-iters <n>           Maximum execute/audit iterations. Default: 3.
+  --run-tests <template>    Optional local verification command before audit.
   --allow-implicit-review-verdict
                              Infer PASS/FAIL from reviewer exit code and plan changes when no CODEXPRO_REVIEW line is printed.
   --allow-review-pass-on-failure
@@ -189,8 +194,8 @@ Loop handoff options:
                              Stop if an executor iteration produces no git diff.
   --stop-if-same-diff       Stop if an executor iteration repeats the previous diff.
   --require-human-confirmation
-                             Ask before running a reviewer-generated follow-up plan.
-  --dry-run                 Print executor/reviewer/test commands without executing them.
+                             Ask before running an audit-generated follow-up plan.
+  --dry-run                 Print executor/audit/test commands without executing them.
   --yes                     Start the local loop without startup confirmation.
 
 Default agent mode:
@@ -236,8 +241,8 @@ Watch for new handoff plans and execute them locally:
   codexpro watch-handoff --agent opencode --model provider/model --yes
   codexpro watch-handoff --agent custom --command "node ./agent.js --task-file {{plan_file}}" --yes
 
-Run a bounded local execute/review loop:
-  codexpro loop-handoff --agent opencode --model provider/model --review-command "node ./reviewer.js --status {{status_file}} --diff {{diff_file}} --plan-file {{plan_file}}" --max-iters 3 --yes
+Run a bounded local execute/audit loop:
+  codexpro loop-handoff --agent opencode --model provider/model --subagents --run-tests "npm test" --max-iters 3 --yes
 
 Stable URL mode after one-time Cloudflare tunnel setup:
   codexpro stable --root /path/to/repo --hostname codexpro.example.com --tunnel-name codexpro
@@ -2263,6 +2268,7 @@ function loopArtifactPaths(root, contextDir) {
     logPath: path.join(bridgeDir, 'execution-log.jsonl'),
     testsPath: path.join(bridgeDir, 'loop-tests.txt'),
     reviewPath: path.join(bridgeDir, 'loop-review.md'),
+    targetPath: path.join(bridgeDir, 'loop-target-plan.md'),
     statePath: path.join(bridgeDir, 'loop-handoff-state.json')
   };
 }
@@ -2290,13 +2296,14 @@ function loopTemplateReplacements(root, contextDir, iteration, paths) {
     log_file: paths.logPath,
     tests_file: paths.testsPath,
     review_file: paths.reviewPath,
+    target_file: paths.targetPath,
     state_file: paths.statePath
   };
 }
 
 function buildReviewerCommand(args, root, contextDir, iteration, paths) {
   const template = String(args.reviewCommand ?? '').trim();
-  if (!template) throw new Error('loop-handoff requires --review-command <template>.');
+  if (!template) return null;
   const replacements = loopTemplateReplacements(root, contextDir, iteration, paths);
   return buildTemplateCommand(template, replacements, replacements, 'Review');
 }
@@ -2590,6 +2597,62 @@ function writeLoopReviewOutput(paths, result, commandText, verdict, nextPlanChan
   fs.writeFileSync(paths.reviewPath, content, { mode: 0o600 });
 }
 
+function writeNativeAuditOutput(paths, audit, iteration, nextPlanChanged) {
+  fs.mkdirSync(paths.bridgeDir, { recursive: true, mode: 0o700 });
+  const content = [
+    '# CodexPro Native Audit',
+    '',
+    `Updated: ${new Date().toISOString()}`,
+    `Iteration: ${iteration}`,
+    `Auditor: ${CODEXPRO_AUDITOR_AGENT}`,
+    audit.model ? `Model: ${audit.model}` : '',
+    audit.sessionId ? `Audit session: ${audit.sessionId}` : '',
+    `Verdict: ${audit.verdict || 'unknown'}`,
+    audit.summary ? `Summary: ${audit.summary}` : '',
+    `Next plan changed: ${nextPlanChanged ? 'yes' : 'no'}`,
+    audit.durationMs != null ? `Duration: ${audit.durationMs} ms` : '',
+    audit.reason ? `Audit error: ${audit.reason}` : '',
+    '',
+    audit.fixes?.length ? `## Required fixes\n\n${audit.fixes.map((fix) => `- ${fix}`).join('\n')}` : '',
+    '',
+    codeBlock('Raw auditor result', audit.raw || '')
+  ].filter(Boolean).join('\n');
+  fs.writeFileSync(paths.reviewPath, content, { mode: 0o600 });
+}
+
+function nativeAuditFollowupPlan(originalTask, audit, iteration) {
+  return [
+    '# CodexPro Audit Remediation',
+    '',
+    `Audit iteration: ${iteration}`,
+    '',
+    '## Original acceptance target',
+    '',
+    String(originalTask || '').trim(),
+    '',
+    '## Audit summary',
+    '',
+    audit.summary || 'The implementation did not satisfy the acceptance target.',
+    '',
+    '## Required fixes',
+    '',
+    ...(audit.fixes?.length ? audit.fixes.map((fix) => `- ${fix}`) : ['- Re-check the implementation against every original requirement and address the failed audit evidence.']),
+    '',
+    '## Execution instruction',
+    '',
+    'Implement the required fixes only, preserve already-correct behavior, and run the relevant verification before returning control to CodexPro for another independent audit.',
+    ''
+  ].join('\n');
+}
+
+function nativeAuditConfig(args, request) {
+  return {
+    command: resolveAgentCommand('opencode'),
+    model: String(args.auditModel ?? process.env.CODEXPRO_AUDIT_MODEL ?? (request.commandInfo.agent === 'opencode' ? request.commandInfo.model : '') ?? '').trim(),
+    configDir: path.join(projectRoot, '.opencode')
+  };
+}
+
 async function runLoopCommand(commandInfo, root, timeoutMs, maxOutputBytes, label) {
   if (!commandAvailableFromRoot(commandInfo.command, root)) {
     throw new Error(`${label} command was not found: ${commandInfo.command}`);
@@ -2608,9 +2671,18 @@ function assertLoopCommandAvailable(commandInfo, root, label) {
   }
 }
 
-function preflightLoopCommands(request, reviewCommand, testCommand) {
+function preflightLoopCommands(request, reviewCommand, testCommand, args) {
   assertLoopCommandAvailable(request.commandInfo, request.root, 'Executor');
-  assertLoopCommandAvailable(reviewCommand, request.root, 'Review');
+  if (reviewCommand) {
+    assertLoopCommandAvailable(reviewCommand, request.root, 'Review');
+  } else {
+    const audit = nativeAuditConfig(args, request);
+    if (!commandAvailableFromRoot(audit.command, request.root)) {
+      throw new Error(`CodexPro native audit requires OpenCode, but the command was not found: ${audit.command}`);
+    }
+    const capability = inspectCodexProAuditorCapability(audit.command, request.root, audit.configDir);
+    if (!capability.ready) throw new Error(`CodexPro native auditor is unavailable: ${capability.reason}`);
+  }
   if (testCommand) assertLoopCommandAvailable(testCommand, request.root, 'Test');
 }
 
@@ -2624,8 +2696,8 @@ async function confirmLoopHandoff(args, root) {
     labelValue('Agent', args.agent ?? 'opencode'),
     ...(args.model ? [labelValue('Model', args.model)] : []),
     labelValue('Max iters', args.maxIters ?? '3'),
-    labelValue('Reviewer', args.reviewCommand ?? ''),
-    'This runs local executor and reviewer commands in a bounded loop. It does not automate ChatGPT or any browser session.'
+    labelValue('Audit', args.reviewCommand ? `external: ${args.reviewCommand}` : `CodexPro native: ${CODEXPRO_AUDITOR_AGENT}`),
+    'This runs a bounded local execute/audit loop. CodexPro only completes when the audit passes; it does not automate ChatGPT or any browser session.'
   ]);
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
@@ -2656,7 +2728,8 @@ async function confirmLoopContinuation(args, root, iteration, planPath) {
   }
 }
 
-function printLoopDryRun(request, reviewCommand, testCommand, maxIters) {
+function printLoopDryRun(request, reviewCommand, testCommand, maxIters, args) {
+  const audit = reviewCommand ? `external: ${commandDisplay(reviewCommand)}` : `CodexPro native: ${CODEXPRO_AUDITOR_AGENT}${args.auditModel ? ` (${args.auditModel})` : ''}`;
   printBox('CodexPro loop-handoff dry run', [
     labelValue('Workspace', request.root),
     labelValue('Plan', path.relative(request.root, request.planPath)),
@@ -2665,7 +2738,8 @@ function printLoopDryRun(request, reviewCommand, testCommand, maxIters) {
     labelValue('Max iters', String(maxIters)),
     labelValue('Executor', request.commandText),
     ...(testCommand ? [labelValue('Tests', commandDisplay(testCommand))] : []),
-    labelValue('Reviewer', commandDisplay(reviewCommand)),
+    labelValue('Audit', audit),
+    'Flow: CodexPro assigns -> agent executes -> CodexPro audits -> FAIL loops with a remediation plan -> PASS completes.',
     'No command was executed and no .ai-bridge result files were changed.'
   ]);
 }
@@ -2694,15 +2768,18 @@ async function runLoopHandoff(argv) {
   if (args.requireCleanGitStart) assertCleanGitStart(root, contextDir);
 
   let request = loadHandoffExecution({ ...args, root, contextDir });
+  const originalTask = request.planText;
   const reviewCommand = buildReviewerCommand(args, root, contextDir, 1, paths);
   const testCommand = buildTestCommand(args, root, contextDir, 1, paths);
+  const nativeAudit = !reviewCommand;
+  const auditConfig = nativeAudit ? nativeAuditConfig(args, request) : null;
 
   if (args.dryRun) {
-    printLoopDryRun(request, reviewCommand, testCommand, maxIters);
+    printLoopDryRun(request, reviewCommand, testCommand, maxIters, args);
     return;
   }
 
-  preflightLoopCommands(request, reviewCommand, testCommand);
+  preflightLoopCommands(request, reviewCommand, testCommand, args);
 
   const approved = await confirmLoopHandoff(args, root);
   if (!approved) {
@@ -2710,15 +2787,18 @@ async function runLoopHandoff(argv) {
     return;
   }
 
+  fs.mkdirSync(paths.bridgeDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(paths.targetPath, originalTask, { mode: 0o600 });
+
   printBox('CodexPro loop-handoff', [
     labelValue('Workspace', root),
     labelValue('Plan', path.relative(root, paths.planPath)),
     labelValue('Agent', request.commandInfo.agent),
     ...(request.commandInfo.model ? [labelValue('Model', request.commandInfo.model)] : []),
     labelValue('Max iters', String(maxIters)),
-    labelValue('Reviewer', commandDisplay(reviewCommand)),
+    labelValue('Audit', nativeAudit ? `CodexPro native: ${CODEXPRO_AUDITOR_AGENT}${auditConfig?.model ? ` (${auditConfig.model})` : ''}` : `external: ${commandDisplay(reviewCommand)}`),
     ...(testCommand ? [labelValue('Tests', commandDisplay(testCommand))] : []),
-    'Mode: local execute/review loop. No ChatGPT or browser session is automated.'
+    'Mode: CodexPro assigns -> agent executes -> CodexPro audits -> FAIL loops -> PASS completes. No ChatGPT or browser session is automated.'
   ]);
 
   let previousChangeFingerprint = '';
@@ -2782,21 +2862,64 @@ async function runLoopHandoff(argv) {
     const iterationReviewCommand = buildReviewerCommand(args, root, contextDir, iteration, paths);
     const beforeReviewPlanExists = fs.existsSync(paths.planPath);
     const beforeReviewPlan = beforeReviewPlanExists ? readTextFileBounded(paths.planPath, maxReadBytes) : '';
-    const reviewResult = await runLoopCommand(iterationReviewCommand, root, reviewTimeoutMs, maxOutputBytes, 'Review');
-    const afterReviewPlanExists = fs.existsSync(paths.planPath);
-    const afterReviewPlan = afterReviewPlanExists ? readTextFileBounded(paths.planPath, maxReadBytes) : '';
-    const planDeletedByReview = beforeReviewPlanExists && !afterReviewPlanExists;
-    const nextPlanChanged = planDeletedByReview || (afterReviewPlanExists && planHash(afterReviewPlan) !== planHash(beforeReviewPlan));
-    const hasUsableFollowupPlan = afterReviewPlanExists && afterReviewPlan.trim() && !isScaffoldedHandoffPlan(afterReviewPlan);
-    let verdict = explicitReviewVerdict(`${reviewResult.stdout}\n${reviewResult.stderr}`);
-    if (!verdict && args.allowImplicitReviewVerdict && nextPlanChanged && reviewResult.exitCode === 0) verdict = 'FAIL';
-    if (!verdict && args.allowImplicitReviewVerdict && afterReviewPlanExists && reviewResult.exitCode === 0 && execution.result?.exitCode === 0 && (!testResult || testResult.exitCode === 0)) verdict = 'PASS';
-    writeLoopReviewOutput(paths, reviewResult, commandDisplay(iterationReviewCommand), verdict, nextPlanChanged);
+    let reviewResult = null;
+    let auditResult = null;
+    let verdict = '';
+    let nextPlanChanged = false;
+    let afterReviewPlanExists = beforeReviewPlanExists;
+    let afterReviewPlan = beforeReviewPlan;
+    let hasUsableFollowupPlan = false;
+    let reviewExitCode = 0;
+
+    if (nativeAudit) {
+      statusLine('wait', `CodexPro auditing iteration ${iteration} with ${CODEXPRO_AUDITOR_AGENT}...`);
+      auditResult = await runCodexProNativeAudit({
+        command: auditConfig.command,
+        root,
+        configDir: auditConfig.configDir,
+        model: auditConfig.model,
+        originalTask,
+        iterationPlan: request.planText,
+        diffPath: paths.diffPath,
+        statusPath: paths.statusPath,
+        testsPath: paths.testsPath,
+        testsRan: Boolean(iterationTestCommand),
+        timeoutMs: reviewTimeoutMs,
+        maxOutputBytes
+      });
+      reviewExitCode = auditResult.ok ? 0 : (auditResult.result?.exitCode ?? 1);
+      verdict = auditResult.ok ? auditResult.verdict : '';
+      if (auditResult.ok && verdict === 'FAIL') {
+        const followupPlan = nativeAuditFollowupPlan(originalTask, auditResult, iteration);
+        fs.writeFileSync(paths.planPath, followupPlan, { mode: 0o600 });
+      }
+      afterReviewPlanExists = fs.existsSync(paths.planPath);
+      afterReviewPlan = afterReviewPlanExists ? readTextFileBounded(paths.planPath, maxReadBytes) : '';
+      nextPlanChanged = afterReviewPlanExists && planHash(afterReviewPlan) !== planHash(beforeReviewPlan);
+      hasUsableFollowupPlan = afterReviewPlanExists && afterReviewPlan.trim() && !isScaffoldedHandoffPlan(afterReviewPlan);
+      writeNativeAuditOutput(paths, auditResult, iteration, nextPlanChanged);
+      if (auditResult.ok) {
+        statusLine(verdict === 'PASS' ? 'ok' : 'warn', `CodexPro audit ${verdict} on iteration ${iteration}${auditResult.summary ? `: ${auditResult.summary}` : ''}`);
+      }
+    } else {
+      reviewResult = await runLoopCommand(iterationReviewCommand, root, reviewTimeoutMs, maxOutputBytes, 'Review');
+      reviewExitCode = reviewResult.exitCode;
+      afterReviewPlanExists = fs.existsSync(paths.planPath);
+      afterReviewPlan = afterReviewPlanExists ? readTextFileBounded(paths.planPath, maxReadBytes) : '';
+      const planDeletedByReview = beforeReviewPlanExists && !afterReviewPlanExists;
+      nextPlanChanged = planDeletedByReview || (afterReviewPlanExists && planHash(afterReviewPlan) !== planHash(beforeReviewPlan));
+      hasUsableFollowupPlan = afterReviewPlanExists && afterReviewPlan.trim() && !isScaffoldedHandoffPlan(afterReviewPlan);
+      verdict = explicitReviewVerdict(`${reviewResult.stdout}\n${reviewResult.stderr}`);
+      if (!verdict && args.allowImplicitReviewVerdict && nextPlanChanged && reviewResult.exitCode === 0) verdict = 'FAIL';
+      if (!verdict && args.allowImplicitReviewVerdict && afterReviewPlanExists && reviewResult.exitCode === 0 && execution.result?.exitCode === 0 && (!testResult || testResult.exitCode === 0)) verdict = 'PASS';
+      writeLoopReviewOutput(paths, reviewResult, commandDisplay(iterationReviewCommand), verdict, nextPlanChanged);
+    }
+
     let acceptedVerdict = verdict;
     let rejectedPassReason = '';
-    if (verdict === 'PASS' && reviewResult.exitCode !== 0) {
+    if (verdict === 'PASS' && reviewExitCode !== 0) {
       acceptedVerdict = 'FAIL';
-      rejectedPassReason = 'reviewer_failed';
+      rejectedPassReason = nativeAudit ? 'audit_failed' : 'reviewer_failed';
     } else if (verdict === 'PASS' && !args.allowReviewPassOnFailure && execution.result?.exitCode !== 0) {
       acceptedVerdict = 'FAIL';
       rejectedPassReason = 'executor_failed';
@@ -2811,9 +2934,13 @@ async function runLoopHandoff(argv) {
       plan_hash: currentPlanHash,
       agent: request.commandInfo.agent,
       model: request.commandInfo.model || undefined,
+      audit_mode: nativeAudit ? 'codexpro_native' : 'external_reviewer',
+      audit_agent: nativeAudit ? CODEXPRO_AUDITOR_AGENT : undefined,
+      audit_model: nativeAudit ? auditResult?.model || auditConfig?.model || undefined : undefined,
+      audit_session_id: nativeAudit ? auditResult?.sessionId || undefined : undefined,
       executor_exit_code: execution.result?.exitCode ?? null,
       test_exit_code: testResult?.exitCode ?? null,
-      reviewer_exit_code: reviewResult.exitCode,
+      reviewer_exit_code: reviewExitCode,
       reviewer_verdict: verdict,
       verdict: acceptedVerdict,
       rejected_pass_reason: rejectedPassReason || undefined,
@@ -2830,6 +2957,10 @@ async function runLoopHandoff(argv) {
       updatedAt: new Date().toISOString(),
       iteration,
       maxIters,
+      auditMode: nativeAudit ? 'codexpro_native' : 'external_reviewer',
+      auditAgent: nativeAudit ? CODEXPRO_AUDITOR_AGENT : undefined,
+      auditModel: nativeAudit ? auditResult?.model || auditConfig?.model || undefined : undefined,
+      auditSessionId: nativeAudit ? auditResult?.sessionId || undefined : undefined,
       reviewerVerdict: verdict,
       verdict: acceptedVerdict,
       rejectedPassReason: rejectedPassReason || undefined,
@@ -2839,57 +2970,57 @@ async function runLoopHandoff(argv) {
       hasUsableFollowupPlan: Boolean(hasUsableFollowupPlan),
       changedThisIteration,
       executorExitCode: execution.result?.exitCode ?? null,
-      reviewerExitCode: reviewResult.exitCode
+      reviewerExitCode: reviewExitCode
     });
 
     if (acceptedVerdict === 'PASS') {
       finalVerdict = 'PASS';
       stopReason = 'pass';
-      statusLine('ok', `Reviewer passed on iteration ${iteration}.`);
+      statusLine('ok', `CodexPro accepted the task on iteration ${iteration}.`);
       break;
     }
 
     if (rejectedPassReason) {
-      if (rejectedPassReason === 'reviewer_failed') {
+      if (rejectedPassReason === 'reviewer_failed' || rejectedPassReason === 'audit_failed') {
         finalVerdict = 'FAIL';
-        stopReason = 'reviewer_error';
-        statusLine('warn', `Reviewer returned PASS, but reviewer process exited with code ${reviewResult.exitCode ?? 'null'}.`);
+        stopReason = nativeAudit ? 'audit_error' : 'reviewer_error';
+        statusLine('warn', `${nativeAudit ? 'CodexPro auditor' : 'Reviewer'} returned PASS, but the audit process was not healthy (exit ${reviewExitCode ?? 'null'}).`);
         break;
       }
       if (rejectedPassReason === 'executor_failed') {
         finalVerdict = 'FAIL';
         stopReason = 'executor_failed';
-        statusLine('warn', `Reviewer returned PASS, but executor exited with code ${execution.result?.exitCode ?? 'null'}.`);
+        statusLine('warn', `Audit returned PASS, but executor exited with code ${execution.result?.exitCode ?? 'null'}.`);
         break;
       }
       finalVerdict = 'FAIL';
       stopReason = 'tests_failed';
-      statusLine('warn', `Reviewer returned PASS, but tests exited with code ${testResult?.exitCode ?? 'null'}.`);
+      statusLine('warn', `Audit returned PASS, but tests exited with code ${testResult?.exitCode ?? 'null'}.`);
       break;
     }
 
     if (acceptedVerdict !== 'FAIL') {
       finalVerdict = 'FAIL';
-      stopReason = reviewResult.exitCode === 0 ? 'unknown_verdict' : 'reviewer_error';
-      statusLine('warn', `Stopping because reviewer did not return a usable verdict. Exit code: ${reviewResult.exitCode ?? 'null'}`);
+      stopReason = reviewExitCode === 0 ? 'unknown_verdict' : (nativeAudit ? 'audit_error' : 'reviewer_error');
+      statusLine('warn', `Stopping because ${nativeAudit ? 'CodexPro auditor' : 'reviewer'} did not return a usable verdict. Exit code: ${reviewExitCode ?? 'null'}${auditResult?.reason ? `; ${auditResult.reason}` : ''}`);
       break;
     }
 
-    if (reviewResult.exitCode !== 0) {
+    if (reviewExitCode !== 0) {
       finalVerdict = 'FAIL';
-      stopReason = 'reviewer_error';
-      statusLine('warn', `Stopping because reviewer exited with code ${reviewResult.exitCode ?? 'null'}.`);
+      stopReason = nativeAudit ? 'audit_error' : 'reviewer_error';
+      statusLine('warn', `Stopping because ${nativeAudit ? 'CodexPro auditor' : 'reviewer'} failed with code ${reviewExitCode ?? 'null'}.`);
       break;
     }
 
     if (!nextPlanChanged || !hasUsableFollowupPlan) {
       finalVerdict = 'FAIL';
       stopReason = 'no_followup_plan';
-      statusLine('warn', 'Reviewer returned FAIL but did not update current-plan.md.');
+      statusLine('warn', `${nativeAudit ? 'CodexPro audit' : 'Reviewer'} returned FAIL but no usable remediation plan is available.`);
       break;
     }
 
-    statusLine('wait', `Reviewer requested another iteration (${iteration}/${maxIters}).`);
+    statusLine('wait', `CodexPro audit requested another execution iteration (${iteration}/${maxIters}).`);
   }
 
   appendBridgeLog(root, contextDir, {
@@ -3155,6 +3286,9 @@ async function runDoctor(argv) {
     record(capability.subagentDepth >= 1 ? 'ok' : 'warn', 'OC child depth', `subagent_depth=${capability.subagentDepth}`);
     record(capability.taskPermission === 'allow' ? 'ok' : 'warn', 'OC Task access', `${CODEXPRO_EXPLORE_AGENT}: ${capability.taskPermission || 'not allowed'}`);
     record(capability.explorerEdit === 'deny' && capability.explorerBash === 'deny' && capability.explorerTask === 'deny' ? 'ok' : 'warn', 'OC child safety', `edit=${capability.explorerEdit || '?'} bash=${capability.explorerBash || '?'} task=${capability.explorerTask || '?'}`);
+
+    const auditorCapability = inspectCodexProAuditorCapability(opencodeCommand, root, openCodeConfigDir);
+    record(auditorCapability.ready ? 'ok' : 'warn', 'OC native audit', auditorCapability.ready ? CODEXPRO_AUDITOR_AGENT : auditorCapability.reason);
 
     const scoutCapability = inspectOpenCodeRuntime(opencodeCommand, root, openCodeConfigDir, { inspector: inspectOpenCodeScoutCapability });
     record(scoutCapability.ready ? 'ok' : 'warn', 'OC Gemini scout', scoutCapability.ready
