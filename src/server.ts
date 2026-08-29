@@ -3104,7 +3104,14 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           data_base64: z.string().min(1).max(14_000_000)
         })).max(4).optional().describe("Files to attach to send_chat_request. Base64 payload; maximum 4 files."),
         url: z.string().optional().describe("HTTP(S) URL for open_tab or navigate."),
-        selector: z.string().optional().describe("CSS selector from snapshot for click or type."),
+        selector: z.string().optional().describe("CSS selector or semantic @e ref from snapshot."),
+        ref: z.string().max(80).optional().describe("Stable semantic element ref such as @e3 from snapshot."),
+        role: z.string().max(80).optional().describe("Semantic ARIA or implicit role locator, for example button or textbox."),
+        name: z.string().max(500).optional().describe("Accessible-name locator, optionally combined with role."),
+        placeholder: z.string().max(500).optional().describe("Input placeholder locator."),
+        label: z.string().max(500).optional().describe("Associated label or aria-label locator."),
+        test_id: z.string().max(500).optional().describe("Exact data-testid or data-test locator."),
+        nth: z.number().int().min(0).max(1000).optional().describe("Zero-based match index for a semantic locator. Default: 0."),
         text: z.string().optional().describe("Text to enter for type."),
         key: z.string().optional().describe("Key for press, such as Enter, Tab, Escape, or ArrowDown."),
         expression: z.string().max(100000).optional().describe("JavaScript expression for evaluate. Runs in the selected page context."),
@@ -3116,6 +3123,13 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           action: z.enum(["snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "screenshot"]),
           url: z.string().optional(),
           selector: z.string().optional(),
+          ref: z.string().max(80).optional(),
+          role: z.string().max(80).optional(),
+          name: z.string().max(500).optional(),
+          placeholder: z.string().max(500).optional(),
+          label: z.string().max(500).optional(),
+          test_id: z.string().max(500).optional(),
+          nth: z.number().int().min(0).max(1000).optional(),
           text: z.string().optional(),
           key: z.string().optional(),
           expression: z.string().max(100000).optional(),
@@ -3124,10 +3138,14 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           delta_x: z.number().optional(),
           delta_y: z.number().optional(),
           max_chars: z.number().int().min(500).max(50000).optional(),
-          full_page: z.boolean().optional()
+          full_page: z.boolean().optional(),
+          delta: z.boolean().optional()
         })).max(50).optional().describe("Batch up to 50 browser actions without extra MCP round-trips."),
         max_chars: z.number().int().min(500).max(50000).optional().describe("Maximum visible page text returned by snapshot. Default: 20000."),
-        full_page: z.boolean().optional().describe("Capture beyond the viewport for screenshot. Default: false.")
+        full_page: z.boolean().optional().describe("Capture beyond the viewport for screenshot. Default: false."),
+        delta: z.boolean().optional().describe("For snapshot, return only semantic elements/text changed since the previous snapshot on this tab."),
+        trace: z.boolean().optional().describe("Collect sanitized CDP network, console, and page lifecycle events around this action."),
+        trace_ms: z.number().int().min(0).max(10000).optional().describe("Milliseconds to keep collecting trace events after the action. Default: 750.")
       },
       annotations: BASH_ANNOTATIONS,
       _meta: {
@@ -3196,10 +3214,20 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           steps: args.steps,
           url: args.url,
           selector: args.selector,
+          ref: args.ref,
+          role: args.role,
+          name: args.name,
+          placeholder: args.placeholder,
+          label: args.label,
+          test_id: args.test_id,
+          nth: args.nth,
           text: args.text,
           key: args.key,
           max_chars: args.max_chars,
-          full_page: args.full_page
+          full_page: args.full_page,
+          delta: args.delta,
+          trace: args.trace,
+          trace_ms: args.trace_ms
         }, selectedProfile);
         result.browser_backend = "extension";
         result.profile_id = selectedProfile;
@@ -3216,6 +3244,13 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
             action: step.action,
             url: step.url,
             selector: step.selector,
+            ref: step.ref,
+            role: step.role,
+            name: step.name,
+            placeholder: step.placeholder,
+            label: step.label,
+            testId: step.test_id,
+            nth: step.nth,
             text: step.text,
             key: step.key,
             expression: step.expression,
@@ -3224,14 +3259,25 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
             deltaX: step.delta_x,
             deltaY: step.delta_y,
             maxChars: step.max_chars,
-            fullPage: step.full_page
+            fullPage: step.full_page,
+            delta: step.delta
           })) : undefined,
           url: args.url,
           selector: args.selector,
+          ref: args.ref,
+          role: args.role,
+          name: args.name,
+          placeholder: args.placeholder,
+          label: args.label,
+          testId: args.test_id,
+          nth: args.nth,
           text: args.text,
           key: args.key,
           maxChars: args.max_chars,
-          fullPage: args.full_page
+          fullPage: args.full_page,
+          delta: args.delta,
+          trace: args.trace,
+          traceMs: args.trace_ms
         });
         result.browser_backend = "dedicated";
       }

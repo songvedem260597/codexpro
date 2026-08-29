@@ -112,11 +112,25 @@ interface BridgeState {
   pending: Map<string, PendingResult>;
   activeProfileId?: string;
   connectorInfo?: (profileId: string) => BrowserExtensionConnectorInfo;
+  profileListeners: Set<(profiles: ExtensionProfileSummary[]) => void>;
+  profileNotifyTimer?: NodeJS.Timeout;
 }
 
 const profileWorkspaceRoots = new Map<string, string>();
 const profileWorkspaceBindings = new Map<string, string>();
 let singleton: BridgeState | undefined;
+
+function scheduleProfileNotification(state: BridgeState): void {
+  if (state.profileNotifyTimer) return;
+  state.profileNotifyTimer = setTimeout(() => {
+    state.profileNotifyTimer = undefined;
+    const profiles = listBrowserExtensionProfiles();
+    for (const listener of state.profileListeners) {
+      try { listener(profiles); } catch {}
+    }
+  }, 25);
+  state.profileNotifyTimer.unref?.();
+}
 
 function isLoopbackAddress(value: string | undefined): boolean {
   return value === "127.0.0.1" || value === "::1" || value === "::ffff:127.0.0.1";
@@ -209,6 +223,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   if (Array.isArray(body.tabs)) profile.tabs = body.tabs.slice(0, 500);
   if (Array.isArray(body.recent_conversations)) profile.recentConversations = body.recent_conversations.slice(0, 3);
   state.profiles.set(id, profile);
+  scheduleProfileNotification(state);
   return profile;
 }
 
@@ -311,6 +326,7 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
   if (req.url === "/activate") {
     const profile = profileFromBody(state, body);
     state.activeProfileId = profile.id;
+    scheduleProfileNotification(state);
     syncWaiters(state);
     sendJson(req, res, 200, { ok: true, active_profile_id: profile.id });
     return;
@@ -387,6 +403,7 @@ export function ensureBrowserExtensionBridge(options: BrowserExtensionBridgeOpti
   const state = {} as BridgeState;
   state.profiles = new Map();
   state.pending = new Map();
+  state.profileListeners = new Set();
   state.connectorInfo = options.connectorInfo;
   state.server = http.createServer((req, res) => {
     handleRequest(state, req, res).catch((error) => {
@@ -500,6 +517,12 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
     .sort((a, b) => Number(b.active) - Number(a.active) || b.last_seen.localeCompare(a.last_seen));
 }
 
+export function subscribeBrowserExtensionProfiles(listener: (profiles: ExtensionProfileSummary[]) => void): () => void {
+  const state = ensureBrowserExtensionBridge();
+  state.profileListeners.add(listener);
+  return () => state.profileListeners.delete(listener);
+}
+
 export function setBrowserExtensionProfileWorkspace(profileId: string, root: string): void {
   const id = String(profileId || "").trim();
   const workspaceRoot = String(root || "").trim();
@@ -508,6 +531,7 @@ export function setBrowserExtensionProfileWorkspace(profileId: string, root: str
   else profileWorkspaceRoots.delete(id);
   const profile = singleton?.profiles.get(id);
   if (profile) profile.workspaceRoot = workspaceRoot;
+  if (singleton) scheduleProfileNotification(singleton);
 }
 
 export function setBrowserExtensionProfileWorkspaceBinding(profileId: string, root: string): void {

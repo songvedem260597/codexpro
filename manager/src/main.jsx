@@ -10,7 +10,7 @@ const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
 const RESPONSE_AUTO_SCROLL_RESUME_MS = 3000;
 const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
-const REALTIME_POLL_MS = 1000;
+const REALTIME_WATCHDOG_MS = 30000;
 const NEW_CHAT_TARGET = "__codexpro_new_chat__";
 const ALL_ALLOWED_WORKSPACES = "__codexpro_all_allowed__";
 const ROLLOVER_CONTEXT_MAX_CHARS = 9000;
@@ -420,7 +420,7 @@ function ResponseText({ text, truncated }) {
   return <div className="chat-message-text response-rich-text">{blocks}</div>;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.46";
+const WORKER_EXTENSION_VERSION = "0.5.48";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -482,6 +482,12 @@ function extensionReady(version) {
     if (current !== target[index]) return current > target[index];
   }
   return true;
+}
+
+function profileSafeForWorkerUpdate(profile) {
+  const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+  const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
+  return profile?.activity === "idle" && Number(profile?.busy_request_count || 0) === 0 && !hasBusyTab;
 }
 
 function profileRequestChats(profile) {
@@ -866,9 +872,19 @@ function App() {
 
   useEffect(() => {
     void refresh(true);
-    const statusTimer = window.setInterval(() => void refreshStatus(), REALTIME_POLL_MS);
+    const unsubscribe = api.onBrowserProfiles?.((payload) => {
+      const profiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
+      setStatus((current) => {
+        if (!current) return current;
+        const previousById = new Map((current.browserProfiles || []).map((profile) => [profile.profile_id, profile]));
+        const browserProfiles = profiles.map((profile) => ({ ...previousById.get(profile.profile_id), ...profile }));
+        return applyConversationTitleOverrides({ ...current, checkedAt: payload?.checked_at || new Date().toISOString(), browserProfiles }, conversationTitleOverridesRef.current);
+      });
+    });
+    const statusTimer = window.setInterval(() => void refreshStatus(), REALTIME_WATCHDOG_MS);
     const projectsTimer = window.setInterval(() => void refresh(false), 30000);
     return () => {
+      unsubscribe?.();
       window.clearInterval(statusTimer);
       window.clearInterval(projectsTimer);
     };
@@ -1015,12 +1031,15 @@ function App() {
   const profileSummary = useMemo(() => {
     const allProfiles = status?.browserProfiles || [];
     const profiles = allProfiles.filter((profile) => profile.connected);
+    const outdated = profiles.filter((profile) => !extensionReady(profile.extension_version));
     return {
       working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length,
       idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile.extension_version))).length,
       hung: allProfiles.filter((profile) => !profile.connected).length,
       missing: profiles.filter((profile) => profile.activity === "no_chatgpt" && !profile.connector_installed).length,
-      reload: profiles.filter((profile) => !extensionReady(profile.extension_version)).length
+      reload: outdated.filter(profileSafeForWorkerUpdate).length,
+      deferredUpdate: outdated.filter((profile) => !profileSafeForWorkerUpdate(profile)).length,
+      outdated: outdated.length
     };
   }, [status?.browserProfiles]);
 
@@ -1214,13 +1233,20 @@ function App() {
 
   async function reloadProfiles() {
     if (!profileSummary.reload) return;
-    const message = `Update worker extension lên ${WORKER_EXTENSION_VERSION} cho ${profileSummary.reload} profile đang dùng bản cũ? Các tab ChatGPT đang mở sẽ được giữ nguyên.`;
+    const deferredNote = profileSummary.deferredUpdate ? ` ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua để không gián đoạn task.` : "";
+    const message = `Update worker extension lên ${WORKER_EXTENSION_VERSION} cho ${profileSummary.reload} worker đang rảnh?${deferredNote}`;
     if (!window.confirm(message)) return;
     setBusy("reload-profiles");
     setError("");
     try {
       const result = await api.reloadProfiles();
-      notify(result.count ? `Đang update ${result.count} worker extension lên ${result.version || WORKER_EXTENSION_VERSION}` : `Worker extension đã ở bản ${WORKER_EXTENSION_VERSION}`);
+      if (result.count) {
+        notify(`Đang update ${result.count} worker đang rảnh${result.deferred ? ` · bỏ qua ${result.deferred} worker đang làm việc` : ""}`);
+      } else if (result.deferred) {
+        notify(`${result.deferred} worker đang làm việc · chưa update để tránh gián đoạn`);
+      } else {
+        notify(`Worker extension đã ở bản ${WORKER_EXTENSION_VERSION}`);
+      }
       window.setTimeout(() => void refresh(false), result.mode === "bootstrap_reload" || result.mode === "mixed_update" ? 8000 : 3500);
     } catch (err) {
       setError(err?.message || String(err));
@@ -2007,12 +2033,17 @@ function App() {
                 <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
                 <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
                 {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
+                {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
               </div>
               <button
                 className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}
                 onClick={reloadProfiles}
                 disabled={Boolean(busy) || profileSummary.reload === 0}
-                title={profileSummary.reload ? `${profileSummary.reload} profile đang dùng worker cũ hơn ${WORKER_EXTENSION_VERSION}` : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
+                title={profileSummary.reload
+                  ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${WORKER_EXTENSION_VERSION}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
+                  : profileSummary.deferredUpdate
+                    ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
+                    : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
               >
                 {busy === "reload-profiles" ? "Đang update worker…" : "Update worker extension"}
               </button>

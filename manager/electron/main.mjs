@@ -24,7 +24,7 @@ const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
 
-const WORKER_EXTENSION_VERSION = "0.5.46";
+const WORKER_EXTENSION_VERSION = "0.5.48";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const REPO_SCAN_CACHE_MS = 60000;
 const REPO_SCAN_MAX_DIRECTORIES = 50000;
@@ -426,6 +426,48 @@ async function captureClipboardImage() {
   return requestFileSummary(filePath);
 }
 
+const browserProfileStreamControllers = new WeakMap();
+
+function startBrowserProfileEventStream(win) {
+  browserProfileStreamControllers.get(win)?.abort();
+  const controller = new AbortController();
+  browserProfileStreamControllers.set(win, controller);
+  win.once("closed", () => controller.abort());
+  void (async () => {
+    while (!controller.signal.aborted && !win.isDestroyed()) {
+      try {
+        const base = await runtimeBaseStatus();
+        if (!base.local.ok) throw new Error("CodexPro local server is offline.");
+        const response = await fetch(`http://127.0.0.1:${base.config.port}/browser-events`, {
+          headers: base.token ? { authorization: `Bearer ${base.token}` } : {},
+          signal: controller.signal
+        });
+        if (!response.ok || !response.body) throw new Error(`Browser event stream HTTP ${response.status}`);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (!controller.signal.aborted && !win.isDestroyed()) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let boundary;
+          while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+            const frame = buffer.slice(0, boundary).replace(/\r/g, "");
+            buffer = buffer.slice(boundary + 2);
+            const data = frame.split("\n").filter((line) => line.startsWith("data:" )).map((line) => line.slice(5).trim()).join("\n");
+            if (!data) continue;
+            const payload = JSON.parse(data);
+            if (!win.isDestroyed()) win.webContents.send("codexpro:browser-profiles", payload);
+          }
+        }
+      } catch (error) {
+        if (controller.signal.aborted || win.isDestroyed()) break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  })();
+}
+
 function createWindow() {
   const smokeMode = process.env.CODEXPRO_MANAGER_SMOKE === "1";
   const win = new BrowserWindow({
@@ -456,6 +498,7 @@ function createWindow() {
   const devUrl = process.env.CODEXPRO_MANAGER_DEV_URL;
   if (devUrl) void win.loadURL(devUrl);
   else void win.loadFile(path.join(here, "..", "dist", "index.html"), process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "requests" ? { query: { page: "requests" } } : undefined);
+  win.webContents.on("did-finish-load", () => startBrowserProfileEventStream(win));
 
   if (smokeMode) {
     win.webContents.once("did-finish-load", async () => {
@@ -1893,15 +1936,34 @@ async function reloadChromeProfiles() {
   const connectedProfiles = status.browserProfiles.filter((profile) => profile.connected);
   if (!connectedProfiles.length) throw new Error("Không có Chrome profile nào đang kết nối.");
   const outdated = connectedProfiles.filter((profile) => !versionAtLeast(profile.extension_version));
-  if (!outdated.length) return { ok: true, mode: "up_to_date", count: 0, failed: 0, version: WORKER_EXTENSION_VERSION };
+  if (!outdated.length) return { ok: true, mode: "up_to_date", count: 0, failed: 0, deferred: 0, outdated: 0, version: WORKER_EXTENSION_VERSION };
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
 
+  const safeToReload = (profile) => {
+    const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
+    const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
+    return profile.activity === "idle" && Number(profile.busy_request_count || 0) === 0 && !hasBusyTab;
+  };
+  const reloadable = outdated.filter(safeToReload);
+  const deferred = outdated.filter((profile) => !safeToReload(profile));
+  if (!reloadable.length) {
+    return {
+      ok: true,
+      mode: "deferred_busy",
+      count: 0,
+      failed: 0,
+      deferred: deferred.length,
+      outdated: outdated.length,
+      version: WORKER_EXTENSION_VERSION
+    };
+  }
+
   const token = readToken(status.config.tokenFile);
-  const legacy = outdated.filter((profile) => {
+  const legacy = reloadable.filter((profile) => {
     const [major = 0, minor = 0] = String(profile.extension_version || "").split(".").map(Number);
     return !(major > 0 || (major === 0 && minor >= 4));
   });
-  const modern = outdated.filter((profile) => !legacy.includes(profile));
+  const modern = reloadable.filter((profile) => !legacy.includes(profile));
 
   const legacyResults = await Promise.allSettled(legacy.map((profile) => localMcpTool(status.config, token, "browser_control", {
     action: "open_tab",
@@ -1915,12 +1977,28 @@ async function reloadChromeProfiles() {
 
   const results = [...legacyResults, ...modernResults];
   const updated = results.filter((result) => result.status === "fulfilled").length;
-  if (!updated) throw new Error("Không profile worker cũ nào nhận được lệnh update.");
+  const racedBusy = results.filter((result) => result.status === "rejected" && /WORKER_BUSY/i.test(String(result.reason?.message || result.reason || ""))).length;
+  const hardFailures = results.length - updated - racedBusy;
+  const deferredCount = deferred.length + racedBusy;
+  if (!updated && hardFailures) throw new Error("Không worker đang rảnh nào nhận được lệnh update.");
+  if (!updated) {
+    return {
+      ok: true,
+      mode: "deferred_busy",
+      count: 0,
+      failed: 0,
+      deferred: deferredCount,
+      outdated: outdated.length,
+      version: WORKER_EXTENSION_VERSION
+    };
+  }
   return {
     ok: true,
     mode: legacy.length ? (modern.length ? "mixed_update" : "bootstrap_reload") : "extension_reload",
     count: updated,
-    failed: outdated.length - updated,
+    failed: hardFailures,
+    deferred: deferredCount,
+    outdated: outdated.length,
     version: WORKER_EXTENSION_VERSION
   };
 }
