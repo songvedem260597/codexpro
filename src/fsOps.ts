@@ -271,15 +271,17 @@ export async function repoTree(config: CodexProConfig, guard: PathGuard, workspa
 export async function listFiles(
   guard: PathGuard,
   workspace: Workspace,
-  options: { root?: string; glob?: string; includeHidden?: boolean; maxFiles: number }
+  options: { root?: string; glob?: string; includeHidden?: boolean; maxFiles: number; excludePrefixes?: string[] }
 ): Promise<string[]> {
   const target = guard.resolve(workspace, options.root ?? ".");
   const stat = await fsp.stat(target.absPath);
   const files: string[] = [];
+  const excludedPrefixes = (options.excludePrefixes ?? []).map((prefix) => prefix.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, ""));
+  const excluded = (rel: string) => excludedPrefixes.some((prefix) => rel === prefix || rel.startsWith(`${prefix}/`));
 
   async function addFile(absFile: string): Promise<void> {
     const rel = displayPath(absFile, workspace.root);
-    if (guard.isBlockedRelativePath(rel)) return;
+    if (guard.isBlockedRelativePath(rel) || excluded(rel)) return;
     if (!options.includeHidden && rel.split("/").some(isHiddenName)) return;
     if (options.glob && !minimatch(rel, options.glob, { dot: true })) return;
     files.push(rel);
@@ -298,7 +300,7 @@ export async function listFiles(
       if (files.length >= options.maxFiles) return;
       const abs = path.join(absDir, entry.name);
       const rel = displayPath(abs, workspace.root);
-      if (guard.isBlockedRelativePath(rel)) continue;
+      if (guard.isBlockedRelativePath(rel) || excluded(rel)) continue;
       if (!options.includeHidden && rel.split("/").some(isHiddenName)) continue;
       if (entry.isDirectory()) await walk(abs);
       else if (entry.isFile()) await addFile(abs);

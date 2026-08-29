@@ -25,6 +25,7 @@ function symbolByName(analysis, name, file) {
 try {
   await write('package.json', JSON.stringify({ name: 'codexgraph-fixture', type: 'module', scripts: { test: 'node --test', build: 'tsc -p tsconfig.json' } }, null, 2));
   await write('tsconfig.json', JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, baseUrl: '.', paths: { '@core/*': ['src/*'] } }, include: ['src/**/*.ts', 'test/**/*.ts'] }, null, 2));
+  await write('.ai-bridge/transient.ts', `export const transient = true;\n`);
   await write('src/state.ts', `export let total = 0;
 export function setTotal(value: number) { total = value; }
 export function getTotal() { return total; }
@@ -62,6 +63,13 @@ bus.on('ready', onReady);
 bus.on('multi', () => void 1);
 bus.on('multi', () => void 2);
 `);
+  const hooksSource = `declare function useEffect(callback: () => void): void;
+export function Hooks() {
+  useEffect(() => console.log('alpha'));
+  useEffect(() => console.log('beta'));
+}
+`;
+  await write('src/hooks.ts', hooksSource);
   await write('src/routes.ts', `declare const app: { get(path: string, handler: () => unknown): void };
 export function healthHandler() { return { ok: true }; }
 app.get('/health', healthHandler);
@@ -83,6 +91,7 @@ void testTop();
 
   const first = await analysisApi.inspectWorkspace(config, guard, workspace);
   assert.equal(first.cache.hit, false);
+  assert(!first.files.some((file) => file.path.startsWith('.ai-bridge/')), 'analysis inventory must exclude transient .ai-bridge files');
   assert.match(first.cache.key, /:graph-v2:/, 'CodexGraph cache key did not invalidate the previous semantic engine snapshot');
   const leaf = symbolByName(first, 'leaf', 'src/service.ts');
   const middle = symbolByName(first, 'middle', 'src/service.ts');
@@ -128,9 +137,14 @@ void testTop();
   const eventNode = first.symbols.find((symbol) => symbol.id === 'virtual:event:ready');
   const routeNode = first.symbols.find((symbol) => symbol.id === 'virtual:route:GET /health');
   assert(eventNode?.id, 'event node missing');
-  const multiCallbacks = first.symbols.filter((symbol) => symbol.path === 'src/events.ts' && symbol.kind === 'function' && symbol.name.startsWith('callback:call:bus.on:multi:arg1:occ'));
+  const multiCallbacks = first.symbols.filter((symbol) => symbol.path === 'src/events.ts' && symbol.kind === 'function' && symbol.name.startsWith('callback:call:bus.on:multi:arg1:key'));
   assert.equal(multiCallbacks.length, 2, 'same-channel anonymous callbacks collapsed into one symbol');
   assert.equal(new Set(multiCallbacks.map((symbol) => symbol.id)).size, 2, 'same-channel anonymous callbacks must have distinct stable ids');
+  const hooks = symbolByName(first, 'Hooks', 'src/hooks.ts');
+  const stableHookCallbackIds = new Set(first.symbols
+    .filter((symbol) => symbol.containerId === hooks.id && symbol.kind === 'function' && symbol.name.startsWith('callback:call:useEffect::arg0:key'))
+    .map((symbol) => symbol.id));
+  assert.equal(stableHookCallbackIds.size, 2, 'hook callbacks were not indexed with distinct anchored ids');
   assert(routeNode?.id, 'route node missing');
   assert(first.relationships.some((edge) => edge.kind === 'routes' && edge.toSymbolId === routeNode.id), 'route registration edge missing');
 
@@ -155,6 +169,21 @@ void testTop();
   const shiftReview = await analysisApi.reviewWorkspaceChanges(config, guard, workspace, { changedPaths: ['src/service.ts'] });
   assert.equal(shiftReview.graphDiff?.removedSymbols ?? 0, 0, 'line-only shift produced removed symbols');
   assert.equal(shiftReview.graphDiff?.removedRelationships ?? 0, 0, 'line-only shift produced removed dependency edges');
+
+  await write('src/hooks.ts', `declare function useEffect(callback: () => void): void;
+export function Hooks() {
+  useEffect(() => console.log('new'));
+  useEffect(() => console.log('alpha'));
+  useEffect(() => console.log('beta'));
+}
+`);
+  analysisApi.invalidateWorkspaceAnalysis(workspace.id);
+  const insertedHook = await analysisApi.inspectWorkspace(config, guard, workspace);
+  const insertedHooks = symbolByName(insertedHook, 'Hooks', 'src/hooks.ts');
+  const insertedHookCallbackIds = new Set(insertedHook.symbols
+    .filter((symbol) => symbol.containerId === insertedHooks.id && symbol.kind === 'function' && symbol.name.startsWith('callback:call:useEffect::arg0:key'))
+    .map((symbol) => symbol.id));
+  for (const id of stableHookCallbackIds) assert(insertedHookCallbackIds.has(id), `existing hook callback id changed after inserting a sibling callback: ${id}`);
 
   await write('src/service.ts', `import { getTotal, setTotal } from './state.js';
 export function leaf() { return getTotal(); }
