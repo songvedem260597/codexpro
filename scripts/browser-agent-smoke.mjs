@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRetryableChatTurnBusyError, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
-import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant } from "../manager/src/chat-transcript.js";
+import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "../manager/src/chat-transcript.js";
 import { projectSelectionChanged } from "../manager/src/chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "../manager/src/chat-response-audit.js";
 
@@ -49,6 +49,12 @@ assert.equal(mergeProgressiveResponseText("Phần một - phần hai đầy đ�
 const optimisticTranscript = [...cachedTranscript, { id: "optimistic-user-1", role: "user", text: "Yêu cầu mới", pending: true, submissionState: "pending", createdAt: "2026-08-29T00:00:00.000Z" }];
 assert.deepEqual(cacheableTranscriptMessages(optimisticTranscript), cachedTranscript, "an outgoing message without a send result must never be persisted as confirmed chat history");
 assert.deepEqual(cacheableTranscriptMessages([...cachedTranscript, { id: "optimistic-user-legacy", role: "user", text: "Tin giả từ cache cũ" }]), cachedTranscript, "legacy optimistic bubbles without send evidence must be removed during cache migration");
+const generatedImageTranscript = trimRecentTranscriptMessages([
+  { id: "image-user", role: "user", text: "Tạo ảnh chân dung" },
+  { id: "image-assistant", role: "assistant", text: "", images: [{ id: "generated-1", dataUrl: "data:image/jpeg;base64,preview" }] }
+]);
+assert.deepEqual(generatedImageTranscript.map((message) => message.id), ["image-user", "image-assistant"], "an image-only assistant turn must remain visible in the transcript");
+assert.deepEqual(cacheableTranscriptMessages(generatedImageTranscript), [{ id: "image-user", role: "user", text: "Tạo ảnh chân dung" }], "generated image data URLs must stay runtime-only and never bloat the transcript cache");
 const firstStreamTranscript = mergeNetworkStreamTranscript(optimisticTranscript, {
   conversationId: "conversation-1",
   text: "Đang xử lý"
@@ -328,8 +334,8 @@ assert.match(worker, /const shouldProbeDom=Boolean\(conversationId&&\(tab\.activ
 assert.match(worker, /for\(const tabId of chatDomActivityByTab\.keys\(\)\)if\(!liveTabIds\.has\(tabId\)\)chatDomActivityByTab\.delete\(tabId\)/, "closed tabs must be pruned from the DOM activity cache");
 assert.match(worker, /testId==='stop-button'/, "DOM activity probe must recognize ChatGPT's stop control");
 assert.match(worker, /const domToolBusy=Boolean\(domActivity\.busy&&domActivity\.source==='dom_tool'\)/, "DOM tool calls must remain working after the initial network request completes");
-assert.match(worker, /busy:networkBusy\|\|domToolBusy\|\|canonicalBusy/, "profile status must treat canonical generation and active DOM tool calls as working");
-assert.match(worker, /settling:!networkBusy&&!domToolBusy&&!canonicalBusy&&domActivity\.busy/, "only non-tool, non-canonical DOM activity may use the finalizing state");
+assert.match(worker, /busy:networkBusy\|\|domImageBusy\|\|domToolBusy\|\|canonicalBusy/, "profile status must treat image generation, canonical generation, and active DOM tool calls as working");
+assert.match(worker, /settling:!networkBusy&&!domImageBusy&&!domToolBusy&&!canonicalBusy&&domActivity\.busy/, "only non-image, non-tool, non-canonical DOM activity may use the finalizing state");
 assert.match(worker, /activity_text:streamBusy\?/, "active ChatGPT work must expose one concise network-or-DOM activity line");
 assert.match(worker, /connector_server_fingerprint:String\(stored\.connectorServerFingerprint\|\|''\)/, "worker heartbeats must report the connector URL fingerprint");
 assert.match(worker, /Tool activity proves that some CodexPro definition is callable[\s\S]*?return false/, "tool activity alone must not falsely verify a profile-bound connector");
@@ -427,6 +433,15 @@ assert.match(conversationRolloverSource, /previousAttempt\?\.status === "creatin
 assert.match(managerUi, /function buildConversationRolloverPrompt\([\s\S]*?Bối cảnh gần nhất từ chat trước:[\s\S]*?Tiếp tục từ đúng việc còn dang dở/, "the new chat handoff must preserve recent conversation context instead of restarting blindly");
 assert.match(worker, /ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS = 2500/, "attachment upload fallback must not impose the old 12 second wait");
 assert.match(worker, /Date\.now\(\)\+400,Date\.now\(\)\+400/, "attachment preview stability should use the shorter verified window");
+assert.match(worker, /image-gen-loading-state/, "ChatGPT image generation must have a dedicated DOM loading signal");
+assert.match(worker, /Generated image:/, "a completed generated image must be recognized as a final response");
+assert.match(worker, /ChatGPT đang tạo ảnh/, "image generation must expose a dedicated activity label instead of generic processing");
+assert.match(worker, /image_response_ready/, "image completion evidence must propagate through profile and response state");
+assert.match(worker, /reconcileChatNetworkCompletion\(tab\.id,conversationId,'dom_image'\)/, "final generated-image DOM must reconcile stale generation state");
+assert.match(worker, /canonicalActivity\.busy&&!domActivity\.image_response_ready/, "final generated-image DOM must suppress stale canonical busy state");
+assert.match(worker, /networkStream\.in_progress&&!domActivity\.image_response_ready/, "final generated-image DOM must suppress a stale network stream");
+assert.match(worker, /response_kind:imageResponseReady\|\|imageGenerationLoading\?'image':'text'/, "DOM response reads must classify image generations without requiring assistant text");
+assert.match(worker, /imageResponseReady\?\{canonical_busy:false,canonical_response_ready:true,network_stream_in_progress:false,response_ready:true,response_kind:'image'\}/, "completed image responses must clear stale canonical and stream busy flags returned to Manager");
 assert.match(worker, /const maxAgeMs=.*DOM_ACTIVITY_PROBE_CACHE_MS/, "DOM activity probes must support a bounded freshness override for send preflight reuse");
 assert.match(worker, /Promise\.all\(\[[\s\S]*?ensureChatNetworkStreamCapture\(tab\.id\)[\s\S]*?chatRequestState\(tab\.id,conversationId\)[\s\S]*?chatDomActivityState\(tab\.id,conversationId,\{maxAgeMs:750\}\)[\s\S]*?chatAttachmentOwnership\(tab\.id,targetConversationId\)/, "send preflight checks must run in parallel and reuse only a sub-second DOM probe");
 const workerSendSource = worker.slice(worker.indexOf("if(action==='send_chat_request')"), worker.indexOf("if(action==='rename_chat')"));
@@ -517,7 +532,10 @@ assert.doesNotMatch(canonicalReaderSource, /status==='finished_successfully'/, "
 const responseReaderSource = worker.slice(worker.indexOf("if(action==='get_chat_response')"), worker.indexOf("if(action==='open_tab')"));
 assert.match(responseReaderSource, /const networkStreamLive=Boolean\(effectiveNetworkBusy&&networkStream\.available\)/, "closed network streams must be hidden after the request becomes terminal");
 assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'/, "DOM fallback must explicitly mark only settled latest-assistant content as ready");
-assert.equal(manifest.version, "0.5.77");
+assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
+assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
+assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
+assert.equal(manifest.version, "0.5.79");
 assert.match(worker, /const MAX_CHATGPT_TABS = 6/, "worker must cap ChatGPT tabs per Chrome profile");
 assert.match(worker, /CHAT_TAB_HEALTH_FAILURES_TO_CLOSE = 2/, "worker must require consecutive failed CodexPro probes before closing an unhealthy tab");
 assert.match(worker, /cleanupChatGptTabs\(tabs,recentConversations\)[\s\S]*?if\(tabCleanup\.closed_count\)tabs=await tabList\(\)/, "polling must clean tabs and refresh the heartbeat snapshot after closures");
