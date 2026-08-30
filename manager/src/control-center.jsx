@@ -26,7 +26,7 @@ function relativeTime(value) {
 
 function activeProfileTab(profile) {
   const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-  return tabs.find((tab) => tab.active) || tabs.find((tab) => tab.busy || tab.settling) || tabs[0] || null;
+  return tabs.find((tab) => tab.busy || tab.settling || String(tab?.network_state || "") === "generating") || tabs.find((tab) => tab.active) || tabs[0] || null;
 }
 
 export function profileHealth(profile) {
@@ -100,9 +100,11 @@ export function ControlCenter({
   onOpenChat,
   onOpenChrome,
   onRecover,
+  onStop,
   onOpenRepo,
   onToggleSetting,
-  onUpdateWorkers
+  onUpdateWorkers,
+  onRestartServer
 }) {
   const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
   const tasks = useMemo(() => profiles
@@ -171,6 +173,16 @@ export function ControlCenter({
                       <span className={project?.repoFullName ? "ok" : "missing"}>{project?.repoFullName || task.profile.current_workspace_repo || "Repo ?"}</span>
                     </div>
                     <small>{task.tab?.activity_text || `Bắt đầu ${relativeTime(task.startedAt)}`}</small>
+                    {project?.isGit && (
+                      <div className="control-task-git" title={project.root || task.root}>
+                        <span>{project.branch || "detached"}</span>
+                        <span>{project.modified || 0} sửa</span>
+                        <span>{project.untracked || 0} mới</span>
+                        <span>↑{project.ahead || 0}</span>
+                        <span>↓{project.behind || 0}</span>
+                        {Number(project.conflicted || 0) > 0 && <b>{project.conflicted} conflict</b>}
+                      </div>
+                    )}
                     {mappingMissing && <div className="control-warning">Thiếu liên kết Task ↔ Profile ↔ Workspace ↔ Repo</div>}
                   </div>
                   <div className="control-task-actions">
@@ -178,6 +190,7 @@ export function ControlCenter({
                     <button className="button secondary" type="button" onClick={() => onOpenChrome(task.profile)}>Chrome</button>
                     <button className="button secondary" type="button" disabled={!project?.root && !task.root} onClick={() => onOpenRepo(project?.root || task.root)}>Repo</button>
                     <button className="button secondary" type="button" disabled={!task.tab?.id || !task.tab?.url} onClick={() => onRecover(task.profile)}>Khôi phục</button>
+                    <button className="button danger-quiet" type="button" disabled={!task.tab?.id || !(task.state === "working" || task.state === "settling")} onClick={() => onStop(task)}>Dừng task</button>
                   </div>
                 </article>
               );
@@ -225,7 +238,13 @@ export function ControlCenter({
         </section>
 
         <section className="control-section">
-          <div className="control-section-head"><div><p className="eyebrow">UPDATE CENTER</p><h2>Phiên bản</h2></div><button className="button secondary" type="button" disabled={Boolean(busy) || !profileSummary?.reload} onClick={onUpdateWorkers}>Update worker</button></div>
+          <div className="control-section-head">
+            <div><p className="eyebrow">UPDATE CENTER</p><h2>Phiên bản</h2></div>
+            <div className="control-section-actions">
+              <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={onRestartServer}>Restart MCP</button>
+              <button className="button secondary" type="button" disabled={Boolean(busy) || !profileSummary?.reload} onClick={onUpdateWorkers}>Update worker</button>
+            </div>
+          </div>
           <div className="update-center-list">
             <div><span>CodexPro Manager</span><strong>v{managerVersion}</strong><small>Desktop app</small></div>
             <div><span>MCP runtime</span><strong>{status?.local?.ok ? "Online" : "Offline"}</strong><small>{String(status?.local?.data?.runtimeBuildId || "build chưa xác định").slice(0, 26)}</small></div>

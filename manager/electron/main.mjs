@@ -1735,6 +1735,11 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
           await win.webContents.executeJavaScript("document.querySelector('.font-role-grid')?.closest('.settings-panel')?.scrollIntoView({ block: 'start' })", true);
           await new Promise((resolve) => setTimeout(resolve, 180));
         }
+        const smokeScrollSelector = String(process.env.CODEXPRO_MANAGER_SMOKE_SCROLL_SELECTOR || "").trim();
+        if (smokeScrollSelector) {
+          await win.webContents.executeJavaScript(`document.querySelector(${JSON.stringify(smokeScrollSelector)})?.scrollIntoView({ block: 'start' })`, true);
+          await new Promise((resolve) => setTimeout(resolve, 220));
+        }
         const screenshot = process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT;
         if (screenshot) {
           win.show();
@@ -2727,6 +2732,23 @@ async function recoverProfileChatTab(payload) {
   return { ...result, window_focus: windowFocus };
 }
 
+async function stopProfileTask(payload) {
+  const profileId = String(payload?.profileId || "").trim();
+  const conversationId = String(payload?.conversationId || "").trim();
+  const targetId = String(payload?.targetId ?? "").trim();
+  if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
+  if (conversationId && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat cần dừng không hợp lệ.");
+  if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome cần dừng.");
+  const base = await readyRuntimeBaseStatus();
+  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  return await localMcpTool(base.config, base.token, "browser_control", {
+    action: "stop_chat_generation",
+    profile_id: profileId,
+    conversation_id: conversationId || undefined,
+    target_id: targetId
+  }, 15000);
+}
+
 async function reloadChromeProfiles() {
   const status = await readyRuntimeStatus();
   const connectedProfiles = status.browserProfiles.filter((profile) => profile.connected);
@@ -3393,6 +3415,15 @@ diagnosticIpcHandle("codexpro:recover-profile-chat", {
   if ((result?.window_focused || result?.window_focus?.ok) && owner && !owner.isDestroyed()) owner.minimize();
   return result;
 });
+diagnosticIpcHandle("codexpro:stop-profile-task", {
+  category: "chat",
+  action: "stop-profile-task",
+  logSuccess: true,
+  successMessage: "Đã gửi lệnh dừng task ChatGPT",
+  failureMessage: "Không dừng được task ChatGPT",
+  details: (payload) => ({ profile_id: String(payload?.profileId || payload?.profile_id || ""), conversation_id: String(payload?.conversationId || payload?.conversation_id || ""), target_id: String(payload?.targetId || "") }),
+  resultDetails: (result) => ({ stopped: Boolean(result?.stopped), reason: String(result?.reason || ""), target_id: String(result?.target_id || ""), conversation_id: String(result?.conversation_id || "") })
+}, (_event, payload) => stopProfileTask(payload));
 diagnosticIpcHandle("codexpro:reload-profiles", {
   category: "profile",
   action: "reload-profiles",

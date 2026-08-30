@@ -944,7 +944,7 @@ function App() {
     let rafId = 0;
     const longTasks = [];
     const tick = () => {
-      frameCount += 1;
+      if (!document.hidden) frameCount += 1;
       rafId = window.requestAnimationFrame(tick);
     };
     rafId = window.requestAnimationFrame(tick);
@@ -960,7 +960,14 @@ function App() {
         observer = null;
       }
     }
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      frameCount = 0;
+      lastSampleAt = window.performance.now();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     const timer = window.setInterval(() => {
+      if (document.hidden) return;
       const now = window.performance.now();
       const elapsed = Math.max(1, now - lastSampleAt);
       const fps = Math.min(120, frameCount * 1000 / elapsed);
@@ -976,6 +983,7 @@ function App() {
     return () => {
       window.cancelAnimationFrame(rafId);
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       observer?.disconnect();
     };
   }, [activePage]);
@@ -1036,7 +1044,7 @@ function App() {
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
     for (const profile of profiles) {
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-      const tab = tabs.find((item) => item.active) || tabs.find((item) => item.busy || item.settling) || tabs[0];
+      const tab = tabs.find((item) => item.busy || item.settling || String(item?.network_state || "") === "generating") || tabs.find((item) => item.active) || tabs[0];
       const taskId = String(profile?.current_task_id || "");
       const title = String(profile?.current_task_title || tab?.title || profile?.active_chat_title || "Task CodexPro");
       const working = Boolean(tab?.busy || tab?.settling || profile?.activity === "working" || Number(profile?.busy_request_count || 0) > 0);
@@ -2207,6 +2215,27 @@ function App() {
     }
   }
 
+  async function stopControlTask(task) {
+    const profile = task?.profile;
+    const tab = task?.tab;
+    if (!profile?.profile_id || !tab?.id) return;
+    const conversationId = String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+    setBusy(`stop-task:${profile.profile_id}`);
+    setError("");
+    try {
+      const result = await api.stopProfileTask({
+        profileId: profile.profile_id,
+        conversationId,
+        targetId: tab.id
+      });
+      notify(result?.stopped ? "Đã dừng task ChatGPT" : "Task đã ngừng trước khi nhận lệnh dừng");
+      window.setTimeout(() => void refresh(false), 700);
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setBusy("");
+    }
+  }
   async function reloadProfiles() {
     if (!profileSummary.reload) return;
     setWorkerUpdateConfirmOpen(false);
@@ -3419,9 +3448,11 @@ function App() {
             onOpenChat={setChatProfileId}
             onOpenChrome={(profile) => void openProfile(profile, { focusOnly: true })}
             onRecover={(profile) => void recoverProfileTab(profile)}
+            onStop={(task) => void stopControlTask(task)}
             onOpenRepo={(root) => void api.openFolder(root)}
             onToggleSetting={(key, value) => void saveManagerSetting({ [key]: value }, value ? "Đã bật tự động hóa" : "Đã tắt tự động hóa")}
             onUpdateWorkers={() => void reloadProfiles()}
+            onRestartServer={() => void control("restart")}
           />
         </div>
 

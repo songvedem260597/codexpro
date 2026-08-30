@@ -5,6 +5,7 @@
 .control-section-head { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
 .control-section-head .eyebrow { margin-bottom: 5px; }
 .control-section-head h2 { margin-bottom: 0; }
+.control-section-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
 .control-section-count { flex: 0 0 auto; padding: 5px 9px; color: #a8b2c4; border: 1px solid #303948; border-radius: 999px; background: #10151d; font-size: var(--font-micro); font-weight: var(--weight-semibold); }
 .control-two-column { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .control-task-list { display: grid; gap: 9px; }
@@ -22,6 +23,9 @@
 .control-task-main { min-width: 0; }
 .control-task-main > strong { display: block; overflow: hidden; color: #e9edf4; font-size: var(--font-title); font-weight: var(--weight-title); text-overflow: ellipsis; white-space: nowrap; }
 .control-task-main > small { display: block; margin-top: 6px; overflow: hidden; color: #8390a3; font-size: var(--font-description); text-overflow: ellipsis; white-space: nowrap; }
+.control-task-git { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; color: #9aa8bc; font-size: var(--font-micro); }
+.control-task-git span, .control-task-git b { padding: 3px 6px; border: 1px solid #2f3948; border-radius: 5px; background: #0c1118; font-weight: var(--weight-semibold); white-space: nowrap; }
+.control-task-git b { color: #ff9da8; border-color: #70343f; background: #281217; }
 .control-mapping-row { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 8px; font-size: var(--font-micro); }
 .control-mapping-row span { max-width: 230px; padding: 3px 6px; overflow: hidden; border: 1px solid #334052; border-radius: 5px; color: #9faabd; background: #111823; text-overflow: ellipsis; white-space: nowrap; }
 .control-mapping-row span.ok { color: #9ee3b9; border-color: #28553c; background: #102319; }
@@ -88,7 +92,7 @@
 @media (prefers-reduced-motion: reduce) { .control-pulse, .control-toggle-track, .control-toggle-track i { animation: none; transition: none; } }
 @media (max-width: 1260px) {
   .control-task { grid-template-columns: 96px minmax(0, 1fr); }
-  .control-task-actions { grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .control-task-actions { grid-column: 1 / -1; grid-template-columns: repeat(5, minmax(0, 1fr)); }
 }
 @media (max-width: 1080px) {
   .control-two-column { grid-template-columns: 1fr; }
