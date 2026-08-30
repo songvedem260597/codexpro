@@ -157,6 +157,22 @@ function preserveProgressiveAssistantMessages(previousMessages, incomingMessages
   });
 }
 
+function preserveProgressiveMessageIdentities(previousMessages, incomingMessages, comparableText) {
+  const previous = Array.isArray(previousMessages) ? previousMessages : [];
+  const incoming = Array.isArray(incomingMessages) ? incomingMessages : [];
+  const usersWithStableIds = incoming.map((message, incomingIndex) => {
+    if (message?.role !== "user") return message;
+    const text = comparableText(message?.text);
+    if (!text) return message;
+    const occurrenceFromEnd = incoming.slice(incomingIndex + 1)
+      .filter((candidate) => candidate?.role === "user" && comparableText(candidate?.text) === text).length;
+    const previousMatches = previous.filter((candidate) => candidate?.role === "user" && comparableText(candidate?.text) === text);
+    const previousUser = previousMatches.at(-(occurrenceFromEnd + 1));
+    return previousUser?.id ? { ...message, id: previousUser.id } : message;
+  });
+  return preserveProgressiveAssistantMessages(previous, usersWithStableIds, comparableText);
+}
+
 export function mergeNetworkStreamTranscript(previousMessages, { conversationId, text, truncated = false }) {
   const streamText = String(text || "").trim();
   const messages = Array.isArray(previousMessages) ? [...previousMessages] : [];
@@ -219,7 +235,7 @@ export function replaceCanonicalTranscript(previousMessages, incomingMessages, {
         const text = comparableText(message?.text);
         return text && !canonicalUserTexts.has(text);
       });
-    const progressiveIncoming = preserveProgressiveAssistantMessages(previous, incoming, comparableText);
+    const progressiveIncoming = preserveProgressiveMessageIdentities(previous, incoming, comparableText);
     return trimRecentTranscriptMessages([...progressiveIncoming, ...unmaterializedOptimisticUsers]);
   }
   return trimRecentTranscriptMessages(previousMessages);

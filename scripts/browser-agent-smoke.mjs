@@ -88,7 +88,7 @@ const materializedCanonicalTranscript = replaceCanonicalTranscript(updatedStream
   { id: "canonical-user-1", role: "user", text: "  Yêu cầu\u00a0mới  " },
   { id: "canonical-assistant-1", role: "assistant", text: "Đã nhận" }
 ]);
-assert.deepEqual(materializedCanonicalTranscript.map((message) => message.id), ["canonical-user-1", "network-stream-assistant:conversation-1"], "canonical materialization must preserve the live assistant identity so React does not remount the response");
+assert.deepEqual(materializedCanonicalTranscript.map((message) => message.id), ["optimistic-user-1", "network-stream-assistant:conversation-1"], "canonical materialization must preserve user and assistant identities so React does not remount the active turn");
 assert.equal(materializedCanonicalTranscript.at(-1).text, "Đã nhận", "a final canonical response must replace rather than merge an unrelated progress fragment");
 assert.notEqual(materializedCanonicalTranscript.at(-1).provisional, true, "canonical finalization must clear the provisional stream marker");
 const reloadRegressedTranscript = replaceCanonicalTranscript([
@@ -576,7 +576,7 @@ assert.match(managerStyles, /\.chat-response-send-state \{[^}]*inline-flex;[^}]*
 assert.match(managerStyles, /\.chat-modal \{[^}]*height: 94vh;[^}]*overflow-anchor: none;[^}]*scrollbar-gutter: stable;/, "chat modal geometry must stay fixed while send state, attachments, and evidence change");
 assert.match(managerStyles, /\.latest-response \{[^}]*overflow-anchor: none;[^}]*scrollbar-gutter: stable;[^}]*scroll-behavior: auto;/, "realtime transcript updates must not repeatedly animate or re-anchor the chat viewport");
 assert.match(managerUi, /const openChatScrollKey = useMemo\([\s\S]*?lastMessage[\s\S]*?visibleText[\s\S]*?contentKey[\s\S]*?turnKey/, "chat auto-scroll must follow visible transcript content and the explicit turn lifecycle");
-assert.match(managerUi, /useLayoutEffect\(\(\) => \{[\s\S]*?openChatScrollKey[\s\S]*?scrollResponseToBottom\(chatProfileId\)/, "chat auto-scroll must settle before paint to avoid a visible second jump");
+assert.match(managerUi, /useLayoutEffect\(\(\) => \{[\s\S]*?openChatScrollKey[\s\S]*?maintainResponsePosition\(chatProfileId,\s*"layout-effect:open-chat-scroll-key"\)/, "the active turn anchor must settle before paint to avoid a visible second jump");
 const sendRequestSource = managerUi.slice(managerUi.indexOf("async function sendRequest(profile)"), managerUi.indexOf("async function rolloverFullConversation"));
 assert.doesNotMatch(sendRequestSource, /requestAnimationFrame\(\(\) => scrollResponseToBottom/, "sendRequest must not schedule a duplicate transcript scroll");
 assert.match(managerUi, /responseTurnActive[\s\S]*?is-response-runway/, "an active send must reserve a half-height response runway before stream content arrives");
@@ -585,7 +585,10 @@ assert.match(managerUi, /logChatLayout[\s\S]*?MutationObserver[\s\S]*?ResizeObse
 assert.match(managerStyles, /\.chat-transcript-message\.is-response-cage \{[^}]*min-height: 108px;[^}]*padding-bottom: 24px;/, "the reserved response cage must keep enough vertical space to prevent transcript jumps");
 assert.match(managerStyles, /\.chat-transcript-message\.is-response-runway \{[^}]*--chat-response-runway-height/, "the newest turn must keep a half-height runway below the sent message");
 assert.match(managerStyles, /\.chat-transcript-message \{[^}]*flex: 0 0 auto;/, "response runway must never shrink older messages and overlap their content");
-assert.match(managerUi, /installResponseAutoPin[\s\S]*?chatResponseRef[\s\S]*?scrollResponseToBottom/, "Manager must keep the transcript pinned after async DOM and layout changes");
+assert.match(managerUi, /installResponseAutoPin[\s\S]*?chatResponseRef[\s\S]*?maintainResponsePosition/, "Manager must maintain the active turn anchor after async DOM and layout changes");
+assert.match(managerUi, /responseTurnAnchors/, "Manager must retain the active turn identity while optimistic messages become canonical");
+assert.match(managerChatScroll, /scrollResponseToTurnAnchor/, "chat scrolling must expose a stable viewport anchor instead of only forcing the bottom");
+assert.match(managerStyles, /\.chat-transcript\.has-turn-anchor::after/, "an anchored turn must reserve enough space below it to remain near the viewport center");
 assert.match(managerChatScroll, /handleResponseWheel[\s\S]*?deltaY < 0[\s\S]*?recordResponseScroll[\s\S]*?responseDistanceFromBottom/, "only explicit upward user input may pause auto-scroll; layout-driven scroll events must not lock it");
 assert.doesNotMatch(managerStyles, /\.message-send-indicator\s*\{/, "the old standalone send status panel must be removed");
 assert.match(managerUi, /className="toast-icon"[\s\S]*?<svg viewBox="0 0 24 24"/, "success toasts must use the custom vector status icon");
@@ -607,7 +610,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.81");
+assert.equal(manifest.version, "0.5.82");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(canonical,domResult\)\)/, "a complete canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
