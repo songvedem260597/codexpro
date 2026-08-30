@@ -1691,7 +1691,17 @@ function App() {
         const contentAlreadyRead = networkCompletionReads.current.get(completionKey) === networkCompletedAt;
         if (!contentAlreadyRead) {
           networkCompletionReads.current.set(completionKey, networkCompletedAt);
-          void loadResponse(profile, conversationId, true, false);
+          void (async () => {
+            const canonical = await loadResponse(profile, conversationId, true, false, false, true);
+            if (!canonical) {
+              if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) networkCompletionReads.current.delete(completionKey);
+              return;
+            }
+            if (completedResponseNeedsDomFallback(canonical)) {
+              const dom = await loadResponse(profile, conversationId, true, true);
+              if (!dom && networkCompletionReads.current.get(completionKey) === networkCompletedAt) networkCompletionReads.current.delete(completionKey);
+            }
+          })();
           if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
         }
         if (currentResponse?.repoTaskId && canVerifyRepoTaskUse({
