@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -13,6 +14,18 @@ const MANAGER_VERSION = app.getVersion();
 const codexProHome = process.env.CODEXPRO_HOME
   ? path.resolve(process.env.CODEXPRO_HOME)
   : path.join(os.homedir(), ".codexpro");
+const diagnostic = (level, source, category, message, details = {}) => {
+  void appendDiagnosticLog(codexProHome, {
+    level,
+    source,
+    category,
+    action: details?.action || "",
+    message,
+    duration_ms: details?.duration_ms,
+    details
+  });
+};
+void pruneDiagnosticLogs(codexProHome).catch(() => undefined);
 const tokenFileDefault = path.join(codexProHome, "http-token");
 const managerProjectsFile = path.join(codexProHome, "manager-projects.json");
 const managerSettingsFile = path.join(codexProHome, "manager-settings.json");
@@ -1274,6 +1287,15 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
               title: lightbox?.querySelector('.attachment-lightbox-head strong')?.textContent?.trim() || ''
             };
           })()`, true);
+          win.webContents.sendInputEvent({ type: "keyDown", keyCode: "Escape" });
+          win.webContents.sendInputEvent({ type: "keyUp", keyCode: "Escape" });
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          const escapeState = await win.webContents.executeJavaScript(`(() => ({
+            lightboxOpen: Boolean(document.querySelector('.attachment-lightbox')),
+            chatModalOpen: Boolean(document.querySelector('.chat-modal'))
+          }))()`, true);
+          attachmentPreviewProbe.escapeClosedLightbox = !escapeState.lightboxOpen;
+          attachmentPreviewProbe.escapeKeptChatModal = escapeState.chatModalOpen;
           const textPreview = await requestFilePreview(path.resolve(app.getAppPath(), "..", "README.md"));
           attachmentPreviewProbe.textPreviewKind = String(textPreview?.kind || "");
           attachmentPreviewProbe.textPreviewHasContent = Boolean(String(textPreview?.text || "").trim());
@@ -1754,7 +1776,7 @@ async function listProjects() {
   );
 }
 
-async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
+async function mcpRequestCore(url, token, body, sessionId, timeoutMs = 15000) {
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -1808,6 +1830,31 @@ async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
   const payload = JSON.parse(text);
   if (payload.error) throw new Error(payload.error.message || "MCP trả về lỗi");
   return { payload, sessionId: nextSessionId };
+}
+
+async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
+  const startedAt = Date.now();
+  const method = String(body?.method || "request");
+  const toolName = String(body?.params?.name || "");
+  const toolAction = String(body?.params?.arguments?.action || "");
+  const action = toolName ? `${toolName}${toolAction ? `:${toolAction}` : ""}` : method;
+  try {
+    const result = await mcpRequestCore(url, token, body, sessionId, timeoutMs);
+    if (method === "tools/call") {
+      diagnostic("info", "mcp", "tool", `MCP tool ${action} hoàn tất`, {
+        action,
+        duration_ms: Date.now() - startedAt
+      });
+    }
+    return result;
+  } catch (error) {
+    diagnostic("error", "mcp", method === "tools/call" ? "tool" : "transport", `MCP ${action} lỗi: ${error?.message || String(error)}`, {
+      action,
+      duration_ms: Date.now() - startedAt,
+      error
+    });
+    throw error;
+  }
 }
 
 async function openLocalMcpSession(config, token) {
@@ -2227,6 +2274,7 @@ async function sendProfileRequestUnlocked(payload) {
   const text = String(payload?.text || "").trim();
   const requestScope = payload?.scope === "all_allowed" ? "all_allowed" : "workspace";
   const requestedProjectRoot = String(payload?.projectRoot || "").trim();
+  const requestedWorkspaceCandidates = Array.isArray(payload?.workspaceCandidates) ? payload.workspaceCandidates.slice(0, 80) : [];
   const requestedFiles = Array.isArray(payload?.attachments) ? payload.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
   const taskId = `cpt_${randomBytes(12).toString("hex")}`;
   const toolRetry = Boolean(payload?.toolRetry);
@@ -2251,8 +2299,14 @@ async function sendProfileRequestUnlocked(payload) {
   if (!base.token) throw new Error("CodexPro chưa có token local MCP.");
   let allowedRoots = allowedWorkspaceRoots(base.config);
   if (!allowedRoots.length) throw new Error("CodexPro chưa có vùng workspace nào được cấp quyền.");
+  const resolveWorkspaceCandidates = () => [...new Set(requestedWorkspaceCandidates
+    .map((root) => String(root || "").trim())
+    .filter(Boolean)
+    .map((root) => path.resolve(root))
+    .filter((root) => fs.existsSync(root) && fs.statSync(root).isDirectory() && allowedRoots.some((allowedRoot) => pathInside(root, allowedRoot))))];
+  let workspaceCandidates = resolveWorkspaceCandidates();
   let selectedProject = null;
-  let initialWorkspaceRoot = allowedRoots.find((root) => base.config.root && root.toLowerCase() === path.resolve(base.config.root).toLowerCase()) || allowedRoots[0];
+  let initialWorkspaceRoot = "";
   if (requestScope === "workspace") {
     const resolvedProjectRoot = path.resolve(requestedProjectRoot);
     if (!fs.existsSync(resolvedProjectRoot) || !fs.statSync(resolvedProjectRoot).isDirectory()) throw new Error("Thư mục đã chọn không còn tồn tại.");
@@ -2270,13 +2324,12 @@ async function sendProfileRequestUnlocked(payload) {
     base = { config: refreshed.config, token: refreshed.token, source: "health-fallback" };
     allowedRoots = allowedWorkspaceRoots(base.config);
     if (!allowedRoots.length) throw new Error("CodexPro chưa có vùng workspace nào được cấp quyền.");
+    workspaceCandidates = resolveWorkspaceCandidates();
     if (requestScope === "workspace") {
       const resolvedProjectRoot = path.resolve(requestedProjectRoot);
       if (!allowedRoots.some((root) => pathInside(resolvedProjectRoot, root))) throw new Error("Thư mục đã chọn nằm ngoài vùng workspace được CodexPro cấp quyền.");
       selectedProject = { root: resolvedProjectRoot };
       initialWorkspaceRoot = resolvedProjectRoot;
-    } else {
-      initialWorkspaceRoot = allowedRoots.find((root) => base.config.root && root.toLowerCase() === path.resolve(base.config.root).toLowerCase()) || allowedRoots[0];
     }
     session = await openLocalMcpSession(base.config, base.token);
   }
@@ -2343,7 +2396,7 @@ async function sendProfileRequestUnlocked(payload) {
   }
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
   const currentWorkspaceRoot = String(profile.current_workspace_root || "").trim();
-  const workspaceSelectSkipped = Boolean(currentWorkspaceRoot && path.resolve(currentWorkspaceRoot).toLowerCase() === path.resolve(initialWorkspaceRoot).toLowerCase());
+  const workspaceSelectSkipped = requestScope === "all_allowed" || Boolean(currentWorkspaceRoot && initialWorkspaceRoot && path.resolve(currentWorkspaceRoot).toLowerCase() === path.resolve(initialWorkspaceRoot).toLowerCase());
   if (!workspaceSelectSkipped) {
     await localMcpToolInSession(session, "browser_control", {
       action: "select_workspace",
@@ -2354,7 +2407,7 @@ async function sendProfileRequestUnlocked(payload) {
   const preparedTask = await localMcpToolInSession(session, "prepare_repo_task", {
     profile_id: profileId,
     task_id: taskId,
-    root: initialWorkspaceRoot,
+    ...(requestScope === "workspace" ? { root: initialWorkspaceRoot } : {}),
     scope: requestScope
   }, 15000);
   if (preparedTask?.prepared !== true || String(preparedTask?.task_id || "") !== taskId) {
@@ -2364,24 +2417,28 @@ async function sendProfileRequestUnlocked(payload) {
     ? [
         "CodexPro Manager đang ở chế độ TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN. Không có repo hoặc đường dẫn cụ thể bị khóa cho yêu cầu này.",
         `Các vùng CodexPro hiện được phép truy cập: ${allowedRoots.join(" ; ")}`,
+        ...(workspaceCandidates.length ? [`Các repo/thư mục Manager đang biết: ${workspaceCandidates.join(" ; ")}`] : []),
         `Task ID bắt buộc: ${taskId}`,
         "BẮT BUỘC tự đặt task_title ngắn gọn 2-6 từ, mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
-        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","root":"${initialWorkspaceRoot.replace(/\\/g, "\\\\")}","scope":"all_allowed"} trước mọi câu trả lời. Phải thay placeholder task_title bằng tên thật do bạn đặt. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
-        "BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Không được trả lời rằng không có tool/MCP, tool/MCP không sử dụng được hoặc tool/MCP bị disable khi chưa thực hiện một tool-call MCP CodexPro thực tế và nhận lỗi kỹ thuật từ chính lần gọi đó.",
-        "Sau khi begin_repo_task thành công, bạn ĐƯỢC PHÉP dùng open_workspace để chuyển giữa các workspace nằm bên trong những vùng CodexPro đã được cấp quyền ở trên nhằm tìm đúng dự án hoặc file. Không được truy cập đường dẫn nằm ngoài các vùng đó."
+        "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
+        `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","task_kind":"general","scope":"all_allowed"}. Không truyền root vì task này không dùng workspace.`,
+        `Nếu task_kind=code: BẮT BUỘC tự chọn đúng repo/thư mục thực sự liên quan tới yêu cầu rồi gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","task_kind":"code","root":"<đường dẫn repo/thư mục thực sự cần thao tác>","scope":"all_allowed"}. Không được mặc định dùng workspace CodexPro hiện tại/default chỉ vì nó đang mở; nếu chưa biết repo cụ thể, chọn vùng được cấp quyền hẹp nhất phù hợp để tìm từ đó.`,
+        "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
+        "Sau khi begin_repo_task với task_kind=code thành công, bạn ĐƯỢC PHÉP dùng open_workspace để chuyển giữa các workspace nằm bên trong những vùng CodexPro đã được cấp quyền ở trên nhằm tìm đúng dự án hoặc file. Không được truy cập đường dẫn nằm ngoài các vùng đó."
       ]
     : [
         `Workspace đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
         `Task ID bắt buộc: ${taskId}`,
         "BẮT BUỘC tự đặt task_title ngắn gọn 2-6 từ, mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
-        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Phải thay placeholder task_title bằng tên thật do bạn đặt. Không được trả lời suông. Không được tự tuyên bố CodexPro hoặc MCP CodexPro bị disable/không khả dụng nếu chưa gọi tool MCP CodexPro thật.`,
-        "BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Không được trả lời rằng không có tool/MCP, tool/MCP không sử dụng được hoặc tool/MCP bị disable khi chưa thực hiện một tool-call MCP CodexPro thực tế và nhận lỗi kỹ thuật từ chính lần gọi đó.",
-        "Sau khi begin_repo_task thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác."
+        "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
+        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","task_kind":"<general hoặc code>","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Phải thay cả hai placeholder bằng giá trị thật. task_kind=general chỉ ghi title, không đọc CODEXPRO.md và không chạy CodexGraph; task_kind=code mới nạp rule, chạy CodexGraph và mở tool workspace.`,
+        "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
+        "Sau khi begin_repo_task với task_kind=code thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác."
       ];
   const taskText = [
     ...(newChat ? ["@CodexPro"] : ["Hãy sử dụng MCP CodexPro đã được kích hoạt trong đoạn chat này."]),
     ...taskScopeLines,
-    ...(toolRetry ? ["Đây là lần gửi lại vì phản hồi trước không có bằng chứng gọi CodexPro. Phải gọi codexpro action=begin_repo_task ngay."] : []),
+    ...(toolRetry ? ["Đây là lần gửi lại vì phản hồi trước không trả task title qua CodexPro. Phải gọi codexpro action=begin_repo_task với task_title và task_kind ngay."] : []),
     "",
     text ? `Yêu cầu của người dùng:\n${text}` : "Yêu cầu của người dùng nằm trong file đính kèm."
   ].join("\n");
@@ -2395,7 +2452,7 @@ async function sendProfileRequestUnlocked(payload) {
     attachments
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
-  return { ...result, repo_task_id: taskId, repo_task_scope: requestScope, repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource };
+  return { ...result, repo_task_id: taskId, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource };
   } finally {
     await closeLocalMcpSession(session);
   }
@@ -2538,6 +2595,10 @@ ipcMain.handle("codexpro:copy", (_event, text) => {
 });
 ipcMain.on("codexpro:log-chat-layout", (_event, payload) => appendManagerChatLayoutLog(payload));
 ipcMain.on("codexpro:log-chat-response-audit", (_event, payload) => appendManagerChatResponseAuditLog(payload));
+ipcMain.on("codexpro:log-diagnostic", (_event, payload) => appendDiagnosticLog(codexProHome, payload || {}));
+ipcMain.handle("codexpro:get-diagnostic-logs", (_event, options) => readDiagnosticLogs(codexProHome, options || {}));
+ipcMain.handle("codexpro:clear-diagnostic-logs", () => clearDiagnosticLogs(codexProHome));
+ipcMain.handle("codexpro:prune-diagnostic-logs", () => pruneDiagnosticLogs(codexProHome));
 ipcMain.handle("codexpro:rotate-link", async () => {
   const choice = await dialog.showMessageBox({
     type: "warning",

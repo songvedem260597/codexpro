@@ -142,8 +142,11 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-active-session-'));
   const codexProHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-gate-home-'));
   const taskRoot = path.join(root, 'task-workspace');
+  const alternateTaskRoot = path.join(root, 'alternate-workspace');
   await fs.mkdir(taskRoot, { recursive: true });
+  await fs.mkdir(alternateTaskRoot, { recursive: true });
   await fs.writeFile(path.join(taskRoot, 'gate.txt'), 'gate initial\n', 'utf8');
+  await fs.writeFile(path.join(alternateTaskRoot, 'alternate.txt'), 'all allowed root\n', 'utf8');
   const port = await getFreePort();
   const token = 'codexpro-http-active-session-smoke-token';
   const child = spawn(process.execPath, ['dist/http.js'], {
@@ -181,8 +184,20 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const manager = await createClient('repo-task-manager');
     const gated = await createClient('repo-task-gate', 'gate-smoke');
     const gatedSibling = await createClient('repo-task-gate-sibling', 'gate-smoke');
+    const general = await createClient('repo-task-general-chatgpt', 'general-smoke');
+    const generalBegan = await callTool(general, 'begin_repo_task', { task_title: 'Research pixel models', task_kind: 'general' });
+    if (!generalBegan.structuredContent.verified || generalBegan.structuredContent.gate_active !== false || generalBegan.structuredContent.global_rules_loaded !== false || generalBegan.structuredContent.codexgraph_active !== false) {
+      throw new Error(`general profile task loaded coding context or failed title registration: ${JSON.stringify(generalBegan.structuredContent)}`);
+    }
+    await expectToolErrorCode(general, 'read', { path: 'task-workspace/gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
+    const generalStatus = await callTool(general, 'repo_task_status', { task_id: generalBegan.structuredContent.task_id });
+    if (!generalStatus.structuredContent.verified || generalStatus.structuredContent.task_kind !== 'general' || generalStatus.structuredContent.codexgraph_active !== false) {
+      throw new Error(`general task title proof was not retained: ${JSON.stringify(generalStatus.structuredContent)}`);
+    }
+    await general.close();
+    clients.splice(clients.indexOf(general), 1);
     const direct = await createClient('repo-task-direct-chatgpt', 'direct-smoke');
-    const directBegan = await callTool(direct, 'begin_repo_task', { task_title: 'Inspect direct request' });
+    const directBegan = await callTool(direct, 'begin_repo_task', { task_title: 'Inspect direct request', task_kind: 'code' });
     if (!directBegan.structuredContent.verified || !/^cpt_[a-f0-9]{24}$/.test(String(directBegan.structuredContent.task_id || ''))) {
       throw new Error(`direct profile task did not receive a server-generated id: ${JSON.stringify(directBegan.structuredContent)}`);
     }
@@ -200,7 +215,42 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const actionNames = Array.isArray(actions?.structuredContent?.actions) ? actions.structuredContent.actions : [];
     if (actionNames.includes('prepare_repo_task')) throw new Error('gated ChatGPT session must not expose prepare_repo_task');
     await expectToolErrorCode(gated, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
-    await expectToolErrorCode(gated, 'begin_repo_task', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa', task_title: 'Verify repo gate', root: taskRoot, scope: 'workspace' }, 'REPO_TASK_NOT_PREPARED');
+    await expectToolErrorCode(gated, 'begin_repo_task', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa', task_title: 'Verify repo gate', task_kind: 'code', root: taskRoot, scope: 'workspace' }, 'REPO_TASK_NOT_PREPARED');
+
+    const preparedAllAllowed = await callTool(manager, 'prepare_repo_task', {
+      profile_id: 'gate-smoke',
+      task_id: 'cpt_dddddddddddddddddddddddd',
+      scope: 'all_allowed'
+    });
+    if (!preparedAllAllowed.structuredContent.prepared || preparedAllAllowed.structuredContent.root_unbound !== true || preparedAllAllowed.structuredContent.root) {
+      throw new Error(`all_allowed task was incorrectly pinned to a default root: ${JSON.stringify(preparedAllAllowed.structuredContent)}`);
+    }
+    await expectToolErrorCode(gatedSibling, 'begin_repo_task', {
+      task_id: 'cpt_dddddddddddddddddddddddd',
+      task_title: 'Choose allowed workspace',
+      task_kind: 'code',
+      scope: 'all_allowed'
+    }, 'REPO_TASK_ROOT_REQUIRED');
+    const beganAllAllowed = await callTool(gatedSibling, 'begin_repo_task', {
+      task_id: 'cpt_dddddddddddddddddddddddd',
+      task_title: 'Choose allowed workspace',
+      task_kind: 'code',
+      root: alternateTaskRoot,
+      scope: 'all_allowed'
+    });
+    if (!beganAllAllowed.structuredContent.verified || beganAllAllowed.structuredContent.scope !== 'all_allowed' || path.resolve(beganAllAllowed.structuredContent.root) !== path.resolve(alternateTaskRoot)) {
+      throw new Error(`all_allowed task did not activate the AI-selected workspace: ${JSON.stringify(beganAllAllowed.structuredContent)}`);
+    }
+    const allAllowedRead = await callTool(gated, 'read', { path: 'alternate.txt' });
+    if (!allAllowedRead.structuredContent.text.includes('all allowed root')) throw new Error('all_allowed profile task did not use the selected alternate workspace');
+    const switchedAllAllowed = await callTool(gated, 'open_workspace', { root: taskRoot, include_tree: false });
+    if (path.resolve(switchedAllAllowed.structuredContent.root) !== path.resolve(taskRoot)) throw new Error('all_allowed task could not switch to another allowed workspace');
+    const switchedAllAllowedRead = await callTool(gated, 'read', { path: 'gate.txt' });
+    if (!switchedAllAllowedRead.structuredContent.text.includes('gate initial')) throw new Error('all_allowed task did not keep the newly selected workspace for subsequent tools');
+    const allAllowedStatus = await callTool(gated, 'repo_task_status', { task_id: 'cpt_dddddddddddddddddddddddd' });
+    if (!allAllowedStatus.structuredContent.verified || !allAllowedStatus.structuredContent.gate_active) {
+      throw new Error(`all_allowed task proof did not accept its unbound prepared root: ${JSON.stringify(allAllowedStatus.structuredContent)}`);
+    }
 
     const preparedA = await callTool(manager, 'prepare_repo_task', {
       profile_id: 'gate-smoke',
@@ -217,16 +267,19 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     await expectToolErrorCode(gated, 'edit', { path: 'gate.txt', old_text: 'gate initial', new_text: 'gate changed' }, 'BEGIN_REPO_TASK_REQUIRED');
     await expectToolErrorCode(gated, 'bash', { command: 'node -e "console.log(\'blocked\')"' }, 'BEGIN_REPO_TASK_REQUIRED');
     await expectToolErrorCode(gated, 'codexpro', { action: 'read', args: { path: 'gate.txt' } }, 'BEGIN_REPO_TASK_REQUIRED');
-    await expectToolErrorCode(gated, 'begin_repo_task', { task_id: 'cpt_cccccccccccccccccccccccc', task_title: 'Wrong repo task', root: taskRoot, scope: 'workspace' }, 'REPO_TASK_MISMATCH');
+    await expectToolErrorCode(gated, 'begin_repo_task', { task_id: 'cpt_cccccccccccccccccccccccc', task_title: 'Wrong repo task', task_kind: 'code', root: taskRoot, scope: 'workspace' }, 'REPO_TASK_MISMATCH');
     const missingProof = await callTool(gated, 'repo_task_status', { task_id: 'cpt_000000000000000000000000' });
     if (missingProof.structuredContent.verified !== false) throw new Error('repo_task_status must remain available before begin_repo_task');
 
     const began = await callTool(gated, 'codexpro', {
       action: 'begin_repo_task',
-      args: { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa', task_title: 'Verify repo gate', root: taskRoot, scope: 'workspace' }
+      args: { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa', task_title: 'Verify repo gate', task_kind: 'code', root: taskRoot, scope: 'workspace' }
     });
     if (!began.structuredContent.verified || !began.structuredContent.global_rules_sha256) {
       throw new Error(`begin_repo_task did not activate the gated MCP session: ${JSON.stringify(began.structuredContent)}`);
+    }
+    if (began.structuredContent.task_kind !== 'code' || began.structuredContent.gate_active !== true || began.structuredContent.global_rules_loaded !== true || began.structuredContent.codexgraph_active !== true) {
+      throw new Error(`code profile task omitted rule/graph evidence: ${JSON.stringify(began.structuredContent)}`);
     }
     const siblingStatus = await callTool(gatedSibling, 'repo_task_status', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa' });
     if (!siblingStatus.structuredContent.verified || !siblingStatus.structuredContent.gate_active) {
@@ -285,6 +338,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const beganB = await callTool(gated, 'begin_repo_task', {
       task_id: 'cpt_bbbbbbbbbbbbbbbbbbbbbbbb',
       task_title: 'Replace repo task',
+      task_kind: 'code',
       root: taskRoot,
       scope: 'workspace'
     });
@@ -295,12 +349,13 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     await fs.writeFile(path.join(codexProHome, 'CODEXPRO.md'), '# changed during task\n- require fresh begin\n', 'utf8');
     await expectToolErrorCode(gated, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_RULES_CHANGED');
     const siblingInvalidStatus = await callTool(gatedSibling, 'repo_task_status', { task_id: 'cpt_bbbbbbbbbbbbbbbbbbbbbbbb' });
-    if (siblingInvalidStatus.structuredContent.verified !== false || siblingInvalidStatus.structuredContent.gate_active !== false) {
-      throw new Error(`repo_task_status stayed verified after the shared profile gate was invalidated: ${JSON.stringify(siblingInvalidStatus.structuredContent)}`);
+    if (siblingInvalidStatus.structuredContent.verified !== true || siblingInvalidStatus.structuredContent.gate_active !== false) {
+      throw new Error(`repo_task_status lost the task title proof or kept workspace access after rules changed: ${JSON.stringify(siblingInvalidStatus.structuredContent)}`);
     }
     const reactivated = await callTool(gated, 'begin_repo_task', {
       task_id: 'cpt_bbbbbbbbbbbbbbbbbbbbbbbb',
       task_title: 'Replace repo task',
+      task_kind: 'code',
       root: taskRoot,
       scope: 'workspace'
     });

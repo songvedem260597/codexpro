@@ -555,10 +555,15 @@ function probeChatActivityPage() {
     const label=String(control.getAttribute?.('aria-label')||control.innerText||control.textContent||'').trim();
     return /^(?:stop(?: answering| generating| streaming)?|dừng(?: trả lời)?)$/i.test(label);
   });
-  const assistantNodes=Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
-  const latestText=String(assistantNodes.at(-1)?.innerText||assistantNodes.at(-1)?.textContent||'').replace(/\u200b/g,'').trim();
-  const thinkingPlaceholder=/(?:^|\n)(?:thinking|đang suy nghĩ)(?:\s*[.…]{1,3})?$/i.test(latestText);
   const conversationTurns=Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]'));
+  const assistantNodes=Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+  const latestUserTurnIndex=conversationTurns.findLastIndex(turn=>Boolean(turn.querySelector?.('[data-message-author-role="user"]')));
+  const assistantAfterLatestUser=latestUserTurnIndex>=0
+    ? conversationTurns.slice(latestUserTurnIndex+1).map(turn=>turn.querySelector?.('[data-message-author-role="assistant"]')).filter(Boolean).at(-1)
+    : assistantNodes.at(-1);
+  const latestAssistant=assistantAfterLatestUser||assistantNodes.at(-1);
+  const latestText=String(latestAssistant?.innerText||latestAssistant?.textContent||'').replace(/\u200b/g,'').trim();
+  const thinkingPlaceholder=/(?:^|\n)(?:thinking|đang suy nghĩ)(?:\s*[.…]{1,3})?$/i.test(latestText);
   const latestTurn=conversationTurns.at(-1);
   const imageGenerationLoading=Boolean(latestTurn?.querySelector?.('[data-testid="image-gen-loading-state"],[data-testid="image-gen-loading-state-frame"],[aria-label^="Generating image" i]'));
   const generatedImage=Array.from(latestTurn?.querySelectorAll?.('img')||[]).find(image=>{
@@ -575,9 +580,10 @@ function probeChatActivityPage() {
   const toolCallVisible=Array.from(latestTurn?.querySelectorAll?.('button,[role="button"],summary')||[]).some(control=>visible(control)&&/^(?:called|calling) tool\b|^(?:đã|đang) gọi tool\b/i.test(String(control.getAttribute?.('aria-label')||control.innerText||control.textContent||'').trim()));
   const toolCallActive=Boolean(!imageGenerationLoading&&!imageResponseReady&&stopControl&&toolCallVisible);
   const busy=Boolean(imageGenerationLoading||!imageResponseReady&&(stopControl||thinkingPlaceholder||recoveryRequired));
+  const responseReady=Boolean(imageResponseReady||assistantAfterLatestUser&&!busy);
   const activityText=imageGenerationLoading?'ChatGPT đang tạo ảnh':messageDeliveryTimedOut?'Phản hồi quá hạn · đang khôi phục nội dung':connectionInterrupted?'Kết nối phản hồi bị ngắt · đang khôi phục':toolCallActive?'CodexPro đang gọi tool':thinkingPlaceholder&&!imageResponseReady?'ChatGPT đang suy nghĩ':stopControl&&!imageResponseReady?'ChatGPT đang tiếp tục xử lý':'';
-  const source=imageGenerationLoading?'dom_image_generation':imageResponseReady?'dom_image_ready':messageDeliveryTimedOut?'dom_message_delivery_timeout':connectionInterrupted?'dom_connection_interrupted':toolCallActive?'dom_tool':stopControl?'dom_stop':thinkingPlaceholder?'dom_thinking':'';
-  return {busy,source,activity_text:activityText,image_generation_in_progress:imageGenerationLoading,image_response_ready:imageResponseReady,connection_interrupted:recoveryRequired,message_delivery_timed_out:messageDeliveryTimedOut,observed_at:Date.now()};
+  const source=imageGenerationLoading?'dom_image_generation':imageResponseReady?'dom_image_ready':responseReady?'dom_response_ready':messageDeliveryTimedOut?'dom_message_delivery_timeout':connectionInterrupted?'dom_connection_interrupted':toolCallActive?'dom_tool':stopControl?'dom_stop':thinkingPlaceholder?'dom_thinking':'';
+  return {busy,response_ready:responseReady,source,activity_text:activityText,image_generation_in_progress:imageGenerationLoading,image_response_ready:imageResponseReady,connection_interrupted:recoveryRequired,message_delivery_timed_out:messageDeliveryTimedOut,observed_at:Date.now()};
 }
 
 async function chatDomActivityState(tabId,conversationId,options={}) {
@@ -600,8 +606,8 @@ async function chatDomActivityState(tabId,conversationId,options={}) {
         'Chrome renderer không phản hồi khi kiểm tra trạng thái ChatGPT.'
       );
       const result=injected?.result&&typeof injected.result==='object'?injected.result:{};
-      return {available:true,busy:Boolean(result.busy),source:String(result.source||''),activity_text:String(result.activity_text||'').trim().slice(0,220),image_generation_in_progress:Boolean(result.image_generation_in_progress),image_response_ready:Boolean(result.image_response_ready),connection_interrupted:Boolean(result.connection_interrupted),message_delivery_timed_out:Boolean(result.message_delivery_timed_out),observed_at:Number(result.observed_at)||Date.now()};
-    }catch(error){return {available:false,busy:false,source:'',activity_text:'',image_generation_in_progress:false,image_response_ready:false,error:String(error?.message||error).slice(0,300)};}
+      return {available:true,busy:Boolean(result.busy),response_ready:Boolean(result.response_ready),source:String(result.source||''),activity_text:String(result.activity_text||'').trim().slice(0,220),image_generation_in_progress:Boolean(result.image_generation_in_progress),image_response_ready:Boolean(result.image_response_ready),connection_interrupted:Boolean(result.connection_interrupted),message_delivery_timed_out:Boolean(result.message_delivery_timed_out),observed_at:Number(result.observed_at)||Date.now()};
+    }catch(error){return {available:false,busy:false,response_ready:false,source:'',activity_text:'',image_generation_in_progress:false,image_response_ready:false,error:String(error?.message||error).slice(0,300)};}
   })();
   chatDomActivityByTab.set(tabId,{at:Number(cached?.at)||0,value:cached?.value||null,promise});
   const value=await promise;
@@ -625,24 +631,24 @@ async function tabList() {
     const shouldProbeCanonical=Boolean(conversationId&&(networkState.busy||canonicalActivity.busy||Date.now()-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS));
     if(shouldProbeCanonical)canonicalActivity=await probeCanonicalActivity(tab.id,conversationId);
     const shouldProbeDom=Boolean(conversationId&&(tab.active||networkState.busy||canonicalActivity.busy||cachedDomActivity?.busy||Date.now()-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS));
-    const domActivity=shouldProbeDom?await chatDomActivityState(tab.id,conversationId):{available:false,busy:false,source:'',activity_text:'',image_generation_in_progress:false,image_response_ready:false};
-    if(domActivity.image_response_ready){
+    const domActivity=shouldProbeDom?await chatDomActivityState(tab.id,conversationId):{available:false,busy:false,response_ready:false,source:'',activity_text:'',image_generation_in_progress:false,image_response_ready:false};
+    if(domActivity.response_ready){
       if(canonicalActivity.busy){
         canonicalActivity={...canonicalActivity,busy:false,response_ready:true,busy_since:0,last_checked_at:Date.now()};
         chatCanonicalActivityByTab.set(tab.id,canonicalActivity);
       }
       if(networkState.busy){
-        await reconcileChatNetworkCompletion(tab.id,conversationId,'dom_image');
+        await reconcileChatNetworkCompletion(tab.id,conversationId,domActivity.image_response_ready?'dom_image':'dom_response');
         networkState=await chatRequestState(tab.id,conversationId);
       }
     }
     const networkStream=conversationId&&networkState.network_state!=='idle'?await chatNetworkStreamCapture(tab.id,conversationId):{};
     const titleOverride=conversationId?titleOverrides[conversationId]:null;
-    const streamBusy=Boolean(networkStream.in_progress&&!domActivity.image_response_ready);
+    const streamBusy=Boolean(networkStream.in_progress&&!domActivity.response_ready);
     const networkBusy=Boolean(networkState.busy||streamBusy);
     const domImageBusy=Boolean(domActivity.image_generation_in_progress);
     const domToolBusy=Boolean(domActivity.busy&&domActivity.source==='dom_tool');
-    const canonicalBusy=Boolean(canonicalActivity.busy&&!domActivity.image_response_ready);
+    const canonicalBusy=Boolean(canonicalActivity.busy&&!domActivity.response_ready);
     const streamActivity=String(networkStream.activity_text||'').trim().slice(0,220);
     return {
       id:tab.id,
@@ -664,6 +670,7 @@ async function tabList() {
       dom_busy:domActivity.busy,
       image_generation_in_progress:Boolean(domActivity.image_generation_in_progress),
       image_response_ready:Boolean(domActivity.image_response_ready),
+      response_ready:Boolean(domActivity.response_ready),
       connection_interrupted:Boolean(domActivity.connection_interrupted),
       message_delivery_timed_out:Boolean(domActivity.message_delivery_timed_out),
       dom_probe_available:domActivity.available,
@@ -2127,19 +2134,20 @@ if(action==='rename_chat'){
       if(!injected?.result?.ok)throw new Error(injected?.result?.error||'Không đọc được phản hồi ChatGPT.');
       let observedDomResult=injected.result;
       let domResult=injected.result;
-      if(domResult.image_response_ready){
+      const initialDomResponseReady=Boolean(domResult.response_ready&&!domResult.busy);
+      if(initialDomResponseReady){
         const previousCanonicalActivity=chatCanonicalActivityByTab.get(tab.id)||emptyCanonicalActivity();
         chatCanonicalActivityByTab.set(tab.id,{...previousCanonicalActivity,conversation_id:conversationId,busy:false,response_ready:true,busy_since:0,last_checked_at:Date.now()});
         canonicalActivityPayload={canonical_busy:false,canonical_response_ready:true,canonical_observed:Boolean(canonical.ok)};
         if(networkState.busy){
-          await reconcileChatNetworkCompletion(tab.id,conversationId,'dom_image');
+          await reconcileChatNetworkCompletion(tab.id,conversationId,domResult.image_response_ready?'dom_image':'dom_response');
           networkState=await chatRequestState(tab.id,conversationId);
           networkPayload=networkPayloadOf(networkState);
         }
       }
       const canonicalText=String(canonical.text||'').trim();
       const domTextBeforeMerge=String(domResult.text||'').trim();
-      if(!domResult.image_response_ready&&canonicalResponseSupersedesDom(canonical,domResult)){
+      if(!domResult.response_ready&&canonicalResponseSupersedesDom(canonical,domResult)){
         const latestAssistant=[...(canonical.messages||[])].reverse().find(message=>message.role==='assistant');
         domResult={...domResult,text:canonicalText,text_length:canonicalText.length,messages:canonical.messages||domResult.messages,message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,truncated:Boolean(latestAssistant?.truncated),busy:Boolean(canonical.busy),response_ready:Boolean(canonical.response_ready),response_source:'canonical_api',updated_at:new Date().toISOString()};
       }
@@ -2207,8 +2215,9 @@ if(action==='rename_chat'){
         recovery.response_checkpoint_applied=Boolean(domResult.response_checkpoint_applied);
         recovery.dom_recovered=!domResult.connection_interrupted&&(connectionInterrupted||messageDeliveryTimedOut||String(domResult.text||'').trim().length>=canonicalText.length);
       }
-      const imageResponseReady=Boolean(domResult.image_response_ready);
-      return withResponseAudit({action,target_id:tab.id,...domResult,busy:Boolean(!imageResponseReady&&(effectiveNetworkBusy||canonical.busy||domResult.busy)),incomplete:imageResponseReady?false:Boolean(domResult.incomplete),incomplete_reason:imageResponseReady?'':String(domResult.incomplete_reason||''),dom_available:true,dom_busy:Boolean(domResult.busy),canonical_available:Boolean(canonical.ok),canonical_error:String(canonical.error||''),...canonicalActivityPayload,...networkStreamPayload,...recovery,...networkPayload,message_delivery_timed_out:messageDeliveryTimedOut,...(imageResponseReady?{canonical_busy:false,canonical_response_ready:true,network_stream_in_progress:false,response_ready:true,response_kind:'image'}:{})},{dom:observedDomResult,canonical,networkStream});
+      const domResponseReady=Boolean(domResult.response_ready&&!domResult.busy);
+      const imageResponseReady=Boolean(domResponseReady&&domResult.image_response_ready);
+      return withResponseAudit({action,target_id:tab.id,...domResult,busy:Boolean(!domResponseReady&&(effectiveNetworkBusy||canonical.busy||domResult.busy)),incomplete:domResponseReady?false:Boolean(domResult.incomplete),incomplete_reason:domResponseReady?'':String(domResult.incomplete_reason||''),dom_available:true,dom_busy:Boolean(domResult.busy),canonical_available:Boolean(canonical.ok),canonical_error:String(canonical.error||''),...canonicalActivityPayload,...networkStreamPayload,...recovery,...networkPayload,message_delivery_timed_out:messageDeliveryTimedOut,...(domResponseReady?{canonical_busy:false,canonical_response_ready:true,network_stream_in_progress:false,response_ready:true,response_kind:imageResponseReady?'image':String(domResult.response_kind||'text')}:{})},{dom:observedDomResult,canonical,networkStream});
     }catch(error){
       if(canonical.ok){
         const latestAssistant=[...(canonical.messages||[])].reverse().find(message=>message.role==='assistant');

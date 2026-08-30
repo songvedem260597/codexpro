@@ -12,6 +12,7 @@ import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
 import { CodeGraphView } from "./code-graph-view.jsx";
+import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -388,7 +389,7 @@ function toolActivityFromText(text) {
   const target = String(args.path || args.cwd || args.root || "").trim();
   const shortTarget = target ? target.replace(/\\+/g, "/").split("/").slice(-3).join("/") : "";
   const labels = {
-    begin_repo_task: "Đang xác minh repo",
+    begin_repo_task: "Đang ghi nhận task",
     open_workspace: "Đang mở repo",
     open_current_workspace: "Đang mở workspace",
     search: shortTarget ? `Đang tìm trong ${shortTarget}` : "Đang tìm trong repo",
@@ -494,6 +495,17 @@ function extensionReady(version) {
   return true;
 }
 
+function repoTaskEvidenceSummary(proof) {
+  if (!proof) return "";
+  const title = String(proof.task_title || "").trim() || "Task chưa có tên";
+  if (proof.task_kind !== "code") return `${title} · GENERAL · không tải Rules/CodexGraph`;
+  const rulesHash = String(proof.global_rules_sha256 || "").slice(0, 8);
+  const coverage = proof.codexgraph?.coverage || {};
+  const symbols = Number(coverage.symbolCount) || 0;
+  const relationships = Number(coverage.relationshipCount) || 0;
+  return `${title} · CODE · Rules ${rulesHash || "thiếu hash"} ✓ · CodexGraph ${symbols} symbols / ${relationships} edges ✓`;
+}
+
 function profileSafeForWorkerUpdate(profile) {
   const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
   const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
@@ -575,6 +587,10 @@ function buildConversationRolloverPrompt(result) {
 
 function App() {
   const [activePage, setActivePage] = useState("overview");
+  const [diagnosticLogs, setDiagnosticLogs] = useState({ summary: { total: 0, info: 0, warn: 0, error: 0 }, entries: [], sources: [], categories: [], queried_hours: 24, checked_at: "" });
+  const [diagnosticFilters, setDiagnosticFilters] = useState({ level: "all", source: "all", category: "all", hours: 24, query: "" });
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
+  const [selectedDiagnostic, setSelectedDiagnostic] = useState(null);
   const [managerSettings, setManagerSettings] = useState(DEFAULT_MANAGER_SETTINGS);
   const [chatWidthInput, setChatWidthInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatWidth));
   const [chatHeightInput, setChatHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatHeight));
@@ -690,6 +706,52 @@ function App() {
   const notify = useCallback((message) => {
     setToast(message);
     window.setTimeout(() => setToast(""), 2600);
+  }, []);
+
+  const loadDiagnosticLogs = useCallback(async (showBusy = true) => {
+    if (typeof api.getDiagnosticLogs !== "function") return;
+    if (showBusy) setDiagnosticBusy(true);
+    try {
+      const next = await api.getDiagnosticLogs({ ...diagnosticFilters, limit: 1500 });
+      setDiagnosticLogs(next || { summary: { total: 0, info: 0, warn: 0, error: 0 }, entries: [] });
+      setSelectedDiagnostic(null);
+    } catch (err) {
+      logRendererDiagnostic(api, "error", "runtime", `Không tải được nhật ký: ${err?.message || String(err)}`, { action: "get-diagnostic-logs", error: err });
+      setError(err?.message || String(err));
+    } finally {
+      if (showBusy) setDiagnosticBusy(false);
+    }
+  }, [diagnosticFilters]);
+
+  const clearDiagnosticLogHistory = useCallback(async () => {
+    setDiagnosticBusy(true);
+    try {
+      await api.clearDiagnosticLogs?.();
+      setSelectedDiagnostic(null);
+      await loadDiagnosticLogs(false);
+      notify("Đã xóa nhật ký chẩn đoán");
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setDiagnosticBusy(false);
+    }
+  }, [loadDiagnosticLogs, notify]);
+
+  useEffect(() => {
+    if (activePage !== "logs") return undefined;
+    const timer = window.setTimeout(() => void loadDiagnosticLogs(false), 140);
+    return () => window.clearTimeout(timer);
+  }, [activePage, loadDiagnosticLogs]);
+
+  useEffect(() => {
+    const onError = (event) => logRendererDiagnostic(api, "error", "runtime", event?.message || "Renderer error", { action: "window.error", filename: event?.filename, lineno: event?.lineno, colno: event?.colno, error: event?.error });
+    const onRejection = (event) => logRendererDiagnostic(api, "error", "runtime", event?.reason?.message || String(event?.reason || "Unhandled promise rejection"), { action: "unhandledrejection", reason: event?.reason });
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
   }, []);
 
   const applyManagerSettings = useCallback((next) => {
@@ -890,6 +952,7 @@ function App() {
       setStatus(applyConversationTitleOverrides(nextStatus, conversationTitleOverridesRef.current));
       setProjects(nextProjects);
     } catch (err) {
+      logRendererDiagnostic(api, "error", "status", `Không làm mới Manager: ${err?.message || String(err)}`, { action: "refresh", error: err });
       setError(err?.message || String(err));
     } finally {
       refreshInFlight.current = false;
@@ -902,7 +965,8 @@ function App() {
     statusRefreshInFlight.current = true;
     try {
       setStatus(applyConversationTitleOverrides(await api.getStatus(), conversationTitleOverridesRef.current));
-    } catch {
+    } catch (err) {
+      logRendererDiagnostic(api, "warn", "status", `Background status refresh lỗi: ${err?.message || String(err)}`, { action: "refresh-status", error: err });
       // Background realtime refresh should not flash a global error for a transient miss.
     } finally {
       statusRefreshInFlight.current = false;
@@ -914,7 +978,8 @@ function App() {
     projectRefreshInFlight.current = true;
     try {
       setProjects(await api.listProjects());
-    } catch {
+    } catch (err) {
+      logRendererDiagnostic(api, "warn", "projects", `Background project refresh lỗi: ${err?.message || String(err)}`, { action: "refresh-projects", error: err });
       // Keep the last good project list when a background discovery refresh transiently fails.
     } finally {
       projectRefreshInFlight.current = false;
@@ -951,7 +1016,10 @@ function App() {
       profileCheckTimes.current.set(profile.profile_id, Date.now());
       setCheckingProfiles((current) => [...new Set([...current, profile.profile_id])]);
       void api.checkProfile(profile.profile_id)
-        .catch(() => null)
+        .catch((err) => {
+          logRendererDiagnostic(api, "warn", "profile", `Kiểm tra profile ${profile.profile_id} lỗi: ${err?.message || String(err)}`, { action: "check-profile", profile_id: profile.profile_id, error: err });
+          return null;
+        })
         .finally(() => {
           setCheckingProfiles((current) => current.filter((id) => id !== profile.profile_id));
           window.setTimeout(() => void refresh(false), 1200);
@@ -1294,7 +1362,7 @@ function App() {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [chatProfileId]);
+  }, [chatProfileId, attachmentPreview]);
 
   const profileSummary = useMemo(() => {
     const allProfiles = status?.browserProfiles || [];
@@ -1745,6 +1813,8 @@ function App() {
         tabSettling: selectedTab?.settling,
         responseCurrent: currentResponse?.conversationId === conversationId,
         responseBusy: currentResponse?.busy,
+        responseReady: currentResponse?.responseReady,
+        responseLoading: currentResponse?.loading,
         responseIncomplete: currentResponse?.incomplete,
         canonicalBusy: currentResponse?.canonicalBusy,
         streamBusy: currentResponse?.networkStreamInProgress
@@ -1803,7 +1873,7 @@ function App() {
       setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
       setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
       const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
-      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, text, attachments });
+      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence(result) }));
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
@@ -1836,6 +1906,7 @@ function App() {
         const submitPath = String(result?.submitted_by || result?.submit_path || "pre-submit");
         const generationEndpoint = String(result?.network_generation_endpoint || "");
         const uncertainMessage = `Chưa xác định được tin nhắn đã gửi hay chưa. Path: ${submitPath}.${generationEndpoint ? ` Endpoint: ${generationEndpoint}.` : ""} ${technicalReason}`;
+        logRendererDiagnostic(api, "warn", "network", uncertainMessage, { action: "send-uncertain", profile_id: profile.profile_id, conversation_id: conversationId, submission_state: submissionState, submitted_by: submitPath, generation_endpoint: generationEndpoint });
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: uncertainMessage }));
         restoreSubmittedInputs();
         notify("Trạng thái gửi chưa chắc chắn · CodexPro không tự gửi lại");
@@ -1880,6 +1951,7 @@ function App() {
         };
       });
       if (generationState === "failed") {
+        logRendererDiagnostic(api, "error", "network", `AI gặp lỗi network${result?.network_error ? `: ${result.network_error}` : ""}`, { action: "generation-failed", profile_id: profile.profile_id, conversation_id: resolvedConversationId, network_status_code: result?.network_status_code, network_error: result?.network_error });
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Tin nhắn đã gửi nhưng AI gặp lỗi network${result?.network_error ? `: ${result.network_error}` : ""}.` }));
         notify("Tin nhắn đã gửi · AI gặp lỗi network");
       } else {
@@ -1888,6 +1960,7 @@ function App() {
       window.setTimeout(() => void refresh(false), 500);
     } catch (err) {
       const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "chat", `Gửi yêu cầu thất bại: ${message}`, { action: "send-request", profile_id: profile.profile_id, conversation_id: conversationId, project_root: projectRoot, error: err });
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence({}, err) }));
       const conversationLimitReached = !newChat && message.includes("CONVERSATION_LIMIT_REACHED:");
       if (conversationLimitReached) {
@@ -1956,11 +2029,15 @@ function App() {
 
     try {
       const handoffText = buildConversationRolloverPrompt(result);
+      const rolloverProjectRoot = result?.projectRoot || projectRootForProfile(profile);
+      const rolloverAllAllowed = result?.repo_task_scope === "all_allowed" || result?.repoTaskScope === "all_allowed" || rolloverProjectRoot === ALL_ALLOWED_WORKSPACES;
       const created = await api.sendProfileRequest({
         profileId,
         conversationId: "",
         newChat: true,
-        projectRoot: result?.projectRoot || projectRootForProfile(profile),
+        scope: rolloverAllAllowed ? "all_allowed" : "workspace",
+        projectRoot: rolloverAllAllowed ? "" : rolloverProjectRoot,
+        workspaceCandidates: rolloverAllAllowed ? projects.map((project) => project.root) : [],
         text: handoffText,
         attachments: Array.isArray(result?.rollover_attachments) ? result.rollover_attachments : []
       });
@@ -2046,13 +2123,14 @@ function App() {
             const previous = current[profile.profile_id] || {};
             return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "rolling-over", loading: true } } : current;
           });
-          notify("Chat cũ né CodexPro 2 lần · đang tạo chat mới");
+          notify("Chat cũ thiếu task title 2 lần · đang tạo chat mới");
           const created = await api.sendProfileRequest({
             profileId: profile.profile_id,
             conversationId: "",
             newChat: true,
             scope: originalScope,
             projectRoot: originalScope === "all_allowed" ? "" : original.projectRoot,
+            workspaceCandidates: originalScope === "all_allowed" ? projects.map((project) => project.root) : [],
             text: original.text,
             attachments: Array.isArray(original.attachments) ? original.attachments : [],
             toolRetry: false,
@@ -2090,14 +2168,14 @@ function App() {
           window.setTimeout(() => void refresh(false), 500);
           return;
         }
-        const message = "ChatGPT đã trả lời nhưng không gọi CodexPro sau 2 lần. Phản hồi này không được coi là đã thực hiện công việc.";
+        const message = "ChatGPT đã trả lời nhưng không trả task title qua CodexPro sau 2 lần. Phản hồi này không được công nhận.";
         setRequestResponses((current) => {
           const previous = current[profile.profile_id] || {};
           return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "failed", repoTaskVerified: false } } : current;
         });
         repoTaskVerificationReads.current.set(verificationKey, "done");
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: message }));
-        notify("ChatGPT né gọi CodexPro · đã chặn phản hồi");
+        notify("ChatGPT thiếu task title · đã chặn phản hồi");
         return;
       }
       setRequestResponses((current) => {
@@ -2110,6 +2188,7 @@ function App() {
         newChat: false,
         scope: originalScope,
         projectRoot: originalScope === "all_allowed" ? "" : original.projectRoot,
+        workspaceCandidates: originalScope === "all_allowed" ? projects.map((project) => project.root) : [],
         text: original.text,
         attachments: Array.isArray(original.attachments) ? original.attachments : [],
         toolRetry: true,
@@ -2136,7 +2215,7 @@ function App() {
           }
         } : current;
       });
-      notify("ChatGPT chưa gọi CodexPro · đang tự gửi lại bắt buộc");
+      notify("ChatGPT chưa trả task title · đang tự gửi lại bắt buộc");
       window.setTimeout(() => void refresh(false), 500);
     } catch (err) {
       const message = err?.message || String(err);
@@ -2184,9 +2263,11 @@ function App() {
         const networkTerminal = isTerminalChatNetworkState(nextNetworkState);
         const networkStreamInProgress = Boolean(networkStreamCurrentGeneration && result.network_stream_in_progress);
         const networkStreamAvailable = Boolean(networkStreamCurrentGeneration && (!networkTerminal || networkStreamInProgress));
-        const canonicalBusy = Object.prototype.hasOwnProperty.call(result, "canonical_busy")
+        const domResponseVerified = Boolean(result.response_ready === true && domAvailable && result.dom_busy !== true && result.network_stream_in_progress !== true);
+        const canonicalBusyFromSource = Object.prototype.hasOwnProperty.call(result, "canonical_busy")
           ? Boolean(result.canonical_busy)
           : Boolean(sameConversation && previous.canonicalBusy);
+        const canonicalBusy = domResponseVerified ? false : canonicalBusyFromSource;
         const incomingMessages = Array.isArray(result.messages)
           ? trimRecentTranscriptMessages(result.messages.map((message, index) => ({
               id: String(message?.id || `${message?.role || "message"}-${index}`),
@@ -2338,10 +2419,14 @@ function App() {
     setBusy(`continue:${profile.profile_id}`);
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
     try {
+      const continueProjectRoot = projectRootForProfile(profile);
+      const continueAllAllowed = continueProjectRoot === ALL_ALLOWED_WORKSPACES;
       await api.sendProfileRequest({
         profileId: profile.profile_id,
         conversationId,
-        projectRoot: projectRootForProfile(profile),
+        scope: continueAllAllowed ? "all_allowed" : "workspace",
+        projectRoot: continueAllAllowed ? "" : continueProjectRoot,
+        workspaceCandidates: continueAllAllowed ? projects.map((project) => project.root) : [],
         text: "Tiếp tục từ đúng chỗ phản hồi vừa bị ngắt. Không lặp lại phần trước; hoàn thành câu trả lời còn dang dở.",
         attachments: []
       });
@@ -2403,6 +2488,8 @@ function App() {
       tabBusy: selectedTab?.busy,
       responseCurrent,
       responseBusy: response?.busy,
+      responseReady: responseVerifiedComplete,
+      responseLoading: response?.loading,
       streamBusy: responseCurrent && response?.networkStreamInProgress,
       canonicalBusy: responseCurrent && response?.canonicalBusy
     });
@@ -2419,6 +2506,8 @@ function App() {
       tabSettling: selectedTab?.settling,
       responseCurrent,
       responseBusy: response?.busy,
+      responseReady: responseVerifiedComplete,
+      responseLoading: response?.loading,
       responseIncomplete: response?.incomplete,
       canonicalBusy: responseCurrent && response?.canonicalBusy,
       streamBusy: responseCurrent && response?.networkStreamInProgress
@@ -2426,8 +2515,10 @@ function App() {
     const domUnavailable = Boolean(responseCurrent && response?.domAvailable === false && !response?.domSkipped);
     const contentNeedsRefresh = Boolean(responseCurrent && response?.contentNeedsRefresh);
     const rolloverCreating = Boolean(responseCurrent && response?.rolloverStatus === "creating");
+    const otherBusyTab = (profile.conversation_tabs || []).some((tab) => (!selectedTab || tab.id !== selectedTab.id) && (tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating"));
+    const selectedResponseClearsProfileBusy = Boolean(responseVerifiedComplete && !selectedBusy && !selectedSettling && !otherBusyTab);
     const canSend = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0) && Boolean(draft.trim() || attachments.length);
-    const working = profile.connected && (profile.activity === "working" || selectedBusy || selectedSettling || rolloverCreating);
+    const working = profile.connected && ((profile.activity === "working" && !selectedResponseClearsProfileBusy) || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
     const responseHeadline = responseCleared
       ? "Chat đã được dọn"
@@ -2490,8 +2581,8 @@ function App() {
               )}
               {responseCurrent && !responseCleared && response?.repoTaskId && (
                 <div className={`network-response-notice is-${response.repoTaskStatus === "verified" ? "completed" : response.repoTaskStatus === "failed" ? "failed" : "generating"}`}>
-                  <strong>{response.repoTaskStatus === "verified" ? "CodexPro: đã xác minh tool call" : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT né tool · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ bằng chứng tool call"}</strong>
-                  <span>{response.repoTaskStatus === "verified" ? (response.repoTaskScope === "all_allowed" ? `Đã xác minh phạm vi toàn bộ vùng được cấp quyền · task ${response.repoTaskId}` : `Workspace đã được mở thật · task ${response.repoTaskId}`) : response.repoTaskStatus === "failed" ? "ChatGPT không gọi CodexPro nên Manager không công nhận phản hồi này." : "Manager chỉ công nhận công việc sau khi server nhận begin_repo_task."}</span>
+                  <strong>{response.repoTaskStatus === "verified" ? (response.repoTaskProof?.task_kind === "code" ? "CodexPro: Rules + CodexGraph đã xác minh" : "CodexPro: đã ghi nhận task title") : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT thiếu title · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ task title"}</strong>
+                  <span>{response.repoTaskStatus === "verified" ? repoTaskEvidenceSummary(response.repoTaskProof) : response.repoTaskStatus === "failed" ? "ChatGPT không trả task title qua CodexPro nên Manager không công nhận phản hồi này." : "Mọi task phải có title; chỉ task CODE mới tải Rules và CodexGraph."}</span>
                 </div>
               )}
               {responseCurrent && !responseCleared && !isNewChat && selectedNetworkState !== "idle" && !selectedNetworkCompleted && !responseVerifiedComplete && (
@@ -2627,6 +2718,7 @@ function App() {
         </div>
         <nav>
           <button type="button" className={activePage === "overview" ? "active" : ""} onClick={() => setActivePage("overview")}><Icon>⌁</Icon>Tổng quan</button>
+          <button type="button" className={activePage === "logs" ? "active" : ""} onClick={() => setActivePage("logs")}><Icon>≡</Icon>Nhật ký</button>
           <button type="button" className={activePage === "settings" ? "active" : ""} onClick={() => setActivePage("settings")}><Icon>⚙</Icon>Cài đặt</button>
         </nav>
         <div className="sidebar-foot">
@@ -2635,12 +2727,12 @@ function App() {
         </div>
       </aside>
 
-      <main className={activePage === "settings" ? "page-settings" : "page-overview"}>
+      <main className={activePage === "settings" ? "page-settings" : activePage === "logs" ? "page-logs" : "page-overview"}>
         <header>
           <div>
-            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : "WINDOWS CONTROL CENTER"}</p>
-            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : "CodexPro của bạn"}</h1>
-            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ toàn app." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
+            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : "WINDOWS CONTROL CENTER"}</p>
+            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : "CodexPro của bạn"}</h1>
+            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ toàn app." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
@@ -2859,6 +2951,23 @@ function App() {
             </nav>
           )}
         </section>
+        </div>
+
+        <div className="diagnostic-page" hidden={activePage !== "logs"}>
+          <DiagnosticLogView
+            data={diagnosticLogs}
+            filters={diagnosticFilters}
+            busy={diagnosticBusy}
+            selected={selectedDiagnostic}
+            onFilters={(patch) => setDiagnosticFilters((current) => ({ ...current, ...patch }))}
+            onRefresh={() => void loadDiagnosticLogs(true)}
+            onClear={() => void clearDiagnosticLogHistory()}
+            onSelect={setSelectedDiagnostic}
+            onCopy={(entry) => {
+              void api.copyText(JSON.stringify(entry, null, 2));
+              notify("Đã copy chi tiết log");
+            }}
+          />
         </div>
 
         <div className="settings-view" hidden={activePage !== "settings"}>
