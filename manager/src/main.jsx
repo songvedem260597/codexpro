@@ -1818,7 +1818,7 @@ function App() {
   }, [chatProfileId, requestResponses]);
 
   useEffect(() => {
-    if (!DEEP_UI_DIAGNOSTICS_ENABLED || !chatProfileId || !openChatResponse?.responseAudit || typeof api.logChatResponseAudit !== "function") return undefined;
+    if (!chatProfileId || !openChatResponse?.responseAudit || typeof api.logChatResponseAudit !== "function") return undefined;
     const conversationId = String(openChatResponse.conversationId || "");
     const timer = window.setTimeout(() => {
       const transcript = responseBodyRefs.current.get(chatProfileId);

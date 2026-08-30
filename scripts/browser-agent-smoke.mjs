@@ -48,6 +48,9 @@ assert.equal(mergeProgressiveResponseText("Phần phản hồi đã nhận", "")
 assert.equal(mergeProgressiveResponseText("Phần phản hồi đã nhận", "Phần phản hồi"), "Phần phản hồi đã nhận", "a shorter post-reload snapshot must not regress visible response text");
 assert.equal(mergeProgressiveResponseText("Phần phản hồi", "Phần phản hồi đã nhận đủ"), "Phần phản hồi đã nhận đủ", "a longer cumulative response must extend the saved checkpoint");
 assert.equal(mergeProgressiveResponseText("Phần một - phần hai đầy đủ", "phần hai đầy đủ - phần ba"), "Phần một - phần hai đầy đủ - phần ba", "an overlapping later fragment must append only its missing tail");
+assert.equal(completedResponseNeedsDomFallback({ response_ready: true, canonical_available: false, network_state: "completed", text: "Đ", messages: [{ role: "user", text: "Làm task" }, { role: "assistant", text: "Đ" }] }), true, "a one-character DOM placeholder without canonical proof must trigger recovery");
+assert.equal(completedResponseNeedsDomFallback({ response_ready: true, canonical_available: false, network_state: "completed", text: "OK", messages: [{ role: "user", text: "Reply OK" }, { role: "assistant", text: "OK" }] }), true, "a two-character unverified DOM response must remain recoverable");
+assert.equal(completedResponseNeedsDomFallback({ response_ready: true, canonical_available: true, network_state: "completed", text: "OK", messages: [{ role: "user", text: "Reply OK" }, { role: "assistant", text: "OK" }] }), false, "a short response is valid once canonical confirms it");
 
 const optimisticTranscript = [...cachedTranscript, { id: "optimistic-user-1", role: "user", text: "Yêu cầu mới", pending: true, submissionState: "pending", createdAt: "2026-08-29T00:00:00.000Z" }];
 assert.deepEqual(cacheableTranscriptMessages(optimisticTranscript), cachedTranscript, "an outgoing message without a send result must never be persisted as confirmed chat history");
@@ -405,6 +408,8 @@ assert.match(worker, /num_turns=6/, "canonical transcript reads must request onl
 assert.doesNotMatch(worker, /num_turns=40/, "canonical transcript reads must not fetch the old 20-exchange window");
 assert.match(worker, /Array\.isArray\(payload\?\.messages\)/, "canonical transcript reads must parse the bounded messages payload directly");
 assert.match(worker, /function canonicalResponseSupersedesDom[\s\S]*?if\(domHasResponse&&!canonicalHasResponse\)return false/, "a lagging canonical snapshot must not erase a newer assistant response already rendered in the DOM");
+assert.match(worker, /const canonicalGenerationMatches=canonicalMatchesCurrentGeneration[\s\S]*?const currentCanonical=canonical\.ok&&!canonicalGenerationMatches/, "response reads must gate canonical content by the current generation");
+assert.match(worker, /short_dom_response_unverified/, "an unverified one-character DOM placeholder must be diagnosed instead of finalized");
 assert.match(worker, /function withResponseAudit[\s\S]*?chatgpt_dom[\s\S]*?canonical_api[\s\S]*?network_stream/, "worker response reads must preserve separate ChatGPT DOM, canonical, and network fingerprints");
 assert.doesNotMatch(worker, /canonical\.response_ready\|\|canonical\.busy\|\|canonicalText\.length>domTextBeforeMerge\.length/, "canonical busy state alone must never overwrite a newer DOM transcript");
 assert.match(worker, /browserElementActionPage/);
@@ -623,9 +628,9 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.82");
+assert.equal(manifest.version, "0.5.83");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
-assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(canonical,domResult\)\)/, "a complete canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
+assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
 assert.match(worker, /const MAX_CHATGPT_TABS = 6/, "worker must cap ChatGPT tabs per Chrome profile");
 assert.match(worker, /CHAT_TAB_HEALTH_FAILURES_TO_CLOSE = 2/, "worker must require consecutive failed CodexPro probes before closing an unhealthy tab");
