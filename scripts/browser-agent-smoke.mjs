@@ -251,6 +251,9 @@ assert.match(bridge, /browser-profile-tasks\.json/, "profile task titles must su
 assert.match(bridge, /loadBrowserProfileTasks\(\)/, "profile task titles must load when the bridge starts");
 assert.match(bridge, /persistBrowserProfileTasks\(\)/, "AI task titles must persist after begin_repo_task");
 assert.ok(managerUi.includes('working || settling ? "Task hi\\u1ec7n t\\u1ea1i" : "Task g\\u1ea7n nh\\u1ea5t"'), "Manager must retain the last AI task title after completion");
+assert.match(managerMain, /const MANAGER_VERSION = app\.getVersion\(\)/, "MCP client metadata must use the packaged Manager version");
+assert.match(managerUi, /CodexPro Manager \{managerPackage\.version\}/, "Manager footer must use package.json instead of a stale hard-coded version");
+assert.doesNotMatch(managerUi, /CodexPro Manager 0\.2\.\d+/, "Manager UI must not hard-code a release version");
 
 for (const action of ["trusted_click", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch"]) {
   assert.match(browserOps, new RegExp(`\\| \\"${action}\\"`), `dedicated browser action ${action} must be exposed`);

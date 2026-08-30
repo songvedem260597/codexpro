@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import managerPackage from "../package.json";
 import "./styles.css";
 import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
@@ -2741,7 +2742,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.80</small>
+          <small>CodexPro Manager {managerPackage.version}</small>
         </div>
       </aside>
 
