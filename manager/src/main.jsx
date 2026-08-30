@@ -1572,7 +1572,17 @@ function App() {
         const contentAlreadyRead = networkCompletionReads.current.get(completionKey) === networkCompletedAt;
         if (!contentAlreadyRead) {
           networkCompletionReads.current.set(completionKey, networkCompletedAt);
-          void loadResponse(profile, conversationId, true, false);
+          void (async () => {
+            const canonical = await loadResponse(profile, conversationId, true, false, false, true);
+            if (!canonical) {
+              if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) networkCompletionReads.current.delete(completionKey);
+              return;
+            }
+            if (completedResponseNeedsDomFallback(canonical)) {
+              const dom = await loadResponse(profile, conversationId, true, true);
+              if (!dom && networkCompletionReads.current.get(completionKey) === networkCompletedAt) networkCompletionReads.current.delete(completionKey);
+            }
+          })();
           if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
         }
         if (currentResponse?.repoTaskId && canVerifyRepoTaskUse({
@@ -3372,7 +3382,7 @@ function App() {
                     ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
                     : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
               >
-                {busy === "reload-profiles" ? "Đang update worker…" : "Update worker extension"}
+                {busy === "reload-profiles" ? "Đang update extension…" : "Update extension"}
               </button>
               <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>
                 {busy === "start" ? "Đang khởi động..." : "Khởi động"}
