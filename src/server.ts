@@ -26,7 +26,7 @@ import { codexPatchToUnifiedDiff, codexPatchTouchedPaths, isCodexPatchEnvelope }
 import { projectCompactGraph } from "./analysis/projection.js";
 import { createRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import { runBrowserControl } from "./browserOps.js";
-import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 
@@ -377,6 +377,16 @@ function sameResolvedRoot(left: string, right: string): boolean {
 
 function expectedRepoTask(profileId: string): ExpectedRepoTask | undefined {
   return expectedRepoTaskByProfile.get(profileId);
+}
+
+function expectedRepoTaskOwner(taskId: string): { profileId: string; expected: ExpectedRepoTask } | undefined {
+  let owner: { profileId: string; expected: ExpectedRepoTask } | undefined;
+  for (const [profileId, expected] of expectedRepoTaskByProfile) {
+    if (expected.taskId !== taskId) continue;
+    if (owner) return undefined;
+    owner = { profileId, expected };
+  }
+  return owner;
 }
 
 function rememberExpectedRepoTask(profileId: string, expected: Omit<ExpectedRepoTask, "preparedAt">): ExpectedRepoTask {
@@ -1345,7 +1355,7 @@ export interface CodexProServerContext {
 }
 
 export function createCodexProServer(config: CodexProConfig, context: CodexProServerContext = {}): McpServer {
-  const browserProfileId = String(context.browserProfileId || "").trim();
+  let browserProfileId = String(context.browserProfileId || "").trim();
   const requireRepoTask = context.requireRepoTask ?? Boolean(browserProfileId);
   let selectedRuntimeTraceWorkspace: Workspace | undefined;
   const workspaces = new WorkspaceManager(
@@ -1963,6 +1973,14 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         preparedAt: Date.now()
       };
       rememberExpectedRepoTask(args.profile_id, expected);
+      setBrowserExtensionProfilePendingTask(args.profile_id, expected.taskId, expected.root || "", expected.scope, expected.preparedAt);
+      recordBrowserProfileTaskEvent("repo_task_prepared", {
+        profile_id: args.profile_id,
+        task_id: expected.taskId,
+        root: expected.root,
+        scope: expected.scope,
+        prepared_at: new Date(expected.preparedAt).toISOString()
+      });
       return textResult(`# Repo Task Prepared\n\nProfile: ${args.profile_id}\nTask: ${expected.taskId}\nRoot: ${expected.root || "(AI chooses an allowed workspace)"}\nScope: ${expected.scope}`, {
         prepared: true,
         profile_id: args.profile_id,
@@ -2000,10 +2018,25 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const gateProfileId = repoTaskGateProfileByServer.get(server as object) || "";
+      const sessionProfileId = repoTaskGateProfileByServer.get(server as object) || "";
+      let gateProfileId = sessionProfileId;
       let expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
       const managerPrepared = Boolean(args.task_id);
       const taskId = args.task_id || (gateProfileId ? `cpt_${randomBytes(12).toString("hex")}` : "");
+      const preparedOwner = managerPrepared && taskId ? expectedRepoTaskOwner(taskId) : undefined;
+      if (preparedOwner && preparedOwner.profileId !== gateProfileId) {
+        gateProfileId = preparedOwner.profileId;
+        expected = preparedOwner.expected;
+        browserProfileId = gateProfileId;
+        repoTaskGateProfileByServer.set(server as object, gateProfileId);
+        recordBrowserProfileTaskEvent("repo_task_profile_rerouted", {
+          task_id: taskId,
+          task_title: String(args.task_title || ""),
+          session_profile_id: sessionProfileId,
+          task_owner_profile_id: gateProfileId,
+          reason: "prepared_task_id_owner"
+        });
+      }
       const scope: "workspace" | "all_allowed" = managerPrepared && args.scope === "all_allowed" ? "all_allowed" : "workspace";
       if (requireRepoTask) {
         if (!gateProfileId) {
@@ -2013,12 +2046,27 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           );
         }
         if (managerPrepared && !expected) {
+          recordBrowserProfileTaskEvent("repo_task_begin_rejected", {
+            profile_id: gateProfileId,
+            session_profile_id: sessionProfileId,
+            task_id: taskId,
+            reason: "task_not_prepared"
+          });
           throw new CodexProError(
             "REPO_TASK_NOT_PREPARED: CodexPro Manager has not prepared the supplied task for this Chrome profile.",
             { code: "REPO_TASK_NOT_PREPARED", details: { profile_id: gateProfileId, task_id: taskId } }
           );
         }
         if (managerPrepared && expected && (expected.taskId !== taskId || expected.scope !== scope)) {
+          recordBrowserProfileTaskEvent("repo_task_begin_rejected", {
+            profile_id: gateProfileId,
+            session_profile_id: sessionProfileId,
+            task_id: taskId,
+            expected_task_id: expected.taskId,
+            expected_scope: expected.scope,
+            received_scope: scope,
+            reason: "task_mismatch"
+          });
           throw new CodexProError(
             `REPO_TASK_MISMATCH: begin_repo_task must use the exact task id and scope prepared by CodexPro Manager (${expected.taskId}, ${expected.scope}).`,
             {
@@ -2084,6 +2132,8 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       if (gateProfileId) setBrowserExtensionProfileTask(gateProfileId, proof.taskId, proof.taskTitle);
       recordBrowserProfileTaskEvent("repo_task_started", {
         profile_id: gateProfileId,
+        session_profile_id: sessionProfileId,
+        profile_rerouted: Boolean(sessionProfileId && sessionProfileId !== gateProfileId),
         task_id: proof.taskId,
         task_title: proof.taskTitle,
         task_title_requested_by: "mcp_server",
@@ -2112,6 +2162,9 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           task_title_returned_by: "ai",
           task_kind: proof.taskKind,
           task_source: proof.taskSource,
+          profile_id: gateProfileId,
+          session_profile_id: sessionProfileId,
+          profile_rerouted: Boolean(sessionProfileId && sessionProfileId !== gateProfileId),
           verified: true,
           gate_active: false,
           workspace_access: false,
@@ -2147,6 +2200,9 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         task_title_returned_by: "ai",
         task_kind: proof.taskKind,
         task_source: proof.taskSource,
+        profile_id: gateProfileId,
+        session_profile_id: sessionProfileId,
+        profile_rerouted: Boolean(sessionProfileId && sessionProfileId !== gateProfileId),
         verified: true,
         gate_active: true,
         workspace_access: true,

@@ -950,9 +950,37 @@ h6.response-heading { font-size: var(--font-body); font-weight: var(--weight-tit
 .diagnostic-summary-grid article.is-info { border-color: #29465a; background: #0f151b; }
 .diagnostic-summary-grid article.is-info > strong { color: #8fc9ef; }
 .diagnostic-panel { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--panel); overflow: hidden; }
-.diagnostic-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(4, minmax(120px, 160px)) auto auto; gap: 8px; align-items: center; padding: 12px; border-bottom: 1px solid var(--border); background: #0d1016; }
-.diagnostic-toolbar input, .diagnostic-toolbar select { height: 40px; min-width: 0; padding-top: 8px; padding-bottom: 8px; }
+.diagnostic-toolbar { display: grid; grid-template-columns: minmax(240px, 1fr) auto; gap: 10px 12px; align-items: center; padding: 12px; border-bottom: 1px solid var(--border); background: #0d1016; }
+.diagnostic-toolbar input { height: 40px; min-width: 0; padding-top: 8px; padding-bottom: 8px; }
+.diagnostic-toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .diagnostic-toolbar .button { min-height: 40px; white-space: nowrap; }
+.diagnostic-filter-row { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.diagnostic-filter { position: relative; min-width: 0; }
+.diagnostic-filter.is-open { z-index: 40; }
+.diagnostic-filter-trigger { width: 100%; height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 10px; color: #cfd6e2; border: 1px solid #303947; border-radius: 7px; background: linear-gradient(145deg, #121720, #0e1219); box-shadow: inset 0 1px 0 #ffffff05; text-align: left; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
+.diagnostic-filter-trigger:hover { color: #eef3fb; border-color: #4a5a73; background: #161d28; }
+.diagnostic-filter.is-open .diagnostic-filter-trigger { color: #fff; border-color: #6685d7; background: #172033; box-shadow: 0 0 0 3px #6b8cff1f, inset 0 1px 0 #ffffff08; }
+.diagnostic-filter-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 999px; background: #788397; box-shadow: 0 0 0 3px #78839718; }
+.diagnostic-filter-dot.is-error { background: #ff6678; box-shadow: 0 0 0 3px #ff667820; }
+.diagnostic-filter-dot.is-warn { background: #e7b94f; box-shadow: 0 0 0 3px #e7b94f20; }
+.diagnostic-filter-dot.is-info, .diagnostic-filter-dot.is-mcp { background: #58b9ee; box-shadow: 0 0 0 3px #58b9ee20; }
+.diagnostic-filter-dot.is-renderer { background: #9d86ff; box-shadow: 0 0 0 3px #9d86ff20; }
+.diagnostic-filter-dot.is-chat { background: #62d99c; box-shadow: 0 0 0 3px #62d99c20; }
+.diagnostic-filter-dot.is-time { background: #8da0bb; box-shadow: 0 0 0 3px #8da0bb1c; }
+.diagnostic-filter-label { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-control); font-weight: var(--weight-medium); }
+.diagnostic-filter-count { min-width: 22px; padding: 2px 6px; color: #9eabc0; border: 1px solid #333e50; border-radius: 999px; background: #0c1016; text-align: center; font-size: var(--font-micro); font-variant-numeric: tabular-nums; }
+.diagnostic-filter-chevron { width: 15px; height: 15px; flex: 0 0 auto; fill: none; stroke: #8491a5; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transition: transform .16s ease; }
+.diagnostic-filter.is-open .diagnostic-filter-chevron { transform: rotate(180deg); }
+.diagnostic-filter-menu { position: absolute; inset: calc(100% + 7px) 0 auto; min-width: 220px; max-height: 320px; display: grid; gap: 3px; padding: 6px; overflow: auto; border: 1px solid #3c4a60; border-radius: 9px; background: #111722; box-shadow: 0 20px 46px #000d, inset 0 1px 0 #ffffff08; }
+.diagnostic-filter-option { width: 100%; min-height: 48px; display: flex; align-items: center; gap: 9px; padding: 7px 9px; color: #cbd4e1; border: 1px solid transparent; border-radius: 6px; background: transparent; text-align: left; }
+.diagnostic-filter-option:hover { color: #fff; background: #1a2432; }
+.diagnostic-filter-option.is-selected { color: #fff; border-color: #3c568d; background: #19243a; }
+.diagnostic-filter-option-copy { min-width: 0; flex: 1; }
+.diagnostic-filter-option-copy strong, .diagnostic-filter-option-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diagnostic-filter-option-copy strong { font-size: var(--font-control); font-weight: var(--weight-medium); }
+.diagnostic-filter-option-copy small { margin-top: 2px; color: #78869b; font-size: var(--font-micro); }
+.diagnostic-filter-option-count { min-width: 24px; color: #8f9db2; text-align: right; font-size: var(--font-micro); font-variant-numeric: tabular-nums; }
+.diagnostic-filter-check { color: #81a1ff; font-size: var(--font-body); font-weight: var(--weight-semibold); }
 .diagnostic-retention-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 13px; color: #8f98a8; border-bottom: 1px solid var(--border); background: #10131a; font-size: var(--font-description); }
 .diagnostic-retention-note span { color: #c7cfdb; font-weight: var(--weight-medium); }
 .diagnostic-table { min-width: 0; max-height: 560px; overflow: auto; background: #0b0e13; }
@@ -1003,9 +1031,8 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
   .subagent-limit-row { grid-template-columns: 1fr; }
   .settings-view { max-width: none; grid-template-columns: 1fr; }
   .diagnostic-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .diagnostic-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .diagnostic-search { grid-column: 1 / -1; }
-  .diagnostic-toolbar .button { width: 100%; }
+  .diagnostic-toolbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .diagnostic-filter-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .settings-view > .settings-panel:has(input[aria-label="Độ rộng popup chat"]),
   .settings-view > .settings-panel:has(input[aria-label="Chiều cao khung chat bên trong"]) { grid-column: 1 / -1; }
   .profile-list.is-card-layout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1018,6 +1045,10 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
 }
 
 @media (max-width: 680px) {
+  .diagnostic-toolbar { grid-template-columns: 1fr; }
+  .diagnostic-toolbar-actions { justify-content: stretch; }
+  .diagnostic-toolbar-actions .button { flex: 1; }
+  .diagnostic-filter-row { grid-template-columns: 1fr; }
   .profile-list.is-card-layout { grid-template-columns: 1fr; }
   .profile-layout-preview.is-card { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .send-debug-grid { grid-template-columns: 1fr; }

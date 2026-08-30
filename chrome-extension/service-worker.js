@@ -1200,6 +1200,16 @@ async function readChatResponsePage() {
   const structuredText=node=>{
     if(!node)return '';
     const clone=node.cloneNode(true);
+    clone.querySelectorAll('button,[role="button"],script,style').forEach(control=>control.remove());
+    clone.querySelectorAll('a[href]').forEach(anchor=>{
+      const href=String(anchor.href||anchor.getAttribute('href')||'').trim();
+      if(!/^(?:https?:\/\/|mailto:)/i.test(href))return;
+      const label=String(anchor.textContent||'').replace(/\s+/g,' ').trim();
+      const escapedLabel=String(label||href).replace(/\\/g,'\\\\').replace(/\[/g,'\\[').replace(/\]/g,'\\]');
+      const escapedHref=href.replace(/\(/g,'%28').replace(/\)/g,'%29').replace(/ /g,'%20');
+      const markdown=!label||label===href?href:`[${escapedLabel}](${escapedHref})`;
+      anchor.replaceWith(document.createTextNode(markdown));
+    });
     clone.querySelectorAll('br').forEach(br=>br.replaceWith(document.createTextNode('\n')));
     clone.querySelectorAll('ul,ol').forEach(list=>{
       const ordered=list.tagName==='OL';
@@ -1212,6 +1222,15 @@ async function readChatResponsePage() {
     });
     clone.querySelectorAll('p,li,pre,blockquote,h1,h2,h3,h4,h5,h6,tr').forEach(block=>block.appendChild(document.createTextNode('\n')));
     return String(clone.textContent||'').replace(/\u200b/g,'').replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  };
+  const linksFor=root=>{
+    const seen=new Set();
+    return Array.from(root?.querySelectorAll?.('a[href]')||[]).map(anchor=>{
+      const href=String(anchor.href||anchor.getAttribute('href')||'').trim();
+      if(!/^(?:https?:\/\/|mailto:)/i.test(href)||seen.has(href))return null;
+      seen.add(href);
+      return {text:String(anchor.textContent||'').replace(/\s+/g,' ').trim()||href,href};
+    }).filter(Boolean).slice(0,24);
   };
   const generatedImagePreview=async image=>{
     const src=String(image?.currentSrc||image?.src||'').trim();
@@ -1274,6 +1293,14 @@ async function readChatResponsePage() {
     }).slice(0,4);
     return (await Promise.all(candidates.map(generatedImagePreview))).filter(Boolean);
   };
+  const assistantContentFor=assistantMessage=>{
+    if(!assistantMessage)return null;
+    const candidates=Array.from(assistantMessage.querySelectorAll('.markdown,.prose,[data-message-content],[class*="markdown"]'));
+    const best=candidates.reduce((current,candidate)=>nodeText(candidate).length>nodeText(current).length?candidate:current,null);
+    const fullLength=nodeText(assistantMessage).length;
+    const bestLength=nodeText(best).length;
+    return !best||fullLength>bestLength+24?assistantMessage:best;
+  };
   if(!location.pathname.startsWith('/c/'))return {ok:false,error:'Tab đã chọn không phải đoạn chat ChatGPT.'};
   const turnNodes=Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]')).filter(turn=>{
     const style=getComputedStyle(turn);
@@ -1290,10 +1317,11 @@ async function readChatResponsePage() {
     }
     const images=await generatedImagesFor(turn);
     if(!assistantMessage&&!images.length)return null;
-    const content=assistantMessage?(assistantMessage.querySelector('.markdown,.prose,[class*="markdown"]')||assistantMessage):null;
+    const content=assistantContentFor(assistantMessage);
     const raw=content?structuredText(content):'';
+    const links=content?linksFor(content):[];
     const text=raw.slice(0,40000);
-    return raw||images.length?{id:`assistant-${index}`,role:'assistant',text,truncated:raw.length>text.length,...(images.length?{images}:{})}:null;
+    return raw||images.length?{id:`assistant-${index}`,role:'assistant',text,truncated:raw.length>text.length,...(links.length?{links}:{}),...(images.length?{images}:{})}:null;
   }))).filter(Boolean);
   const latestUserIndex=messages.findLastIndex(message=>message.role==='user');
   const assistantAfterLatestUser=latestUserIndex>=0?messages.slice(latestUserIndex+1).findLast(message=>message.role==='assistant'):[...messages].reverse().find(message=>message.role==='assistant');
@@ -1318,7 +1346,8 @@ async function readChatResponsePage() {
   const responseReady=Boolean(imageResponseReady||assistantAfterLatestUser&&!busy);
   const finalizedMessages=messages.map((message,index)=>message.role==='assistant'?{...message,end_turn:index<latestUserIndex||responseReady}:message);
   const text=assistantAfterLatestUser?.text||'';
-  return {ok:true,title:document.title,url:location.href,text,text_length:text.length,truncated:Boolean(assistantAfterLatestUser?.truncated),incomplete:busy,incomplete_reason:imageGenerationLoading?'image_generation_in_progress':messageDeliveryTimedOut?'message_delivery_timeout':connectionInterrupted?'connection_interrupted':busy?(thinkingPlaceholder?'thinking_placeholder':'generation_in_progress'):'',image_generation_in_progress:imageGenerationLoading,image_response_ready:imageResponseReady,response_kind:imageResponseReady||imageGenerationLoading?'image':'text',connection_interrupted:recoveryRequired,message_delivery_timed_out:messageDeliveryTimedOut,conversation_limit_reached:false,conversation_limit_message:'',conversation_limit_button_label:'',message_count:finalizedMessages.filter(message=>message.role==='assistant').length,total_message_count:finalizedMessages.length,messages:finalizedMessages,busy,response_ready:responseReady,response_source:'chatgpt_dom',updated_at:new Date().toISOString()};
+  const links=Array.isArray(assistantAfterLatestUser?.links)?assistantAfterLatestUser.links:[];
+  return {ok:true,title:document.title,url:location.href,text,text_length:text.length,links,truncated:Boolean(assistantAfterLatestUser?.truncated),incomplete:busy,incomplete_reason:imageGenerationLoading?'image_generation_in_progress':messageDeliveryTimedOut?'message_delivery_timeout':connectionInterrupted?'connection_interrupted':busy?(thinkingPlaceholder?'thinking_placeholder':'generation_in_progress'):'',image_generation_in_progress:imageGenerationLoading,image_response_ready:imageResponseReady,response_kind:imageResponseReady||imageGenerationLoading?'image':'text',connection_interrupted:recoveryRequired,message_delivery_timed_out:messageDeliveryTimedOut,conversation_limit_reached:false,conversation_limit_message:'',conversation_limit_button_label:'',message_count:finalizedMessages.filter(message=>message.role==='assistant').length,total_message_count:finalizedMessages.length,messages:finalizedMessages,busy,response_ready:responseReady,response_source:'chatgpt_dom',updated_at:new Date().toISOString()};
 }
 
 function inspectChatSendAttemptPage(attemptId='') {
@@ -2232,7 +2261,7 @@ if(action==='rename_chat'){
       }
       const canonicalText=String(canonical.text||'').trim();
       const domTextBeforeMerge=String(domResult.text||'').trim();
-      if(!domResult.response_ready&&canonicalResponseSupersedesDom(canonical,domResult)){
+      if(canonicalResponseSupersedesDom(canonical,domResult)){
         const latestAssistant=[...(canonical.messages||[])].reverse().find(message=>message.role==='assistant');
         domResult={...domResult,text:canonicalText,text_length:canonicalText.length,messages:canonical.messages||domResult.messages,message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,truncated:Boolean(latestAssistant?.truncated),busy:Boolean(canonical.busy),response_ready:Boolean(canonical.response_ready),response_source:'canonical_api',updated_at:new Date().toISOString()};
       }

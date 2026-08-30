@@ -20,7 +20,7 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
-import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionProfilePendingTask, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles } from "./browserExtensionBridge.js";
 
 const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
 
@@ -1976,10 +1976,14 @@ async function main(): Promise<void> {
         const browserProfileId = typeof req.query.codexpro_profile === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(req.query.codexpro_profile)
           ? req.query.codexpro_profile
           : "";
+        const pendingTask = browserProfileId ? getBrowserExtensionProfilePendingTask(browserProfileId) : undefined;
         recordBrowserProfileTaskEvent("mcp_session_initialized", {
           profile_id: browserProfileId,
           profile_bound: Boolean(browserProfileId),
-          client_name: String(req.body?.params?.clientInfo?.name || "")
+          client_name: String(req.body?.params?.clientInfo?.name || ""),
+          pending_task_id: pendingTask?.task_id,
+          pending_task_scope: pendingTask?.scope,
+          pending_task_age_ms: pendingTask?.age_ms
         });
         const server = createCodexProServer(config, {
           workerId,

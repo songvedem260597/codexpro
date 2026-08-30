@@ -200,7 +200,7 @@ const matchingResponseAudit = buildChatResponseAuditRecord({
   ]
 });
 assert.equal(matchingResponseAudit.comparison, "match", "audit must confirm the ChatGPT DOM response reaches the Manager UI unchanged");
-const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, managerChatScroll, manifestText, connectorInstaller] = await Promise.all([
+const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, managerDiagnosticView, managerChatScroll, manifestText, connectorInstaller] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "src", "server.ts"), "utf8"),
@@ -210,6 +210,7 @@ const [browserOps, worker, server, httpSource, bridge, managerMain, managerPrelo
   readFile(join(root, "manager", "electron", "preload.cjs"), "utf8"),
   readFile(join(root, "manager", "src", "main.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "styles.css"), "utf8"),
+  readFile(join(root, "manager", "src", "diagnostic-log-view.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "chat-scroll.js"), "utf8"),
   readFile(join(root, "chrome-extension", "manifest.json"), "utf8"),
   readFile(join(root, "chrome-extension", "connector-installer.js"), "utf8")
@@ -304,6 +305,23 @@ assert.ok(managerUi.includes('working || settling ? "Task hi\\u1ec7n t\\u1ea1i" 
 assert.match(managerMain, /const MANAGER_VERSION = app\.getVersion\(\)/, "MCP client metadata must use the packaged Manager version");
 assert.match(managerUi, /CodexPro Manager \{managerPackage\.version\}/, "Manager footer must use package.json instead of a stale hard-coded version");
 assert.doesNotMatch(managerUi, /CodexPro Manager 0\.2\.\d+/, "Manager UI must not hard-code a release version");
+assert.match(managerDiagnosticView, /function DiagnosticDropdown[\s\S]*?aria-haspopup="listbox"[\s\S]*?diagnostic-filter-menu/, "Diagnostic filters must use the custom accessible dropdown instead of clipped native selects");
+assert.doesNotMatch(managerDiagnosticView, /<select\b/, "Diagnostic toolbar must not regress to native select controls");
+assert.match(managerStyles, /\.diagnostic-toolbar \{[^}]*grid-template-columns: minmax\(240px, 1fr\) auto[\s\S]*?\.diagnostic-filter-row \{[^}]*repeat\(4, minmax\(0, 1fr\)\)/, "Diagnostic toolbar must reserve a full row for four unclipped filters");
+assert.match(managerMain, /function diagnosticIpcHandle[\s\S]*?envelopeError[\s\S]*?durationMs >= Number\(options\.slowMs\)[\s\S]*?catch \(error\)/, "Manager IPC diagnostics must capture envelope failures, slow operations, and thrown errors centrally");
+for (const action of ["control-server", "setup-profile", "recover-profile-chat", "reload-profiles", "save-manager-settings", "send-profile-request", "get-profile-response", "get-repo-task-status", "inspect-project"]) {
+  assert.match(managerMain, new RegExp(`action: \\"${action}\\"`), `important Manager action ${action} must be covered by persistent diagnostics`);
+}
+assert.match(managerMain, /uncaughtExceptionMonitor[\s\S]*?render-process-gone[\s\S]*?child-process-gone/, "Manager must persist main-process, renderer, and child-process failures");
+assert.match(managerMain, /routinePollingAction[\s\S]*?browser_control:list_profiles[\s\S]*?browser_control:get_chat_response[\s\S]*?durationMs >= 2_000/, "routine MCP polling must only be persisted when it becomes slow");
+assert.match(managerMain, /MANAGER_RUN_ID[\s\S]*?manager_run_id:[\s\S]*?manager_version:[\s\S]*?process_id:/, "every Manager diagnostic must carry run, version, and process correlation context");
+assert.match(managerMain, /function recordBrowserProfileTransitions[\s\S]*?profile-state-transition[\s\S]*?mất heartbeat[\s\S]*?renderer không phản hồi[\s\S]*?Connection interrupted[\s\S]*?Message delivery timed out[\s\S]*?generation chuyển sang trạng thái lỗi[\s\S]*?chưa có task title/, "profile diagnostics must persist heartbeat, renderer, delivery, network, and missing-task-title state transitions");
+assert.match(managerMain, /function recordChatResponseAuditDiagnostic[\s\S]*?chat-response-audit-mismatch[\s\S]*?expected_assistant[\s\S]*?manager_state_assistant[\s\S]*?manager_ui_assistant/, "response diagnostics must compare ChatGPT source, Manager state, and rendered UI fingerprints");
+assert.match(managerMain, /action: "send-profile-request"[\s\S]*?repo_task_id[\s\S]*?submission_state[\s\S]*?generation_state[\s\S]*?manager_preflight_ms/, "send diagnostics must correlate task, submission, network, and Manager timing evidence");
+assert.match(managerMain, /action: "get-profile-response"[\s\S]*?network_state[\s\S]*?response_ready[\s\S]*?dom_error[\s\S]*?canonical_available/, "response diagnostics must retain network, readiness, DOM, and canonical evidence");
+assert.match(managerMain, /action: "get-repo-task-status"[\s\S]*?task_title[\s\S]*?task_kind[\s\S]*?verified/, "task verification diagnostics must retain the required title and classification");
+assert.match(managerMain, /manager-started[\s\S]*?platform:[\s\S]*?electron_version:[\s\S]*?chrome_version:/, "incident logs must identify the runtime that produced them");
+assert.match(managerMain, /did-fail-load[\s\S]*?preload-error[\s\S]*?console-message[\s\S]*?renderer-console/, "Electron page, preload, and renderer console failures must enter persistent diagnostics");
 assert.match(managerUi, /begin_repo_task: "Đang ghi nhận task"/, "Manager must describe begin_repo_task as universal task registration");
 assert.match(managerUi, /function repoTaskEvidenceSummary[\s\S]*?GENERAL · không tải Rules\/CodexGraph[\s\S]*?CODE · Rules[\s\S]*?CodexGraph \$\{symbols\} symbols \/ \$\{relationships\} edges/, "Manager must distinguish title-only GENERAL evidence from CODE Rules/CodexGraph evidence");
 
@@ -567,7 +585,10 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.79");
+assert.equal(manifest.version, "0.5.81");
+assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
+assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(canonical,domResult\)\)/, "a complete canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
+assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
 assert.match(worker, /const MAX_CHATGPT_TABS = 6/, "worker must cap ChatGPT tabs per Chrome profile");
 assert.match(worker, /CHAT_TAB_HEALTH_FAILURES_TO_CLOSE = 2/, "worker must require consecutive failed CodexPro probes before closing an unhealthy tab");
 assert.match(worker, /cleanupChatGptTabs\(tabs,recentConversations\)[\s\S]*?if\(tabCleanup\.closed_count\)tabs=await tabList\(\)/, "polling must clean tabs and refresh the heartbeat snapshot after closures");

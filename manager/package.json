@@ -1,6 +1,6 @@
 {
   "name": "codexpro-manager",
-  "version": "0.2.86",
+  "version": "0.2.89",
   "private": true,
   "description": "Desktop manager for a local CodexPro MCP server on macOS and Windows.",
   "author": "CodexPro contributors",
@@ -10,6 +10,7 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env CODEXPRO_MANAGER_DEV_URL=http://127.0.0.1:5173 electron .\"",
     "build": "vite build",
     "test:markdown": "node scripts/markdown-response-smoke.mjs",
+    "test:diagnostic": "node scripts/diagnostic-log-smoke.mjs && node scripts/runtime-health-diagnostic-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
@@ -17,6 +18,9 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@fontsource/be-vietnam-pro": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/manrope": "^5.3.0",
     "@react-sigma/core": "^5.0.6",
     "@react-sigma/layout-forceatlas2": "^5.0.6",
     "graphology": "^0.26.0",

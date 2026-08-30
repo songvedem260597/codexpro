@@ -8,10 +8,12 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createHeadlessWorkerManager } from "./headless-workers.mjs";
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
+import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const MANAGER_VERSION = app.getVersion();
+const MANAGER_RUN_ID = `mgr_${Date.now().toString(36)}_${randomBytes(4).toString("hex")}`;
 const codexProHome = process.env.CODEXPRO_HOME
   ? path.resolve(process.env.CODEXPRO_HOME)
   : path.join(os.homedir(), ".codexpro");
@@ -23,10 +25,91 @@ const diagnostic = (level, source, category, message, details = {}) => {
     action: details?.action || "",
     message,
     duration_ms: details?.duration_ms,
-    details
+    details: {
+      manager_run_id: MANAGER_RUN_ID,
+      manager_version: MANAGER_VERSION,
+      process_id: process.pid,
+      ...details
+    }
+  }).catch((error) => {
+    console.error("[manager-diagnostic]", error?.message || error);
   });
 };
-void pruneDiagnosticLogs(codexProHome).catch(() => undefined);
+const diagnosticThrottleState = new Map();
+function diagnosticAllowed(key, intervalMs) {
+  if (!key || !(Number(intervalMs) > 0)) return true;
+  const now = Date.now();
+  const previous = Number(diagnosticThrottleState.get(key)) || 0;
+  if (now - previous < Number(intervalMs)) return false;
+  diagnosticThrottleState.set(key, now);
+  if (diagnosticThrottleState.size > 1000) {
+    for (const [candidate, at] of diagnosticThrottleState.entries()) {
+      if (now - at > 60 * 60 * 1000) diagnosticThrottleState.delete(candidate);
+    }
+  }
+  return true;
+}
+function diagnosticProjection(factory, args, fallback = {}) {
+  if (typeof factory !== "function") return fallback;
+  try {
+    const value = factory(...args);
+    return value && typeof value === "object" ? value : fallback;
+  } catch (error) {
+    return { diagnostic_projection_error: String(error?.message || error) };
+  }
+}
+function diagnosticIpcHandle(channel, options, handler) {
+  const action = String(options?.action || channel.replace(/^codexpro:/, ""));
+  const category = String(options?.category || "runtime");
+  const successMessage = String(options?.successMessage || `${action} hoàn tất`);
+  const failureMessage = String(options?.failureMessage || `${action} thất bại`);
+  ipcMain.handle(channel, async (event, ...args) => {
+    const startedAt = Date.now();
+    const ipcCallId = `ipc_${startedAt.toString(36)}_${randomBytes(3).toString("hex")}`;
+    const context = {
+      ipc_call_id: ipcCallId,
+      ipc_channel: channel,
+      ...diagnosticProjection(options?.details, args)
+    };
+    try {
+      const result = await handler(event, ...args);
+      const durationMs = Date.now() - startedAt;
+      const envelopeError = result && typeof result === "object" && result.ok === false && result.error ? result.error : null;
+      const resultContext = diagnosticProjection(options?.resultDetails, [result, ...args]);
+      const resultDiagnostic = diagnosticProjection(options?.resultDiagnostic, [result, ...args], null);
+      if (envelopeError) {
+        diagnostic("error", "manager", category, `${failureMessage}: ${envelopeError.message || "Lỗi không xác định"}`, {
+          action,
+          duration_ms: durationMs,
+          ...context,
+          error: envelopeError
+        });
+      } else if (resultDiagnostic && diagnosticAllowed(resultDiagnostic.dedupeKey, resultDiagnostic.throttleMs)) {
+        diagnostic(resultDiagnostic.level || "warn", "manager", category, resultDiagnostic.message || `${action} cần chú ý`, {
+          action,
+          duration_ms: durationMs,
+          ...context,
+          ...resultContext,
+          ...(resultDiagnostic.details || {})
+        });
+      } else if (options?.logSuccess) {
+        diagnostic("info", "manager", category, successMessage, { action, duration_ms: durationMs, ...context, ...resultContext });
+      } else if (Number(options?.slowMs) > 0 && durationMs >= Number(options.slowMs)) {
+        diagnostic("warn", "manager", category, `${action} phản hồi chậm (${durationMs} ms)`, { action, duration_ms: durationMs, ...context, ...resultContext });
+      }
+      return result;
+    } catch (error) {
+      diagnostic("error", "manager", category, `${failureMessage}: ${error?.message || String(error)}`, {
+        action,
+        duration_ms: Date.now() - startedAt,
+        ...context,
+        error
+      });
+      throw error;
+    }
+  });
+}
+void pruneDiagnosticLogs(codexProHome).catch((error) => console.error("[manager-diagnostic-prune]", error?.message || error));
 const tokenFileDefault = path.join(codexProHome, "http-token");
 const managerProjectsFile = path.join(codexProHome, "manager-projects.json");
 const isWindows = process.platform === "win32";
@@ -63,9 +146,10 @@ const DEFAULT_GLOBAL_RULES = `# CodexPro Global Rules
 - Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
 `;
 
-const WORKER_EXTENSION_VERSION = "0.5.79";
+const WORKER_EXTENSION_VERSION = "0.5.81";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
+const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
 const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
 const GIT_SUMMARY_CACHE_MS = 2 * 60 * 1000;
 const GIT_SUMMARY_CACHE_RETENTION_MS = 30 * 60 * 1000;
@@ -74,6 +158,7 @@ const REPO_SCAN_MAX_DEPTH = 12;
 const REPO_SCAN_TIMEOUT_MS = 12000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
+const runtimeHealthDiagnosticTracker = createRuntimeHealthDiagnosticTracker();
 let repoScanCache = null;
 let repoScanPromise = null;
 const headlessExtensionRoot = app.isPackaged
@@ -115,7 +200,10 @@ function appendManagerChatLayoutLog(payload) {
       if (error?.code !== "ENOENT") throw error;
     }
     await fs.promises.appendFile(managerChatLayoutLogFile, line + "\n", "utf8");
-  }).catch((error) => console.error("[manager-chat-layout]", error?.message || error));
+  }).catch((error) => {
+    console.error("[manager-chat-layout]", error?.message || error);
+    diagnostic("error", "manager", "logging", `Không ghi được chat layout log: ${error?.message || String(error)}`, { action: "write-chat-layout-log", error });
+  });
 }
 
 function appendManagerChatResponseAuditLog(payload) {
@@ -138,7 +226,77 @@ function appendManagerChatResponseAuditLog(payload) {
       if (error?.code !== "ENOENT") throw error;
     }
     await fs.promises.appendFile(managerChatResponseAuditLogFile, line + "\n", "utf8");
-  }).catch((error) => console.error("[manager-chat-response-audit]", error?.message || error));
+  }).catch((error) => {
+    console.error("[manager-chat-response-audit]", error?.message || error);
+    diagnostic("error", "manager", "logging", `Không ghi được response audit log: ${error?.message || String(error)}`, { action: "write-chat-response-audit-log", error });
+  });
+}
+
+const responseAuditDiagnosticState = new Map();
+
+function responseAuditFingerprintSummary(value) {
+  if (!value || typeof value !== "object") return null;
+  return {
+    fingerprint: String(value.fingerprint || ""),
+    length: Number(value.length) || 0
+  };
+}
+
+function recordChatResponseAuditDiagnostic(payload) {
+  const record = payload && typeof payload === "object" ? payload : {};
+  const comparison = String(record.comparison || "");
+  const profileId = String(record.profileId || "");
+  const conversationId = String(record.conversationId || "");
+  if (!profileId || !conversationId || !comparison) return;
+  const key = `${profileId}:${conversationId}`;
+  const previous = responseAuditDiagnosticState.get(key);
+  responseAuditDiagnosticState.set(key, comparison);
+  if (previous === comparison) return;
+  if (comparison === "match") {
+    if (previous && previous !== "match") {
+      diagnostic("info", "renderer", "chat-audit", "Nội dung Manager đã khớp lại với nguồn ChatGPT", {
+        action: "chat-response-audit-recovered",
+        profile_id: profileId,
+        conversation_id: conversationId,
+        request_id: String(record.requestId || ""),
+        previous_comparison: previous,
+        fetch_mode: String(record.fetchMode || ""),
+        selected_source: String(record.selectedSource || ""),
+        comparison_basis: String(record.comparisonBasis || "")
+      });
+    }
+    return;
+  }
+  const terminal = ["completed", "failed", "cancelled"].includes(String(record.networkState || "").toLowerCase());
+  const actionable = [
+    "missing_in_manager_state",
+    "manager_state_mismatch",
+    "missing_in_manager_ui",
+    "manager_ui_mismatch"
+  ].includes(comparison) || (terminal && ["source_unavailable", "source_missing_latest_assistant"].includes(comparison));
+  if (!actionable) return;
+  const basis = record?.sources?.chatgptDom?.available
+    ? record.sources.chatgptDom
+    : record?.sources?.canonical?.available
+      ? record.sources.canonical
+      : record?.sources?.networkStream || {};
+  diagnostic(comparison.includes("missing_in_manager") || comparison.includes("mismatch") ? "error" : "warn", "renderer", "chat-audit", `Sai lệch phản hồi ChatGPT: ${comparison}`, {
+    action: "chat-response-audit-mismatch",
+    profile_id: profileId,
+    conversation_id: conversationId,
+    request_id: String(record.requestId || ""),
+    comparison,
+    fetch_mode: String(record.fetchMode || ""),
+    network_state: String(record.networkState || ""),
+    selected_source: String(record.selectedSource || ""),
+    comparison_basis: String(record.comparisonBasis || ""),
+    source_message_count: Number(basis?.messageCount) || 0,
+    manager_state_message_count: Number(record?.managerState?.messageCount) || 0,
+    manager_ui_message_count: Number(record?.managerUi?.messageCount) || 0,
+    expected_assistant: responseAuditFingerprintSummary(basis?.assistantAfterLatestUser || basis?.latestAssistant),
+    manager_state_assistant: responseAuditFingerprintSummary(record?.managerState?.assistantAfterLatestUser || record?.managerState?.latestAssistant),
+    manager_ui_assistant: responseAuditFingerprintSummary(record?.managerUi?.assistantAfterLatestUser || record?.managerUi?.latestAssistant)
+  });
 }
 
 function mimeTypeForFile(filePath) {
@@ -238,7 +396,7 @@ async function chooseRequestFiles() {
   return files;
 }
 
-const MANAGER_FONT_CHOICES = new Set(["system", "arial", "tahoma", "verdana", "trebuchet", "georgia", "cascadia"]);
+const MANAGER_FONT_CHOICES = new Set(["system", "be-vietnam-pro", "manrope", "jetbrains-mono", "arial", "tahoma", "verdana", "trebuchet", "georgia", "cascadia"]);
 const WORKER_IMAGE_STATES = new Set(["idle", "working", "hung"]);
 const WORKER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const MAX_WORKER_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -671,6 +829,93 @@ async function captureClipboardImage() {
 
 const browserProfileStreamControllers = new WeakMap();
 let latestBrowserProfileStream = { connected: false, checkedAt: "", profiles: [] };
+let lastBrowserProfileStreamErrorAt = 0;
+const browserProfileDiagnosticState = new Map();
+
+function profileDiagnosticSnapshot(profile) {
+  const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+  const incidentTab = tabs.find((tab) => tab?.renderer_unresponsive || tab?.connection_interrupted || tab?.message_delivery_timed_out || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error) || null;
+  const incidentConversationId = String(incidentTab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+  return {
+    connected: Boolean(profile?.connected),
+    extension_version: String(profile?.extension_version || ""),
+    renderer_unresponsive: Boolean(profile?.renderer_unresponsive || tabs.some((tab) => tab?.renderer_unresponsive)),
+    connection_interrupted: tabs.some((tab) => tab?.connection_interrupted),
+    message_delivery_timed_out: tabs.some((tab) => tab?.message_delivery_timed_out),
+    network_failed: tabs.some((tab) => String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error),
+    incident_conversation_id: incidentConversationId,
+    incident_tab_id: String(incidentTab?.id || ""),
+    renderer_error: String(incidentTab?.renderer_error || ""),
+    network_state: String(incidentTab?.network_state || ""),
+    network_status_code: Number(incidentTab?.network_status_code) || 0,
+    network_error: String(incidentTab?.network_error || ""),
+    activity: String(profile?.activity || "idle"),
+    task_id: String(profile?.current_task_id || ""),
+    task_title: String(profile?.current_task_title || "").trim(),
+    tab_count: Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs.length : 0
+  };
+}
+
+function recordBrowserProfileTransitions(profiles, checkedAt) {
+  const nextIds = new Set();
+  for (const profile of Array.isArray(profiles) ? profiles : []) {
+    const profileId = String(profile?.profile_id || "").trim();
+    if (!profileId) continue;
+    nextIds.add(profileId);
+    const current = profileDiagnosticSnapshot(profile);
+    const previous = browserProfileDiagnosticState.get(profileId);
+    const details = { action: "profile-state-transition", profile_id: profileId, checked_at: String(checkedAt || ""), ...current };
+    if (previous) {
+      if (previous.connected && !current.connected) {
+        diagnostic("warn", "browser", "profile", "Chrome profile mất heartbeat", details);
+      } else if (!previous.connected && current.connected) {
+        diagnostic("info", "browser", "profile", "Chrome profile đã kết nối lại", details);
+      }
+      if (!previous.renderer_unresponsive && current.renderer_unresponsive) {
+        diagnostic("error", "browser", "profile", "Chrome renderer không phản hồi", details);
+      } else if (previous.renderer_unresponsive && !current.renderer_unresponsive) {
+        diagnostic("info", "browser", "profile", "Chrome renderer đã phản hồi lại", details);
+      }
+      if (!previous.connection_interrupted && current.connection_interrupted) {
+        diagnostic("warn", "browser", "chat", "ChatGPT báo Connection interrupted", details);
+      } else if (previous.connection_interrupted && !current.connection_interrupted) {
+        diagnostic("info", "browser", "chat", "ChatGPT đã hết trạng thái Connection interrupted", details);
+      }
+      if (!previous.message_delivery_timed_out && current.message_delivery_timed_out) {
+        diagnostic("error", "browser", "chat", "ChatGPT báo Message delivery timed out", details);
+      } else if (previous.message_delivery_timed_out && !current.message_delivery_timed_out) {
+        diagnostic("info", "browser", "chat", "ChatGPT đã hết trạng thái Message delivery timed out", details);
+      }
+      if (!previous.network_failed && current.network_failed) {
+        diagnostic("error", "browser", "network", "ChatGPT generation chuyển sang trạng thái lỗi", details);
+      } else if (previous.network_failed && !current.network_failed) {
+        diagnostic("info", "browser", "network", "ChatGPT generation đã thoát trạng thái lỗi", details);
+      }
+      if (previous.extension_version && current.extension_version && previous.extension_version !== current.extension_version) {
+        diagnostic("info", "browser", "profile", `Worker extension đổi từ ${previous.extension_version} sang ${current.extension_version}`, details);
+      }
+      if (current.task_title && current.task_title !== previous.task_title) {
+        diagnostic("info", "browser", "task", "Profile đã nhận task title", details);
+      }
+    }
+    const workingWithoutTitle = current.activity === "working" && !current.task_title;
+    const previouslyMissingSameTask = previous?.activity === "working" && !previous?.task_title && previous?.task_id === current.task_id;
+    if (workingWithoutTitle && !previouslyMissingSameTask) {
+      diagnostic("warn", "browser", "task", "Profile đang làm việc nhưng chưa có task title", details);
+    }
+    browserProfileDiagnosticState.set(profileId, current);
+  }
+  for (const [profileId, previous] of browserProfileDiagnosticState.entries()) {
+    if (nextIds.has(profileId)) continue;
+    diagnostic("info", "browser", "profile", "Chrome profile đã rời danh sách realtime", {
+      action: "profile-removed-from-stream",
+      profile_id: profileId,
+      checked_at: String(checkedAt || ""),
+      ...previous
+    });
+    browserProfileDiagnosticState.delete(profileId);
+  }
+}
 
 function cachedBrowserProfileForSend(profileId) {
   if (!latestBrowserProfileStream.connected) return null;
@@ -692,6 +937,10 @@ function startBrowserProfileEventStream(win) {
           signal: controller.signal
         });
         if (!response.ok || !response.body) throw new Error(`Browser event stream HTTP ${response.status}`);
+        if (!latestBrowserProfileStream.connected && lastBrowserProfileStreamErrorAt) {
+          diagnostic("info", "manager", "profile", "Luồng realtime profile đã kết nối lại", { action: "browser-profile-stream-recovered" });
+          lastBrowserProfileStreamErrorAt = 0;
+        }
         latestBrowserProfileStream = { ...latestBrowserProfileStream, connected: true };
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -709,6 +958,7 @@ function startBrowserProfileEventStream(win) {
             const payload = JSON.parse(data);
             if (Array.isArray(payload?.profiles)) {
               latestBrowserProfileStream = { connected: true, checkedAt: String(payload.checked_at || ""), profiles: payload.profiles };
+              recordBrowserProfileTransitions(payload.profiles, payload.checked_at);
             }
             if (!win.isDestroyed()) win.webContents.send("codexpro:browser-profiles", payload);
           }
@@ -716,6 +966,14 @@ function startBrowserProfileEventStream(win) {
       } catch (error) {
         latestBrowserProfileStream = { ...latestBrowserProfileStream, connected: false };
         if (controller.signal.aborted || win.isDestroyed()) break;
+        const now = Date.now();
+        if (!lastBrowserProfileStreamErrorAt || now - lastBrowserProfileStreamErrorAt >= 60_000) {
+          diagnostic("warn", "manager", "profile", `Luồng realtime profile bị ngắt: ${error?.message || String(error)}`, {
+            action: "browser-profile-stream-disconnected",
+            error
+          });
+          lastBrowserProfileStreamErrorAt = now;
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 2_000));
     }
@@ -724,8 +982,9 @@ function startBrowserProfileEventStream(win) {
 
 function createWindow() {
   const smokeMode = process.env.CODEXPRO_MANAGER_SMOKE === "1";
+  const diagnosticSmokeMode = smokeMode && process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "logs";
   const win = new BrowserWindow({
-    width: smokeMode ? 1900 : 1240,
+    width: smokeMode && !diagnosticSmokeMode ? 1900 : 1240,
     height: smokeMode ? 1000 : 820,
     minWidth: 940,
     minHeight: 650,
@@ -740,6 +999,56 @@ function createWindow() {
     }
   });
   win.removeMenu();
+  let unresponsiveAt = 0;
+  win.on("unresponsive", () => {
+    unresponsiveAt = Date.now();
+    diagnostic("error", "electron", "window", "Cửa sổ Manager không phản hồi", { action: "window-unresponsive" });
+  });
+  win.on("responsive", () => {
+    if (!unresponsiveAt) return;
+    diagnostic("info", "electron", "window", "Cửa sổ Manager đã phản hồi lại", {
+      action: "window-responsive",
+      duration_ms: Date.now() - unresponsiveAt
+    });
+    unresponsiveAt = 0;
+  });
+  win.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
+    if (!isMainFrame && errorCode === -3) return;
+    diagnostic("error", "electron", "window", `Manager page load thất bại: ${errorDescription || errorCode}`, {
+      action: "did-fail-load",
+      error_code: errorCode,
+      error_description: String(errorDescription || ""),
+      url: String(validatedUrl || ""),
+      is_main_frame: Boolean(isMainFrame)
+    });
+  });
+  win.webContents.on("preload-error", (_event, preloadPath, error) => {
+    diagnostic("error", "electron", "window", `Manager preload thất bại: ${error?.message || String(error)}`, {
+      action: "preload-error",
+      preload_path: String(preloadPath || ""),
+      error
+    });
+  });
+  win.webContents.on("console-message", (_event, detailsOrLevel, legacyMessage, legacyLine, legacySourceId) => {
+    const details = detailsOrLevel && typeof detailsOrLevel === "object"
+      ? detailsOrLevel
+      : { level: detailsOrLevel, message: legacyMessage, lineNumber: legacyLine, sourceId: legacySourceId };
+    const level = String(details?.level || "").toLowerCase();
+    const numericLevel = Number(details?.level);
+    const isError = level === "error" || numericLevel >= 3;
+    const isWarning = level === "warning" || level === "warn" || numericLevel === 2;
+    if (!isError && !isWarning) return;
+    const message = String(details?.message || "Renderer console message");
+    const key = `renderer-console:${level}:${String(details?.sourceId || "")}:${message.slice(0, 180)}`;
+    if (!diagnosticAllowed(key, 30_000)) return;
+    diagnostic(isError ? "error" : "warn", "renderer", "runtime", `Renderer console: ${message}`, {
+      action: "renderer-console",
+      console_level: level || numericLevel,
+      line_number: Number(details?.lineNumber) || 0,
+      column_number: Number(details?.columnNumber) || 0,
+      source_id: String(details?.sourceId || "")
+    });
+  });
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   win.webContents.on("will-navigate", (event, url) => {
     const allowed = process.env.CODEXPRO_MANAGER_DEV_URL;
@@ -858,8 +1167,8 @@ function createWindow() {
               const trigger = document.querySelector('.font-setting-row .settings-dropdown-trigger');
               trigger?.click();
               await new Promise((resolve) => setTimeout(resolve, 80));
-              const tahoma = [...document.querySelectorAll('.font-setting-row .settings-dropdown-option')].find((item) => /Tahoma/i.test(item.textContent || ''));
-              tahoma?.click();
+              const bundledFont = [...document.querySelectorAll('.font-setting-row .settings-dropdown-option')].find((item) => /Be Vietnam Pro/i.test(item.textContent || ''));
+              bundledFont?.click();
             })()`, true);
             await new Promise((resolve) => setTimeout(resolve, 700));
           }
@@ -899,11 +1208,12 @@ function createWindow() {
               mainContentWidth: Math.round((main?.clientWidth || 0) - 100),
               chatWidthVar: document.querySelector('.app-shell')?.style.getPropertyValue('--chat-modal-width') || '',
               chatHeightVar: document.querySelector('.app-shell')?.style.getPropertyValue('--chat-response-height') || '',
-              fontVar: document.querySelector('.app-shell')?.style.getPropertyValue('--app-font-family') || ''
+              fontVar: document.querySelector('.app-shell')?.style.getPropertyValue('--app-font-family') || '',
+              bundledFontLoaded: document.fonts.check("400 14px 'Be Vietnam Pro'", 'Tiếng Việt Đặng Nguyễn Trường')
             };
           })()`, true);
           settingsProbe = {
-            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && uiSettings.subagentValue === "1" && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.maxSubagents === 1 && /smoke-global-rule/.test(afterSettings.globalRules || '') && /smoke-global-rule/.test(uiSettings.globalRulesValue || '') && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "tahoma" && afterSettings.profileLayout === "cards" && /Tahoma/i.test(uiSettings.fontValue) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
+            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && uiSettings.subagentValue === "1" && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.maxSubagents === 1 && /smoke-global-rule/.test(afterSettings.globalRules || '') && /smoke-global-rule/.test(uiSettings.globalRulesValue || '') && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "be-vietnam-pro" && afterSettings.profileLayout === "cards" && /Be Vietnam Pro/i.test(uiSettings.fontValue) && uiSettings.bundledFontLoaded && /Be Vietnam Pro/i.test(uiSettings.fontVar) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
             before: { maxSubagents: beforeSettings.maxSubagents, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout },
             saved: { maxSubagents: afterSettings.maxSubagents, chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily, profileLayout: afterSettings.profileLayout },
             chatModalWidth,
@@ -913,6 +1223,48 @@ function createWindow() {
           };
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
             await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ maxSubagents: beforeSettings.maxSubagents, globalRules: beforeSettings.globalRules, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout })})`, true);
+          }
+        }
+        let diagnosticProbe = null;
+        if (diagnosticSmokeMode) {
+          const logPageClicked = await win.webContents.executeJavaScript(`(() => {
+            const button = [...document.querySelectorAll('nav button')].find((item) => /nhật ký/i.test(item.textContent || ''));
+            button?.click();
+            return Boolean(button);
+          })()`, true);
+          if (!logPageClicked) throw new Error("Smoke không tìm thấy màn Nhật ký.");
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          const dropdownOpened = await win.webContents.executeJavaScript(`(() => {
+            const trigger = document.querySelector('.diagnostic-filter-trigger');
+            trigger?.click();
+            return Boolean(trigger);
+          })()`, true);
+          if (!dropdownOpened) throw new Error("Smoke không tìm thấy dropdown nhật ký custom.");
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          diagnosticProbe = await win.webContents.executeJavaScript(`(() => {
+            const panel = document.querySelector('.diagnostic-panel');
+            const toolbar = document.querySelector('.diagnostic-toolbar');
+            const filters = [...document.querySelectorAll('.diagnostic-filter-trigger')];
+            const menu = document.querySelector('.diagnostic-filter-menu');
+            const rect = (node) => node ? { left: Math.round(node.getBoundingClientRect().left), right: Math.round(node.getBoundingClientRect().right), top: Math.round(node.getBoundingClientRect().top), bottom: Math.round(node.getBoundingClientRect().bottom), width: Math.round(node.getBoundingClientRect().width), height: Math.round(node.getBoundingClientRect().height) } : null;
+            const panelRect = rect(panel);
+            const toolbarRect = rect(toolbar);
+            const filterRects = filters.map(rect);
+            return {
+              visible: !document.querySelector('.diagnostic-page')?.hidden,
+              customDropdownCount: filters.length,
+              nativeSelectCount: document.querySelectorAll('.diagnostic-toolbar select').length,
+              menuOpen: Boolean(menu),
+              menuOptionCount: menu?.querySelectorAll('[role="option"]').length || 0,
+              panel: panelRect,
+              toolbar: toolbarRect,
+              filters: filterRects,
+              actions: rect(document.querySelector('.diagnostic-toolbar-actions')),
+              noHorizontalOverflow: Boolean(panelRect && toolbarRect && toolbarRect.right <= panelRect.right + 1 && toolbarRect.left >= panelRect.left - 1 && filterRects.every((item) => item && item.right <= panelRect.right + 1))
+            };
+          })()`, true);
+          if (!diagnosticProbe.visible || diagnosticProbe.customDropdownCount !== 4 || diagnosticProbe.nativeSelectCount !== 0 || !diagnosticProbe.menuOpen || diagnosticProbe.menuOptionCount < 4 || !diagnosticProbe.noHorizontalOverflow) {
+            throw new Error(`Diagnostic dropdown smoke không đạt: ${JSON.stringify(diagnosticProbe)}`);
           }
         }
         const chatSmokeRequested = [
@@ -1268,6 +1620,7 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
           stillHasChatTitleChip: Boolean(card.querySelector('.active-chat-chip')),
           metaStillHasChat: /(?:^|\\s)Chat:/i.test(card.querySelector('.profile-meta')?.textContent || '')
         })))()`, true);
+        const activeChatTitleProbe = activeRepoProbe;
         let toastProbe = null;
         if (process.env.CODEXPRO_MANAGER_SMOKE_TOAST === "1") {
           await win.webContents.executeJavaScript("document.querySelector('.copy-button')?.click()", true);
@@ -1323,6 +1676,16 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
           attachmentPreviewProbe.textPreviewKind = String(textPreview?.kind || "");
           attachmentPreviewProbe.textPreviewHasContent = Boolean(String(textPreview?.text || "").trim());
         }
+        if (process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT_FONT === "1") {
+          await win.webContents.executeJavaScript(`(() => {
+            const row = document.querySelector('.font-setting-row');
+            row?.scrollIntoView({ block: 'start' });
+            row?.querySelector('.settings-dropdown-trigger')?.click();
+          })()`, true);
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          await win.webContents.executeJavaScript("document.querySelector('.font-setting-row .settings-dropdown-menu')?.scrollTo({ top: 72, behavior: 'instant' })", true);
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
         const screenshot = process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT;
         if (screenshot) {
           win.show();
@@ -1330,7 +1693,7 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         }
         const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, inspectionUiProbe, settingsProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeRepoProbe, toastProbe }));
+        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, inspectionUiProbe, settingsProbe, diagnosticProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe, activeRepoProbe, toastProbe }));
       } catch (error) {
         console.error(error instanceof Error ? error.stack || error.message : String(error));
         process.exitCode = 1;
@@ -1508,7 +1871,7 @@ async function health(base, token, attempts = 1) {
     try {
       const response = await fetch(`${base.replace(/\/$/, "")}/healthz`, {
         headers: token ? { authorization: `Bearer ${token}` } : {},
-        signal: AbortSignal.timeout(5500)
+        signal: AbortSignal.timeout(RUNTIME_HEALTH_TIMEOUT_MS)
       });
       const body = await response.json().catch(() => ({}));
       lastResult = {
@@ -1516,14 +1879,22 @@ async function health(base, token, attempts = 1) {
         status: response.status,
         latency: Date.now() - started,
         data: body,
+        timeout_ms: RUNTIME_HEALTH_TIMEOUT_MS,
+        timed_out: false,
         ...(response.ok && body.ok === true ? {} : { error: `HTTP ${response.status}` })
       };
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const errorName = error instanceof Error ? error.name : "";
       lastResult = {
         ok: false,
         status: 0,
         latency: Date.now() - started,
-        error: error instanceof Error ? error.message : String(error)
+        timeout_ms: RUNTIME_HEALTH_TIMEOUT_MS,
+        timed_out: errorName === "TimeoutError" || /timed?\s*out|timeout/i.test(message),
+        error_name: errorName,
+        error_code: String(error?.code || ""),
+        error: message
       };
     }
     if (lastResult.ok || attempt === attempts) return lastResult;
@@ -1664,6 +2035,7 @@ async function runtimeBaseStatus(options = {}) {
   if (forceRefresh) runtimeBaseCache = null;
   if (runtimeBasePromise) return runtimeBasePromise;
   runtimeBasePromise = (async () => {
+    const healthCycleId = `health_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
     const task = await scheduledTask();
 
     if (!isWindows) {
@@ -1739,13 +2111,39 @@ async function runtimeBaseStatus(options = {}) {
     } catch {
       processes = [];
     }
+    const processSummaries = processes.map((item) => ({ pid: item.ProcessId, name: item.Name }));
+    const healthDiagnostics = [
+      runtimeHealthDiagnosticTracker.observe({
+        target: "local",
+        label: "Local MCP",
+        base: localBase,
+        result: local,
+        healthCycleId,
+        processes: processSummaries,
+        slowMs: 1_000
+      }),
+      runtimeHealthDiagnosticTracker.observe({
+        target: "tunnel",
+        label: "Public tunnel",
+        base: publicBase,
+        configured: Boolean(publicBase),
+        result: tunnel,
+        healthCycleId,
+        processes: processSummaries,
+        slowMs: 2_500
+      })
+    ];
+    for (const event of healthDiagnostics) {
+      if (!event) continue;
+      diagnostic(event.level, event.source, event.category, event.message, event.details);
+    }
     const value = {
       task,
       config,
       token,
       local,
       tunnel,
-      processes: processes.map((item) => ({ pid: item.ProcessId, name: item.Name })),
+      processes: processSummaries,
       mcpLink: connectorLink(config, token),
       tokenConfigured: Boolean(token),
       autoStart: Boolean(task.autoStartCommand)
@@ -1763,7 +2161,15 @@ async function runtimeBaseStatus(options = {}) {
 async function runtimeStatus() {
   const base = await runtimeBaseStatus();
   const browserProfilesRaw = base.local.ok
-    ? await listBrowserProfilesThroughMcp(base.config, base.token).catch(() => [])
+    ? await listBrowserProfilesThroughMcp(base.config, base.token).catch((error) => {
+        if (diagnosticAllowed(`runtime-list-profiles:${String(error?.message || error).slice(0, 160)}`, 30_000)) {
+          diagnostic("warn", "manager", "profile", `Không đọc được danh sách profile trong runtime status: ${error?.message || String(error)}`, {
+            action: "runtime-list-profiles-fallback",
+            error
+          });
+        }
+        return [];
+      })
     : [];
   const browserProfilesVisible = browserProfilesRaw.filter((profile) => {
     const headless = profile.headless === true || String(profile.profile_id || "").startsWith("headless-");
@@ -2218,10 +2624,14 @@ async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
   try {
     const result = await mcpRequestCore(url, token, body, sessionId, timeoutMs);
     if (method === "tools/call") {
-      diagnostic("info", "mcp", "tool", `MCP tool ${action} hoàn tất`, {
-        action,
-        duration_ms: Date.now() - startedAt
-      });
+      const durationMs = Date.now() - startedAt;
+      const routinePollingAction = new Set(["browser_control:list_profiles", "browser_control:get_chat_response"]).has(action);
+      if (!routinePollingAction || durationMs >= 2_000) {
+        diagnostic(routinePollingAction ? "warn" : "info", "mcp", "tool", routinePollingAction ? `MCP polling ${action} phản hồi chậm` : `MCP tool ${action} hoàn tất`, {
+          action,
+          duration_ms: durationMs
+        });
+      }
     }
     return result;
   } catch (error) {
@@ -2261,8 +2671,15 @@ async function closeLocalMcpSession(session) {
       signal: AbortSignal.timeout(3000)
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     if (process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1") {
-      console.error(`[manager-mcp] close session failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[manager-mcp] close session failed: ${message}`);
+    }
+    if (diagnosticAllowed(`mcp-close-session:${message.slice(0, 160)}`, 60_000)) {
+      diagnostic("warn", "mcp", "transport", `Không đóng sạch được MCP session: ${message}`, {
+        action: "close-mcp-session",
+        error
+      });
     }
   }
 }
@@ -2993,19 +3410,41 @@ async function controlServer(action) {
   return runtimeStatus({ forceRefresh: true });
 }
 
-ipcMain.handle("codexpro:status", () => runtimeStatus());
-ipcMain.handle("codexpro:control", (_event, action) => controlServer(action));
+diagnosticIpcHandle("codexpro:status", { category: "status", action: "runtime-status", slowMs: 5_000 }, () => runtimeStatus());
+diagnosticIpcHandle("codexpro:control", {
+  category: "status",
+  action: "control-server",
+  logSuccess: true,
+  successMessage: "Điều khiển server hoàn tất",
+  failureMessage: "Không điều khiển được server",
+  details: (action) => ({ requested_action: String(action || "") })
+}, (_event, action) => controlServer(action));
 ipcMain.handle("codexpro:copy", (_event, text) => {
   clipboard.writeText(String(text || ""));
   return true;
 });
 ipcMain.on("codexpro:log-chat-layout", (_event, payload) => appendManagerChatLayoutLog(payload));
-ipcMain.on("codexpro:log-chat-response-audit", (_event, payload) => appendManagerChatResponseAuditLog(payload));
-ipcMain.on("codexpro:log-diagnostic", (_event, payload) => appendDiagnosticLog(codexProHome, payload || {}));
+ipcMain.on("codexpro:log-chat-response-audit", (_event, payload) => {
+  appendManagerChatResponseAuditLog(payload);
+  recordChatResponseAuditDiagnostic(payload);
+});
+ipcMain.on("codexpro:log-diagnostic", (_event, payload) => diagnostic(
+  payload?.level,
+  payload?.source || "renderer",
+  payload?.category || "runtime",
+  payload?.message || "Renderer diagnostic event",
+  { ...(payload?.details && typeof payload.details === "object" ? payload.details : {}), action: payload?.action || payload?.details?.action || "" }
+));
 ipcMain.handle("codexpro:get-diagnostic-logs", (_event, options) => readDiagnosticLogs(codexProHome, options || {}));
 ipcMain.handle("codexpro:clear-diagnostic-logs", () => clearDiagnosticLogs(codexProHome));
 ipcMain.handle("codexpro:prune-diagnostic-logs", () => pruneDiagnosticLogs(codexProHome));
-ipcMain.handle("codexpro:rotate-link", async () => {
+diagnosticIpcHandle("codexpro:rotate-link", {
+  category: "settings",
+  action: "rotate-mcp-link",
+  logSuccess: true,
+  successMessage: "Tạo link MCP mới hoàn tất",
+  failureMessage: "Không tạo được link MCP mới"
+}, async () => {
   const choice = await dialog.showMessageBox({
     type: "warning",
     title: "Tạo link MCP mới",
@@ -3042,72 +3481,241 @@ ipcMain.handle("codexpro:rotate-link", async () => {
   await controlServer("restart");
   return { cancelled: false, ...(await runtimeStatus()) };
 });
-ipcMain.handle("codexpro:projects", () => listProjects());
-ipcMain.handle("codexpro:check-profile", (_event, profileId) => checkChatGptProfile(profileId));
-ipcMain.handle("codexpro:setup-profile", (_event, profileId) => setupChatGptProfile(profileId));
-ipcMain.handle("codexpro:open-profile-chat", async (event, payload) => {
+diagnosticIpcHandle("codexpro:projects", { category: "projects", action: "list-projects", slowMs: 5_000 }, () => listProjects());
+diagnosticIpcHandle("codexpro:check-profile", {
+  category: "profile",
+  action: "check-profile",
+  slowMs: 10_000,
+  failureMessage: "Kiểm tra Chrome profile thất bại",
+  details: (profileId) => ({ profile_id: String(profileId || "") }),
+  resultDetails: (result) => ({
+    connected: result?.connected,
+    connector_installed: result?.connector_installed,
+    connector_profile_bound: result?.connector_profile_bound,
+    connector_update_required: result?.connector_update_required,
+    renderer_unresponsive: result?.renderer_unresponsive,
+    extension_version: String(result?.extension_version || ""),
+    tab_count: Number(result?.tab_count) || (Array.isArray(result?.conversation_tabs) ? result.conversation_tabs.length : 0)
+  }),
+  resultDiagnostic: (result) => result?.connected === false || result?.connector_installed === false || result?.connector_profile_bound === false || result?.connector_update_required || result?.renderer_unresponsive
+    ? { level: result?.renderer_unresponsive ? "error" : "warn", message: "Kiểm tra profile phát hiện trạng thái bất thường" }
+    : null
+}, (_event, profileId) => checkChatGptProfile(profileId));
+diagnosticIpcHandle("codexpro:setup-profile", {
+  category: "profile",
+  action: "setup-profile",
+  logSuccess: true,
+  successMessage: "Cập nhật CodexPro cho Chrome profile hoàn tất",
+  failureMessage: "Cập nhật CodexPro cho Chrome profile thất bại",
+  details: (profileId) => ({ profile_id: String(profileId || "") }),
+  resultDetails: (result) => ({
+    connected: result?.connected,
+    connector_installed: result?.connector_installed,
+    connector_profile_bound: result?.connector_profile_bound,
+    extension_version: String(result?.extension_version || ""),
+    message: String(result?.message || "")
+  })
+}, (_event, profileId) => setupChatGptProfile(profileId));
+diagnosticIpcHandle("codexpro:open-profile-chat", {
+  category: "profile",
+  action: "open-profile-chat",
+  failureMessage: "Không mở được Chrome profile",
+  details: (payload) => ({ profile_id: String(payload?.profileId || payload?.profile_id || ""), conversation_id: String(payload?.conversationId || payload?.conversation_id || ""), target_id: String(payload?.targetId || ""), target_conversation_id: String(payload?.targetConversationId || "") }),
+  resultDetails: (result) => ({ opened_new_tab: Boolean(result?.opened_new_tab), window_focused: Boolean(result?.window_focused || result?.window_focus?.ok), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed) })
+}, async (event, payload) => {
   const result = await openProfileChat(payload);
   const owner = BrowserWindow.fromWebContents(event.sender);
   if (result?.window_focus?.ok && owner && !owner.isDestroyed()) owner.minimize();
   return result;
 });
-ipcMain.handle("codexpro:recover-profile-chat", async (event, payload) => {
+diagnosticIpcHandle("codexpro:recover-profile-chat", {
+  category: "chat",
+  action: "recover-profile-chat",
+  logSuccess: true,
+  successMessage: "Khôi phục tab ChatGPT hoàn tất",
+  failureMessage: "Khôi phục tab ChatGPT thất bại",
+  details: (payload) => ({ profile_id: String(payload?.profileId || payload?.profile_id || ""), conversation_id: String(payload?.conversationId || payload?.conversation_id || ""), target_id: String(payload?.targetId || "") }),
+  resultDetails: (result) => ({ replaced_tab_id: String(result?.replaced_tab_id || ""), new_tab_id: String(result?.tab_id || result?.new_tab_id || ""), window_focused: Boolean(result?.window_focused || result?.window_focus?.ok) })
+}, async (event, payload) => {
   const result = await recoverProfileChatTab(payload);
   const owner = BrowserWindow.fromWebContents(event.sender);
   if ((result?.window_focused || result?.window_focus?.ok) && owner && !owner.isDestroyed()) owner.minimize();
   return result;
 });
-ipcMain.handle("codexpro:reload-profiles", () => reloadChromeProfiles());
-ipcMain.handle("codexpro:get-manager-settings", () => managerSettingsPayload());
-ipcMain.handle("codexpro:save-manager-settings", (_event, patch) => saveManagerSettingsPatch(patch));
-ipcMain.handle("codexpro:create-worker-image-pack", (_event, name) => createWorkerImagePack(name));
-ipcMain.handle("codexpro:select-worker-image-pack", (_event, packId) => selectWorkerImagePack(packId));
-ipcMain.handle("codexpro:delete-worker-image-pack", (_event, packId) => deleteWorkerImagePack(packId));
-ipcMain.handle("codexpro:choose-worker-image", (_event, payload) => chooseWorkerImage(payload?.packId, payload?.state));
-ipcMain.handle("codexpro:reset-worker-image", (_event, payload) => resetWorkerImage(payload?.packId, payload?.state));
-ipcMain.handle("codexpro:reset-manager-settings", () => resetManagerSettings());
-ipcMain.handle("codexpro:headless-workers", () => headlessWorkers.listWorkers());
-ipcMain.handle("codexpro:create-headless-worker", (_event, payload) => headlessWorkers.createWorker(payload));
-ipcMain.handle("codexpro:sync-headless-worker", (_event, workerId) => headlessWorkers.syncWorker(workerId));
-ipcMain.handle("codexpro:start-headless-worker", (_event, workerId) => headlessWorkers.startWorker(workerId));
-ipcMain.handle("codexpro:stop-headless-worker", (_event, workerId) => headlessWorkers.stopWorker(workerId));
-ipcMain.handle("codexpro:delete-headless-worker", (_event, workerId) => headlessWorkers.deleteWorker(workerId));
-ipcMain.handle("codexpro:set-headless-worker-autostart", (_event, payload) => headlessWorkers.setWorkerAutoStart(payload?.workerId, payload?.autoStart));
-ipcMain.handle("codexpro:choose-request-files", () => chooseRequestFiles());
-ipcMain.handle("codexpro:get-request-file-preview", (_event, filePath) => requestFilePreview(filePath));
-ipcMain.handle("codexpro:capture-clipboard-image", () => captureClipboardImage());
-ipcMain.handle("codexpro:send-profile-request", (_event, payload) => ipcResult(() => sendProfileRequest(payload)));
-ipcMain.handle("codexpro:rename-profile-chat", (_event, payload) => renameProfileChat(payload));
-ipcMain.handle("codexpro:get-profile-response", (_event, payload) => getProfileResponse(payload));
-ipcMain.handle("codexpro:get-chat-response-cache", (_event, payload) => getManagerChatCacheEntry(payload));
-ipcMain.handle("codexpro:save-chat-response-cache", (_event, payload) => saveManagerChatCacheEntry(payload));
-ipcMain.handle("codexpro:get-repo-task-status", (_event, payload) => getRepoTaskStatus(payload));
-ipcMain.handle("codexpro:choose-project", async () => {
+diagnosticIpcHandle("codexpro:reload-profiles", {
+  category: "profile",
+  action: "reload-profiles",
+  logSuccess: true,
+  successMessage: "Reload worker extension hoàn tất",
+  failureMessage: "Reload worker extension thất bại",
+  resultDetails: (result) => ({ mode: String(result?.mode || ""), count: Number(result?.count) || 0, failed: Number(result?.failed) || 0, deferred: Number(result?.deferred) || 0, outdated: Number(result?.outdated) || 0, version: String(result?.version || "") }),
+  resultDiagnostic: (result) => Number(result?.failed) > 0 ? { level: "error", message: `Reload worker còn ${Number(result.failed)} profile thất bại` } : Number(result?.deferred) > 0 ? { level: "warn", message: `Reload worker bỏ qua ${Number(result.deferred)} profile đang bận` } : null
+}, () => reloadChromeProfiles());
+diagnosticIpcHandle("codexpro:get-manager-settings", { category: "settings", action: "get-manager-settings" }, () => managerSettingsPayload());
+diagnosticIpcHandle("codexpro:save-manager-settings", {
+  category: "settings",
+  action: "save-manager-settings",
+  logSuccess: true,
+  successMessage: "Lưu cài đặt Manager hoàn tất",
+  failureMessage: "Lưu cài đặt Manager thất bại",
+  details: (patch) => ({ changed_keys: Object.keys(patch && typeof patch === "object" ? patch : {}).slice(0, 30) })
+}, (_event, patch) => saveManagerSettingsPatch(patch));
+diagnosticIpcHandle("codexpro:create-worker-image-pack", { category: "settings", action: "create-worker-image-pack", failureMessage: "Tạo bộ ảnh worker thất bại" }, (_event, name) => createWorkerImagePack(name));
+diagnosticIpcHandle("codexpro:select-worker-image-pack", { category: "settings", action: "select-worker-image-pack", failureMessage: "Chọn bộ ảnh worker thất bại" }, (_event, packId) => selectWorkerImagePack(packId));
+diagnosticIpcHandle("codexpro:delete-worker-image-pack", { category: "settings", action: "delete-worker-image-pack", failureMessage: "Xóa bộ ảnh worker thất bại" }, (_event, packId) => deleteWorkerImagePack(packId));
+diagnosticIpcHandle("codexpro:choose-worker-image", { category: "settings", action: "choose-worker-image", failureMessage: "Chọn ảnh worker thất bại", details: (payload) => ({ state: String(payload?.state || "") }) }, (_event, payload) => chooseWorkerImage(payload?.packId, payload?.state));
+diagnosticIpcHandle("codexpro:reset-worker-image", { category: "settings", action: "reset-worker-image", failureMessage: "Khôi phục ảnh worker thất bại", details: (payload) => ({ state: String(payload?.state || "") }) }, (_event, payload) => resetWorkerImage(payload?.packId, payload?.state));
+diagnosticIpcHandle("codexpro:reset-manager-settings", {
+  category: "settings",
+  action: "reset-manager-settings",
+  logSuccess: true,
+  successMessage: "Khôi phục cài đặt Manager hoàn tất",
+  failureMessage: "Khôi phục cài đặt Manager thất bại"
+}, () => resetManagerSettings());
+diagnosticIpcHandle("codexpro:headless-workers", { category: "worker", action: "headless-workers", failureMessage: "Đọc danh sách headless worker thất bại" }, () => headlessWorkers.listWorkers());
+diagnosticIpcHandle("codexpro:create-headless-worker", { category: "worker", action: "create-headless-worker", failureMessage: "Tạo headless worker thất bại" }, (_event, payload) => headlessWorkers.createWorker(payload));
+diagnosticIpcHandle("codexpro:sync-headless-worker", { category: "worker", action: "sync-headless-worker", failureMessage: "Đồng bộ headless worker thất bại" }, (_event, workerId) => headlessWorkers.syncWorker(workerId));
+diagnosticIpcHandle("codexpro:start-headless-worker", { category: "worker", action: "start-headless-worker", failureMessage: "Khởi động headless worker thất bại" }, (_event, workerId) => headlessWorkers.startWorker(workerId));
+diagnosticIpcHandle("codexpro:stop-headless-worker", { category: "worker", action: "stop-headless-worker", failureMessage: "Dừng headless worker thất bại" }, (_event, workerId) => headlessWorkers.stopWorker(workerId));
+diagnosticIpcHandle("codexpro:delete-headless-worker", { category: "worker", action: "delete-headless-worker", failureMessage: "Xóa headless worker thất bại" }, (_event, workerId) => headlessWorkers.deleteWorker(workerId));
+diagnosticIpcHandle("codexpro:set-headless-worker-autostart", { category: "worker", action: "set-headless-worker-autostart", failureMessage: "Cập nhật autostart headless worker thất bại" }, (_event, payload) => headlessWorkers.setWorkerAutoStart(payload?.workerId, payload?.autoStart));
+diagnosticIpcHandle("codexpro:choose-request-files", { category: "chat", action: "choose-request-files", failureMessage: "Chọn file đính kèm thất bại" }, () => chooseRequestFiles());
+diagnosticIpcHandle("codexpro:get-request-file-preview", { category: "chat", action: "get-request-file-preview", failureMessage: "Đọc preview file đính kèm thất bại" }, (_event, filePath) => requestFilePreview(filePath));
+diagnosticIpcHandle("codexpro:capture-clipboard-image", { category: "chat", action: "capture-clipboard-image", failureMessage: "Đọc ảnh clipboard thất bại" }, () => captureClipboardImage());
+diagnosticIpcHandle("codexpro:send-profile-request", {
+  category: "chat",
+  action: "send-profile-request",
+  logSuccess: true,
+  successMessage: "ChatGPT đã nhận yêu cầu gửi",
+  failureMessage: "Gửi yêu cầu ChatGPT thất bại",
+  details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || ""), new_chat: Boolean(payload?.newChat), attachment_count: Array.isArray(payload?.attachments) ? payload.attachments.length : 0, request_scope: String(payload?.scope || "workspace"), tool_retry: Boolean(payload?.toolRetry), tool_rollover_count: Number(payload?.toolRolloverCount) || 0 }),
+  resultDetails: (result) => {
+    const value = result?.ok ? result.value : result;
+    return {
+      profile_id: String(value?.profile_id || ""),
+      conversation_id: String(value?.conversation_id || ""),
+      request_id: String(value?.request_id || value?.generation_request_id || ""),
+      repo_task_id: String(value?.repo_task_id || ""),
+      submission_state: String(value?.submission_state || ""),
+      submitted_by: String(value?.submitted_by || ""),
+      generation_state: String(value?.generation_state || value?.network_state || ""),
+      generation_endpoint: String(value?.generation_endpoint || ""),
+      network_status_code: Number(value?.network_status_code) || 0,
+      network_error: String(value?.network_error || ""),
+      manager_preflight_ms: Number(value?.manager_preflight_ms) || 0,
+      manager_total_ms: Number(value?.manager_total_ms) || 0,
+      runtime_connection_source: String(value?.runtime_connection_source || ""),
+      profile_preflight_source: String(value?.profile_preflight_source || "")
+    };
+  },
+  resultDiagnostic: (result, payload) => {
+    const value = result?.ok ? result.value : result;
+    const submissionState = String(value?.submission_state || "").toLowerCase();
+    const generationState = String(value?.generation_state || value?.network_state || "").toLowerCase();
+    if (submissionState === "uncertain") return { level: "warn", message: "Trạng thái gửi ChatGPT không chắc chắn" };
+    if (generationState === "failed" || value?.network_error) return { level: "error", message: "ChatGPT nhận yêu cầu nhưng generation lỗi network" };
+    return null;
+  }
+}, (_event, payload) => ipcResult(() => sendProfileRequest(payload)));
+diagnosticIpcHandle("codexpro:rename-profile-chat", {
+  category: "chat",
+  action: "rename-profile-chat",
+  failureMessage: "Đổi tên chat thất bại",
+  details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || "") })
+}, (_event, payload) => renameProfileChat(payload));
+diagnosticIpcHandle("codexpro:get-profile-response", {
+  category: "chat",
+  action: "get-profile-response",
+  slowMs: 8_000,
+  failureMessage: "Đọc phản hồi ChatGPT thất bại",
+  details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || ""), read_dom: payload?.readDom !== false, recover_stale_dom: Boolean(payload?.recoverStaleDom), canonical_only: Boolean(payload?.canonicalOnly) }),
+  resultDetails: (result) => ({
+    request_id: String(result?.request_id || result?.generation_request_id || ""),
+    network_state: String(result?.network_state || ""),
+    network_source: String(result?.network_source || ""),
+    network_status_code: Number(result?.network_status_code) || 0,
+    network_error: String(result?.network_error || ""),
+    network_duration_ms: Number(result?.network_duration_ms) || 0,
+    response_ready: Boolean(result?.response_ready),
+    response_source: String(result?.response_source || ""),
+    message_count: Number(result?.message_count) || (Array.isArray(result?.messages) ? result.messages.length : 0),
+    dom_available: result?.dom_available,
+    dom_skipped: Boolean(result?.dom_skipped),
+    dom_error: String(result?.dom_error || ""),
+    canonical_available: Boolean(result?.canonical_available),
+    network_stream_available: Boolean(result?.network_stream_available),
+    network_stream_in_progress: Boolean(result?.network_stream_in_progress)
+  }),
+  resultDiagnostic: (result, payload) => {
+    const networkState = String(result?.network_state || "").toLowerCase();
+    const key = `${String(payload?.profileId || "")}:${String(payload?.conversationId || "")}`;
+    if (networkState === "failed" || result?.network_error) return { level: "error", message: "Đọc phản hồi phát hiện generation lỗi network", dedupeKey: `response-network-failed:${key}`, throttleMs: 30_000 };
+    if (result?.dom_error) return { level: "warn", message: "Đọc phản hồi gặp lỗi DOM", dedupeKey: `response-dom-error:${key}:${String(result.dom_error).slice(0, 120)}`, throttleMs: 30_000 };
+    if (networkState === "completed" && !result?.response_ready && !result?.network_stream_in_progress) return { level: "warn", message: "Network đã hoàn tất nhưng chưa có phản hồi xác minh", dedupeKey: `response-missing-final:${key}`, throttleMs: 30_000 };
+    return null;
+  }
+}, (_event, payload) => getProfileResponse(payload));
+diagnosticIpcHandle("codexpro:get-chat-response-cache", { category: "chat", action: "get-chat-response-cache", failureMessage: "Đọc cache phản hồi thất bại", details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || "") }) }, (_event, payload) => getManagerChatCacheEntry(payload));
+diagnosticIpcHandle("codexpro:save-chat-response-cache", { category: "chat", action: "save-chat-response-cache", failureMessage: "Lưu cache phản hồi thất bại", details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || ""), message_count: Array.isArray(payload?.messages) ? payload.messages.length : 0 }) }, (_event, payload) => saveManagerChatCacheEntry(payload));
+diagnosticIpcHandle("codexpro:get-repo-task-status", {
+  category: "tool",
+  action: "get-repo-task-status",
+  logSuccess: true,
+  successMessage: "Đã kiểm tra task title và CodexPro gate",
+  slowMs: 5_000,
+  failureMessage: "Xác minh task CodexPro thất bại",
+  details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || ""), task_id: String(payload?.taskId || "") }),
+  resultDetails: (result) => ({ verified: Boolean(result?.verified), task_id: String(result?.task_id || ""), task_title: String(result?.task_title || ""), task_kind: String(result?.task_kind || ""), verification_reason: String(result?.reason || result?.verification_reason || "") }),
+  resultDiagnostic: (result) => result?.verified === false || !String(result?.task_title || "").trim()
+    ? { level: "warn", message: result?.verified === false ? "Task CodexPro chưa được xác minh" : "Task CodexPro đã verified nhưng thiếu task title" }
+    : null
+}, (_event, payload) => getRepoTaskStatus(payload));
+diagnosticIpcHandle("codexpro:choose-project", { category: "projects", action: "choose-project", failureMessage: "Mở hộp chọn dự án thất bại" }, async () => {
   const result = await dialog.showOpenDialog({ properties: ["openDirectory"], title: "Chọn repo hoặc dự án" });
   return result.canceled ? null : result.filePaths[0];
 });
 
-ipcMain.handle("codexpro:add-project", async (_event, root) => {
+diagnosticIpcHandle("codexpro:add-project", {
+  category: "projects",
+  action: "add-project",
+  logSuccess: true,
+  successMessage: "Thêm dự án hoàn tất",
+  failureMessage: "Thêm dự án thất bại",
+  details: (root) => ({ root: String(root || "") })
+}, async (_event, root) => {
   const resolved = path.resolve(String(root || ""));
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) throw new Error("Thư mục dự án không tồn tại.");
   const roots = [...new Set([...managerProjects(), resolved])];
   saveManagerProjects(roots);
   return listProjects();
 });
-ipcMain.handle("codexpro:remove-project", async (_event, root) => {
+diagnosticIpcHandle("codexpro:remove-project", {
+  category: "projects",
+  action: "remove-project",
+  logSuccess: true,
+  successMessage: "Xóa dự án khỏi danh sách hoàn tất",
+  failureMessage: "Xóa dự án khỏi danh sách thất bại",
+  details: (root) => ({ root: String(root || "") })
+}, async (_event, root) => {
   const target = path.resolve(String(root || "")).toLowerCase();
   saveManagerProjects(managerProjects().filter((item) => path.resolve(item).toLowerCase() !== target));
   return listProjects();
 });
-ipcMain.handle("codexpro:inspect-project", (_event, root) => inspectThroughMcp(path.resolve(String(root || ""))));
-ipcMain.handle("codexpro:open-folder", async (_event, root) => {
+diagnosticIpcHandle("codexpro:inspect-project", {
+  category: "projects",
+  action: "inspect-project",
+  slowMs: 15_000,
+  failureMessage: "Phân tích dự án qua MCP thất bại",
+  details: (root) => ({ root: String(root || "") })
+}, (_event, root) => inspectThroughMcp(path.resolve(String(root || ""))));
+diagnosticIpcHandle("codexpro:open-folder", { category: "projects", action: "open-folder", failureMessage: "Mở thư mục thất bại", details: (root) => ({ root: String(root || "") }) }, async (_event, root) => {
   const error = await shell.openPath(path.resolve(String(root || "")));
   if (error) throw new Error(error);
   return true;
 });
-ipcMain.handle("codexpro:open-external", async (_event, url) => {
+diagnosticIpcHandle("codexpro:open-external", { category: "runtime", action: "open-external", failureMessage: "Mở liên kết ngoài thất bại", details: (url) => ({ url: String(url || "") }) }, async (_event, url) => {
   const parsed = new URL(String(url));
-  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Chỉ cho phép liên kết HTTP(S).");
+  if (!["http:", "https:", "mailto:"].includes(parsed.protocol)) throw new Error("Chỉ cho phép liên kết HTTP(S) hoặc mailto.");
   await shell.openExternal(parsed.toString());
   return true;
 });
@@ -3115,7 +3723,39 @@ ipcMain.handle("codexpro:open-external", async (_event, url) => {
 const managerSmokeMode = process.env.CODEXPRO_MANAGER_SMOKE === "1";
 const hasSingleInstanceLock = managerSmokeMode || app.requestSingleInstanceLock();
 
+process.on("uncaughtExceptionMonitor", (error, origin) => {
+  diagnostic("error", "electron", "runtime", `Main process exception: ${error?.message || String(error)}`, {
+    action: "uncaught-exception",
+    origin,
+    error
+  });
+});
+process.on("warning", (warning) => {
+  diagnostic("warn", "electron", "runtime", `Node warning: ${warning?.message || String(warning)}`, {
+    action: "process-warning",
+    warning
+  });
+});
+app.on("render-process-gone", (_event, webContents, details) => {
+  diagnostic("error", "electron", "window", `Renderer đã dừng: ${details?.reason || "unknown"}`, {
+    action: "render-process-gone",
+    web_contents_id: webContents?.id,
+    reason: details?.reason,
+    exit_code: details?.exitCode
+  });
+});
+app.on("child-process-gone", (_event, details) => {
+  diagnostic(details?.reason === "clean-exit" ? "info" : "error", "electron", "runtime", `Tiến trình con đã dừng: ${details?.type || "unknown"} · ${details?.reason || "unknown"}`, {
+    action: "child-process-gone",
+    type: details?.type,
+    reason: details?.reason,
+    exit_code: details?.exitCode,
+    name: details?.name
+  });
+});
+
 if (!hasSingleInstanceLock) {
+  diagnostic("warn", "electron", "runtime", "Manager không khởi động vì đã có một instance khác", { action: "single-instance-rejected" });
   app.quit();
 } else {
   app.on("second-instance", () => {
@@ -3127,6 +3767,14 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
+    diagnostic("info", "electron", "runtime", "CodexPro Manager đã khởi động", {
+      action: "manager-started",
+      platform: process.platform,
+      architecture: process.arch,
+      electron_version: process.versions.electron,
+      chrome_version: process.versions.chrome,
+      node_version: process.versions.node
+    });
     if (isMac && app.isPackaged) {
       try {
         app.setLoginItemSettings({ openAtLogin: true });
@@ -3148,5 +3796,8 @@ if (!hasSingleInstanceLock) {
 
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
+  });
+  app.on("before-quit", () => {
+    diagnostic("info", "electron", "runtime", "CodexPro Manager đang thoát", { action: "manager-before-quit" });
   });
 }
