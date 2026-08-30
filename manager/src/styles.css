@@ -111,10 +111,10 @@ h1 { font-size: var(--font-page); line-height: 1.18; font-weight: var(--weight-b
 h2 { font-size: var(--font-section); line-height: 1.3; font-weight: var(--weight-semibold); letter-spacing: -.3px; margin-bottom: 8px; }
 h3 { font-size: var(--font-base); line-height: 1.4; font-weight: var(--weight-semibold); color: #c5cbd6; margin: 22px 0 8px; }
 .subtitle, .section-note { color: var(--muted); margin: 0; font-size: var(--font-base); line-height: var(--leading-body); }
-.header-server-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 9px; flex: 0 0 auto; }
+.header-server-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 9px; flex: 1 1 auto; min-width: 0; max-width: 100%; }
 .header-server-actions .button,
 .header-server-actions .profile-count { height: 40px; min-height: 40px; box-sizing: border-box; }
-.header-server-actions .profile-count { flex-wrap: nowrap; padding-top: 0; padding-bottom: 0; }
+.header-server-actions .profile-count { flex-wrap: nowrap; padding-top: 0; padding-bottom: 0; max-width: 100%; }
 .eyebrow { color: var(--blue); font-size: var(--font-xs); line-height: 1.3; letter-spacing: 1.2px; font-weight: var(--weight-bold); margin-bottom: 8px; }
 section { margin-bottom: 38px; }
 [hidden] { display: none !important; }
@@ -1033,6 +1033,12 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
 .diagnostic-detail-head span { color: #818c9d; font-size: var(--font-description); }
 .diagnostic-detail > strong { color: #d8dee8; font-size: var(--font-body); font-weight: var(--weight-medium); }
 .diagnostic-detail pre { max-height: 280px; margin: 0; padding: 12px; overflow: auto; color: #b8c4d4; border: 1px solid #252d39; border-radius: var(--radius-control); background: #090c11; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+@media (max-width: 1500px) {
+  header { flex-direction: column; align-items: stretch; }
+  .header-server-actions { width: 100%; justify-content: flex-start; }
+  .header-server-actions .profile-count { flex: 1 1 100%; width: 100%; height: auto; min-height: 40px; flex-wrap: wrap; }
+}
 
 @media (max-width: 1080px) {
   .status-grid { grid-template-columns: repeat(2, 1fr); }
