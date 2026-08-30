@@ -563,7 +563,7 @@ function probeChatActivityPage() {
 }
 
 async function chatDomActivityState(tabId,conversationId,options={}) {
-  if(!Number.isInteger(tabId)||!conversationId)return {available:false,busy:false,source:'',activity_text:''};
+  if(!Number.isInteger(tabId))return {available:false,busy:false,source:'',activity_text:''};
   const now=Date.now();
   const fresh=options?.fresh===true;
   const maxAgeMs=Number.isFinite(Number(options?.maxAgeMs))?Math.max(0,Number(options.maxAgeMs)):DOM_ACTIVITY_PROBE_CACHE_MS;

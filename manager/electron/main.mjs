@@ -49,8 +49,9 @@ const DEFAULT_GLOBAL_RULES = `# CodexPro Global Rules
 - Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
 `;
 
-const WORKER_EXTENSION_VERSION = "0.5.74";
+const WORKER_EXTENSION_VERSION = "0.5.75";
 const RUNTIME_BASE_CACHE_MS = 10000;
+const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
 const GIT_SUMMARY_CACHE_MS = 2 * 60 * 1000;
 const GIT_SUMMARY_CACHE_RETENTION_MS = 30 * 60 * 1000;
@@ -1326,6 +1327,54 @@ async function runPowerShell(script) {
   return stdout.trim();
 }
 
+async function macFrontmostBundleId() {
+  const { stdout: frontStdout } = await execFileAsync("/usr/bin/lsappinfo", ["front"], { maxBuffer: 256 * 1024 });
+  const front = frontStdout.trim();
+  if (!front) return "";
+  const { stdout: infoStdout } = await execFileAsync("/usr/bin/lsappinfo", ["info", "-only", "bundleid", front], { maxBuffer: 256 * 1024 });
+  return infoStdout.match(/"CFBundleIdentifier"="([^"]+)"/)?.[1] || "";
+}
+
+async function focusChromeWindowMac() {
+  let foregroundBundleId = "";
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await execFileAsync("/usr/bin/open", ["-a", "Google Chrome"], { maxBuffer: 256 * 1024 });
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        foregroundBundleId = await macFrontmostBundleId();
+        if (foregroundBundleId === "com.google.Chrome") {
+          return {
+            ok: true,
+            activated: true,
+            foreground_match: true,
+            source: "launchservices",
+            foreground_bundle_id: foregroundBundleId
+          };
+        }
+      }
+    }
+    return {
+      ok: false,
+      activated: false,
+      foreground_match: false,
+      source: "launchservices",
+      foreground_bundle_id: foregroundBundleId,
+      reason: "chrome_not_frontmost"
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      activated: false,
+      foreground_match: false,
+      source: "launchservices",
+      foreground_bundle_id: foregroundBundleId,
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 function parseTaskArguments(args = "") {
   const value = String(args);
   const read = (name) => {
@@ -2284,6 +2333,7 @@ async function checkChatGptProfile(profileId) {
 }
 
 async function focusChromeWindow(chatTitle) {
+  if (isMac) return focusChromeWindowMac();
   const title = String(chatTitle || "").trim();
   if (!title) return { ok: false, reason: "missing_title" };
   const encodedTitle = Buffer.from(title, "utf8").toString("base64");
@@ -2420,7 +2470,7 @@ async function openProfileChat(payload) {
       const reason = activationError instanceof Error ? activationError.message : String(activationError);
       throw new Error(`Không mở được profile Chrome vì extension chưa phản hồi lệnh activate tab: ${reason}`);
     }
-    throw new Error("Đã chọn đúng tab nhưng Windows chưa đưa Chrome lên trước. Hãy thử lại một lần.");
+    throw new Error(`Đã chọn đúng tab nhưng ${platformLabel} chưa đưa Chrome lên trước. Hãy thử lại một lần.`);
   }
 
   return {

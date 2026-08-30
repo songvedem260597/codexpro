@@ -290,6 +290,8 @@ assert.match(worker, /network_stream_in_progress:networkStreamInProgress/, "work
 assert.match(worker, /streamBusy\?\(streamActivity\|\|'CodexPro đang sử dụng tool'\)/, "profile status must prefer live tool activity over stale DOM activity");
 assert.match(worker, /probeCanonicalCompletion/, "tracker timeout must verify canonical response before reporting failure");
 assert.match(worker, /function probeChatActivityPage/, "profile status must supplement network state with a lightweight DOM activity probe");
+assert.match(worker, /if\(!Number\.isInteger\(tabId\)\)return \{available:false,busy:false,source:'',activity_text:''\};/, "DOM activity probing must also run for ChatGPT tabs that have not received a /c/ conversation URL yet");
+assert.doesNotMatch(worker, /if\(!Number\.isInteger\(tabId\)\|\|!conversationId\)/, "a new/root ChatGPT tab must not be forced idle just because it has no conversation id yet");
 assert.match(worker, /const shouldProbeDom=Boolean\(conversationId&&\(tab\.active\|\|networkState\.busy\|\|canonicalActivity\.busy\|\|cachedDomActivity\?\.busy/, "idle background ChatGPT tabs must not receive unconditional DOM probes");
 assert.match(worker, /for\(const tabId of chatDomActivityByTab\.keys\(\)\)if\(!liveTabIds\.has\(tabId\)\)chatDomActivityByTab\.delete\(tabId\)/, "closed tabs must be pruned from the DOM activity cache");
 assert.match(worker, /testId==='stop-button'/, "DOM activity probe must recognize ChatGPT's stop control");
@@ -482,7 +484,7 @@ assert.doesNotMatch(canonicalReaderSource, /status==='finished_successfully'/, "
 const responseReaderSource = worker.slice(worker.indexOf("if(action==='get_chat_response')"), worker.indexOf("if(action==='open_tab')"));
 assert.match(responseReaderSource, /const networkStreamLive=Boolean\(effectiveNetworkBusy&&networkStream\.available\)/, "closed network streams must be hidden after the request becomes terminal");
 assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'/, "DOM fallback must explicitly mark only settled latest-assistant content as ready");
-assert.equal(manifest.version, "0.5.74");
+assert.equal(manifest.version, "0.5.75");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");
