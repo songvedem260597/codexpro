@@ -393,6 +393,38 @@
 .codexgraph-raw-details summary { color: #8290a2; font-size: 12px; cursor: pointer; user-select: none; }
 .codexgraph-raw-details h3 { margin: 14px 0 8px; color: #b9c4d1; font-size: 12px; }
 
+/* Keep Code Graph on the same semantic typography scale as the rest of Manager. */
+.codexgraph-summary-copy h3,
+.codexgraph-detail h3 { font-size: var(--font-title); font-weight: var(--weight-title); }
+.codexgraph-summary-copy p:last-child,
+.codexgraph-toolbar > label,
+.codexgraph-filter-label,
+.codexgraph-filter-option-copy small,
+.codexgraph-hint,
+.codexgraph-detail.is-empty span,
+.codexgraph-path,
+.codexgraph-meta strong,
+.codexgraph-related-head,
+.codexgraph-related-copy strong,
+.codexgraph-related-empty,
+.codexgraph-warning,
+.codexgraph-empty,
+.codexgraph-raw-details summary,
+.codexgraph-raw-details h3 { font-size: var(--font-description); font-weight: var(--weight-description); }
+.codexgraph-toolbar input,
+.codexgraph-toolbar select,
+.codexgraph-filter-trigger,
+.codexgraph-filter-option-copy strong { font-size: var(--font-control); font-weight: var(--weight-body); }
+.codexgraph-metrics strong,
+.codexgraph-detail.is-empty strong { font-size: var(--font-title); font-weight: var(--weight-title); }
+.codexgraph-metrics span,
+.codexgraph-kind,
+.codexgraph-virtual,
+.codexgraph-meta small,
+.codexgraph-related-kind,
+.codexgraph-related-copy small,
+.codexgraph-live { font-size: var(--font-micro); }
+
 @media (max-width: 1050px) {
   .codexgraph-summary { align-items: stretch; flex-direction: column; }
   .codexgraph-metrics { grid-template-columns: repeat(4, 1fr); width: 100%; }
