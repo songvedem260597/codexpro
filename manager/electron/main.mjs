@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { createHeadlessWorkerManager } from "./headless-workers.mjs";
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
+import { syncUnpackedCodexProExtensions } from "./extension-sync.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -171,6 +172,35 @@ const headlessExtensionRoot = app.isPackaged
   ? path.join(process.resourcesPath, "chrome-extension")
   : path.resolve(here, "..", "..", "chrome-extension");
 const headlessWorkers = createHeadlessWorkerManager({ codexProHome, extensionRoot: headlessExtensionRoot });
+
+async function syncInstalledWorkerExtension() {
+  try {
+    const result = await syncUnpackedCodexProExtensions({
+      sourceRoot: headlessExtensionRoot,
+      targetVersion: WORKER_EXTENSION_VERSION,
+      codexProHome
+    });
+    if (result.synced.length) {
+      diagnostic("info", "manager", "worker", `Đã đồng bộ worker extension lên ${WORKER_EXTENSION_VERSION}`, {
+        action: "sync-worker-extension-files",
+        source_root: result.sourceRoot,
+        source_version: result.sourceVersion,
+        target_version: result.targetVersion,
+        synced_paths: result.synced.map((item) => item.path),
+        backup_dir: result.backupDir || ""
+      });
+    }
+    return result;
+  } catch (error) {
+    diagnostic("error", "manager", "worker", `Không thể đồng bộ worker extension lên ${WORKER_EXTENSION_VERSION}`, {
+      action: "sync-worker-extension-files",
+      source_root: headlessExtensionRoot,
+      target_version: WORKER_EXTENSION_VERSION,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    throw error;
+  }
+}
 const gitSummaryCache = new Map();
 const gitSummaryPromises = new Map();
 
@@ -3139,6 +3169,7 @@ async function reloadChromeProfiles() {
   const outdated = connectedProfiles.filter((profile) => !versionAtLeast(profile.extension_version));
   if (!outdated.length) return { ok: true, mode: "up_to_date", count: 0, failed: 0, deferred: 0, outdated: 0, version: WORKER_EXTENSION_VERSION };
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  await syncInstalledWorkerExtension();
 
   const safeToReload = (profile) => {
     const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
@@ -3313,6 +3344,7 @@ async function sendProfileRequestUnlocked(payload) {
   if (!profile) throw new Error("Profile Chrome này không còn được CodexPro nhận diện.");
   if (!versionAtLeast(profile.extension_version)) {
     if (sendDebug) console.error(`[manager-send] updating worker ${profile.extension_version || "unknown"} -> ${WORKER_EXTENSION_VERSION}`);
+    await syncInstalledWorkerExtension();
     await localMcpToolInSession(session, "browser_control", {
       action: "reload_extension",
       profile_id: profileId
