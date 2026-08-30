@@ -87,6 +87,11 @@ const FONT_OPTIONS = [
   { value: "cascadia", label: "Cascadia Code", css: '"Cascadia Code", Consolas, monospace' }
 ];
 
+const FONT_ROLE_OPTIONS = [
+  { value: "inherit", label: "Theo font nội dung", hint: "Dùng cùng font với nội dung & control" },
+  ...FONT_OPTIONS
+];
+
 const GLOBAL_RULES_TEMPLATE = `# CodexPro Global Rules
 
 <!-- Rule trong file này áp dụng cho mọi repo/dự án được thao tác qua MCP CodexPro. -->
@@ -100,6 +105,8 @@ const DEFAULT_MANAGER_SETTINGS = {
   chatWidth: 940,
   chatHeight: 330,
   fontFamily: "system",
+  headingFontFamily: "inherit",
+  monoFontFamily: "inherit",
   fontSize: 14,
   profileLayout: "rows",
   maxSubagents: 1,
@@ -652,6 +659,113 @@ function buildConversationRolloverPrompt(result) {
   return `${prefix}\n\n${context}\n\nTiếp tục từ đúng việc còn dang dở. Nếu cần chờ người dùng đưa yêu cầu tiếp theo thì chỉ báo ngắn gọn rằng chat mới đã sẵn sàng để tiếp tục dự án.`.slice(0, 11800);
 }
 
+function ChatRequestComposer({
+  profileId,
+  initialDraft,
+  draftResetVersion,
+  attachments,
+  placeholder,
+  disabled,
+  attachmentDisabled,
+  canSendBase,
+  sending,
+  rolloverCreating,
+  selectedBusy,
+  selectedSettling,
+  isNewChat,
+  sendError,
+  sendEvidence,
+  canOpenChrome,
+  onPaste,
+  onChooseAttachments,
+  onOpenAttachmentPreview,
+  onRemoveAttachment,
+  onClearSendError,
+  onDraftSnapshot,
+  onClose,
+  onOpenChrome,
+  onSend
+}) {
+  const [draft, setDraft] = useState(() => String(initialDraft || ""));
+  const sendingRef = useRef(false);
+
+  const updateDraft = useCallback((nextDraft) => {
+    const normalized = String(nextDraft || "");
+    setDraft(normalized);
+    onDraftSnapshot(normalized);
+  }, [onDraftSnapshot]);
+
+  useEffect(() => {
+    updateDraft(initialDraft);
+  }, [profileId, draftResetVersion]);
+
+  const canSend = canSendBase && Boolean(draft.trim() || attachments.length);
+
+  const submit = useCallback(async () => {
+    if (!canSend || sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      const submitted = await onSend(draft);
+      if (submitted) updateDraft("");
+    } finally {
+      sendingRef.current = false;
+    }
+  }, [canSend, draft, onSend, updateDraft]);
+
+  return (
+    <>
+      <label className="request-label" htmlFor={`request-${profileId}`}>Nhắn tiếp</label>
+      <div className="request-composer">
+        <textarea
+          id={`request-${profileId}`}
+          value={draft}
+          maxLength={12000}
+          placeholder={placeholder}
+          onPaste={onPaste}
+          onChange={(event) => {
+            updateDraft(event.target.value);
+            if (sendError) onClearSendError();
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.nativeEvent?.isComposing || event.repeat) return;
+            if (!canSend) return;
+            event.preventDefault();
+            void submit();
+          }}
+          disabled={disabled}
+        />
+        {attachments.length > 0 && (
+          <div className="request-files">
+            {attachments.map((file) => (
+              <div className="request-file" key={file.path} title={file.path} role="button" tabIndex={0} aria-label={`Xem trước ${file.name}`} onClick={() => void onOpenAttachmentPreview(file)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void onOpenAttachmentPreview(file); } }}>
+                {file.previewDataUrl
+                  ? <img className="request-file-image" src={file.previewDataUrl} alt="" />
+                  : <span className="request-file-icon">▤</span>}
+                <span className="request-file-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span>
+                <button type="button" aria-label={`Bỏ ${file.name}`} onClick={(event) => { event.stopPropagation(); onRemoveAttachment(file.path); }} disabled={sending}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="request-composer-toolbar">
+          <button type="button" className="attach-button" onClick={onChooseAttachments} disabled={attachmentDisabled || attachments.length >= 4}><span>＋</span> Thêm file</button>
+          <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${draft.length.toLocaleString("vi-VN")}/12.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
+        </div>
+      </div>
+      {sendError && <div className="request-send-error">{sendError}</div>}
+      <SendDebugEvidence evidence={sendEvidence} />
+      <div className="request-card-foot">
+        {selectedBusy && <span>Đang nhận phản hồi</span>}
+        <div className="request-card-actions">
+          <button type="button" className="button secondary" onClick={onClose}>Đóng</button>
+          <button type="button" className="button secondary" onClick={onOpenChrome} disabled={!canOpenChrome}>Mở Chrome</button>
+          <button type="button" className="button primary" onClick={() => void submit()} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : selectedSettling ? "Chat đang hoàn tất" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function App() {
   const [activePage, setActivePage] = useState("overview");
   const [diagnosticLogs, setDiagnosticLogs] = useState({ summary: { total: 0, info: 0, warn: 0, error: 0 }, entries: [], sources: [], categories: [], queried_hours: 24, checked_at: "" });
@@ -687,7 +801,8 @@ function App() {
   const [workerUpdateConfirmOpen, setWorkerUpdateConfirmOpen] = useState(false);
   const [inspection, setInspection] = useState(null);
   const [checkingProfiles, setCheckingProfiles] = useState([]);
-  const [requestDrafts, setRequestDrafts] = useState({});
+  const requestDraftsRef = useRef({});
+  const [requestDraftResetVersions, setRequestDraftResetVersions] = useState({});
   const [requestTargets, setRequestTargets] = useState({});
   const [requestProjectRoots, setRequestProjectRoots] = useState({});
   const [requestFiles, setRequestFiles] = useState({});
@@ -1257,7 +1372,9 @@ function App() {
           tabBusy: tab.busy,
           tabSettling: tab.settling,
           canonicalBusy: currentResponse.canonicalBusy,
-          streamBusy: currentResponse.networkStreamInProgress
+          streamBusy: currentResponse.networkStreamInProgress,
+          networkCompletedAt,
+          repoTaskDispatchedAt: currentResponse.repoTaskDispatchedAt
         })) {
           void verifyRepoTaskUse(profile, conversationId, currentResponse, networkCompletedAt);
         }
@@ -1803,7 +1920,8 @@ function App() {
   function startNewChat(profile) {
     setRenameChat(null);
     setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
-    setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
+    requestDraftsRef.current[profile.profile_id] = "";
+    setRequestDraftResetVersions((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || 0) + 1 }));
     setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
     setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: false, error: "", conversationId: NEW_CHAT_TARGET, text: "", busy: false } }));
@@ -1854,23 +1972,47 @@ function App() {
     const activeConversationId = conversationOf(activeTab);
     const conversations = profileRequestChats(profile);
     const defaultTarget = activeConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "";
-    const conversationId = options.focusOnly ? activeConversationId : String(requestTargets[profile.profile_id] || defaultTarget);
+    const requestedConversationId = String(requestTargets[profile.profile_id] || "");
+    const conversationId = options.focusOnly ? activeConversationId : String(requestedConversationId || defaultTarget);
     const selectedTab = tabs.find((tab) => conversationOf(tab) === conversationId);
     const targetTab = selectedTab || activeTab;
     const selectedConversation = conversations.find((chat) => String(chat.id) === conversationId);
+    const selectionReason = options.focusOnly ? "focus_only_active_tab" : selectedTab ? "selected_conversation_tab" : activeTab ? "active_tab_fallback" : "missing_target_tab";
+    const selectionDiagnostic = {
+      action: "profile-tab-open-selection",
+      profile_id: profile.profile_id,
+      focus_only: Boolean(options.focusOnly),
+      selection_reason: selectionReason,
+      requested_conversation_id: requestedConversationId,
+      default_conversation_id: String(defaultTarget || ""),
+      selected_conversation_id: String(conversationId || ""),
+      active_target_id: String(activeTab?.id || ""),
+      active_conversation_id: activeConversationId,
+      selected_target_id: String(selectedTab?.id || ""),
+      target_id: String(targetTab?.id || ""),
+      target_conversation_id: conversationOf(targetTab),
+      target_title: String(selectedConversation?.title || targetTab?.title || profile.active_chat_title || ""),
+      tab_candidates: tabs.slice(0, 20).map((tab) => ({ id: String(tab?.id || ""), conversation_id: conversationOf(tab), active: Boolean(tab?.active), window_id: String(tab?.windowId ?? tab?.window_id ?? ""), title: String(tab?.title || "").slice(0, 160), url: String(tab?.url || "").slice(0, 300) }))
+    };
+    logRendererDiagnostic(api, "info", "profile", `Manager chọn tab ${selectionDiagnostic.target_id || "không xác định"} để mở profile ${profile.profile_id}`, selectionDiagnostic);
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
     setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: null }));
     setBusy(`open-profile:${profile.profile_id}`);
     setError("");
     try {
-      await api.openProfileChat({
+      const result = await api.openProfileChat({
         profileId: profile.profile_id,
         conversationId,
         targetId: targetTab?.id,
         targetConversationId: conversationOf(targetTab),
-        title: selectedConversation?.title || targetTab?.title || profile.active_chat_title || ""
+        title: selectedConversation?.title || targetTab?.title || profile.active_chat_title || "",
+        selectionReason,
+        activeTargetId: activeTab?.id,
+        activeConversationId
       });
+      logRendererDiagnostic(api, "info", "profile", `Chrome xác nhận mở tab ${String(result?.activation?.target_id || result?.target_id || "không xác định")}`, { ...selectionDiagnostic, action: "profile-tab-open-result", result_profile_id: String(result?.profile_id || ""), result_conversation_id: String(result?.conversation_id || ""), result_target_id: String(result?.target_id || ""), activation_target_id: String(result?.activation?.target_id || ""), activation_window_id: String(result?.activation?.window_id || ""), activation_window_focused: Boolean(result?.activation?.window_focused), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed), navigation_target_id: String(result?.navigation?.target_id || ""), navigation_url: String(result?.navigation?.url || ""), window_focus: result?.window_focus || null });
     } catch (err) {
+      logRendererDiagnostic(api, "error", "profile", `Mở tab profile thất bại: ${err?.message || String(err)}`, { ...selectionDiagnostic, action: "profile-tab-open-error", error: err });
       setError(err?.message || String(err));
     } finally {
       setBusy("");
@@ -1925,17 +2067,18 @@ function App() {
     }
   }
 
-  async function sendRequest(profile) {
+  async function sendRequest(profile, draftOverride = null) {
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const conversationId = String(requestTargets[profile.profile_id] ?? defaultTarget ?? NEW_CHAT_TARGET);
     const newChat = conversationId === NEW_CHAT_TARGET;
-    const text = String(requestDrafts[profile.profile_id] || "").trim();
+    const text = String(draftOverride !== null ? draftOverride : (requestDraftsRef.current[profile.profile_id] || "")).trim();
     const attachments = requestFiles[profile.profile_id] || [];
     const projectRoot = projectRootForProfile(profile);
+    if (!text && !attachments.length) return false;
     if (!projectRoot) {
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có workspace nào được chọn." }));
-      return;
+      return false;
     }
     if (!newChat) {
       const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${conversationId}`));
@@ -1961,7 +2104,7 @@ function App() {
       });
       if (!turnReady) {
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước. Chờ trạng thái về ĐANG RẢNH rồi gửi để tin nhắn không bị nhập vào turn cũ." }));
-        return;
+        return false;
       }
     }
     responseScrollLocked.current.delete(profile.profile_id);
@@ -2001,16 +2144,11 @@ function App() {
     }
     try {
       const restoreSubmittedInputs = () => {
-        setRequestDrafts((current) => {
-          if (!text || String(current[profile.profile_id] || "").trim()) return current;
-          return { ...current, [profile.profile_id]: text };
-        });
         setRequestFiles((current) => {
           if (!attachments.length || (current[profile.profile_id] || []).length) return current;
           return { ...current, [profile.profile_id]: attachments };
         });
       };
-      setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
       setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
       const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
       const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
@@ -2051,7 +2189,7 @@ function App() {
         restoreSubmittedInputs();
         notify("Trạng thái gửi chưa chắc chắn · CodexPro không tự gửi lại");
         window.setTimeout(() => void refresh(false), 500);
-        return;
+        return false;
       }
       if (newChat && resolvedConversationId && resolvedConversationId !== NEW_CHAT_TARGET) {
         setRequestTargets((current) => ({ ...current, [profile.profile_id]: resolvedConversationId }));
@@ -2081,6 +2219,7 @@ function App() {
             networkError: String(result?.network_error || previous.networkError || ""),
             networkStatusCode: Number(result?.network_status_code) || Number(previous.networkStatusCode) || 0,
             repoTaskId: String(result?.repo_task_id || ""),
+            repoTaskDispatchedAt: String(result?.repo_task_dispatched_at || ""),
             repoTaskScope: String(result?.repo_task_scope || (allAllowedScope ? "all_allowed" : "workspace")),
             repoTaskRetryCount: Number(result?.repo_task_retry_count) || 0,
             repoTaskRolloverCount: Number(result?.repo_task_rollover_count) || 0,
@@ -2098,6 +2237,7 @@ function App() {
         notify(newChat ? "Đã tạo chat mới và gửi tin nhắn đầu tiên" : `Đã gửi${result.attachment_count ? ` ${result.attachment_count} file` : ""} vào ${result.title || profile.active_chat_title || profile.label}`);
       }
       window.setTimeout(() => void refresh(false), 500);
+      return true;
     } catch (err) {
       const message = err?.message || String(err);
       logRendererDiagnostic(api, "error", "chat", `Gửi yêu cầu thất bại: ${message}`, { action: "send-request", profile_id: profile.profile_id, conversation_id: conversationId, project_root: projectRoot, error: err });
@@ -2117,13 +2257,9 @@ function App() {
           rollover_attachments: attachments
         });
         if (newConversationId) {
-          return;
+          return true;
         }
       }
-      setRequestDrafts((current) => {
-        if (!text || String(current[profile.profile_id] || "").trim()) return current;
-        return { ...current, [profile.profile_id]: text };
-      });
       setRequestFiles((current) => {
         if (!attachments.length || (current[profile.profile_id] || []).length) return current;
         return { ...current, [profile.profile_id]: attachments };
@@ -2139,6 +2275,7 @@ function App() {
       if (/heartbeat|offline|did not reconnect|không còn được CodexPro nhận diện/i.test(message)) {
         window.setTimeout(() => void refreshStatus(), 0);
       }
+      return false;
     } finally {
       setBusy("");
     }
@@ -2235,7 +2372,8 @@ function App() {
   async function verifyRepoTaskUse(profile, conversationId, response, networkCompletedAt) {
     const taskId = String(response?.repoTaskId || "");
     if (!taskId || response?.conversationId !== conversationId) return;
-    const verificationKey = `${taskId}:${networkCompletedAt}`;
+    const taskDispatchedAt = String(response?.repoTaskDispatchedAt || "");
+    const verificationKey = `${taskId}:${taskDispatchedAt}:${networkCompletedAt}`;
     const verificationState = repoTaskVerificationReads.current.get(verificationKey);
     if (verificationState === "running" || verificationState === "done" || Number(verificationState) > Date.now()) return;
     repoTaskVerificationReads.current.set(verificationKey, "running");
@@ -2279,6 +2417,7 @@ function App() {
             previousTaskId: taskId
           });
           if (String(created?.submission_state || "") === "uncertain") throw new Error("Chat mới có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
+          if (String(created?.repo_task_id || "") !== taskId) throw new Error("Manager đã đổi Task ID khi tạo chat mới; đã dừng để tránh REPO_TASK_MISMATCH.");
           const newConversationId = String(created?.conversation_id || "").trim();
           if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT chưa trả conversation id cho chat mới bắt buộc dùng CodexPro.");
           requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: newConversationId };
@@ -2296,6 +2435,7 @@ function App() {
               sendUncertain: false,
               networkState: String(created?.generation_state || created?.network_state || "generating"),
               repoTaskId: String(created?.repo_task_id || ""),
+              repoTaskDispatchedAt: String(created?.repo_task_dispatched_at || ""),
               repoTaskScope: String(created?.repo_task_scope || originalScope),
               repoTaskRetryCount: 0,
               repoTaskRolloverCount: rolloverCount + 1,
@@ -2305,6 +2445,7 @@ function App() {
             }
           }));
           repoTaskVerificationReads.current.set(verificationKey, "done");
+          logRendererDiagnostic(api, "warn", "tool", "ChatGPT thiếu task title; Manager đã tạo chat mới và giữ nguyên Task ID", { action: "repo-task-title-rollover", profile_id: profile.profile_id, previous_conversation_id: conversationId, conversation_id: newConversationId, previous_task_id: taskId, rollover_task_id: String(created?.repo_task_id || ""), task_id_reused: created?.repo_task_id_reused === true, repo_task_dispatched_at: String(created?.repo_task_dispatched_at || "") });
           notify("Đã tạo chat mới · @CodexPro được gọi lại đúng một lần");
           window.setTimeout(() => void refresh(false), 500);
           return;
@@ -2338,6 +2479,7 @@ function App() {
         previousTaskId: taskId
       });
       if (String(retried?.submission_state || "") === "uncertain") throw new Error("Lần bắt buộc gọi CodexPro có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
+      if (String(retried?.repo_task_id || "") !== taskId) throw new Error("Manager đã đổi Task ID khi gửi lại; đã dừng để tránh REPO_TASK_MISMATCH.");
       repoTaskVerificationReads.current.set(verificationKey, "done");
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
       setRequestResponses((current) => {
@@ -2347,6 +2489,7 @@ function App() {
           [profile.profile_id]: {
             ...previous,
             repoTaskId: String(retried?.repo_task_id || ""),
+            repoTaskDispatchedAt: String(retried?.repo_task_dispatched_at || ""),
             repoTaskScope: String(retried?.repo_task_scope || originalScope),
             repoTaskRetryCount: 1,
             repoTaskRolloverCount: rolloverCount,
@@ -2358,7 +2501,7 @@ function App() {
         } : current;
       });
       notify("ChatGPT chưa trả task title · đang tự gửi lại bắt buộc");
-      logRendererDiagnostic(api, "warn", "tool", "ChatGPT thiếu task title; Manager đã gửi lại một lần", { action: "repo-task-title-retry", profile_id: profile.profile_id, conversation_id: conversationId, previous_task_id: taskId, retry_task_id: String(retried?.repo_task_id || "") });
+      logRendererDiagnostic(api, "warn", "tool", "ChatGPT thiếu task title; Manager đã gửi lại một lần và giữ nguyên Task ID", { action: "repo-task-title-retry", profile_id: profile.profile_id, conversation_id: conversationId, previous_task_id: taskId, retry_task_id: String(retried?.repo_task_id || ""), task_id_reused: retried?.repo_task_id_reused === true, repo_task_dispatched_at: String(retried?.repo_task_dispatched_at || "") });
       window.setTimeout(() => void refresh(false), 500);
     } catch (err) {
       const message = err?.message || String(err);
@@ -2598,7 +2741,7 @@ function App() {
     const selectedTarget = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
     const isNewChat = selectedTarget === NEW_CHAT_TARGET;
     const sending = busy === `request:${profile.profile_id}`;
-    const draft = requestDrafts[profile.profile_id] || "";
+    const initialDraft = requestDraftsRef.current[profile.profile_id] || "";
     const attachments = requestFiles[profile.profile_id] || [];
     const response = requestResponses[profile.profile_id];
     const sendError = requestSendErrors[profile.profile_id] || "";
@@ -2666,7 +2809,7 @@ function App() {
     const rolloverCreating = Boolean(responseCurrent && response?.rolloverStatus === "creating");
     const otherBusyTab = (profile.conversation_tabs || []).some((tab) => (!selectedTab || tab.id !== selectedTab.id) && (tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating"));
     const selectedResponseClearsProfileBusy = Boolean(responseVerifiedComplete && !selectedBusy && !selectedSettling && !otherBusyTab);
-    const canSend = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0) && Boolean(draft.trim() || attachments.length);
+    const canSendBase = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0);
     const working = profile.connected && ((profile.activity === "working" && !selectedResponseClearsProfileBusy) || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
     const responseHeadline = responseCleared
@@ -2775,51 +2918,33 @@ function App() {
               ) : <div className="response-empty">Đoạn chat này chưa có tin nhắn.</div>}
             </div>
 
-            <label className="request-label" htmlFor={`request-${profile.profile_id}`}>Nhắn tiếp</label>
-            <div className="request-composer">
-              <textarea
-                id={`request-${profile.profile_id}`}
-                value={draft}
-                maxLength={12000}
-                placeholder={rolloverCreating ? "Chat cũ đã đầy · đang tạo chat mới để tiếp tục dự án…" : "Nhập file hoặc tin nhắn"}
-                onPaste={(event) => void pasteRequestImage(profile.profile_id, event)}
-                onChange={(event) => { setRequestDrafts((current) => ({ ...current, [profile.profile_id]: event.target.value })); if (sendError) setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" })); }}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.nativeEvent?.isComposing || event.repeat) return;
-                  if (!canSend) return;
-                  event.preventDefault();
-                  void sendRequest(profile);
-                }}
-                disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating}
-              />
-              {attachments.length > 0 && (
-                <div className="request-files">
-                  {attachments.map((file) => (
-                    <div className="request-file" key={file.path} title={file.path} role="button" tabIndex={0} aria-label={`Xem trước ${file.name}`} onClick={() => void openAttachmentPreview(file)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openAttachmentPreview(file); } }}>
-                      {file.previewDataUrl
-                        ? <img className="request-file-image" src={file.previewDataUrl} alt="" />
-                        : <span className="request-file-icon">▤</span>}
-                      <span className="request-file-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span>
-                      <button type="button" aria-label={`Bỏ ${file.name}`} onClick={(event) => { event.stopPropagation(); setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== file.path) })); }} disabled={sending}>×</button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="request-composer-toolbar">
-                <button type="button" className="attach-button" onClick={() => chooseRequestAttachments(profile.profile_id)} disabled={!profile.connected || sending || rolloverCreating || attachments.length >= 4}><span>＋</span> Thêm file</button>
-                <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${draft.length.toLocaleString("vi-VN")}/12.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
-              </div>
-            </div>
-            {sendError && <div className="request-send-error">{sendError}</div>}
-            <SendDebugEvidence evidence={sendEvidence} />
-            <div className="request-card-foot">
-              {selectedBusy && <span>Đang nhận phản hồi</span>}
-              <div className="request-card-actions">
-                <button type="button" className="button secondary" onClick={() => setChatProfileId("")}>Đóng</button>
-                <button type="button" className="button secondary" onClick={() => openProfile(profile)} disabled={Boolean(busy) || !profile.connected || isNewChat || !(profile.conversation_tabs?.length)}>Mở Chrome</button>
-                <button type="button" className="button primary" onClick={() => sendRequest(profile)} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : selectedSettling ? "Chat đang hoàn tất" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
-              </div>
-            </div>
+            <ChatRequestComposer
+              profileId={profile.profile_id}
+              initialDraft={initialDraft}
+              draftResetVersion={requestDraftResetVersions[profile.profile_id] || 0}
+              attachments={attachments}
+              placeholder={rolloverCreating ? "Chat cũ đã đầy · đang tạo chat mới để tiếp tục dự án…" : "Nhập file hoặc tin nhắn"}
+              disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating}
+              attachmentDisabled={!profile.connected || sending || rolloverCreating}
+              canSendBase={canSendBase}
+              sending={sending}
+              rolloverCreating={rolloverCreating}
+              selectedBusy={selectedBusy}
+              selectedSettling={selectedSettling}
+              isNewChat={isNewChat}
+              sendError={sendError}
+              sendEvidence={sendEvidence}
+              canOpenChrome={!busy && profile.connected && !isNewChat && Boolean(profile.conversation_tabs?.length)}
+              onPaste={(event) => void pasteRequestImage(profile.profile_id, event)}
+              onChooseAttachments={() => void chooseRequestAttachments(profile.profile_id)}
+              onOpenAttachmentPreview={(file) => openAttachmentPreview(file)}
+              onRemoveAttachment={(filePath) => setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== filePath) }))}
+              onClearSendError={() => setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }))}
+              onDraftSnapshot={(nextDraft) => { requestDraftsRef.current[profile.profile_id] = nextDraft; }}
+              onClose={() => setChatProfileId("")}
+              onOpenChrome={() => openProfile(profile)}
+              onSend={(nextDraft) => sendRequest(profile, nextDraft)}
+            />
           </article>
         </div>
       </div>
@@ -2827,11 +2952,15 @@ function App() {
   }
 
   const selectedFont = FONT_OPTIONS.find((option) => option.value === managerSettings.fontFamily) || FONT_OPTIONS[0];
+  const selectedHeadingFont = FONT_OPTIONS.find((option) => option.value === managerSettings.headingFontFamily);
+  const selectedMonoFont = FONT_OPTIONS.find((option) => option.value === managerSettings.monoFontFamily);
   const appStyle = {
     "--chat-modal-width": `${managerSettings.chatWidth}px`,
     "--chat-response-height": `${managerSettings.chatHeight}px`,
     "--chat-response-runway-height": `${Math.max(108, Math.round((managerSettings.chatHeight - 45) / 2))}px`,
     "--app-font-family": selectedFont.css,
+    "--heading-font-family": selectedHeadingFont?.css || selectedFont.css,
+    "--mono-font-family": selectedMonoFont?.css || selectedFont.css,
     "--font-micro": `${Math.max(10, managerSettings.fontSize - 4)}px`,
     "--font-description": `${Math.max(11, managerSettings.fontSize - 2)}px`,
     "--font-body": `${managerSettings.fontSize}px`,
@@ -2881,7 +3010,7 @@ function App() {
           <div>
             <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : `${platform.toUpperCase()} CONTROL CENTER`}</p>
             <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : "CodexPro của bạn"}</h1>
-            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ toàn app." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
+            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
@@ -3440,22 +3569,47 @@ function App() {
             <div className="settings-panel-head">
               <div>
                 <p className="eyebrow">TYPOGRAPHY</p>
-                <h2>Font chữ toàn app</h2>
-                <p className="section-note">Áp dụng ngay cho sidebar, popup chat, nội dung phản hồi và các control.</p>
+                <h2>Font chữ theo thành phần</h2>
+                <p className="section-note">Chọn font riêng cho nội dung, tiêu đề và phần kỹ thuật. Có thể để các nhóm dùng chung một font.</p>
               </div>
             </div>
-            <div className="font-setting-row">
-              <label>Font đang dùng</label>
-              <SettingsDropdown
-                value={managerSettings.fontFamily}
-                options={FONT_OPTIONS}
-                disabled={settingsBusy === "save"}
-                onChange={(value) => void saveManagerSetting({ fontFamily: value }, "Đã đổi font toàn app")}
-              />
-              <div className="font-preview" style={{ fontFamily: selectedFont.css, fontSize: `${managerSettings.fontSize}px` }}>Aa Bb Cc · Tiếng Việt rõ đẹp: Đặng, Nguyễn, Trường · 0123456789</div>
+            <div className="font-role-grid">
+              <div className="font-setting-row">
+                <label>Nội dung & control</label>
+                <SettingsDropdown
+                  value={managerSettings.fontFamily}
+                  options={FONT_OPTIONS}
+                  disabled={settingsBusy === "save"}
+                  ariaLabel="Chọn font nội dung và control"
+                  onChange={(value) => void saveManagerSetting({ fontFamily: value }, "Đã đổi font nội dung")}
+                />
+                <div className="font-preview" style={{ fontFamily: selectedFont.css, fontSize: `${managerSettings.fontSize}px` }}>Aa Bb Cc · Nội dung tiếng Việt: Đặng, Nguyễn, Trường · 0123456789</div>
+              </div>
+              <div className="font-setting-row">
+                <label>Tiêu đề</label>
+                <SettingsDropdown
+                  value={managerSettings.headingFontFamily}
+                  options={FONT_ROLE_OPTIONS}
+                  disabled={settingsBusy === "save"}
+                  ariaLabel="Chọn font tiêu đề"
+                  onChange={(value) => void saveManagerSetting({ headingFontFamily: value }, value === "inherit" ? "Tiêu đề dùng font nội dung" : "Đã đổi font tiêu đề")}
+                />
+                <div className="font-preview is-title" style={{ fontFamily: selectedHeadingFont?.css || selectedFont.css }}>CodexPro · Tiêu đề giao diện</div>
+              </div>
+              <div className="font-setting-row">
+                <label>Code · ID · log</label>
+                <SettingsDropdown
+                  value={managerSettings.monoFontFamily}
+                  options={FONT_ROLE_OPTIONS}
+                  disabled={settingsBusy === "save"}
+                  ariaLabel="Chọn font code ID và log"
+                  onChange={(value) => void saveManagerSetting({ monoFontFamily: value }, value === "inherit" ? "Code và log dùng font nội dung" : "Đã đổi font code và log")}
+                />
+                <div className="font-preview is-mono" style={{ fontFamily: selectedMonoFont?.css || selectedFont.css }}>cpt_task_id · 127.0.0.1:8793 · npm run build</div>
+              </div>
             </div>
             <div className="font-size-setting-row">
-              <label>Cỡ chữ</label>
+              <label>Cỡ chữ chung</label>
               <div className="width-control">
                 <button
                   type="button"

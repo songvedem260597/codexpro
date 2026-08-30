@@ -36,9 +36,17 @@ export function canAcceptNextChatMessage(status) {
   return !shouldShowChatBusy(status) && !shouldShowChatSettling(status);
 }
 
-export function canVerifyRepoTaskUse({ responseCurrent, responseReady, responseBusy, responseIncomplete, awaitingAssistant, tabBusy, tabSettling, canonicalBusy, streamBusy }) {
+export function isRepoTaskCompletionCurrent({ networkCompletedAt, repoTaskDispatchedAt }) {
+  const dispatchedAtMs = Date.parse(String(repoTaskDispatchedAt || ""));
+  if (!Number.isFinite(dispatchedAtMs)) return true;
+  const completedAtMs = Date.parse(String(networkCompletedAt || ""));
+  return Number.isFinite(completedAtMs) && completedAtMs >= dispatchedAtMs;
+}
+
+export function canVerifyRepoTaskUse({ responseCurrent, responseReady, responseBusy, responseIncomplete, awaitingAssistant, tabBusy, tabSettling, canonicalBusy, streamBusy, networkCompletedAt, repoTaskDispatchedAt }) {
   return Boolean(
     responseCurrent
+    && isRepoTaskCompletionCurrent({ networkCompletedAt, repoTaskDispatchedAt })
     && responseReady
     && !responseBusy
     && !responseIncomplete
