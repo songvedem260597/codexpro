@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
-import workerHung from "./assets/worker-hung.gif";
-import workerIdle from "./assets/worker-idle.gif";
-import workerWorking from "./assets/worker-working.gif";
+import workerHung from "./assets/worker-packs/y-ta-dam-dang-pixel/hung.gif";
+import workerIdle from "./assets/worker-packs/y-ta-dam-dang-pixel/idle.gif";
+import workerWorking from "./assets/worker-packs/y-ta-dam-dang-pixel/working.gif";
 import { canAcceptNextChatMessage, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";

@@ -10,6 +10,7 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env CODEXPRO_MANAGER_DEV_URL=http://127.0.0.1:5173 electron .\"",
     "build": "vite build",
     "test:markdown": "node scripts/markdown-response-smoke.mjs",
+    "test:worker-packs": "node scripts/worker-pack-assets-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win nsis --x64",

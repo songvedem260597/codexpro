@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "y-ta-dam-dang-pixel",
+  "name": "Y tá đảm đang Pixel",
+  "version": "1.0.0",
+  "states": {
+    "idle": {
+      "file": "idle.gif",
+      "bytes": 327478,
+      "sha256": "b1e4152907d201acb5df6e0332fa240fb7a0b25c8110123f18762e9d9ed28f15",
+      "frames": 4,
+      "transparent": true
+    },
+    "working": {
+      "file": "working.gif",
+      "bytes": 310286,
+      "sha256": "e94f404d3cc8174305871b7152709836eb61829ef009e64de73ffce0e7bd0d30",
+      "frames": 4,
+      "transparent": true
+    },
+    "hung": {
+      "file": "hung.gif",
+      "bytes": 343112,
+      "sha256": "be0805b1ee6cfbf9d5f8d61cf98c72945dcec1f658af42184c2a7cac750aa28d",
+      "frames": 4,
+      "transparent": true
+    }
+  }
+}

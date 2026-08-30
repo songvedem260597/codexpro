@@ -93,7 +93,7 @@
     "windows:recover": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows-recover.ps1 -StartNow",
     "manager:dev": "npm --prefix manager run dev",
     "manager:build": "npm --prefix manager run build",
-    "manager:check": "npm --prefix manager run build && npm --prefix manager run test:markdown",
+    "manager:check": "npm --prefix manager run test:worker-packs && npm --prefix manager run build && npm --prefix manager run test:markdown",
     "manager:dist": "npm --prefix manager run dist",
     "connect": "node scripts/codexpro.mjs",
     "connect:setup": "node scripts/codexpro.mjs setup",
