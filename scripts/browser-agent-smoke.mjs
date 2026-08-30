@@ -393,6 +393,9 @@ assert.match(worker, /Tool activity proves that some CodexPro definition is call
 assert.match(worker, /scheduleDomActivityRefresh/, "DOM settling must refresh until ChatGPT becomes idle");
 assert.match(worker, /async function recentConversationList[\s\S]*?promiseWithTimeout\([\s\S]*?fetchRecentConversationsPage[\s\S]*?DOM_ACTION_TIMEOUT_MS/, "a hung active renderer must not block the extension poll loop and heartbeat");
 assert.match(worker, /if\(action==='recover_chat_tab'\)[\s\S]*?WORKER_BUSY:[\s\S]*?replaceUnresponsiveChatTab/, "manual tab recovery must refuse active generations and replace only an idle renderer");
+assert.match(worker, /function stopChatGenerationPage[\s\S]*?testId==='stop-button'[\s\S]*?stopControl\.click\(\)/, "task stop must click only ChatGPT's visible stop-generation control");
+assert.match(worker, /if\(action==='stop_chat_generation'\)[\s\S]*?stopChatGenerationPage[\s\S]*?stopped:Boolean\(result\.stopped\)/, "worker must expose a bounded stop-generation command");
+assert.match(server, /"stop_chat_generation"/, "browser_control schema must expose stop_chat_generation");
 assert.match(worker, /async function replaceUnresponsiveChatTab[\s\S]*?chrome\.tabs\.create[\s\S]*?waitForTab[\s\S]*?chrome\.tabs\.remove\(replacedTabId\)/, "renderer recovery must load a replacement before closing the exact stuck tab");
 assert.match(worker, /dom_replaced=true[\s\S]*?recovery_tab_id/, "stale-response reload recovery must escalate to replacing a renderer that stays unresponsive");
 assert.match(worker, /conversation\|steer_turn/, "ChatGPT steer_turn must be tracked as a generation request");
@@ -429,6 +432,10 @@ assert.match(openProfileChat, /let navigation = null[\s\S]*?navigation = await l
 assert.match(managerMain, /codexpro:open-profile-chat[\s\S]*?logSuccess: true[\s\S]*?selection_reason:[\s\S]*?activation_target_id:[\s\S]*?window_focus:/, "every successful open-profile request must persist the requested target and actual activation evidence");
 assert.match(managerUi, /action: "profile-tab-open-selection"[\s\S]*?tab_candidates:[\s\S]*?action: "profile-tab-open-result"[\s\S]*?activation_target_id:[\s\S]*?action: "profile-tab-open-error"/, "renderer diagnostics must capture tab candidates, selection reason, activation result, and failures");
 assert.match(managerMain, /async function recoverProfileChatTab[\s\S]*?action: "recover_chat_tab"[\s\S]*?60000/, "Manager must expose the bounded replace-tab recovery command");
+assert.match(managerMain, /async function stopProfileTask[\s\S]*?action: "stop_chat_generation"[\s\S]*?15000/, "Manager must route task stop through the bounded MCP command");
+assert.match(managerMain, /codexpro:stop-profile-task[\s\S]*?stopProfileTask\(payload\)/, "Manager IPC must expose task stop to the renderer");
+assert.match(managerPreload, /stopProfileTask: \(payload\) => invoke\("codexpro:stop-profile-task", payload\)/, "preload must expose stopProfileTask");
+assert.match(managerUi, /async function stopControlTask[\s\S]*?api\.stopProfileTask[\s\S]*?onStop=\{\(task\) => void stopControlTask\(task\)\}/, "Control Center must wire task stop from UI to preload");
 
 assert.match(server, /steps: z\.array\(z\.object/);
 assert.match(server, /timeout_ms: z\.number\(\)\.int\(\)\.min\(100\)\.max\(60000\)/);
