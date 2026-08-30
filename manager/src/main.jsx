@@ -3454,24 +3454,28 @@ function App() {
                 {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
                 {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
               </div>
-              <button
-                className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}
-                onClick={() => setWorkerUpdateConfirmOpen(true)}
-                disabled={Boolean(busy) || profileSummary.reload === 0}
-                title={profileSummary.reload
-                  ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${WORKER_EXTENSION_VERSION}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
-                  : profileSummary.deferredUpdate
-                    ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
-                    : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
-              >
-                {busy === "reload-profiles" ? "Đang update worker…" : "Update worker extension"}
-              </button>
-              <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>
-                {busy === "start" ? "Đang khởi động..." : "Khởi động"}
-              </button>
-              <button className="button secondary" onClick={() => control("restart")} disabled={Boolean(busy)}>
-                {busy === "restart" ? "Đang restart..." : "Restart server"}
-              </button>
+              <div className="header-action-row">
+                <button
+                  className={`button ${profileSummary.reload ? "worker-update-action" : "secondary"} reload-all`}
+                  onClick={() => setWorkerUpdateConfirmOpen(true)}
+                  disabled={Boolean(busy) || profileSummary.reload === 0}
+                  title={profileSummary.reload
+                    ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${WORKER_EXTENSION_VERSION}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
+                    : profileSummary.deferredUpdate
+                      ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
+                      : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
+                >
+                  {busy === "reload-profiles" ? "Đang update worker…" : "Update worker extension"}
+                </button>
+                <div className="runtime-action-group">
+                  <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>
+                    {busy === "start" ? "Đang khởi động..." : "Khởi động"}
+                  </button>
+                  <button className="button secondary" onClick={() => control("restart")} disabled={Boolean(busy)}>
+                    {busy === "restart" ? "Đang restart..." : "Restart server"}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </header>
