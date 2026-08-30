@@ -96,6 +96,13 @@ const FONT_ROLE_OPTIONS = [
   ...FONT_OPTIONS
 ];
 
+const FONT_WEIGHT_LABELS = {
+  400: "Regular",
+  500: "Medium",
+  600: "Semibold",
+  700: "Bold"
+};
+
 const GLOBAL_RULES_TEMPLATE = `# CodexPro Global Rules
 
 <!-- Rule trong file này áp dụng cho mọi repo/dự án được thao tác qua MCP CodexPro. -->
@@ -112,6 +119,7 @@ const DEFAULT_MANAGER_SETTINGS = {
   headingFontFamily: "inherit",
   monoFontFamily: "inherit",
   fontSize: 14,
+  fontWeight: 400,
   profileLayout: "rows",
   maxSubagents: 1,
   autoRecovery: false,
@@ -541,13 +549,21 @@ function profileSafeForWorkerUpdate(profile) {
   return profile?.activity === "idle" && Number(profile?.busy_request_count || 0) === 0 && !hasBusyTab;
 }
 
-function profileRequestChats(profile) {
+function conversationIdFromTab(tab) {
+  return String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+}
+
+function profileRequestChats(profile, preferredId = "") {
   const recent = Array.isArray(profile?.recent_conversations) ? profile.recent_conversations : [];
-  if (recent.length) return recent.slice(0, 3);
-  return (profile?.conversation_tabs || []).map((tab) => {
-    const match = String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/);
-    return match ? { id: match[1], title: tab.title, url: tab.url, open: true, active: tab.active } : null;
-  }).filter(Boolean).slice(0, 3);
+  const tabs = (profile?.conversation_tabs || []).map((tab) => {
+    const id = conversationIdFromTab(tab);
+    return id ? { id, title: tab.title, url: tab.url, open: true, active: tab.active, busy: tab.busy, settling: tab.settling, network_state: tab.network_state } : null;
+  }).filter(Boolean);
+  const tabById = new Map(tabs.map((chat) => [chat.id, chat]));
+  const conversations = [...recent.map((chat) => ({ ...chat, ...(tabById.get(String(chat.id)) || {}) })), ...tabs]
+    .filter((chat, index, all) => chat.id && all.findIndex((candidate) => String(candidate.id) === String(chat.id)) === index);
+  const preferred = conversations.find((chat) => String(chat.id) === String(preferredId));
+  return preferred ? [preferred, ...conversations.filter((chat) => chat !== preferred)].slice(0, 3) : conversations.slice(0, 3);
 }
 
 function applyConversationTitleOverrides(status, overrides) {
@@ -776,6 +792,8 @@ function App() {
   const conversationRollovers = useRef(new Map());
   const profilesRef = useRef([]);
   const requestTargetsRef = useRef({});
+  const requestTargetReasons = useRef(new Map());
+  const requestTargetDiagnostics = useRef(new Map());
   const responseBodyRefs = useRef(new Map());
   const chatModalRef = useRef(null);
   const chatResponseRef = useRef(null);
@@ -1462,7 +1480,9 @@ function App() {
         if (!conversationId) continue;
         const selectedTarget = String(requestTargetsRef.current[profile.profile_id] || "");
         const currentResponse = requestResponses[profile.profile_id];
-        const relevant = selectedTarget === conversationId || currentResponse?.conversationId === conversationId || (chatProfileId === profile.profile_id && tab.active);
+        const relevant = selectedTarget
+          ? selectedTarget === conversationId || currentResponse?.conversationId === conversationId
+          : currentResponse?.conversationId === conversationId || (chatProfileId === profile.profile_id && tab.active);
         if (!relevant) continue;
         const networkState = String(tab.network_state || (tab.busy ? "generating" : "idle"));
         const networkCompletedAt = String(tab.network_last_completed_at || "");
@@ -1557,10 +1577,50 @@ function App() {
   useEffect(() => {
     if (!chatProfileId) return;
     const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
+    const target = String(requestTargetsRef.current[chatProfileId] || requestTargets[chatProfileId] || "");
+    if (!profile || !target) return;
+    const response = requestResponses[chatProfileId];
+    const selectedTab = (profile.conversation_tabs || []).find((tab) => conversationIdFromTab(tab) === target);
+    const composerLockReason = !profile.connected
+      ? "profile_disconnected"
+      : busy === `request:${chatProfileId}`
+        ? "request_sending"
+        : selectedTab?.busy || String(selectedTab?.network_state || "") === "generating"
+          ? "selected_tab_busy"
+          : selectedTab?.settling
+            ? "selected_tab_settling"
+            : response?.conversationId === target && response?.rolloverStatus === "creating"
+              ? "conversation_rollover"
+              : response?.conversationId === target && (response?.busy || response?.loading || response?.networkStreamInProgress || response?.canonicalBusy)
+                ? "selected_response_busy"
+                : "";
+    const previous = requestTargetDiagnostics.current.get(chatProfileId);
+    const reason = requestTargetReasons.current.get(chatProfileId) || (previous?.target && previous.target !== target ? "state_update" : "status_refresh");
+    const signature = JSON.stringify([target, composerLockReason, (profile.conversation_tabs || []).map((tab) => [tab.id, conversationIdFromTab(tab), tab.active, tab.busy, tab.settling, tab.network_state])]);
+    if (previous?.signature === signature) return;
+    logRendererDiagnostic(api, "info", "chat", `Mục tiêu composer ${chatProfileId}: ${previous?.target || "(chưa chọn)"} -> ${target}`, {
+      action: "composer-target-state",
+      profile_id: chatProfileId,
+      from_conversation_id: previous?.target || "",
+      to_conversation_id: target,
+      selection_reason: reason,
+      composer_locked: Boolean(composerLockReason),
+      composer_lock_reason: composerLockReason,
+      tab_candidates: (profile.conversation_tabs || []).slice(0, 20).map((tab) => ({ id: String(tab?.id || ""), conversation_id: conversationIdFromTab(tab), active: Boolean(tab?.active), busy: Boolean(tab?.busy), settling: Boolean(tab?.settling), network_state: String(tab?.network_state || ""), title: String(tab?.title || "").slice(0, 160) }))
+    });
+    requestTargetReasons.current.delete(chatProfileId);
+    requestTargetDiagnostics.current.set(chatProfileId, { target, signature });
+  }, [busy, chatProfileId, requestResponses, requestTargets, status?.browserProfiles]);
+
+  useEffect(() => {
+    if (!chatProfileId) return;
+    const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
     if (!profile) return;
     const conversations = profileRequestChats(profile);
     const initialTarget = requestTargetsRef.current[chatProfileId] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET;
     if (!requestTargetsRef.current[chatProfileId]) {
+      requestTargetsRef.current = { ...requestTargetsRef.current, [chatProfileId]: initialTarget };
+      requestTargetReasons.current.set(chatProfileId, "initial_open");
       setRequestTargets((current) => ({ ...current, [chatProfileId]: initialTarget }));
     }
     const response = requestResponses[chatProfileId];
@@ -2057,8 +2117,13 @@ function App() {
 
   function openChat(profile) {
     const conversations = profileRequestChats(profile);
-    const conversationId = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
-    if (conversationId) setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
+    const pinnedConversationId = String(requestTargetsRef.current[profile.profile_id] || "");
+    const conversationId = String(pinnedConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
+    if (conversationId) {
+      requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: conversationId };
+      requestTargetReasons.current.set(profile.profile_id, pinnedConversationId ? "reopen_pinned_selection" : "initial_open");
+      setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
+    }
     const projectRoot = projectRootForProfile(profile);
     const rememberedRoot = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
     if (projectRoot && projectRoot.toLowerCase() !== rememberedRoot.toLowerCase()) selectProjectForProfile(profile.profile_id, projectRoot);
@@ -2089,12 +2154,27 @@ function App() {
   function startNewChat(profile) {
     setRenameChat(null);
     responseTurnAnchors.current.delete(profile.profile_id);
+    requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: NEW_CHAT_TARGET };
+    requestTargetReasons.current.set(profile.profile_id, "user_new_chat");
     setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
     requestDraftsRef.current[profile.profile_id] = "";
     setRequestDraftResetVersions((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || 0) + 1 }));
     setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
     setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: false, error: "", conversationId: NEW_CHAT_TARGET, text: "", busy: false } }));
+  }
+
+  function selectRequestConversation(profile, conversationId) {
+    const profileId = profile.profile_id;
+    const previousTarget = String(requestTargetsRef.current[profileId] || "");
+    const nextTarget = String(conversationId || "");
+    if (!nextTarget || nextTarget === previousTarget) return;
+    setRenameChat(null);
+    requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: nextTarget };
+    requestTargetReasons.current.set(profileId, "user_selected_conversation");
+    setRequestTargets((current) => ({ ...current, [profileId]: nextTarget }));
+    setRequestResponses((current) => ({ ...current, [profileId]: { visible: true, loading: true, error: "", conversationId: nextTarget, text: "", messages: [] } }));
+    void hydrateCachedResponse(profile, nextTarget);
   }
 
   function beginRenameSelectedChat(profile, conversationId, currentTitle) {
@@ -2394,6 +2474,8 @@ function App() {
         return false;
       }
       if (newChat && resolvedConversationId && resolvedConversationId !== NEW_CHAT_TARGET) {
+        requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: resolvedConversationId };
+        requestTargetReasons.current.set(profile.profile_id, "new_chat_created");
         setRequestTargets((current) => ({ ...current, [profile.profile_id]: resolvedConversationId }));
       }
       setRequestResponses((current) => {
@@ -2725,7 +2807,8 @@ function App() {
   }
 
   async function loadResponse(profile, explicitConversationId, silent = false, readDom = false, recoverStaleDom = false, canonicalOnly = false) {
-    const conversations = profileRequestChats(profile);
+    const pinnedTarget = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
+    const conversations = profileRequestChats(profile, pinnedTarget);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const conversationId = String(explicitConversationId || requestTargets[profile.profile_id] || defaultTarget || "");
     if (!conversationId || conversationId === NEW_CHAT_TARGET || responseFetches.current.has(profile.profile_id)) return null;
@@ -2938,10 +3021,13 @@ function App() {
   function renderChatModal() {
     const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
     if (!profile) return null;
-    const conversations = profileRequestChats(profile);
+    const pinnedTarget = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
+    const conversations = profileRequestChats(profile, pinnedTarget);
     const workspaceProjects = projects;
     const selectedProjectRoot = projectRootForProfile(profile);
     const selectedTarget = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
+    const selectedConversation = conversations.find((chat) => String(chat.id) === selectedTarget);
+    const renameOpen = renameChat?.profileId === profile.profile_id && renameChat?.conversationId === selectedTarget;
     const isNewChat = selectedTarget === NEW_CHAT_TARGET;
     const sending = busy === `request:${profile.profile_id}`;
     const initialDraft = requestDraftsRef.current[profile.profile_id] || "";
@@ -3056,6 +3142,21 @@ function App() {
             <label className="request-label">Chọn repo và đường dẫn</label>
             <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => changeProjectForProfile(profile, root)} disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating} />
             {!workspaceProjects.length && selectedProjectRoot !== ALL_ALLOWED_WORKSPACES && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
+            <div className="request-label-row">
+              <label className="request-label">Đoạn chat <small>giữ nguyên lựa chọn khi làm mới</small></label>
+              <div className="chat-manage-actions">
+                <button type="button" onClick={() => beginRenameSelectedChat(profile, selectedTarget, selectedConversation?.title || "")} disabled={!profile.connected || isNewChat || !selectedConversation || Boolean(busy)}>Đổi tên</button>
+                <button type="button" onClick={() => startNewChat(profile)} disabled={!profile.connected || Boolean(busy)}>+ Chat mới</button>
+              </div>
+            </div>
+            {renameOpen && (
+              <div className="chat-rename-editor">
+                <input className="chat-rename-input" type="text" value={renameChat.title} maxLength={120} autoFocus aria-label="Tên đoạn chat mới" onChange={(event) => setRenameChat((current) => current ? { ...current, title: event.target.value } : current)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveRenamedChat(profile); } if (event.key === "Escape") { event.preventDefault(); setRenameChat(null); } }} disabled={Boolean(busy)} />
+                <button type="button" className="chat-rename-cancel" onClick={() => setRenameChat(null)} disabled={Boolean(busy)}>Hủy</button>
+                <button type="button" className="chat-rename-save" onClick={() => void saveRenamedChat(profile)} disabled={Boolean(busy) || !String(renameChat.title || "").trim()}>Lưu</button>
+              </div>
+            )}
+            <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => selectRequestConversation(profile, id)} disabled={!profile.connected || !conversations.length || sending} />
             <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${sending || selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
               <div className="chat-response-head">
@@ -3173,7 +3274,15 @@ function App() {
     "--font-base": `${managerSettings.fontSize}px`,
     "--font-brand": `${managerSettings.fontSize + 3}px`,
     "--font-section": `${managerSettings.fontSize + 6}px`,
-    "--font-page": `${managerSettings.fontSize + 14}px`
+    "--font-page": `${managerSettings.fontSize + 14}px`,
+    "--weight-regular": managerSettings.fontWeight,
+    "--weight-description": managerSettings.fontWeight,
+    "--weight-body": managerSettings.fontWeight,
+    "--weight-medium": Math.max(managerSettings.fontWeight, 500),
+    "--weight-control": Math.max(managerSettings.fontWeight, 600),
+    "--weight-title": Math.max(managerSettings.fontWeight, 600),
+    "--weight-semibold": Math.max(managerSettings.fontWeight, 600),
+    "--weight-bold": Math.max(managerSettings.fontWeight, 700)
   };
   const workerSettingItems = [
     { state: "idle", title: "Đang rảnh", description: "Hiện khi profile online và đang chờ việc." },
@@ -3773,6 +3882,38 @@ function App() {
                 >＋</button>
               </div>
               <div className="font-size-value"><strong>{managerSettings.fontSize}</strong><span>px · cỡ chữ cơ bản</span></div>
+            </div>
+            <div className="font-size-setting-row font-weight-setting-row">
+              <label>Độ đậm chữ chung</label>
+              <div className="width-control">
+                <button
+                  type="button"
+                  className="setting-step-button"
+                  aria-label="Giảm độ đậm chữ"
+                  disabled={settingsBusy === "save" || managerSettings.fontWeight <= 400}
+                  onClick={() => void saveManagerSetting({ fontWeight: Math.max(400, managerSettings.fontWeight - 100) }, "Đã giảm độ đậm chữ")}
+                >−</button>
+                <input
+                  className="settings-range font-weight-range"
+                  type="range"
+                  min="400"
+                  max="700"
+                  step="100"
+                  aria-label="Độ đậm chữ chung"
+                  value={managerSettings.fontWeight}
+                  onChange={(event) => setManagerSettings((current) => ({ ...current, fontWeight: Number(event.target.value) }))}
+                  onPointerUp={(event) => void saveManagerSetting({ fontWeight: Number(event.currentTarget.value) }, "Đã lưu độ đậm chữ")}
+                  onKeyUp={(event) => void saveManagerSetting({ fontWeight: Number(event.currentTarget.value) }, "Đã lưu độ đậm chữ")}
+                />
+                <button
+                  type="button"
+                  className="setting-step-button"
+                  aria-label="Tăng độ đậm chữ"
+                  disabled={settingsBusy === "save" || managerSettings.fontWeight >= 700}
+                  onClick={() => void saveManagerSetting({ fontWeight: Math.min(700, managerSettings.fontWeight + 100) }, "Đã tăng độ đậm chữ")}
+                >＋</button>
+              </div>
+              <div className="font-size-value"><strong>{managerSettings.fontWeight}</strong><span>{FONT_WEIGHT_LABELS[managerSettings.fontWeight] || "Custom"} · độ đậm cơ bản</span></div>
             </div>
           </section>
 
