@@ -99,10 +99,18 @@ export function discardProvisionalAssistantAfterLatestUser(messages, { includeUn
 }
 
 export function completedResponseNeedsDomFallback(response) {
-  if (!response || response.response_ready === true) return false;
-  if (response.busy === true || response.network_stream_in_progress === true || response.network_state === "generating") return false;
+  if (!response) return false;
   const messages = Array.isArray(response?.messages) ? response.messages : [];
-  return response.canonical_available === false || messages.length === 0 || transcriptAwaitingAssistant(messages);
+  const latestUserIndex = messages.findLastIndex((message) => message?.role === "user");
+  const assistant = latestUserIndex >= 0
+    ? messages.slice(latestUserIndex + 1).findLast((message) => message?.role === "assistant")
+    : messages.findLast((message) => message?.role === "assistant");
+  const suspiciousShortFinal = response.response_ready === true
+    && response.canonical_available !== true
+    && String(assistant?.text || response.text || "").trim().length <= 2;
+  if (response.response_ready === true && !suspiciousShortFinal) return false;
+  if (response.busy === true || response.network_stream_in_progress === true || response.network_state === "generating") return false;
+  return suspiciousShortFinal || response.canonical_available === false || messages.length === 0 || transcriptAwaitingAssistant(messages);
 }
 
 export function mergeProgressiveResponseText(previousValue, incomingValue) {

@@ -143,7 +143,7 @@ const DEFAULT_GLOBAL_RULES = `# CodexPro Global Rules
 - Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
 `;
 
-const WORKER_EXTENSION_VERSION = "0.5.82";
+const WORKER_EXTENSION_VERSION = "0.5.83";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -3526,6 +3526,8 @@ diagnosticIpcHandle("codexpro:get-profile-response", {
     dom_skipped: Boolean(result?.dom_skipped),
     dom_error: String(result?.dom_error || ""),
     canonical_available: Boolean(result?.canonical_available),
+    canonical_generation_matches: result?.canonical_generation_matches !== false,
+    short_dom_response_unverified: Boolean(result?.short_dom_response_unverified),
     network_stream_available: Boolean(result?.network_stream_available),
     network_stream_in_progress: Boolean(result?.network_stream_in_progress)
   }),
@@ -3534,6 +3536,8 @@ diagnosticIpcHandle("codexpro:get-profile-response", {
     const key = `${String(payload?.profileId || "")}:${String(payload?.conversationId || "")}`;
     if (networkState === "failed" || result?.network_error) return { level: "error", message: "Đọc phản hồi phát hiện generation lỗi network", dedupeKey: `response-network-failed:${key}`, throttleMs: 30_000 };
     if (result?.dom_error) return { level: "warn", message: "Đọc phản hồi gặp lỗi DOM", dedupeKey: `response-dom-error:${key}:${String(result.dom_error).slice(0, 120)}`, throttleMs: 30_000 };
+    if (result?.canonical_generation_matches === false) return { level: "warn", message: "Bỏ canonical cũ không thuộc lượt hiện tại", dedupeKey: `response-stale-canonical:${key}`, throttleMs: 10_000 };
+    if (result?.short_dom_response_unverified) return { level: "warn", message: "Không công nhận phản hồi DOM quá ngắn khi canonical chưa xác minh", dedupeKey: `response-short-dom:${key}`, throttleMs: 10_000 };
     if (networkState === "completed" && !result?.response_ready && !result?.network_stream_in_progress) return { level: "warn", message: "Network đã hoàn tất nhưng chưa có phản hồi xác minh", dedupeKey: `response-missing-final:${key}`, throttleMs: 30_000 };
     return null;
   }
