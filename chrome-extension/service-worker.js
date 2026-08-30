@@ -8,6 +8,9 @@ const DOM_READ_TIMEOUT_MS = 2500;
 const DOM_ACTIVITY_PROBE_TIMEOUT_MS = 800;
 const DOM_ACTIVITY_PROBE_CACHE_MS = 5000;
 const DOM_ACTIVITY_RECENT_NETWORK_MS = 2*60*1000;
+const CANONICAL_ACTIVITY_PROBE_MS = 5000;
+const CANONICAL_ACTIVITY_STALE_MS = CHAT_REQUEST_STALE_MS;
+const CANONICAL_ACTIVITY_GENERATION_SKEW_MS = 2*1000;
 const CANONICAL_READ_TIMEOUT_MS = 15000;
 const DOM_ACTION_TIMEOUT_MS = 5000;
 const SCREENSHOT_TIMEOUT_MS = 15000;
@@ -36,6 +39,8 @@ const debuggerSessionsByTab = new Map();
 const debuggerEventSubscribersByTab = new Map();
 const browserMutationTailsByTab = new Map();
 const canonicalCompletionProbeAtByTab = new Map();
+const chatCanonicalActivityByTab = new Map();
+const chatCanonicalActivityProbesByTab = new Map();
 const pendingConversationByTab = new Map();
 const chatAttachmentOwnershipByTab = new Map();
 const chatDomActivityByTab = new Map();
@@ -237,6 +242,7 @@ function beginChatRequest(details) {
       status_code:0,
       error:''
     });
+    beginCanonicalActivityGeneration(details.tabId,context.conversation_id,now);
     notifyChatNetworkWaiters(details.tabId);
     await persistChatNetworkState();
     scheduleRealtimeProfilePush();
@@ -276,6 +282,8 @@ async function bindConversationToTab(tabId,conversationId) {
   await ensureChatNetworkStateLoaded();
   const current=chatNetworkStateByTab.get(tabId);
   if(current){chatNetworkStateByTab.set(tabId,{...current,conversation_id:conversationId});await persistChatNetworkState();}
+  const canonicalActivity=chatCanonicalActivityByTab.get(tabId);
+  if(canonicalActivity&&!canonicalActivity.conversation_id)chatCanonicalActivityByTab.set(tabId,{...canonicalActivity,conversation_id:String(conversationId)});
 }
 
 async function chatRequestState(tabId,conversationId='') {
@@ -402,7 +410,7 @@ chrome.webRequest.onBeforeRequest.addListener(details=>{const attributed=attribu
 chrome.webRequest.onCompleted.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'completed',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onErrorOccurred.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'failed',0,details.error);finishChatRequest(attributed,'failed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onBeforeRedirect.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'redirected',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
-chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
+chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
 
 async function profileInfo() {
   const stored = await chrome.storage.local.get(['profileId','active','connectorInstall']);
@@ -503,19 +511,25 @@ async function tabList() {
   const tabs = await chrome.tabs.query({});
   const liveTabIds=new Set(tabs.map(tab=>tab.id).filter(Number.isInteger));
   for(const tabId of chatDomActivityByTab.keys())if(!liveTabIds.has(tabId))chatDomActivityByTab.delete(tabId);
+  for(const tabId of chatCanonicalActivityByTab.keys())if(!liveTabIds.has(tabId))chatCanonicalActivityByTab.delete(tabId);
+  for(const tabId of chatCanonicalActivityProbesByTab.keys())if(!liveTabIds.has(tabId))chatCanonicalActivityProbesByTab.delete(tabId);
   const titleOverrides=await getConversationTitleOverrides();
   const summaries=await Promise.all(tabs.map(async tab => {
     const conversationId=conversationIdFromUrl(tab.url);
     const networkState=await chatRequestState(tab.id,conversationId);
     const cachedDomActivity=chatDomActivityByTab.get(tab.id)?.value;
     const networkObservedAt=Math.max(Date.parse(networkState.network_last_started_at||'')||0,Date.parse(networkState.network_last_completed_at||'')||0);
-    const shouldProbeDom=Boolean(conversationId&&(tab.active||networkState.busy||cachedDomActivity?.busy||Date.now()-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS));
+    let canonicalActivity=canonicalActivityState(tab.id,conversationId);
+    const shouldProbeCanonical=Boolean(conversationId&&(networkState.busy||canonicalActivity.busy||Date.now()-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS));
+    if(shouldProbeCanonical)canonicalActivity=await probeCanonicalActivity(tab.id,conversationId);
+    const shouldProbeDom=Boolean(conversationId&&(tab.active||networkState.busy||canonicalActivity.busy||cachedDomActivity?.busy||Date.now()-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS));
     const domActivity=shouldProbeDom?await chatDomActivityState(tab.id,conversationId):{available:false,busy:false,source:'',activity_text:''};
     const networkStream=conversationId&&networkState.network_state!=='idle'?await chatNetworkStreamCapture(tab.id,conversationId):{};
     const titleOverride=conversationId?titleOverrides[conversationId]:null;
     const streamBusy=Boolean(networkStream.in_progress);
     const networkBusy=Boolean(networkState.busy||streamBusy);
     const domToolBusy=Boolean(domActivity.busy&&domActivity.source==='dom_tool');
+    const canonicalBusy=Boolean(canonicalActivity.busy);
     const streamActivity=String(networkStream.activity_text||'').trim().slice(0,220);
     return {
       id:tab.id,
@@ -523,12 +537,12 @@ async function tabList() {
       active:Boolean(tab.active),
       title:String(titleOverride?.title||tab.title||''),
       url:tab.url || '',
-      busy:networkBusy||domToolBusy,
-      settling:!networkBusy&&!domToolBusy&&domActivity.busy,
-      busy_request_count:networkState.busy_request_count,
-      busy_since:networkState.busy_since,
-      busy_source:streamBusy?'network_stream':networkState.busy?'network':domToolBusy?'dom_tool':domActivity.busy?domActivity.source:'',
-      activity_text:streamBusy?(streamActivity||'CodexPro đang sử dụng tool'):domActivity.busy?domActivity.activity_text:'',
+      busy:networkBusy||domToolBusy||canonicalBusy,
+      settling:!networkBusy&&!domToolBusy&&!canonicalBusy&&domActivity.busy,
+      busy_request_count:Math.max(Number(networkState.busy_request_count)||0,canonicalBusy?1:0),
+      busy_since:networkState.busy_since||(canonicalBusy&&canonicalActivity.busy_since?new Date(canonicalActivity.busy_since).toISOString():''),
+      busy_source:streamBusy?'network_stream':networkState.busy?'network':domToolBusy?'dom_tool':canonicalBusy?'canonical':domActivity.busy?domActivity.source:'',
+      activity_text:streamBusy?(streamActivity||'CodexPro đang sử dụng tool'):domToolBusy?domActivity.activity_text:canonicalBusy?'ChatGPT đang tiếp tục xử lý':domActivity.busy?domActivity.activity_text:'',
       network_stream_in_progress:streamBusy,
       dom_busy:domActivity.busy,
       connection_interrupted:Boolean(domActivity.connection_interrupted),
@@ -1143,7 +1157,7 @@ async function readCanonicalConversationPage(conversationId) {
         const assistantAfterUser=messages.slice(latestUserIndex+1).findLast(message=>message.role==='assistant');
         const latestAssistant=assistantAfterUser||[...messages].reverse().find(message=>message.role==='assistant');
         const responseReady=Boolean(assistantAfterUser?.end_turn===true);
-        if(messages.length)return {ok:true,endpoint,messages,text:assistantAfterUser?.text||'',text_length:String(assistantAfterUser?.text||'').length,response_ready:responseReady,busy:Boolean(latestUserIndex>=0&&!responseReady),latest_user_id:String(messages[latestUserIndex]?.id||''),latest_assistant_id:String(assistantAfterUser?.id||latestAssistant?.id||'')};
+        if(messages.length)return {ok:true,endpoint,messages,text:assistantAfterUser?.text||'',text_length:String(assistantAfterUser?.text||'').length,response_ready:responseReady,busy:Boolean(latestUserIndex>=0&&!responseReady),latest_user_id:String(messages[latestUserIndex]?.id||''),latest_user_create_time:Number(messages[latestUserIndex]?.create_time)||0,latest_assistant_id:String(assistantAfterUser?.id||latestAssistant?.id||'')};
         lastError=`${endpoint}: conversation chưa có assistant message.`;
       }else lastError=`${endpoint}: ChatGPT HTTP ${response.status}`;
       if(![404,405].includes(response.status))break;
@@ -1321,19 +1335,109 @@ async function reconcileChatNetworkCompletion(tabId,conversationId,source='canon
   return true;
 }
 
+function emptyCanonicalActivity() {
+  return {conversation_id:'',busy:false,response_ready:false,busy_since:0,last_checked_at:0,generation_started_at:0,baseline_user_id:'',latest_user_id:'',latest_user_create_time:0};
+}
+
+function beginCanonicalActivityGeneration(tabId,conversationId='',startedAt=Date.now()) {
+  if(!Number.isInteger(tabId))return;
+  const previous=chatCanonicalActivityByTab.get(tabId);
+  if(previous?.busy&&(!conversationId||!previous.conversation_id||previous.conversation_id===conversationId)){
+    chatCanonicalActivityByTab.set(tabId,{...previous,conversation_id:String(conversationId||previous.conversation_id||''),last_checked_at:0});
+    return;
+  }
+  chatCanonicalActivityByTab.set(tabId,{
+    conversation_id:String(conversationId||previous?.conversation_id||''),
+    busy:true,
+    response_ready:false,
+    busy_since:Number(previous?.busy&&previous?.busy_since)||Number(startedAt)||Date.now(),
+    last_checked_at:0,
+    generation_started_at:Number(startedAt)||Date.now(),
+    baseline_user_id:String(previous?.latest_user_id||''),
+    latest_user_id:String(previous?.latest_user_id||''),
+    latest_user_create_time:0
+  });
+}
+
+function canonicalActivityState(tabId,conversationId='') {
+  const current=chatCanonicalActivityByTab.get(tabId);
+  if(!current)return emptyCanonicalActivity();
+  if(conversationId&&current.conversation_id&&current.conversation_id!==conversationId){chatCanonicalActivityByTab.delete(tabId);return emptyCanonicalActivity();}
+  const age=Date.now()-Math.max(Number(current.last_checked_at||0),Number(current.busy_since||0),Number(current.generation_started_at||0));
+  if(age>CANONICAL_ACTIVITY_STALE_MS){chatCanonicalActivityByTab.delete(tabId);return emptyCanonicalActivity();}
+  return current;
+}
+
+function canonicalMatchesCurrentGeneration(previous,canonical) {
+  const generationStartedAt=Number(previous?.generation_started_at||0);
+  if(!generationStartedAt)return true;
+  const baselineUserId=String(previous?.baseline_user_id||'');
+  const latestUserId=String(canonical?.latest_user_id||'');
+  if(baselineUserId&&latestUserId)return baselineUserId!==latestUserId;
+  const latestUserCreateMs=Number(canonical?.latest_user_create_time||0)*1000;
+  if(!latestUserCreateMs)return false;
+  return latestUserCreateMs+CANONICAL_ACTIVITY_GENERATION_SKEW_MS>=generationStartedAt;
+}
+
+function rememberCanonicalActivity(tabId,conversationId,canonical) {
+  if(!Number.isInteger(tabId)||!conversationId||!canonical?.ok)return canonicalActivityState(tabId,conversationId);
+  const now=Date.now();
+  const previous=canonicalActivityState(tabId,conversationId);
+  const matchesGeneration=canonicalMatchesCurrentGeneration(previous,canonical);
+  const canonicalBusy=Boolean(canonical.busy);
+  const canonicalReady=Boolean(canonical.response_ready&&!canonical.busy&&matchesGeneration);
+  let next={
+    ...previous,
+    conversation_id:String(conversationId),
+    last_checked_at:now,
+    latest_user_id:String(canonical.latest_user_id||previous.latest_user_id||''),
+    latest_user_create_time:Number(canonical.latest_user_create_time)||Number(previous.latest_user_create_time)||0
+  };
+  if(canonicalBusy&&matchesGeneration){
+    next={...next,busy:true,response_ready:false,busy_since:Number(previous.busy_since)||now};
+  }else if(canonicalReady){
+    next={...next,busy:false,response_ready:true,busy_since:0};
+  }
+  chatCanonicalActivityByTab.set(tabId,next);
+  const changed=Boolean(previous.busy)!==Boolean(next.busy)||Boolean(previous.response_ready)!==Boolean(next.response_ready)||String(previous.conversation_id||'')!==String(next.conversation_id||'');
+  if(changed)scheduleRealtimeProfilePush(0);
+  return next;
+}
+
+async function probeCanonicalActivity(tabId,conversationId,force=false) {
+  if(!conversationId)return emptyCanonicalActivity();
+  const current=canonicalActivityState(tabId,conversationId);
+  if(!force&&Date.now()-Number(current.last_checked_at||0)<CANONICAL_ACTIVITY_PROBE_MS)return current;
+  const running=chatCanonicalActivityProbesByTab.get(tabId);
+  if(running)return running;
+  const probe=(async()=>{
+    try{
+      const [injected]=await promiseWithTimeout(
+        chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:readCanonicalConversationPage,args:[conversationId]}),
+        CANONICAL_READ_TIMEOUT_MS,
+        'ChatGPT không phản hồi khi đọc activity canonical.'
+      );
+      return rememberCanonicalActivity(tabId,conversationId,injected?.result);
+    }catch{
+      const previous=canonicalActivityState(tabId,conversationId);
+      if(previous.conversation_id)chatCanonicalActivityByTab.set(tabId,{...previous,last_checked_at:Date.now()});
+      return previous;
+    }finally{
+      chatCanonicalActivityProbesByTab.delete(tabId);
+    }
+  })();
+  chatCanonicalActivityProbesByTab.set(tabId,probe);
+  return probe;
+}
+
 async function probeCanonicalCompletion(tabId,conversationId,force=false) {
   if(!conversationId)return false;
   const now=Date.now(),last=Number(canonicalCompletionProbeAtByTab.get(tabId)||0);
   if(!force&&now-last<CANONICAL_COMPLETION_PROBE_MS)return false;
   canonicalCompletionProbeAtByTab.set(tabId,now);
   try{
-    const [injected]=await promiseWithTimeout(
-      chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:readCanonicalConversationPage,args:[conversationId]}),
-      CANONICAL_READ_TIMEOUT_MS,
-      'ChatGPT không phản hồi khi xác minh completion canonical.'
-    );
-    const canonical=injected?.result;
-    if(canonical?.ok&&canonical.response_ready&&!canonical.busy)return await reconcileChatNetworkCompletion(tabId,conversationId,'canonical_api');
+    const canonical=await probeCanonicalActivity(tabId,conversationId,true);
+    if(canonical.response_ready&&!canonical.busy)return await reconcileChatNetworkCompletion(tabId,conversationId,'canonical_api');
   }catch{}
   return false;
 }
@@ -1803,6 +1907,8 @@ if(action==='rename_chat'){
       );
       canonical=canonicalInjection?.result||canonical;
     }catch(error){canonical={ok:false,error:String(error?.message||error).slice(0,500)};}
+    const rememberedCanonicalActivity=rememberCanonicalActivity(tab.id,conversationId,canonical);
+    const canonicalActivityPayload={canonical_busy:Boolean(rememberedCanonicalActivity.busy),canonical_response_ready:Boolean(rememberedCanonicalActivity.response_ready&&!rememberedCanonicalActivity.busy),canonical_observed:Boolean(canonical.ok)};
     if(canonical.ok&&canonical.response_ready&&!canonical.busy){
       await reconcileChatNetworkCompletion(tab.id,conversationId,'canonical_api');
       networkState=await chatRequestState(tab.id,conversationId);
@@ -1811,9 +1917,9 @@ if(action==='rename_chat'){
     if(args.canonical_only===true){
       if(canonical.ok){
         const latestAssistant=[...(canonical.messages||[])].reverse().find(message=>message.role==='assistant');
-        return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(canonical.text||''),text_length:String(canonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(canonical.busy||networkStreamInProgress),incomplete_reason:canonical.busy?'canonical_generation_in_progress':networkStreamInProgress?'tool_activity_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,messages:canonical.messages||[],busy:Boolean(effectiveNetworkBusy||canonical.busy),dom_available:false,dom_skipped:true,dom_error:'',canonical_available:true,canonical_error:'',response_ready:Boolean(canonical.response_ready&&!networkStreamInProgress),response_source:'canonical_api',updated_at:new Date().toISOString(),...networkStreamPayload,...networkPayload},{canonical,networkStream});
+        return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(canonical.text||''),text_length:String(canonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(canonical.busy||networkStreamInProgress),incomplete_reason:canonical.busy?'canonical_generation_in_progress':networkStreamInProgress?'tool_activity_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,messages:canonical.messages||[],busy:Boolean(effectiveNetworkBusy||canonical.busy),dom_available:false,dom_skipped:true,dom_error:'',canonical_available:true,canonical_error:'',response_ready:Boolean(canonical.response_ready&&!networkStreamInProgress),response_source:'canonical_api',updated_at:new Date().toISOString(),...canonicalActivityPayload,...networkStreamPayload,...networkPayload},{canonical,networkStream});
       }
-      return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:visibleNetworkStreamText,text_length:visibleNetworkStreamText.length,truncated:false,incomplete:effectiveNetworkBusy,incomplete_reason:effectiveNetworkBusy?'generation_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:visibleNetworkStreamMessages.length,total_message_count:visibleNetworkStreamMessages.length,messages:visibleNetworkStreamMessages,busy:effectiveNetworkBusy,dom_available:false,dom_skipped:true,dom_error:'',canonical_available:false,canonical_error:String(canonical.error||''),response_ready:false,response_source:visibleNetworkStreamText?'network_stream':'network_state',updated_at:networkStream.updated_at||new Date().toISOString(),...networkStreamPayload,...networkPayload},{canonical,networkStream});
+      return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:visibleNetworkStreamText,text_length:visibleNetworkStreamText.length,truncated:false,incomplete:effectiveNetworkBusy,incomplete_reason:effectiveNetworkBusy?'generation_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:visibleNetworkStreamMessages.length,total_message_count:visibleNetworkStreamMessages.length,messages:visibleNetworkStreamMessages,busy:effectiveNetworkBusy,dom_available:false,dom_skipped:true,dom_error:'',canonical_available:false,canonical_error:String(canonical.error||''),response_ready:false,response_source:visibleNetworkStreamText?'network_stream':'network_state',updated_at:networkStream.updated_at||new Date().toISOString(),...canonicalActivityPayload,...networkStreamPayload,...networkPayload},{canonical,networkStream});
     }
     try{
       const [injected]=await promiseWithTimeout(
@@ -1894,11 +2000,11 @@ if(action==='rename_chat'){
         recovery.response_checkpoint_applied=Boolean(domResult.response_checkpoint_applied);
         recovery.dom_recovered=!domResult.connection_interrupted&&(connectionInterrupted||messageDeliveryTimedOut||String(domResult.text||'').trim().length>=canonicalText.length);
       }
-      return withResponseAudit({action,target_id:tab.id,...domResult,busy:Boolean(effectiveNetworkBusy||canonical.busy||domResult.busy),dom_available:true,dom_busy:Boolean(domResult.busy),canonical_available:Boolean(canonical.ok),canonical_error:String(canonical.error||''),...networkStreamPayload,...recovery,...networkPayload,message_delivery_timed_out:messageDeliveryTimedOut},{dom:observedDomResult,canonical,networkStream});
+      return withResponseAudit({action,target_id:tab.id,...domResult,busy:Boolean(effectiveNetworkBusy||canonical.busy||domResult.busy),dom_available:true,dom_busy:Boolean(domResult.busy),canonical_available:Boolean(canonical.ok),canonical_error:String(canonical.error||''),...canonicalActivityPayload,...networkStreamPayload,...recovery,...networkPayload,message_delivery_timed_out:messageDeliveryTimedOut},{dom:observedDomResult,canonical,networkStream});
     }catch(error){
       if(canonical.ok){
         const latestAssistant=[...(canonical.messages||[])].reverse().find(message=>message.role==='assistant');
-        return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(canonical.text||''),text_length:String(canonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(canonical.busy||networkStreamInProgress),incomplete_reason:canonical.busy?'canonical_generation_in_progress':networkStreamInProgress?'tool_activity_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,messages:canonical.messages||[],busy:Boolean(effectiveNetworkBusy||canonical.busy),dom_available:false,dom_error:String(error?.message||error).slice(0,500),canonical_available:true,response_ready:Boolean(canonical.response_ready&&!networkStreamInProgress),response_source:'canonical_api',updated_at:new Date().toISOString(),...networkStreamPayload,...networkPayload},{dom:{ok:false,error:String(error?.message||error)},canonical,networkStream});
+        return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(canonical.text||''),text_length:String(canonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(canonical.busy||networkStreamInProgress),incomplete_reason:canonical.busy?'canonical_generation_in_progress':networkStreamInProgress?'tool_activity_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(canonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(canonical.messages||[]).length,messages:canonical.messages||[],busy:Boolean(effectiveNetworkBusy||canonical.busy),dom_available:false,dom_error:String(error?.message||error).slice(0,500),canonical_available:true,response_ready:Boolean(canonical.response_ready&&!networkStreamInProgress),response_source:'canonical_api',updated_at:new Date().toISOString(),...canonicalActivityPayload,...networkStreamPayload,...networkPayload},{dom:{ok:false,error:String(error?.message||error)},canonical,networkStream});
       }
       return withResponseAudit({
         action,

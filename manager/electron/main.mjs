@@ -45,7 +45,7 @@ const DEFAULT_GLOBAL_RULES = `# CodexPro Global Rules
 - Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
 `;
 
-const WORKER_EXTENSION_VERSION = "0.5.73";
+const WORKER_EXTENSION_VERSION = "0.5.74";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
@@ -1815,7 +1815,7 @@ async function openLocalMcpSession(config, token) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.79" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.80" } }
   });
   const session = { url, token, sessionId: initialized.sessionId, nextId: 2 };
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, session.sessionId);
@@ -1871,7 +1871,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.79" } }
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: "0.2.80" } }
   });
   const sessionId = initialized.sessionId;
   try {

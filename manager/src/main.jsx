@@ -4,7 +4,7 @@ import "./styles.css";
 import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
-import { canAcceptNextChatMessage, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
+import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
@@ -481,7 +481,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.73";
+const WORKER_EXTENSION_VERSION = "0.5.74";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -1021,14 +1021,15 @@ function App() {
           }
           continue;
         }
-        if (networkState === "generating" || tab.settling) {
+        if (networkState === "generating" || tab.busy || tab.settling) {
           const streamKey = `${profile.profile_id}:${conversationId}`;
           const lastStreamRead = Number(networkStreamReads.current.get(streamKey) || 0);
-          if (Date.now() - lastStreamRead >= 850) {
+          const activityPollMs = networkState === "generating" ? 850 : LATEST_RESPONSE_RECOVERY_POLL_MS;
+          if (Date.now() - lastStreamRead >= activityPollMs) {
             networkStreamReads.current.set(streamKey, Date.now());
-            void loadResponse(profile, conversationId, true, false);
+            void loadResponse(profile, conversationId, true, false, false, networkState !== "generating");
           }
-          if (networkState === "generating") continue;
+          continue;
         }
         if (networkState !== "completed" || !networkCompletedAt) continue;
         const completionKey = `${profile.profile_id}:${conversationId}`;
@@ -1038,7 +1039,17 @@ function App() {
           void loadResponse(profile, conversationId, true, false);
           if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
         }
-        if (!tab.busy && !tab.settling && currentResponse?.repoTaskId) {
+        if (currentResponse?.repoTaskId && canVerifyRepoTaskUse({
+          responseCurrent: currentResponse.conversationId === conversationId,
+          responseReady: currentResponse.responseReady,
+          responseBusy: currentResponse.busy,
+          responseIncomplete: currentResponse.incomplete,
+          awaitingAssistant: currentResponse.awaitingAssistant,
+          tabBusy: tab.busy,
+          tabSettling: tab.settling,
+          canonicalBusy: currentResponse.canonicalBusy,
+          streamBusy: currentResponse.networkStreamInProgress
+        })) {
           void verifyRepoTaskUse(profile, conversationId, currentResponse, networkCompletedAt);
         }
       }
@@ -1727,7 +1738,9 @@ function App() {
         tabSettling: selectedTab?.settling,
         responseCurrent: currentResponse?.conversationId === conversationId,
         responseBusy: currentResponse?.busy,
-        responseIncomplete: currentResponse?.incomplete
+        responseIncomplete: currentResponse?.incomplete,
+        canonicalBusy: currentResponse?.canonicalBusy,
+        streamBusy: currentResponse?.networkStreamInProgress
       });
       if (!turnReady) {
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước. Chờ trạng thái về ĐANG RẢNH rồi gửi để tin nhắn không bị nhập vào turn cũ." }));
@@ -2164,6 +2177,9 @@ function App() {
         const networkTerminal = isTerminalChatNetworkState(nextNetworkState);
         const networkStreamInProgress = Boolean(networkStreamCurrentGeneration && result.network_stream_in_progress);
         const networkStreamAvailable = Boolean(networkStreamCurrentGeneration && (!networkTerminal || networkStreamInProgress));
+        const canonicalBusy = Object.prototype.hasOwnProperty.call(result, "canonical_busy")
+          ? Boolean(result.canonical_busy)
+          : Boolean(sameConversation && previous.canonicalBusy);
         const incomingMessages = Array.isArray(result.messages)
           ? trimRecentTranscriptMessages(result.messages.map((message, index) => ({
               id: String(message?.id || `${message?.role || "message"}-${index}`),
@@ -2181,7 +2197,7 @@ function App() {
           text: result.text,
             truncated: result.truncated
         });
-        const terminalAwaitingFinal = Boolean(networkTerminal && !networkStreamInProgress && result.response_ready !== true);
+        const terminalAwaitingFinal = Boolean(networkTerminal && !networkStreamInProgress && !canonicalBusy && result.response_ready !== true);
         if (terminalAwaitingFinal) {
           nextMessages = discardProvisionalAssistantAfterLatestUser(nextMessages, { includeUnverified: true });
         }
@@ -2200,10 +2216,11 @@ function App() {
                 ? nextAssistantText || mergeProgressiveResponseText(sameConversation ? previous.text : "", result.text)
                 : (sameConversation ? previous.text || "" : ""),
             messages: nextMessages,
-            busy: networkTerminal && !networkStreamInProgress ? false : Boolean(result.busy || networkStreamInProgress),
+            busy: Boolean(canonicalBusy || networkStreamInProgress || (!networkTerminal && result.busy)),
+            canonicalBusy,
             truncated: contentAvailable || networkStreamAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
-            incomplete: networkTerminal ? false : contentAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
-            incompleteReason: networkTerminal ? "" : contentAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
+            incomplete: canonicalBusy ? true : networkTerminal ? false : contentAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
+            incompleteReason: canonicalBusy ? "canonical_generation_in_progress" : networkTerminal ? "" : contentAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
             conversationLimitReached: Boolean(previous.conversationLimitReached),
             conversationLimitMessage: previous.conversationLimitMessage || "",
             domAvailable,
@@ -2231,7 +2248,7 @@ function App() {
             networkStatusCode: Number(result.network_status_code) || Number(previous.networkStatusCode) || 0,
             networkError: String(result.network_error || previous.networkError || ""),
             networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
-            responseReady: Boolean(result.response_ready && !networkStreamInProgress),
+            responseReady: Boolean(!canonicalBusy && result.response_ready && !networkStreamInProgress),
             responseSource: terminalAwaitingFinal ? "network_state" : String(result.response_source || previous.responseSource || ''),
             responseAudit,
             responseAuditFetchMode,
@@ -2378,7 +2395,8 @@ function App() {
       tabBusy: selectedTab?.busy,
       responseCurrent,
       responseBusy: response?.busy,
-      streamBusy: responseCurrent && response?.networkStreamInProgress
+      streamBusy: responseCurrent && response?.networkStreamInProgress,
+      canonicalBusy: responseCurrent && response?.canonicalBusy
     });
     const selectedSettling = !(responseCurrent && response?.networkStreamInProgress) && shouldShowChatSettling({
       networkState: selectedNetworkState,
@@ -2386,14 +2404,16 @@ function App() {
       responseCurrent,
       responseIncomplete: response?.incomplete
     });
-    const responseTurnActive = selectedRecoveringNetworkAbort || (!isTerminalChatNetworkState(selectedNetworkState) && Boolean(sending || selectedBusy || selectedSettling || response?.busy || response?.loading));
+    const responseTurnActive = selectedRecoveringNetworkAbort || Boolean(sending || selectedBusy || selectedSettling || (responseCurrent && (response?.busy || response?.loading)));
     const turnReady = !selectedRecoveringNetworkAbort && canAcceptNextChatMessage({
       networkState: selectedNetworkState,
       tabBusy: selectedTab?.busy,
       tabSettling: selectedTab?.settling,
       responseCurrent,
       responseBusy: response?.busy,
-      responseIncomplete: response?.incomplete
+      responseIncomplete: response?.incomplete,
+      canonicalBusy: responseCurrent && response?.canonicalBusy,
+      streamBusy: responseCurrent && response?.networkStreamInProgress
     });
     const domUnavailable = Boolean(responseCurrent && response?.domAvailable === false && !response?.domSkipped);
     const contentNeedsRefresh = Boolean(responseCurrent && response?.contentNeedsRefresh);
@@ -2597,7 +2617,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
-          <small>CodexPro Manager 0.2.79</small>
+          <small>CodexPro Manager 0.2.80</small>
         </div>
       </aside>
 
