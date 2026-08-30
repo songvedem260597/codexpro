@@ -1281,7 +1281,13 @@ function App() {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const closeOnEscape = (event) => {
-      if (event.key === "Escape") setChatProfileId("");
+      if (event.key !== "Escape") return;
+      if (attachmentPreview) {
+        event.preventDefault();
+        setAttachmentPreview(null);
+        return;
+      }
+      setChatProfileId("");
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => {
@@ -3208,7 +3214,7 @@ function App() {
       {renderChatModal()}
 
       {attachmentPreview && (
-        <div className="modal-backdrop attachment-lightbox-backdrop" tabIndex={-1} autoFocus onKeyDown={(event) => { if (event.key === "Escape") setAttachmentPreview(null); }} onMouseDown={(event) => event.target === event.currentTarget && setAttachmentPreview(null)}>
+        <div className="modal-backdrop attachment-lightbox-backdrop" tabIndex={-1} autoFocus onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setAttachmentPreview(null); } }} onMouseDown={(event) => event.target === event.currentTarget && setAttachmentPreview(null)}>
           <div className="attachment-lightbox" role="dialog" aria-modal="true" aria-label={`Xem trước ${attachmentPreview.name || "file"}`}>
             <div className="attachment-lightbox-head">
               <div>
