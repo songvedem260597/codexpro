@@ -221,8 +221,15 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const siblingRead = await callTool(gatedSibling, 'read', { path: 'gate.txt' });
     if (!siblingRead.structuredContent.text.includes('gate initial')) throw new Error('sibling MCP session remained blocked after profile task activation');
     if (began.structuredContent.task_title !== 'Verify repo gate') throw new Error('begin_repo_task did not preserve the AI-generated task title');
+    if (began.structuredContent.task_title_source !== 'ai') throw new Error('begin_repo_task did not identify the AI as the task title source');
     const titledProof = await callTool(gated, 'repo_task_status', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa' });
     if (titledProof.structuredContent.task_title !== 'Verify repo gate') throw new Error('repo_task_status did not return the AI-generated task title');
+    if (titledProof.structuredContent.task_title_source !== 'ai') throw new Error('repo_task_status did not identify the AI task title source');
+    const persistedProfileTasks = JSON.parse(await fs.readFile(path.join(codexProHome, 'browser-profile-tasks.json'), 'utf8'));
+    const persistedProfileTask = persistedProfileTasks?.profiles?.['gate-smoke'];
+    if (persistedProfileTask?.task_id !== 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa' || persistedProfileTask?.task_title !== 'Verify repo gate') {
+      throw new Error(`AI task title was not persisted for Manager restart recovery: ${JSON.stringify(persistedProfileTasks)}`);
+    }
     const gatedSelfTest = await callTool(gated, 'codexpro_self_test', {
       write_probe: false,
       bash_probe: false,

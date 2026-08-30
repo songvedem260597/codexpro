@@ -245,6 +245,13 @@ const domGenericActivity = runChatActivityProbe({ assistantText: "Phản hồi t
 assert.equal(domGenericActivity.source, "dom_stop");
 assert.equal(domGenericActivity.activity_text, "ChatGPT đang tiếp tục xử lý", "generic DOM work must use a stable status instead of assistant response text");
 
+assert.match(server, /task_title:[\s\S]*?words >= 2 && words <= 6/, "begin_repo_task must require a short AI-generated task title");
+assert.match(server, /task_title_source: "ai"/, "repo task results must identify the AI task-title source");
+assert.match(bridge, /browser-profile-tasks\.json/, "profile task titles must survive a runtime restart");
+assert.match(bridge, /loadBrowserProfileTasks\(\)/, "profile task titles must load when the bridge starts");
+assert.match(bridge, /persistBrowserProfileTasks\(\)/, "AI task titles must persist after begin_repo_task");
+assert.ok(managerUi.includes('working || settling ? "Task hi\\u1ec7n t\\u1ea1i" : "Task g\\u1ea7n nh\\u1ea5t"'), "Manager must retain the last AI task title after completion");
+
 for (const action of ["trusted_click", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch"]) {
   assert.match(browserOps, new RegExp(`\\| \\"${action}\\"`), `dedicated browser action ${action} must be exposed`);
   assert.match(server, new RegExp(`\\"${action}\\"`), `browser_control schema must expose ${action}`);
