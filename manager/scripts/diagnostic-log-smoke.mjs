@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   appendDiagnosticLog,
   clearDiagnosticLogs,
+  flushDiagnosticLogs,
   pruneDiagnosticLogs,
   readDiagnosticLogs
 } from "../electron/diagnostic-log.mjs";
@@ -110,6 +111,28 @@ try {
   assert.equal(routedTask.entries.length, 1);
   assert.equal(routedTask.entries[0].action, "repo_task_profile_rerouted");
   assert.equal(routedTask.entries[0].details.task_owner_profile_id, "profile-owner");
+
+  const burstRoot = path.join(root, "burst");
+  const burstWrites = [];
+  for (let index = 0; index < 22_500; index += 1) {
+    burstWrites.push(appendDiagnosticLog(burstRoot, {
+      level: "info",
+      source: "burst",
+      category: "load",
+      action: "burst-write",
+      message: `burst-${index}`,
+      details: { index }
+    }));
+  }
+  await Promise.all(burstWrites);
+  await flushDiagnosticLogs(burstRoot);
+  const burstLatest = await readDiagnosticLogs(burstRoot, { hours: 24, source: "burst", limit: 5000 });
+  assert.ok(burstLatest.entries.some((entry) => entry.message === "burst-22499"), "backpressure must keep the newest diagnostic records");
+  const backpressure = await readDiagnosticLogs(burstRoot, { hours: 24, category: "logging", query: "diagnostic-backpressure", limit: 10 });
+  assert.equal(backpressure.entries.length, 1, "an overloaded pending queue must leave one diagnostic backpressure marker");
+  assert.ok(Number(backpressure.entries[0].details?.dropped_count) > 0, "the backpressure marker must report how many old pending records were dropped");
+  const burstStat = await fs.stat(path.join(burstRoot, "manager-diagnostic.jsonl"));
+  assert.ok(burstStat.size <= 8 * 1024 * 1024, "diagnostic storage must remain capped at 8 MiB after a large burst");
 
   await clearDiagnosticLogs(root);
   const cleared = await readDiagnosticLogs(root, { hours: 24 });
