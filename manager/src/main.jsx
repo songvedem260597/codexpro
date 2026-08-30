@@ -3445,7 +3445,7 @@ function App() {
                         <strong>{profileTaskLabel}</strong>
                       </div>
                     )}
-                    {(working || settling) && <div className="profile-live-activity" role="status" aria-live="polite"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{liveActivityText || (settling ? "ChatGPT đang hoàn tất tác vụ" : "ChatGPT đang xử lý")}</span></div>}
+                    {(working || settling) && <div className="profile-live-activity" role="status" aria-live="polite"><span className="profile-live-activity-text">{liveActivityText || (settling ? "ChatGPT đang hoàn tất tác vụ" : "ChatGPT đang xử lý")}</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></div>}
                   </div>
                   <div className="profile-actions">
                     {!ready && <span className="update-needed">Có worker {WORKER_EXTENSION_VERSION} mới</span>}
