@@ -2,13 +2,17 @@ const TRANSCRIPT_EXCHANGE_LIMIT = 3;
 const TRANSCRIPT_MESSAGE_HARD_LIMIT = 12;
 const OPTIMISTIC_SUBMISSION_TTL_MS = 10 * 60 * 1000;
 
+function messageHasContent(message) {
+  return Boolean(String(message?.text || "").trim() || (Array.isArray(message?.images) && message.images.length));
+}
+
 function usableMessages(response, conversationId) {
   if (!response || response.conversationId !== conversationId || !Array.isArray(response.messages)) return [];
-  return response.messages.filter((message) => String(message?.text || "").trim());
+  return response.messages.filter(messageHasContent);
 }
 
 export function trimRecentTranscriptMessages(messages) {
-  const usable = Array.isArray(messages) ? messages.filter((message) => String(message?.text || "").trim()) : [];
+  const usable = Array.isArray(messages) ? messages.filter(messageHasContent) : [];
   if (!usable.length) return [];
   const exchanges = [];
   let current = null;
@@ -56,7 +60,10 @@ export function cacheableTranscriptMessages(messages) {
     if (message?.pending || optimisticSubmissionState(message) === "pending") return false;
     if (/^(?:optimistic|rollover)-user-/.test(String(message?.id || "")) && !optimisticSubmissionState(message) && !message?.uncertain) return false;
     return true;
-  });
+  }).map((message) => {
+    const { images: _images, ...cacheMessage } = message || {};
+    return cacheMessage;
+  }).filter((message) => String(message?.text || "").trim());
 }
 
 export function materializeTranscriptMessages(response, conversationId) {
@@ -76,7 +83,7 @@ export function materializeTranscriptMessages(response, conversationId) {
 }
 
 export function transcriptAwaitingAssistant(messages) {
-  const usable = Array.isArray(messages) ? messages.filter((message) => String(message?.text || "").trim()) : [];
+  const usable = Array.isArray(messages) ? messages.filter(messageHasContent) : [];
   const latestUserIndex = usable.findLastIndex((message) => message?.role === "user");
   return latestUserIndex >= 0 && !usable.slice(latestUserIndex + 1).some((message) => message?.role === "assistant" && message?.provisional !== true && message?.endTurn !== false);
 }
