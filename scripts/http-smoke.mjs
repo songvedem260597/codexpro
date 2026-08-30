@@ -292,10 +292,42 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const titledProof = await callTool(gated, 'repo_task_status', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa' });
     if (titledProof.structuredContent.task_title !== 'Verify repo gate') throw new Error('repo_task_status did not return the AI-generated task title');
     if (titledProof.structuredContent.task_title_source !== 'ai') throw new Error('repo_task_status did not identify the AI task title source');
+
+    const preparedMisbound = await callTool(manager, 'prepare_repo_task', {
+      profile_id: 'task-owner-profile',
+      task_id: 'cpt_eeeeeeeeeeeeeeeeeeeeeeee',
+      root: taskRoot,
+      scope: 'workspace'
+    });
+    if (!preparedMisbound.structuredContent.prepared) throw new Error('manager could not prepare a task owned by another profile');
+    const beganMisbound = await callTool(gatedSibling, 'begin_repo_task', {
+      task_id: 'cpt_eeeeeeeeeeeeeeeeeeeeeeee',
+      task_title: 'Route shared connector',
+      task_kind: 'general',
+      root: taskRoot,
+      scope: 'workspace'
+    });
+    if (!beganMisbound.structuredContent.verified || beganMisbound.structuredContent.profile_id !== 'task-owner-profile' || beganMisbound.structuredContent.session_profile_id !== 'gate-smoke' || beganMisbound.structuredContent.profile_rerouted !== true) {
+      throw new Error(`shared connector task was not routed to its prepared profile: ${JSON.stringify(beganMisbound.structuredContent)}`);
+    }
+    const restoredSibling = await callTool(gatedSibling, 'begin_repo_task', {
+      task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa',
+      task_title: 'Verify repo gate',
+      task_kind: 'code',
+      root: taskRoot,
+      scope: 'workspace'
+    });
+    if (!restoredSibling.structuredContent.verified || restoredSibling.structuredContent.profile_id !== 'gate-smoke' || restoredSibling.structuredContent.session_profile_id !== 'task-owner-profile' || restoredSibling.structuredContent.profile_rerouted !== true) {
+      throw new Error(`shared connector session did not route back to the next prepared profile: ${JSON.stringify(restoredSibling.structuredContent)}`);
+    }
     const persistedProfileTasks = JSON.parse(await fs.readFile(path.join(codexProHome, 'browser-profile-tasks.json'), 'utf8'));
     const persistedProfileTask = persistedProfileTasks?.profiles?.['gate-smoke'];
     if (persistedProfileTask?.task_id !== 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa' || persistedProfileTask?.task_title !== 'Verify repo gate') {
       throw new Error(`AI task title was not persisted for Manager restart recovery: ${JSON.stringify(persistedProfileTasks)}`);
+    }
+    const reroutedProfileTask = persistedProfileTasks?.profiles?.['task-owner-profile'];
+    if (reroutedProfileTask?.task_id !== 'cpt_eeeeeeeeeeeeeeeeeeeeeeee' || reroutedProfileTask?.task_title !== 'Route shared connector') {
+      throw new Error(`shared connector title was persisted under the wrong profile: ${JSON.stringify(persistedProfileTasks)}`);
     }
     const taskEvents = (await fs.readFile(path.join(codexProHome, 'profile-task-events.jsonl'), 'utf8')).trim().split(/\r?\n/).map((line) => JSON.parse(line));
     if (!taskEvents.some((event) => event.event === 'mcp_session_initialized' && event.profile_id === 'direct-smoke' && event.profile_bound === true)) {
@@ -303,6 +335,12 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     }
     if (!taskEvents.some((event) => event.event === 'repo_task_started' && event.profile_id === 'direct-smoke' && event.task_source === 'chatgpt_direct' && event.task_title_returned_by === 'ai')) {
       throw new Error(`direct AI task title was not logged: ${JSON.stringify(taskEvents)}`);
+    }
+    if (!taskEvents.some((event) => event.event === 'repo_task_prepared' && event.profile_id === 'task-owner-profile' && event.task_id === 'cpt_eeeeeeeeeeeeeeeeeeeeeeee')) {
+      throw new Error(`prepared task correlation was not logged: ${JSON.stringify(taskEvents)}`);
+    }
+    if (!taskEvents.some((event) => event.event === 'repo_task_profile_rerouted' && event.session_profile_id === 'gate-smoke' && event.task_owner_profile_id === 'task-owner-profile' && event.task_id === 'cpt_eeeeeeeeeeeeeeeeeeeeeeee')) {
+      throw new Error(`shared connector profile reroute was not logged: ${JSON.stringify(taskEvents)}`);
     }
     const gatedSelfTest = await callTool(gated, 'codexpro_self_test', {
       write_probe: false,

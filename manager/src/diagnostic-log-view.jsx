@@ -1,6 +1,83 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 const LEVEL_LABELS = { info: "INFO", warn: "CẢNH BÁO", error: "LỖI" };
+const SOURCE_LABELS = { manager: "Manager", renderer: "Giao diện", mcp: "MCP", worker: "Worker", electron: "Electron" };
+const CATEGORY_LABELS = {
+  runtime: "Runtime",
+  status: "Trạng thái",
+  projects: "Dự án",
+  profile: "Chrome profile",
+  chat: "Đoạn chat",
+  network: "Kết nối",
+  tool: "MCP tool",
+  transport: "MCP transport",
+  settings: "Cài đặt",
+  window: "Cửa sổ"
+};
+
+function DiagnosticDropdown({ value, options, onChange, ariaLabel }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef(null);
+  const selected = options.find((option) => option.value === value) || options[0];
+
+  useEffect(() => {
+    const close = (event) => {
+      if (!root.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, []);
+
+  return (
+    <div className={`diagnostic-filter ${open ? "is-open" : ""}`} ref={root}>
+      <button
+        type="button"
+        className="diagnostic-filter-trigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
+          if (["ArrowDown", "Enter", " "].includes(event.key) && !open) {
+            event.preventDefault();
+            setOpen(true);
+          }
+        }}
+      >
+        <span className={`diagnostic-filter-dot is-${selected?.tone || "neutral"}`} aria-hidden="true" />
+        <span className="diagnostic-filter-label">{selected?.label || "Chọn bộ lọc"}</span>
+        {Number.isFinite(Number(selected?.count)) && <span className="diagnostic-filter-count">{Number(selected.count)}</span>}
+        <svg className="diagnostic-filter-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+      </button>
+      {open && (
+        <div className="diagnostic-filter-menu" role="listbox" aria-label={ariaLabel}>
+          {options.map((option) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={option.value === value}
+              className={`diagnostic-filter-option ${option.value === value ? "is-selected" : ""}`}
+              key={option.value}
+              onClick={() => {
+                onChange(option.value);
+                setOpen(false);
+              }}
+            >
+              <span className={`diagnostic-filter-dot is-${option.tone || "neutral"}`} aria-hidden="true" />
+              <span className="diagnostic-filter-option-copy">
+                <strong>{option.label}</strong>
+                {option.hint && <small>{option.hint}</small>}
+              </span>
+              {Number.isFinite(Number(option.count)) && <span className="diagnostic-filter-option-count">{Number(option.count)}</span>}
+              {option.value === value && <span className="diagnostic-filter-check">✓</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function diagnosticTime(value) {
   const parsed = Date.parse(String(value || ""));
@@ -26,8 +103,36 @@ export function logRendererDiagnostic(api, level, category, message, details = {
 export function DiagnosticLogView({ data, filters, busy, selected, onFilters, onRefresh, onClear, onSelect, onCopy }) {
   const entries = Array.isArray(data?.entries) ? data.entries : [];
   const summary = data?.summary || { total: 0, info: 0, warn: 0, error: 0 };
+  const available = data?.available || { levels: summary, sources: {}, categories: {} };
+  const availableTotal = Object.values(available.levels || {}).reduce((total, count) => total + (Number(count) || 0), 0);
   const sourceOptions = ["all", ...new Set(["renderer", "mcp", ...(data?.sources || [])])];
   const categoryOptions = ["all", ...new Set(["runtime", "status", "projects", "profile", "chat", "network", "tool", "transport", ...(data?.categories || [])])];
+  const levelOptions = [
+    { value: "all", label: "Tất cả mức", hint: "Hiển thị toàn bộ mức độ", tone: "neutral", count: availableTotal },
+    { value: "error", label: "Lỗi", hint: "Cần điều tra ngay", tone: "error", count: available.levels?.error || 0 },
+    { value: "warn", label: "Cảnh báo", hint: "Có thể tự phục hồi", tone: "warn", count: available.levels?.warn || 0 },
+    { value: "info", label: "Thông tin", hint: "Hoạt động bình thường", tone: "info", count: available.levels?.info || 0 }
+  ];
+  const sourceFilterOptions = sourceOptions.map((item) => ({
+    value: item,
+    label: item === "all" ? "Tất cả nguồn" : (SOURCE_LABELS[item] || item),
+    hint: item === "all" ? "Manager, giao diện và MCP" : `Chỉ log từ ${SOURCE_LABELS[item] || item}`,
+    tone: item === "mcp" ? "mcp" : item === "renderer" ? "renderer" : "neutral",
+    count: item === "all" ? availableTotal : available.sources?.[item]
+  }));
+  const categoryFilterOptions = categoryOptions.map((item) => ({
+    value: item,
+    label: item === "all" ? "Tất cả nhóm" : (CATEGORY_LABELS[item] || item),
+    hint: item === "all" ? "Mọi khu vực chức năng" : `Chỉ nhóm ${CATEGORY_LABELS[item] || item}`,
+    tone: ["network", "transport"].includes(item) ? "warn" : item === "chat" ? "chat" : "neutral",
+    count: item === "all" ? availableTotal : available.categories?.[item]
+  }));
+  const hourOptions = [
+    { value: 1, label: "1 giờ gần nhất", hint: "Điều tra lỗi vừa xảy ra", tone: "time" },
+    { value: 6, label: "6 giờ gần nhất", hint: "Theo dõi trong một phiên", tone: "time" },
+    { value: 12, label: "12 giờ gần nhất", hint: "Nửa ngày gần nhất", tone: "time" },
+    { value: 24, label: "24 giờ gần nhất", hint: "Toàn bộ thời gian lưu", tone: "time" }
+  ];
 
   return (
     <div className="diagnostic-view">
@@ -47,26 +152,16 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
             placeholder="Tìm lỗi, action, profile, task..."
             aria-label="Tìm trong nhật ký"
           />
-          <select value={filters.level} onChange={(event) => onFilters({ level: event.target.value })} aria-label="Lọc mức log">
-            <option value="all">Tất cả mức</option>
-            <option value="error">Lỗi</option>
-            <option value="warn">Cảnh báo</option>
-            <option value="info">Info</option>
-          </select>
-          <select value={filters.source} onChange={(event) => onFilters({ source: event.target.value })} aria-label="Lọc nguồn log">
-            {sourceOptions.map((value) => <option key={value} value={value}>{value === "all" ? "Tất cả nguồn" : value}</option>)}
-          </select>
-          <select value={filters.category} onChange={(event) => onFilters({ category: event.target.value })} aria-label="Lọc nhóm log">
-            {categoryOptions.map((value) => <option key={value} value={value}>{value === "all" ? "Tất cả nhóm" : value}</option>)}
-          </select>
-          <select value={filters.hours} onChange={(event) => onFilters({ hours: Number(event.target.value) })} aria-label="Khoảng thời gian log">
-            <option value={1}>1 giờ</option>
-            <option value={6}>6 giờ</option>
-            <option value={12}>12 giờ</option>
-            <option value={24}>24 giờ</option>
-          </select>
-          <button className="button secondary diagnostic-refresh" type="button" onClick={onRefresh} disabled={busy}>{busy ? "Đang tải…" : "Làm mới"}</button>
-          <button className="button danger-quiet" type="button" onClick={onClear} disabled={busy || !summary.total}>Xóa log</button>
+          <div className="diagnostic-toolbar-actions">
+            <button className="button secondary diagnostic-refresh" type="button" onClick={onRefresh} disabled={busy}>{busy ? "Đang tải…" : "Làm mới"}</button>
+            <button className="button danger-quiet" type="button" onClick={onClear} disabled={busy || !summary.total}>Xóa log</button>
+          </div>
+          <div className="diagnostic-filter-row">
+            <DiagnosticDropdown value={filters.level} options={levelOptions} onChange={(level) => onFilters({ level })} ariaLabel="Lọc mức log" />
+            <DiagnosticDropdown value={filters.source} options={sourceFilterOptions} onChange={(source) => onFilters({ source })} ariaLabel="Lọc nguồn log" />
+            <DiagnosticDropdown value={filters.category} options={categoryFilterOptions} onChange={(category) => onFilters({ category })} ariaLabel="Lọc nhóm log" />
+            <DiagnosticDropdown value={filters.hours} options={hourOptions} onChange={(hours) => onFilters({ hours: Number(hours) })} ariaLabel="Khoảng thời gian log" />
+          </div>
         </div>
 
         <div className="diagnostic-retention-note">

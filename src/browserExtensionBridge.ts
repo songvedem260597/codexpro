@@ -143,6 +143,7 @@ const profileWorkspaceBindings = new Map<string, string>();
 const profileTaskIds = new Map<string, string>();
 const profileTaskTitles = new Map<string, string>();
 const profileTaskUpdatedAt = new Map<string, string>();
+const profilePendingTasks = new Map<string, { taskId: string; root: string; scope: "workspace" | "all_allowed"; preparedAt: number }>();
 const profileTaskEventSignatures = new Map<string, { signature: string; at: number }>();
 let singleton: BridgeState | undefined;
 
@@ -398,11 +399,16 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     const previous = profileTaskEventSignatures.get(id);
     if (!previous || previous.signature !== signature || profile.lastSeen - previous.at >= PROFILE_TASK_EVENT_THROTTLE_MS) {
       profileTaskEventSignatures.set(id, { signature, at: profile.lastSeen });
+      const pendingTask = profilePendingTasks.get(id);
       recordBrowserProfileTaskEvent("profile_activity_without_task", {
         profile_id: id,
         conversation_url: String(activeTab?.url || ""),
         activity_text: String(activeTab?.activity_text || ""),
         network_state: String(activeTab?.network_state || ""),
+        pending_task_id: pendingTask?.taskId,
+        pending_task_root: pendingTask?.root,
+        pending_task_scope: pendingTask?.scope,
+        pending_task_age_ms: pendingTask ? Math.max(0, profile.lastSeen - pendingTask.preparedAt) : undefined,
         connector_fingerprint_present: Boolean(profile.connectorServerFingerprint),
         connector_fingerprint_expected: Boolean(expectedConnectorFingerprint(state, id))
       });
@@ -761,6 +767,8 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
   const normalizedTaskId = String(taskId || "").trim();
   const taskTitle = String(title || "").trim();
   if (!id) return;
+  const pendingTask = profilePendingTasks.get(id);
+  if (!normalizedTaskId || pendingTask?.taskId === normalizedTaskId) profilePendingTasks.delete(id);
   const changed = profileTaskIds.get(id) !== normalizedTaskId || profileTaskTitles.get(id) !== taskTitle;
   if (!changed) {
     if (singleton) scheduleProfileNotification(singleton);
@@ -784,6 +792,43 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
   });
   if (singleton) scheduleProfileNotification(singleton);
 }
+
+export function setBrowserExtensionProfilePendingTask(
+  profileId: string,
+  taskId: string,
+  root: string,
+  scope: "workspace" | "all_allowed",
+  preparedAt = Date.now()
+): void {
+  const id = String(profileId || "").trim();
+  const normalizedTaskId = String(taskId || "").trim();
+  if (!id || !normalizedTaskId) return;
+  profilePendingTasks.set(id, {
+    taskId: normalizedTaskId,
+    root: String(root || "").trim(),
+    scope,
+    preparedAt
+  });
+}
+
+export function getBrowserExtensionProfilePendingTask(profileId: string): {
+  task_id: string;
+  root: string;
+  scope: "workspace" | "all_allowed";
+  prepared_at: string;
+  age_ms: number;
+} | undefined {
+  const pendingTask = profilePendingTasks.get(String(profileId || "").trim());
+  if (!pendingTask) return undefined;
+  return {
+    task_id: pendingTask.taskId,
+    root: pendingTask.root,
+    scope: pendingTask.scope,
+    prepared_at: new Date(pendingTask.preparedAt).toISOString(),
+    age_ms: Math.max(0, Date.now() - pendingTask.preparedAt)
+  };
+}
+
 export function setBrowserExtensionProfileWorkspaceBinding(profileId: string, root: string): void {
   const id = String(profileId || "").trim();
   const workspaceRoot = String(root || "").trim();

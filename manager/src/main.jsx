@@ -2,6 +2,18 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createRoot } from "react-dom/client";
 import managerPackage from "../package.json";
 import "./styles.css";
+import "@fontsource/be-vietnam-pro/400.css";
+import "@fontsource/be-vietnam-pro/500.css";
+import "@fontsource/be-vietnam-pro/600.css";
+import "@fontsource/be-vietnam-pro/700.css";
+import "@fontsource/manrope/400.css";
+import "@fontsource/manrope/500.css";
+import "@fontsource/manrope/600.css";
+import "@fontsource/manrope/700.css";
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/500.css";
+import "@fontsource/jetbrains-mono/600.css";
+import "@fontsource/jetbrains-mono/700.css";
 import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
@@ -64,6 +76,9 @@ const workerIcons = {
 
 const FONT_OPTIONS = [
   { value: "system", label: "Segoe UI / mặc định Windows", css: '"Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", sans-serif' },
+  { value: "be-vietnam-pro", label: "Be Vietnam Pro", hint: "Text dài · tiếng Việt rõ và dễ đọc", css: '"Be Vietnam Pro", "Segoe UI", sans-serif' },
+  { value: "manrope", label: "Manrope", hint: "Tiêu đề · giao diện hiện đại, gọn", css: 'Manrope, "Segoe UI", sans-serif' },
+  { value: "jetbrains-mono", label: "JetBrains Mono", hint: "Code · ID · log kỹ thuật", css: '"JetBrains Mono", "Cascadia Code", Consolas, monospace' },
   { value: "arial", label: "Arial", css: 'Arial, sans-serif' },
   { value: "tahoma", label: "Tahoma", css: 'Tahoma, sans-serif' },
   { value: "verdana", label: "Verdana", css: 'Verdana, sans-serif' },
@@ -731,6 +746,7 @@ function App() {
       await loadDiagnosticLogs(false);
       notify("Đã xóa nhật ký chẩn đoán");
     } catch (err) {
+      logRendererDiagnostic(api, "error", "runtime", `Không xóa được nhật ký: ${err?.message || String(err)}`, { action: "clear-diagnostic-logs", error: err });
       setError(err?.message || String(err));
     } finally {
       setDiagnosticBusy(false);
@@ -769,7 +785,12 @@ function App() {
     let cancelled = false;
     api.getManagerSettings()
       .then((next) => { if (!cancelled) applyManagerSettings(next); })
-      .catch((err) => { if (!cancelled) setError(err?.message || String(err)); });
+      .catch((err) => {
+        if (!cancelled) {
+          logRendererDiagnostic(api, "error", "settings", `Không tải được cài đặt: ${err?.message || String(err)}`, { action: "get-manager-settings", error: err });
+          setError(err?.message || String(err));
+        }
+      });
     return () => { cancelled = true; };
   }, [applyManagerSettings]);
 
@@ -2071,6 +2092,7 @@ function App() {
       return newConversationId;
     } catch (err) {
       const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "chat", `Không tạo được chat tiếp nối: ${message}`, { action: "conversation-rollover", profile_id: profileId, conversation_id: conversationId, error: err });
       conversationRollovers.current.set(key, { status: "failed", at: Date.now() });
       setRequestResponses((current) => {
         const previous = current[profileId] || {};
@@ -2103,7 +2125,7 @@ function App() {
       return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "checking" } } : current;
     });
     try {
-      const proof = await api.getRepoTaskStatus({ taskId });
+      const proof = await api.getRepoTaskStatus({ taskId, profileId: profile.profile_id, conversationId });
       if (proof?.verified) {
         repoTaskVerificationReads.current.set(verificationKey, "done");
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
@@ -2169,6 +2191,7 @@ function App() {
           return;
         }
         const message = "ChatGPT đã trả lời nhưng không trả task title qua CodexPro sau 2 lần. Phản hồi này không được công nhận.";
+        logRendererDiagnostic(api, "error", "tool", message, { action: "repo-task-title-missing", profile_id: profile.profile_id, conversation_id: conversationId, task_id: taskId, retry_count: retryCount, rollover_count: rolloverCount, proof });
         setRequestResponses((current) => {
           const previous = current[profile.profile_id] || {};
           return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "failed", repoTaskVerified: false } } : current;
@@ -2216,6 +2239,7 @@ function App() {
         } : current;
       });
       notify("ChatGPT chưa trả task title · đang tự gửi lại bắt buộc");
+      logRendererDiagnostic(api, "warn", "tool", "ChatGPT thiếu task title; Manager đã gửi lại một lần", { action: "repo-task-title-retry", profile_id: profile.profile_id, conversation_id: conversationId, previous_task_id: taskId, retry_task_id: String(retried?.repo_task_id || "") });
       window.setTimeout(() => void refresh(false), 500);
     } catch (err) {
       const message = err?.message || String(err);
@@ -2230,6 +2254,7 @@ function App() {
         return;
       }
       repoTaskVerificationReads.current.set(verificationKey, "done");
+      logRendererDiagnostic(api, "error", "tool", `Không xác minh được tool call CodexPro: ${message}`, { action: "repo-task-verification", profile_id: profile.profile_id, conversation_id: conversationId, task_id: taskId, error: err });
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Không xác minh được tool call CodexPro: ${message}` }));
     }
   }
@@ -2351,6 +2376,7 @@ function App() {
       return result;
     } catch (err) {
       const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "chat", `Đọc phản hồi thất bại: ${message}`, { action: "load-response", profile_id: profile.profile_id, conversation_id: conversationId, read_dom: readDom, recover_stale_dom: recoverStaleDom, canonical_only: canonicalOnly, silent, error: err });
       setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: false, error: message, conversationId } }));
       if (!silent) setError(message);
       return null;
@@ -2375,7 +2401,9 @@ function App() {
       if (!selected.length) return;
       addRequestAttachments(profileId, selected);
     } catch (err) {
-      setError(err?.message || String(err));
+      const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "chat", `Xử lý file đính kèm thất bại: ${message}`, { action: "choose-request-attachments", profile_id: profileId, error: err });
+      setError(message);
     }
   }
 
@@ -2385,6 +2413,7 @@ function App() {
       const preview = await api.getRequestFilePreview(file.path);
       setAttachmentPreview({ ...preview, loading: false, path: file.path });
     } catch (err) {
+      logRendererDiagnostic(api, "error", "chat", `Đọc preview file thất bại: ${err?.message || String(err)}`, { action: "open-attachment-preview", file_name: file.name, file_size: file.size, mime_type: file.mimeType, error: err });
       setAttachmentPreview({
         loading: false,
         name: file.name,
@@ -2410,6 +2439,7 @@ function App() {
       notify("Đã dán ảnh từ clipboard");
     } catch (err) {
       const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "chat", `Dán ảnh clipboard thất bại: ${message}`, { action: "paste-request-image", profile_id: profileId, error: err });
       setRequestSendErrors((current) => ({ ...current, [profileId]: message }));
     }
   }
@@ -2527,7 +2557,7 @@ function App() {
       : selectedRecoveringNetworkAbort
         ? "AI vẫn đang xử lý · đang xác minh sau khi transport bị hủy"
         : selectedBusy || selectedSettling
-        ? selectedActivityText || (selectedBusy ? "AI đang xử lý · theo dõi bằng network" : "AI đang hoàn tất tác vụ")
+        ? "CodexPro đang xử lý…"
         : selectedNetworkFailed && responseVerifiedComplete
           ? "AI đã phản hồi xong · canonical xác nhận"
           : selectedNetworkFailed
@@ -2579,13 +2609,13 @@ function App() {
                   <span>{response.rolloverNotice}</span>
                 </div>
               )}
-              {responseCurrent && !responseCleared && response?.repoTaskId && (
+              {responseCurrent && !responseCleared && response?.repoTaskId && (response.repoTaskStatus === "verified" || response.repoTaskStatus === "failed") && (
                 <div className={`network-response-notice is-${response.repoTaskStatus === "verified" ? "completed" : response.repoTaskStatus === "failed" ? "failed" : "generating"}`}>
                   <strong>{response.repoTaskStatus === "verified" ? (response.repoTaskProof?.task_kind === "code" ? "CodexPro: Rules + CodexGraph đã xác minh" : "CodexPro: đã ghi nhận task title") : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT thiếu title · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ task title"}</strong>
                   <span>{response.repoTaskStatus === "verified" ? repoTaskEvidenceSummary(response.repoTaskProof) : response.repoTaskStatus === "failed" ? "ChatGPT không trả task title qua CodexPro nên Manager không công nhận phản hồi này." : "Mọi task phải có title; chỉ task CODE mới tải Rules và CodexGraph."}</span>
                 </div>
               )}
-              {responseCurrent && !responseCleared && !isNewChat && selectedNetworkState !== "idle" && !selectedNetworkCompleted && !responseVerifiedComplete && (
+              {responseCurrent && !responseCleared && !isNewChat && !responseVerifiedComplete && (selectedNetworkFailed || selectedRecoveringNetworkAbort) && (
                 <div className={`network-response-notice is-${selectedNetworkState}`}>
                   <strong>{selectedRecoveringNetworkAbort ? "Network: transport cũ bị hủy · đang xác minh" : selectedBusy ? "Network: AI đang xử lý" : "Network: request thất bại"}</strong>
                   <span>{selectedRecoveringNetworkAbort ? "Chrome đã hủy transport cũ nhưng ChatGPT có thể vẫn tiếp tục ở backend. CodexPro đang kiểm tra transcript canonical trước khi kết luận lỗi." : selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
@@ -3213,7 +3243,7 @@ function App() {
                 disabled={settingsBusy === "save"}
                 onChange={(value) => void saveManagerSetting({ fontFamily: value }, "Đã đổi font toàn app")}
               />
-              <div className="font-preview" style={{ fontFamily: selectedFont.css, fontSize: `${managerSettings.fontSize}px` }}>Aa Bb Cc · CodexPro đang làm việc · 0123456789</div>
+              <div className="font-preview" style={{ fontFamily: selectedFont.css, fontSize: `${managerSettings.fontSize}px` }}>Aa Bb Cc · Tiếng Việt rõ đẹp: Đặng, Nguyễn, Trường · 0123456789</div>
             </div>
             <div className="font-size-setting-row">
               <label>Cỡ chữ</label>
