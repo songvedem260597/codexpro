@@ -10,8 +10,8 @@ export function isRecoverableAbortedChatNetworkFailure({ networkState, networkEr
   return Math.max(0, Number(nowMs) - completedAtMs) < Math.max(1000, Number(graceMs) || 120000);
 }
 
-export function shouldShowChatBusy({ networkState, tabBusy, responseCurrent, responseBusy, streamBusy }) {
-  if (tabBusy || streamBusy) return true;
+export function shouldShowChatBusy({ networkState, tabBusy, responseCurrent, responseBusy, streamBusy, canonicalBusy }) {
+  if (tabBusy || streamBusy || canonicalBusy) return true;
   if (isTerminalChatNetworkState(networkState)) return false;
   return networkState === "generating" || Boolean(responseCurrent && responseBusy);
 }
@@ -24,6 +24,20 @@ export function shouldShowChatSettling({ networkState, tabSettling, responseCurr
 
 export function canAcceptNextChatMessage(status) {
   return !shouldShowChatBusy(status) && !shouldShowChatSettling(status);
+}
+
+export function canVerifyRepoTaskUse({ responseCurrent, responseReady, responseBusy, responseIncomplete, awaitingAssistant, tabBusy, tabSettling, canonicalBusy, streamBusy }) {
+  return Boolean(
+    responseCurrent
+    && responseReady
+    && !responseBusy
+    && !responseIncomplete
+    && !awaitingAssistant
+    && !tabBusy
+    && !tabSettling
+    && !canonicalBusy
+    && !streamBusy
+  );
 }
 
 export function isRetryableChatTurnBusyError(error) {
