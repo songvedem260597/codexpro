@@ -158,6 +158,7 @@ const REPO_SCAN_MAX_DEPTH = 12;
 const REPO_SCAN_TIMEOUT_MS = 12000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
+let runtimeFreshnessPromise = null;
 const runtimeHealthDiagnosticTracker = createRuntimeHealthDiagnosticTracker();
 let repoScanCache = null;
 let repoScanPromise = null;
@@ -3456,6 +3457,55 @@ async function controlServer(action) {
   return runtimeStatus({ forceRefresh: true });
 }
 
+function expectedRuntimeBuildId(config) {
+  const root = String(config?.root || "").trim();
+  if (!root) return "";
+  try {
+    const stat = fs.statSync(path.join(root, "dist", "http.js"));
+    return `${Math.floor(stat.mtimeMs)}:${stat.size}`;
+  } catch {
+    return "";
+  }
+}
+
+function ensureFreshRuntimeAfterManagerStart() {
+  if (runtimeFreshnessPromise) return runtimeFreshnessPromise;
+  runtimeFreshnessPromise = (async () => {
+    const base = await runtimeBaseStatus({ forceRefresh: true });
+    if (!base.local.ok) return { checked: true, restarted: false, reason: "runtime-offline" };
+    const expectedBuildId = expectedRuntimeBuildId(base.config);
+    const activeBuildId = String(base.local.data?.runtimeBuildId || "").trim();
+    if (!expectedBuildId || activeBuildId === expectedBuildId) {
+      return { checked: true, restarted: false, reason: expectedBuildId ? "current" : "build-unavailable" };
+    }
+    diagnostic("warn", "manager", "runtime", "Runtime CodexPro đang chạy bản cũ; Manager sẽ restart server", {
+      action: "runtime-build-mismatch",
+      active_build_id: activeBuildId,
+      expected_build_id: expectedBuildId,
+      runtime_started_at: String(base.local.data?.runtimeStartedAt || "")
+    });
+    const restarted = await controlServer("restart");
+    const restartedBuildId = String(restarted?.local?.data?.runtimeBuildId || "").trim();
+    if (!restarted?.local?.ok || restartedBuildId !== expectedBuildId) {
+      throw new Error(`Runtime restart không nạp đúng build ${expectedBuildId}; đang chạy ${restartedBuildId || "unknown"}.`);
+    }
+    diagnostic("info", "manager", "runtime", "Runtime CodexPro đã restart sang build mới", {
+      action: "runtime-build-refreshed",
+      previous_build_id: activeBuildId,
+      runtime_build_id: restartedBuildId,
+      runtime_started_at: String(restarted?.local?.data?.runtimeStartedAt || "")
+    });
+    return { checked: true, restarted: true, runtimeBuildId: restartedBuildId };
+  })().catch((error) => {
+    diagnostic("error", "manager", "runtime", `Không đồng bộ được runtime CodexPro: ${error?.message || String(error)}`, {
+      action: "runtime-build-refresh-failed",
+      error
+    });
+    return { checked: true, restarted: false, reason: "refresh-failed", error: error?.message || String(error) };
+  });
+  return runtimeFreshnessPromise;
+}
+
 diagnosticIpcHandle("codexpro:status", { category: "status", action: "runtime-status", slowMs: 5_000 }, () => runtimeStatus());
 diagnosticIpcHandle("codexpro:control", {
   category: "status",
@@ -3837,6 +3887,7 @@ if (!hasSingleInstanceLock) {
     void headlessWorkers.startAutoWorkers().catch((error) => {
       console.warn("Không thể tự khởi động headless worker:", error instanceof Error ? error.message : String(error));
     });
+    void ensureFreshRuntimeAfterManagerStart();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });

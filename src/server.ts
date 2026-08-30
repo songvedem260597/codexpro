@@ -2037,6 +2037,18 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           reason: "prepared_task_id_owner"
         });
       }
+      if (managerPrepared && !preparedOwner && !gateProfileId) {
+        recordBrowserProfileTaskEvent("repo_task_owner_missing", {
+          task_id: taskId,
+          task_title: String(args.task_title || ""),
+          session_profile_id: sessionProfileId,
+          reason: "prepared_task_id_not_found"
+        });
+        throw new CodexProError(
+          "REPO_TASK_NOT_PREPARED: This Manager task id has no owning Chrome profile. Refresh the Manager task and call begin_repo_task with the newly prepared id.",
+          { code: "REPO_TASK_NOT_PREPARED", details: { task_id: taskId } }
+        );
+      }
       const scope: "workspace" | "all_allowed" = managerPrepared && args.scope === "all_allowed" ? "all_allowed" : "workspace";
       if (requireRepoTask) {
         if (!gateProfileId) {
