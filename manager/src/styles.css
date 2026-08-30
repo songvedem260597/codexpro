@@ -412,7 +412,7 @@ section { margin-bottom: 38px; }
 .chat-transcript-message.is-response-runway.is-typing { align-items: flex-start; }
 .chat-transcript-message.is-tool-activity { align-items: center; padding: 6px 0; }
 .chat-transcript-message.is-tool-activity .chat-message-avatar { margin-top: 0; }
-.tool-activity-live { display: inline-flex; align-items: center; gap: 8px; color: #aebcff; }
+.tool-activity-live { display: inline-flex; align-items: center; gap: 8px; padding-left: 31px; color: #aebcff; }
 .chat-message-avatar { width: 28px; height: 28px; flex: 0 0 auto; display: grid; place-items: center; margin-top: 2px; color: #c9d4ff; border: 1px solid #3e4d79; border-radius: var(--radius-control); background: #1b2440; font-size: 13px; }
 .latest-response-content { min-width: 0; min-height: 0; flex: 1; }
 .chat-message-actions { display: flex; align-items: center; gap: 4px; min-height: 28px; margin-top: 7px; }
