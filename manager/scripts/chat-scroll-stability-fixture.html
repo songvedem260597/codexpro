@@ -34,7 +34,7 @@
     </div>
     <script type="module">
       window.__chatScrollModuleStarted = true;
-      const { handleResponseWheel, installResponseAutoPin, recordResponseScroll, responseDistanceFromBottom, responseScrollMetrics, scrollResponseToTurnAnchor } = await import("../src/chat-scroll.js");
+      const { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, recordResponseScroll, responseDistanceFromBottom, responseScrollMetrics, scheduleResponseAutoResume, scrollResponseToTurnAnchor } = await import("../src/chat-scroll.js");
       const waitFrames = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const panel = document.querySelector("#panel");
       const transcript = document.querySelector("#transcript");
@@ -118,18 +118,53 @@
       canonical.replaceWith(replacement);
       await waitFrames();
       maintainAnchor("anchor-after-canonical-replace");
+
+      const resumeProfileId = "resume-fixture";
+      const resumeLocked = new Map();
+      const resumeTimers = new Map();
+      const resumeEvents = [];
+      const fakeTimers = new Map();
+      const fakeDelays = new Map();
+      let fakeTimerId = 0;
+      const fakeWindow = {
+        setTimeout(callback, delay) {
+          const id = ++fakeTimerId;
+          fakeTimers.set(id, callback);
+          fakeDelays.set(id, delay);
+          return id;
+        },
+        clearTimeout(id) {
+          fakeTimers.delete(id);
+          fakeDelays.delete(id);
+        }
+      };
+      scheduleResponseAutoResume({ profileId: resumeProfileId, lockedProfiles: resumeLocked, timers: resumeTimers, delay: 5000, windowObject: fakeWindow, resume: () => resumeEvents.push("resumed") });
+      const firstResumeTimer = resumeTimers.get(resumeProfileId);
+      scheduleResponseAutoResume({ profileId: resumeProfileId, lockedProfiles: resumeLocked, timers: resumeTimers, delay: 5000, windowObject: fakeWindow, resume: () => resumeEvents.push("resumed") });
+      const secondResumeTimer = resumeTimers.get(resumeProfileId);
+      const timerReset = firstResumeTimer !== secondResumeTimer && !fakeTimers.has(firstResumeTimer) && fakeTimers.has(secondResumeTimer);
+      const delayedResume = fakeDelays.get(secondResumeTimer) === 5000 && Boolean(resumeLocked.get(resumeProfileId));
+      fakeTimers.get(secondResumeTimer)?.();
+      const resumedAfterIdle = !resumeLocked.get(resumeProfileId) && !resumeTimers.has(resumeProfileId) && resumeEvents.length === 1;
+      scheduleResponseAutoResume({ profileId: resumeProfileId, lockedProfiles: resumeLocked, timers: resumeTimers, delay: 5000, windowObject: fakeWindow, resume: () => resumeEvents.push("unexpected") });
+      const canceledResumeTimer = resumeTimers.get(resumeProfileId);
+      const canceledResume = cancelResponseAutoResume(resumeProfileId, resumeTimers, fakeWindow) && !fakeTimers.has(canceledResumeTimer) && !resumeTimers.has(resumeProfileId) && resumeEvents.length === 1;
+      resumeLocked.delete(resumeProfileId);
+
       window.__chatScrollResult = {
         ok: steps.slice(0, 4).every((step) => step.distance <= 1)
           && steps[4].locked && Math.abs(steps[4].top - steps[4].expectedTop) <= 1
           && !steps[5].locked && steps[5].distance <= 1
           && pinEvents.some((event) => event.cause.includes("mutation"))
           && pinEvents.every((event) => event.after.distanceFromBottom <= 1)
-          && anchorSteps.every((step) => Math.abs(step.afterCenter - step.expectedCenter) <= 1),
+          && anchorSteps.every((step) => Math.abs(step.afterCenter - step.expectedCenter) <= 1)
+          && timerReset && delayedResume && resumedAfterIdle && canceledResume,
         order: [...transcript.children].map((node) => node.textContent),
         oldMessageHeights: [...transcript.children].slice(0, 3).map((node) => Math.round(node.getBoundingClientRect().height)),
         steps,
         pinEvents,
-        anchorSteps
+        anchorSteps,
+        autoResume: { timerReset, delayedResume, resumedAfterIdle, canceledResume, resumeEvents }
       };
     </script>
   </body>
