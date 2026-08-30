@@ -1259,7 +1259,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
   );
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.29.2" }, { instructions: serverInstructions(config, requireRepoTask) });
+  const server = new McpServer({ name: "CodexPro", version: "0.29.3" }, { instructions: serverInstructions(config, requireRepoTask) });
   runtimeTraceWorkspaceByServer.set(server as object, () => selectedRuntimeTraceWorkspace ?? workspaces.defaultWorkspace());
   repoTaskWorkspaceSelectorByServer.set(server as object, (root) => workspaces.openWorkspace(root));
   repoTaskGateRequiredByServer.set(server as object, requireRepoTask);

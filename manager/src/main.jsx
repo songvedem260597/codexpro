@@ -9,7 +9,7 @@ import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } fro
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
-import { profileCardBorderState } from "./profile-card-state.js";
+import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
 import { CodeGraphView } from "./code-graph-view.jsx";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
@@ -1621,14 +1621,14 @@ function App() {
     }
   }
 
-  async function openProfile(profile) {
+  async function openProfile(profile, options = {}) {
     const tabs = profile.conversation_tabs || [];
-    const activeTab = tabs.find((tab) => tab.active) || tabs[0];
+    const activeTab = profileChromeTarget(profile);
     const conversationOf = (tab) => String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
     const activeConversationId = conversationOf(activeTab);
     const conversations = profileRequestChats(profile);
     const defaultTarget = activeConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "";
-    const conversationId = String(requestTargets[profile.profile_id] || defaultTarget);
+    const conversationId = options.focusOnly ? activeConversationId : String(requestTargets[profile.profile_id] || defaultTarget);
     const selectedTab = tabs.find((tab) => conversationOf(tab) === conversationId);
     const targetTab = selectedTab || activeTab;
     const selectedConversation = conversations.find((chat) => String(chat.id) === conversationId);
@@ -2597,7 +2597,7 @@ function App() {
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
-          <small>CodexPro Manager 0.2.78</small>
+          <small>CodexPro Manager 0.2.79</small>
         </div>
       </aside>
 
@@ -2709,6 +2709,7 @@ function App() {
                 rendererError: String(liveTab?.renderer_error || ""),
                 connectionInterrupted: Boolean(liveTab?.connection_interrupted)
               });
+              const chromeAction = profileChromeActionState({ profile, busy, rendererUnresponsive });
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
               const profileProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const profileRepoLabel = String(profile.current_workspace_repo || profileProject?.githubRepo || profileProject?.name || "").trim();
@@ -2759,11 +2760,11 @@ function App() {
                       </button>
                       <button
                         className="button secondary open-profile"
-                        onClick={() => rendererUnresponsive ? recoverProfileTab(profile) : openProfile(profile)}
-                        disabled={Boolean(busy) || !profile.connected || !(profile.conversation_tabs?.length)}
-                        title={rendererUnresponsive ? "Đóng tab renderer bị treo và mở lại đúng conversation trong một tab mới" : "Mở profile Chrome"}
+                        onClick={() => rendererUnresponsive ? recoverProfileTab(profile) : openProfile(profile, { focusOnly: true })}
+                        disabled={chromeAction.disabled}
+                        title={chromeAction.title}
                       >
-                        {busy === `recover-profile:${profile.profile_id}` ? "Đang khôi phục…" : busy === `open-profile:${profile.profile_id}` ? "Đang mở…" : rendererUnresponsive ? "Khôi phục tab" : "Mở profile"}
+                        {busy === `recover-profile:${profile.profile_id}` ? "Đang khôi phục…" : busy === `open-profile:${profile.profile_id}` ? "Đang chuyển…" : chromeAction.label}
                       </button>
                     </div>
                     {connectorInstalled ? (

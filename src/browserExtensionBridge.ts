@@ -37,6 +37,12 @@ export interface ExtensionProfileSummary {
   current_workspace_root: string;
   current_task_id: string;
   current_task_title: string;
+  chatgpt_tabs: Array<{
+    id: number;
+    title: string;
+    url: string;
+    active: boolean;
+  }>;
   conversation_tabs: Array<{
     id: number;
     title: string;
@@ -513,6 +519,14 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       const titleConversation = activeConversation ?? conversationTabs[0];
       let activeConversationId = "";
       try { activeConversationId = new URL(String(titleConversation?.url ?? "")).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1] ?? ""; } catch {}
+      const chatgptTabSummaries = chatgptTabs
+        .map((tab) => ({
+          id: Number(tab.id),
+          title: String(tab.title ?? "ChatGPT").trim().slice(0, 300),
+          url: String(tab.url ?? "").trim().slice(0, 2000),
+          active: tab.active === true
+        }))
+        .filter((tab) => Number.isInteger(tab.id) && tab.id >= 0);
       const conversationSummaries = conversationTabs
         .map((tab) => ({
           id: Number(tab.id),
@@ -587,6 +601,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       current_workspace_root: profile.workspaceRoot,
       current_task_id: profileTaskIds.get(profile.id) || "",
       current_task_title: profileTaskTitles.get(profile.id) || "",
+      chatgpt_tabs: chatgptTabSummaries,
       conversation_tabs: conversationSummaries,
       recent_conversations: recentConversations
       };
