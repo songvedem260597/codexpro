@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRetryableChatTurnBusyError, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
+import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRepoTaskCompletionCurrent, isRetryableChatTurnBusyError, shouldShowChatBusy, shouldShowChatSettling } from "../manager/src/chat-status.js";
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "../manager/src/chat-transcript.js";
 import { projectSelectionChanged } from "../manager/src/chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "../manager/src/chat-response-audit.js";
@@ -21,6 +21,9 @@ assert.equal(canAcceptNextChatMessage({ networkState: "completed", tabBusy: fals
 assert.equal(canAcceptNextChatMessage({ networkState: "completed", tabBusy: false, tabSettling: false, responseCurrent: true, responseBusy: false, responseIncomplete: false }), true, "a fully completed and settled turn may accept the next message");
 assert.equal(canVerifyRepoTaskUse({ responseCurrent: true, responseReady: false, responseBusy: true, responseIncomplete: true, awaitingAssistant: true, tabBusy: false, tabSettling: false, canonicalBusy: true, streamBusy: false }), false, "repo verification must not retry while canonical generation is still active");
 assert.equal(canVerifyRepoTaskUse({ responseCurrent: true, responseReady: true, responseBusy: false, responseIncomplete: false, awaitingAssistant: false, tabBusy: false, tabSettling: false, canonicalBusy: false, streamBusy: false }), true, "repo verification may run only after the final assistant response is settled");
+assert.equal(isRepoTaskCompletionCurrent({ networkCompletedAt: "2026-08-30T10:37:26.000Z", repoTaskDispatchedAt: "2026-08-30T10:37:27.000Z" }), false, "a completion from the previous attempt must not verify a freshly retried task");
+assert.equal(isRepoTaskCompletionCurrent({ networkCompletedAt: "2026-08-30T10:37:28.000Z", repoTaskDispatchedAt: "2026-08-30T10:37:27.000Z" }), true, "a completion after the retry dispatch may verify the reused task");
+assert.equal(canVerifyRepoTaskUse({ responseCurrent: true, responseReady: true, responseBusy: false, responseIncomplete: false, awaitingAssistant: false, tabBusy: false, tabSettling: false, canonicalBusy: false, streamBusy: false, networkCompletedAt: "2026-08-30T10:37:26.000Z", repoTaskDispatchedAt: "2026-08-30T10:37:27.000Z" }), false, "settled DOM from an older attempt must not trigger task rollover");
 assert.equal(isRetryableChatTurnBusyError(new Error("Đoạn chat vẫn đang hoàn tất lượt trước.")), true, "a fresh worker busy guard must be retried after the turn settles");
 assert.equal(isRetryableChatTurnBusyError(new Error("Đoạn chat này đang xử lý yêu cầu khác.")), true, "a network busy race must be retried after the turn settles");
 assert.equal(isRetryableChatTurnBusyError(new Error("Profile này đang gửi một yêu cầu khác. Hãy chờ network ACK trước khi gửi tiếp.")), true, "a profile-level send race must be retried without showing a false verification error");
@@ -414,6 +417,9 @@ const openProfileChat = managerMain.slice(managerMain.indexOf("async function op
 assert.match(openProfileChat, /action: "activate_tab"[\s\S]*?}, 32000\)/, "Manager must wait longer than the 25-second extension bridge command timeout");
 assert.match(openProfileChat, /catch \(error\) \{\s*activationError = error;\s*\}[\s\S]*?focusChromeWindow\(title\)/, "a delayed activate acknowledgement must still verify whether Chrome actually opened");
 assert.match(openProfileChat, /activation_acknowledgement_delayed: Boolean\(activationError\)/, "open-profile diagnostics must expose delayed activation acknowledgements");
+assert.match(openProfileChat, /let navigation = null[\s\S]*?navigation = await localMcpTool[\s\S]*?target_conversation_id: targetConversationId[\s\S]*?navigation,\s*activation:/, "open-profile results must preserve navigation and target-selection evidence");
+assert.match(managerMain, /codexpro:open-profile-chat[\s\S]*?logSuccess: true[\s\S]*?selection_reason:[\s\S]*?activation_target_id:[\s\S]*?window_focus:/, "every successful open-profile request must persist the requested target and actual activation evidence");
+assert.match(managerUi, /action: "profile-tab-open-selection"[\s\S]*?tab_candidates:[\s\S]*?action: "profile-tab-open-result"[\s\S]*?activation_target_id:[\s\S]*?action: "profile-tab-open-error"/, "renderer diagnostics must capture tab candidates, selection reason, activation result, and failures");
 assert.match(managerMain, /async function recoverProfileChatTab[\s\S]*?action: "recover_chat_tab"[\s\S]*?60000/, "Manager must expose the bounded replace-tab recovery command");
 
 assert.match(server, /steps: z\.array\(z\.object/);
@@ -467,10 +473,11 @@ assert.match(sendProfileRequestSource, /task_kind[\s\S]*?<general hoặc code>[\
 assert.match(sendProfileRequestSource, /Không được mặc định dùng workspace CodexPro hiện tại\/default/, "all_allowed prompt must force the AI to choose the actual target instead of defaulting to CodexPro's current workspace");
 assert.doesNotMatch(sendProfileRequestSource, /root:\\"\$\{initialWorkspaceRoot\.replace\([\s\S]{0,120}?scope:\\"all_allowed/, "all_allowed prompt must not hardcode the Manager default workspace root");
 assert.match(sendProfileRequestSource, /action: "send_chat_request"[\s\S]*?}, 235000\)/, "chat submission must preserve the action timeout after a reconnect wait");
-const managerSendUiSource = managerUi.slice(managerUi.indexOf("async function sendRequest(profile)"), managerUi.indexOf("async function rolloverFullConversation"));
-assert.match(managerSendUiSource, /setRequestDrafts\([\s\S]*?profile\.profile_id\]: ""[\s\S]*?setRequestFiles\([\s\S]*?profile\.profile_id\]: \[\][\s\S]*?api\.sendProfileRequest/, "Manager must clear submitted text/files before awaiting the IPC send result");
+const managerSendUiSource = managerUi.slice(managerUi.indexOf("async function sendRequest(profile"), managerUi.indexOf("async function rolloverFullConversation"));
+assert.match(managerSendUiSource, /draftOverride !== null \? draftOverride : \(requestDraftsRef\.current\[profile\.profile_id\][\s\S]*?api\.sendProfileRequest/, "Manager send must read the composer snapshot without subscribing the full chat modal to every keystroke");
+assert.match(managerUi, /const submitted = await onSend\(draft\);\s*if \(submitted\) updateDraft\(""\)/, "the local composer must clear its draft only after a confirmed submission");
 assert.match(managerSendUiSource, /scope: allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "all_allowed sends must preserve scope and provide known workspace candidates to the backend");
-assert.match(managerSendUiSource, /restoreSubmittedInputs\(\)[\s\S]*?Trạng thái gửi chưa chắc chắn/, "an uncertain submission must restore the submitted draft instead of silently losing it");
+assert.match(managerSendUiSource, /restoreSubmittedInputs\(\)[\s\S]*?Trạng thái gửi chưa chắc chắn[\s\S]*?return false/, "an uncertain submission must preserve the local composer draft instead of silently clearing it");
 assert.match(managerSendUiSource, /CONVERSATION_LIMIT_REACHED:[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a terminal full-conversation banner must roll the pending user request and attachments into a new chat");
 const conversationRolloverSource = managerUi.slice(managerUi.indexOf("async function rolloverFullConversation"), managerUi.indexOf("async function verifyRepoTaskUse"));
 assert.match(conversationRolloverSource, /newChat: true[\s\S]*?text: handoffText[\s\S]*?attachments:/, "conversation rollover must create a fresh ChatGPT chat and send the preserved context once");
@@ -540,6 +547,12 @@ assert.match(managerMain, /manager-chat-layout\.jsonl[\s\S]*?appendManagerChatLa
 assert.match(managerMain, /manager-chat-response-audit\.jsonl[\s\S]*?appendManagerChatResponseAuditLog[\s\S]*?codexpro:log-chat-response-audit/, "Manager must persist bounded ChatGPT-to-Manager response comparison logs");
 assert.match(managerMain, /manager-chat-cache\.json[\s\S]*?MAX_CHAT_CACHE_ENTRIES = 30/, "Manager must persist a bounded local response cache instead of rebuilding every transcript on open");
 assert.match(managerUi, /currentResponse\?\.repoTaskId && canVerifyRepoTaskUse\(/, "CodexPro verification must wait for a canonical-ready settled response");
+assert.match(managerMain, /const previousTaskId = String\(payload\?\.previousTaskId[\s\S]*?const taskId = previousTaskId \|\| `cpt_/, "task-title retry and chat rollover must preserve the original prepared task id");
+assert.match(managerMain, /repo_task_id_reused: taskIdReused[\s\S]*?repo_task_dispatched_at: taskDispatchedAt/, "Manager send results must expose task-id reuse and the attempt dispatch boundary");
+assert.match(managerUi, /repoTaskDispatchedAt: currentResponse\.repoTaskDispatchedAt/, "renderer task verification must compare network completion with the active send-attempt boundary");
+assert.match(managerUi, /repoTaskDispatchedAt: String\(result\?\.repo_task_dispatched_at[\s\S]*?repoTaskDispatchedAt: String\(created\?\.repo_task_dispatched_at[\s\S]*?repoTaskDispatchedAt: String\(retried\?\.repo_task_dispatched_at/, "initial sends, retries, and chat rollovers must all retain their dispatch boundary");
+assert.match(managerUi, /String\(created\?\.repo_task_id \|\| ""\) !== taskId[\s\S]*?String\(retried\?\.repo_task_id \|\| ""\) !== taskId/, "renderer must reject any retry or rollover that unexpectedly replaces the prepared task id");
+assert.match(managerUi, /action: "repo-task-title-rollover"[\s\S]*?task_id_reused:[\s\S]*?action: "repo-task-title-retry"[\s\S]*?task_id_reused:/, "retry diagnostics must record task-id continuity for both same-chat and new-chat recovery");
 assert.match(managerUi, /ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước/, "send must reject attempts that would steer the active turn");
 assert.match(managerUi, /setRequestSendEvidence\(\(current\) => \(\{ \.\.\.current, \[profile\.profile_id\]: null \}\)\)/, "opening Chrome must clear stale send evidence");
 assert.match(managerUi, /heartbeat\|offline\|did not reconnect[\s\S]*?refreshStatus\(\)/, "a final heartbeat failure must immediately reconcile the visible profile status");

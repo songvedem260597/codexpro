@@ -448,6 +448,8 @@ function defaultManagerSettings() {
     chatWidth: 940,
     chatHeight: 330,
     fontFamily: "system",
+    headingFontFamily: "inherit",
+    monoFontFamily: "inherit",
     fontSize: 14,
     profileLayout: "rows",
     maxSubagents: 1,
@@ -478,6 +480,8 @@ function readManagerSettings() {
       chatWidth: Math.max(720, Math.min(1600, Number(parsed?.chatWidth) || defaults.chatWidth)),
       chatHeight: Math.max(180, Math.min(700, Number(parsed?.chatHeight) || defaults.chatHeight)),
       fontFamily: MANAGER_FONT_CHOICES.has(String(parsed?.fontFamily || "")) ? String(parsed.fontFamily) : defaults.fontFamily,
+      headingFontFamily: parsed?.headingFontFamily === "inherit" || MANAGER_FONT_CHOICES.has(String(parsed?.headingFontFamily || "")) ? String(parsed.headingFontFamily) : defaults.headingFontFamily,
+      monoFontFamily: parsed?.monoFontFamily === "inherit" || MANAGER_FONT_CHOICES.has(String(parsed?.monoFontFamily || "")) ? String(parsed.monoFontFamily) : defaults.monoFontFamily,
       fontSize: Math.max(12, Math.min(18, Number(parsed?.fontSize) || defaults.fontSize)),
       profileLayout: parsed?.profileLayout === "cards" ? "cards" : defaults.profileLayout,
       maxSubagents: Math.max(1, Math.min(1, Number(parsed?.maxSubagents) || defaults.maxSubagents)),
@@ -635,6 +639,12 @@ function saveManagerSettingsPatch(patch = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(patch, "fontFamily") && MANAGER_FONT_CHOICES.has(String(patch.fontFamily))) {
     next.fontFamily = String(patch.fontFamily);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "headingFontFamily") && (patch.headingFontFamily === "inherit" || MANAGER_FONT_CHOICES.has(String(patch.headingFontFamily)))) {
+    next.headingFontFamily = String(patch.headingFontFamily);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "monoFontFamily") && (patch.monoFontFamily === "inherit" || MANAGER_FONT_CHOICES.has(String(patch.monoFontFamily)))) {
+    next.monoFontFamily = String(patch.monoFontFamily);
   }
   if (Object.prototype.hasOwnProperty.call(patch, "fontSize")) {
     next.fontSize = Math.max(12, Math.min(18, Number(patch.fontSize) || current.fontSize));
@@ -1108,7 +1118,8 @@ function createWindow() {
           }
         }
         let settingsProbe = null;
-        const settingsSmokeRequested = process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1" || process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "settings";
+        const fontRolesSmokeRequested = process.env.CODEXPRO_MANAGER_SMOKE_FONT_ROLES === "1";
+        const settingsSmokeRequested = process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1" || process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "settings" || fontRolesSmokeRequested;
         if (settingsSmokeRequested) {
           const beforeSettings = await win.webContents.executeJavaScript("window.codexpro.getManagerSettings().then((value) => JSON.parse(JSON.stringify(value)))", true);
           let workerPackProbe = null;
@@ -1118,6 +1129,10 @@ function createWindow() {
             return Boolean(button);
           })()`, true);
           await new Promise((resolve) => setTimeout(resolve, 300));
+          if (fontRolesSmokeRequested) {
+            await win.webContents.executeJavaScript(`(async () => { const choose = async (index, matcher) => { const row = [...document.querySelectorAll('.font-setting-row')][index]; const trigger = row?.querySelector('.settings-dropdown-trigger'); if (!trigger) throw new Error('Thiếu dropdown font role ' + index); trigger.click(); await new Promise((resolve) => setTimeout(resolve, 100)); const liveRow = [...document.querySelectorAll('.font-setting-row')][index]; const option = [...(liveRow?.querySelectorAll('.settings-dropdown-option') || [])].find((item) => matcher.test(item.textContent || '')); if (!option) throw new Error('Thiếu lựa chọn font role ' + index); option.click(); await new Promise((resolve) => setTimeout(resolve, 180)); }; await choose(0, /Be Vietnam Pro/i); await choose(1, /Manrope/i); await choose(2, /JetBrains Mono/i); })()`, true);
+            await new Promise((resolve) => setTimeout(resolve, 650));
+          }
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
             workerPackProbe = await win.webContents.executeJavaScript(`(async () => {
               const created = await window.codexpro.createWorkerImagePack('CodexPro smoke pack');
@@ -1133,7 +1148,7 @@ function createWindow() {
               };
             })()`, true);
             await win.webContents.executeJavaScript(`(async () => {
-              await window.codexpro.saveManagerSettings({ maxSubagents: 8, globalRules: '# CodexPro Global Rules\n\n- smoke-global-rule\n' });
+              await window.codexpro.saveManagerSettings({ maxSubagents: 8, globalRules: '# CodexPro Global Rules\n\n- smoke-global-rule\n', headingFontFamily: 'manrope', monoFontFamily: 'jetbrains-mono' });
               const range = document.querySelector('.settings-range:not(.chat-height-range)');
               const heightRange = document.querySelector('.chat-height-range');
               const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
@@ -1192,7 +1207,9 @@ function createWindow() {
               heightNumberValue: document.querySelector('input[aria-label="Chiều cao khung chat bên trong"]')?.value || '',
               subagentValue: document.querySelector('.subagent-limit-field input')?.value || '',
               globalRulesValue: document.querySelector('.global-rules-editor')?.value || '',
-              fontValue: document.querySelector('.font-setting-row .settings-dropdown-value strong')?.textContent?.trim() || '',
+              fontValue: document.querySelectorAll('.font-setting-row .settings-dropdown-value strong')?.[0]?.textContent?.trim() || '',
+              headingFontValue: document.querySelectorAll('.font-setting-row .settings-dropdown-value strong')?.[1]?.textContent?.trim() || '',
+              monoFontValue: document.querySelectorAll('.font-setting-row .settings-dropdown-value strong')?.[2]?.textContent?.trim() || '',
               profileLayoutValue: document.querySelector('.profile-layout-select .settings-dropdown-value strong')?.textContent?.trim() || '',
               profileLayoutClass: document.querySelector('.profile-list')?.className || '',
               workerCards: document.querySelectorAll('.worker-setting-card').length,
@@ -1201,20 +1218,32 @@ function createWindow() {
               chatWidthVar: document.querySelector('.app-shell')?.style.getPropertyValue('--chat-modal-width') || '',
               chatHeightVar: document.querySelector('.app-shell')?.style.getPropertyValue('--chat-response-height') || '',
               fontVar: document.querySelector('.app-shell')?.style.getPropertyValue('--app-font-family') || '',
-              bundledFontLoaded: document.fonts.check("400 14px 'Be Vietnam Pro'", 'Tiếng Việt Đặng Nguyễn Trường')
+              headingFontVar: document.querySelector('.app-shell')?.style.getPropertyValue('--heading-font-family') || '',
+              monoFontVar: document.querySelector('.app-shell')?.style.getPropertyValue('--mono-font-family') || '',
+              headingComputedFont: getComputedStyle(document.querySelector('.font-preview.is-title')).fontFamily,
+              monoComputedFont: getComputedStyle(document.querySelector('.font-preview.is-mono')).fontFamily,
+              bundledFontLoaded: document.fonts.check("400 14px 'Be Vietnam Pro'", 'Tiếng Việt Đặng Nguyễn Trường'),
+              roleFontsLoaded: document.fonts.check("600 17px 'Manrope'", 'Tiêu đề giao diện') && document.fonts.check("400 12px 'JetBrains Mono'", 'cpt_task_id')
             };
           })()`, true);
+          const fontRolesOk = !fontRolesSmokeRequested || (afterSettings.fontFamily === "be-vietnam-pro" && afterSettings.headingFontFamily === "manrope" && afterSettings.monoFontFamily === "jetbrains-mono" && /Be Vietnam Pro/i.test(uiSettings.fontValue) && /Manrope/i.test(uiSettings.headingFontValue) && /JetBrains Mono/i.test(uiSettings.monoFontValue) && uiSettings.bundledFontLoaded && uiSettings.roleFontsLoaded && /Be Vietnam Pro/i.test(uiSettings.fontVar) && /Manrope/i.test(uiSettings.headingFontVar) && /JetBrains Mono/i.test(uiSettings.monoFontVar) && /Manrope/i.test(uiSettings.headingComputedFont) && /JetBrains Mono/i.test(uiSettings.monoComputedFont));
           settingsProbe = {
-            ok: Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && uiSettings.subagentValue === "1" && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.maxSubagents === 1 && /smoke-global-rule/.test(afterSettings.globalRules || '') && /smoke-global-rule/.test(uiSettings.globalRulesValue || '') && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "be-vietnam-pro" && afterSettings.profileLayout === "cards" && /Be Vietnam Pro/i.test(uiSettings.fontValue) && uiSettings.bundledFontLoaded && /Be Vietnam Pro/i.test(uiSettings.fontVar) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
-            before: { maxSubagents: beforeSettings.maxSubagents, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout },
-            saved: { maxSubagents: afterSettings.maxSubagents, chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily, profileLayout: afterSettings.profileLayout },
+            ok: fontRolesOk && Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && uiSettings.subagentValue === "1" && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.maxSubagents === 1 && /smoke-global-rule/.test(afterSettings.globalRules || '') && /smoke-global-rule/.test(uiSettings.globalRulesValue || '') && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "be-vietnam-pro" && afterSettings.headingFontFamily === "manrope" && afterSettings.monoFontFamily === "jetbrains-mono" && afterSettings.profileLayout === "cards" && /Be Vietnam Pro/i.test(uiSettings.fontValue) && /Manrope/i.test(uiSettings.headingFontValue) && /JetBrains Mono/i.test(uiSettings.monoFontValue) && uiSettings.bundledFontLoaded && uiSettings.roleFontsLoaded && /Be Vietnam Pro/i.test(uiSettings.fontVar) && /Manrope/i.test(uiSettings.headingFontVar) && /JetBrains Mono/i.test(uiSettings.monoFontVar) && /Manrope/i.test(uiSettings.headingComputedFont) && /JetBrains Mono/i.test(uiSettings.monoComputedFont) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
+            before: { maxSubagents: beforeSettings.maxSubagents, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily, profileLayout: beforeSettings.profileLayout },
+            saved: { maxSubagents: afterSettings.maxSubagents, chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily, headingFontFamily: afterSettings.headingFontFamily, monoFontFamily: afterSettings.monoFontFamily, profileLayout: afterSettings.profileLayout },
             chatModalWidth,
             chatResponseHeight,
             ui: uiSettings,
             workerPackProbe
           };
-          if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
-            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify({ maxSubagents: beforeSettings.maxSubagents, globalRules: beforeSettings.globalRules, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, profileLayout: beforeSettings.profileLayout })})`, true);
+          if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1" || fontRolesSmokeRequested) {
+            const restorePatch = process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1"
+              ? { maxSubagents: beforeSettings.maxSubagents, globalRules: beforeSettings.globalRules, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily, profileLayout: beforeSettings.profileLayout }
+              : { fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily };
+            await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify(restorePatch)})`, true);
+            const restoredSettings = await win.webContents.executeJavaScript("window.codexpro.getManagerSettings().then((value) => JSON.parse(JSON.stringify(value)))", true);
+            settingsProbe.restored = { fontFamily: restoredSettings.fontFamily, headingFontFamily: restoredSettings.headingFontFamily, monoFontFamily: restoredSettings.monoFontFamily };
+            settingsProbe.ok = settingsProbe.ok && restoredSettings.fontFamily === beforeSettings.fontFamily && restoredSettings.headingFontFamily === beforeSettings.headingFontFamily && restoredSettings.monoFontFamily === beforeSettings.monoFontFamily;
           }
         }
         let diagnosticProbe = null;
@@ -1661,6 +1690,9 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
           await new Promise((resolve) => setTimeout(resolve, 120));
           await win.webContents.executeJavaScript("document.querySelector('.font-setting-row .settings-dropdown-menu')?.scrollTo({ top: 72, behavior: 'instant' })", true);
           await new Promise((resolve) => setTimeout(resolve, 100));
+        } else if (process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT_FONT_ROLES === "1") {
+          await win.webContents.executeJavaScript("document.querySelector('.font-role-grid')?.closest('.settings-panel')?.scrollIntoView({ block: 'start' })", true);
+          await new Promise((resolve) => setTimeout(resolve, 180));
         }
         const screenshot = process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT;
         if (screenshot) {
@@ -2514,6 +2546,9 @@ async function openProfileChat(payload) {
   const targetId = String(payload?.targetId ?? "").trim();
   const targetConversationId = String(payload?.targetConversationId || "").trim();
   const title = String(payload?.title || "").trim();
+  const selectionReason = String(payload?.selectionReason || "").trim();
+  const activeTargetId = String(payload?.activeTargetId ?? "").trim();
+  const activeConversationId = String(payload?.activeConversationId || "").trim();
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (conversationId && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome của profile này.");
@@ -2522,8 +2557,9 @@ async function openProfileChat(payload) {
   if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const token = base.token;
 
+  let navigation = null;
   if (conversationId && targetConversationId !== conversationId) {
-    await localMcpTool(base.config, token, "browser_control", {
+    navigation = await localMcpTool(base.config, token, "browser_control", {
       action: "navigate",
       profile_id: profileId,
       target_id: targetId,
@@ -2567,6 +2603,12 @@ async function openProfileChat(payload) {
     profile_id: profileId,
     conversation_id: conversationId || targetConversationId,
     target_id: Number(targetId),
+    target_conversation_id: targetConversationId,
+    target_title: title,
+    selection_reason: selectionReason,
+    active_target_id: activeTargetId,
+    active_conversation_id: activeConversationId,
+    navigation,
     activation: activation || { ok: true, acknowledgement_delayed: true },
     activation_acknowledgement_delayed: Boolean(activationError),
     window_focus: windowFocus
@@ -2695,7 +2737,10 @@ async function sendProfileRequestUnlocked(payload) {
   const requestedProjectRoot = String(payload?.projectRoot || "").trim();
   const requestedWorkspaceCandidates = Array.isArray(payload?.workspaceCandidates) ? payload.workspaceCandidates.slice(0, 80) : [];
   const requestedFiles = Array.isArray(payload?.attachments) ? payload.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
-  const taskId = `cpt_${randomBytes(12).toString("hex")}`;
+  const previousTaskId = String(payload?.previousTaskId || "").trim();
+  if (previousTaskId && !/^cpt_[a-f0-9]{24}$/.test(previousTaskId)) throw new Error("CodexPro task id trước đó không hợp lệ.");
+  const taskId = previousTaskId || `cpt_${randomBytes(12).toString("hex")}`;
+  const taskIdReused = Boolean(previousTaskId);
   const toolRetry = Boolean(payload?.toolRetry);
   const toolRolloverCount = Math.max(0, Math.min(1, Number(payload?.toolRolloverCount) || 0));
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
@@ -2862,6 +2907,7 @@ async function sendProfileRequestUnlocked(payload) {
     text ? `Yêu cầu của người dùng:\n${text}` : "Yêu cầu của người dùng nằm trong file đính kèm."
   ].join("\n");
   const dispatchStartedAt = Date.now();
+  const taskDispatchedAt = new Date(dispatchStartedAt).toISOString();
   const result = await localMcpToolInSession(session, "browser_control", {
     action: "send_chat_request",
     profile_id: profileId,
@@ -2871,7 +2917,7 @@ async function sendProfileRequestUnlocked(payload) {
     attachments
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
-  return { ...result, repo_task_id: taskId, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource };
+  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource };
   } finally {
     await closeLocalMcpSession(session);
   }
@@ -3097,9 +3143,11 @@ diagnosticIpcHandle("codexpro:setup-profile", {
 diagnosticIpcHandle("codexpro:open-profile-chat", {
   category: "profile",
   action: "open-profile-chat",
+  logSuccess: true,
+  successMessage: "Mở Chrome profile hoàn tất",
   failureMessage: "Không mở được Chrome profile",
-  details: (payload) => ({ profile_id: String(payload?.profileId || payload?.profile_id || ""), conversation_id: String(payload?.conversationId || payload?.conversation_id || ""), target_id: String(payload?.targetId || ""), target_conversation_id: String(payload?.targetConversationId || "") }),
-  resultDetails: (result) => ({ opened_new_tab: Boolean(result?.opened_new_tab), window_focused: Boolean(result?.window_focused || result?.window_focus?.ok), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed) })
+  details: (payload) => ({ profile_id: String(payload?.profileId || payload?.profile_id || ""), conversation_id: String(payload?.conversationId || payload?.conversation_id || ""), target_id: String(payload?.targetId || ""), target_conversation_id: String(payload?.targetConversationId || ""), target_title: String(payload?.title || ""), selection_reason: String(payload?.selectionReason || ""), active_target_id: String(payload?.activeTargetId || ""), active_conversation_id: String(payload?.activeConversationId || "") }),
+  resultDetails: (result) => ({ result_profile_id: String(result?.profile_id || ""), result_conversation_id: String(result?.conversation_id || ""), result_target_id: String(result?.target_id || ""), navigation_target_id: String(result?.navigation?.target_id || ""), navigation_url: String(result?.navigation?.url || ""), activation_target_id: String(result?.activation?.target_id || ""), activation_window_id: String(result?.activation?.window_id || ""), activation_window_focused: Boolean(result?.activation?.window_focused), window_focused: Boolean(result?.window_focused || result?.window_focus?.ok), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed), window_focus: result?.window_focus || null })
 }, async (event, payload) => {
   const result = await openProfileChat(payload);
   const owner = BrowserWindow.fromWebContents(event.sender);
