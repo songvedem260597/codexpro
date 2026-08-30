@@ -1995,7 +1995,7 @@ function App() {
     setError("");
     try {
       const result = await api.setupProfile(profile.profile_id);
-      notify(result.message || "CodexPro READY · kết nối thành công");
+      notify(result.message || "CodexPro READY");
       await refresh(false);
     } catch (err) {
       setError(err?.message || String(err));
