@@ -465,6 +465,7 @@ function defaultManagerSettings() {
     headingFontFamily: "inherit",
     monoFontFamily: "inherit",
     fontSize: 14,
+    fontWeight: 400,
     profileLayout: "rows",
     maxSubagents: 1,
     autoRecovery: false,
@@ -500,6 +501,7 @@ function readManagerSettings() {
       headingFontFamily: parsed?.headingFontFamily === "inherit" || MANAGER_FONT_CHOICES.has(String(parsed?.headingFontFamily || "")) ? String(parsed.headingFontFamily) : defaults.headingFontFamily,
       monoFontFamily: parsed?.monoFontFamily === "inherit" || MANAGER_FONT_CHOICES.has(String(parsed?.monoFontFamily || "")) ? String(parsed.monoFontFamily) : defaults.monoFontFamily,
       fontSize: Math.max(12, Math.min(18, Number(parsed?.fontSize) || defaults.fontSize)),
+      fontWeight: Math.max(400, Math.min(700, Math.round((Number(parsed?.fontWeight) || defaults.fontWeight) / 100) * 100)),
       profileLayout: parsed?.profileLayout === "cards" ? "cards" : defaults.profileLayout,
       maxSubagents: Math.max(1, Math.min(1, Number(parsed?.maxSubagents) || defaults.maxSubagents)),
       autoRecovery: parsed?.autoRecovery === true,
@@ -668,6 +670,9 @@ function saveManagerSettingsPatch(patch = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(patch, "fontSize")) {
     next.fontSize = Math.max(12, Math.min(18, Number(patch.fontSize) || current.fontSize));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "fontWeight")) {
+    next.fontWeight = Math.max(400, Math.min(700, Math.round((Number(patch.fontWeight) || current.fontWeight) / 100) * 100));
   }
   if (Object.prototype.hasOwnProperty.call(patch, "profileLayout")) {
     next.profileLayout = patch.profileLayout === "cards" ? "cards" : "rows";
@@ -1185,8 +1190,8 @@ function createWindow() {
               };
             })()`, true);
             await win.webContents.executeJavaScript(`(async () => {
-              await window.codexpro.saveManagerSettings({ maxSubagents: 8, globalRules: '# CodexPro Global Rules\n\n- smoke-global-rule\n', headingFontFamily: 'manrope', monoFontFamily: 'jetbrains-mono' });
-              const range = document.querySelector('.settings-range:not(.chat-height-range)');
+              await window.codexpro.saveManagerSettings({ maxSubagents: 8, globalRules: '# CodexPro Global Rules\n\n- smoke-global-rule\n', headingFontFamily: 'manrope', monoFontFamily: 'jetbrains-mono', fontWeight: 500 });
+              const range = document.querySelector('.settings-range:not(.chat-height-range):not(.font-weight-range)');
               const heightRange = document.querySelector('.chat-height-range');
               const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
               if (range) {
@@ -1247,6 +1252,7 @@ function createWindow() {
               fontValue: document.querySelectorAll('.font-setting-row .settings-dropdown-value strong')?.[0]?.textContent?.trim() || '',
               headingFontValue: document.querySelectorAll('.font-setting-row .settings-dropdown-value strong')?.[1]?.textContent?.trim() || '',
               monoFontValue: document.querySelectorAll('.font-setting-row .settings-dropdown-value strong')?.[2]?.textContent?.trim() || '',
+              fontWeightValue: document.querySelector('.font-weight-range')?.value || '',
               profileLayoutValue: document.querySelector('.profile-layout-select .settings-dropdown-value strong')?.textContent?.trim() || '',
               profileLayoutClass: document.querySelector('.profile-list')?.className || '',
               workerCards: document.querySelectorAll('.worker-setting-card').length,
@@ -1257,6 +1263,8 @@ function createWindow() {
               fontVar: document.querySelector('.app-shell')?.style.getPropertyValue('--app-font-family') || '',
               headingFontVar: document.querySelector('.app-shell')?.style.getPropertyValue('--heading-font-family') || '',
               monoFontVar: document.querySelector('.app-shell')?.style.getPropertyValue('--mono-font-family') || '',
+              bodyWeightVar: document.querySelector('.app-shell')?.style.getPropertyValue('--weight-body') || '',
+              titleWeightVar: document.querySelector('.app-shell')?.style.getPropertyValue('--weight-title') || '',
               headingComputedFont: getComputedStyle(document.querySelector('.font-preview.is-title')).fontFamily,
               monoComputedFont: getComputedStyle(document.querySelector('.font-preview.is-mono')).fontFamily,
               bundledFontLoaded: document.fonts.check("400 14px 'Be Vietnam Pro'", 'Tiếng Việt Đặng Nguyễn Trường'),
@@ -1275,7 +1283,7 @@ function createWindow() {
           };
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1" || fontRolesSmokeRequested) {
             const restorePatch = process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1"
-              ? { maxSubagents: beforeSettings.maxSubagents, globalRules: beforeSettings.globalRules, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily, profileLayout: beforeSettings.profileLayout }
+              ? { maxSubagents: beforeSettings.maxSubagents, globalRules: beforeSettings.globalRules, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily, fontWeight: beforeSettings.fontWeight, profileLayout: beforeSettings.profileLayout }
               : { fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily };
             await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify(restorePatch)})`, true);
             const restoredSettings = await win.webContents.executeJavaScript("window.codexpro.getManagerSettings().then((value) => JSON.parse(JSON.stringify(value)))", true);
