@@ -68,20 +68,33 @@ try {
       connector_token: "fixture-task-secret"
     })
   ].join("\n") + "\n", "utf8");
+  await fs.writeFile(path.join(root, "runtime-lifecycle.jsonl"), `${JSON.stringify({
+    schema_version: 1,
+    record_id: "runtime-fixture",
+    timestamp: new Date().toISOString(),
+    level: "error",
+    source: "runtime",
+    category: "lifecycle",
+    action: "child-exit",
+    message: "codexpro process exited",
+    details: { child_pid: 1234, exit_code: 1, token: "fixture-runtime-secret" }
+  })}\n`, "utf8");
 
   await pruneDiagnosticLogs(root);
   const all = await readDiagnosticLogs(root, { hours: 24, limit: 20 });
-  assert.equal(all.summary.total, 5);
-  assert.equal(all.summary.error, 1);
+  assert.equal(all.summary.total, 6);
+  assert.equal(all.summary.error, 2);
   assert.equal(all.summary.warn, 2);
   assert.equal(all.summary.info, 2);
-  assert.deepEqual(all.available.levels, { info: 2, warn: 2, error: 1 });
+  assert.deepEqual(all.available.levels, { info: 2, warn: 2, error: 2 });
   assert.equal(all.available.sources.mcp, 1);
   assert.equal(all.available.sources.renderer, 2);
   assert.equal(all.available.sources["mcp-task"], 2);
+  assert.equal(all.available.sources.runtime, 1);
   assert.equal(all.available.categories.tool, 1);
   assert.equal(all.available.categories.chat, 1);
   assert.equal(all.available.categories["task-routing"], 2);
+  assert.equal(all.available.categories.lifecycle, 1);
   assert.ok(!all.entries.some((entry) => entry.action === "expired"));
   assert.equal(new Set(all.entries.map((entry) => entry.record_id)).size, all.summary.total, "every record needs a unique id for incident correlation");
   assert.ok(all.entries.every((entry) => /^\w[\w-]+$/.test(entry.record_id)), "diagnostic record ids must be searchable");
@@ -91,11 +104,13 @@ try {
   assert.ok(!serialized.includes("fixture-sensitive-alpha"));
   assert.ok(!serialized.includes("fixture-sensitive-beta"));
   assert.ok(!serialized.includes("fixture-task-secret"));
+  assert.ok(!serialized.includes("fixture-runtime-secret"));
   assert.ok(serialized.includes("[REDACTED]"));
 
   const errors = await readDiagnosticLogs(root, { hours: 24, level: "error" });
-  assert.equal(errors.entries.length, 1);
-  assert.equal(errors.entries[0].action, "send-request");
+  assert.equal(errors.entries.length, 2);
+  assert.ok(errors.entries.some((entry) => entry.action === "send-request"));
+  assert.ok(errors.entries.some((entry) => entry.action === "child-exit"));
   assert.equal(errors.available.sources.mcp, 1, "filter facets must retain sources outside the selected result set");
   assert.equal(errors.available.levels.info, 2, "filter facets must retain all available levels");
 
@@ -138,6 +153,7 @@ try {
   const cleared = await readDiagnosticLogs(root, { hours: 24 });
   assert.equal(cleared.summary.total, 0);
   await assert.rejects(fs.stat(path.join(root, "profile-task-events.jsonl")), { code: "ENOENT" });
+  await assert.rejects(fs.stat(path.join(root, "runtime-lifecycle.jsonl")), { code: "ENOENT" });
 
   console.log("✓ diagnostic log retention/redaction/filter smoke test passed");
 } finally {

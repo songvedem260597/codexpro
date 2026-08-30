@@ -820,6 +820,28 @@ function App() {
     ].join(":");
     return `${openChatResponse.conversationId || ""}:${messages.length}:${contentKey}:${turnKey}`;
   }, [busy, chatProfileId, openChatResponse, requestTargets, status?.browserProfiles]);
+  const openChatTurnActive = useMemo(() => {
+    if (!chatProfileId) return false;
+    const selectedTarget = String(requestTargets[chatProfileId] || openChatResponse?.conversationId || "");
+    const responseCurrent = Boolean(openChatResponse && openChatResponse.conversationId === selectedTarget);
+    const openProfile = (status?.browserProfiles || []).find((profile) => profile.profile_id === chatProfileId);
+    const openTab = (openProfile?.conversation_tabs || []).find((tab) => selectedTarget && String(tab.url || "").includes(`/c/${selectedTarget}`))
+      || (openProfile?.conversation_tabs || []).find((tab) => tab.active);
+    return Boolean(
+      busy === `request:${chatProfileId}`
+      || openTab?.busy
+      || openTab?.settling
+      || String(openTab?.network_state || "") === "generating"
+      || (responseCurrent && (
+        openChatResponse.busy
+        || openChatResponse.loading
+        || openChatResponse.networkStreamInProgress
+        || openChatResponse.canonicalBusy
+        || openChatResponse.incomplete
+        || openChatAwaitingAssistant
+      ))
+    );
+  }, [busy, chatProfileId, openChatAwaitingAssistant, openChatResponse, requestTargets, status?.browserProfiles]);
 
   useEffect(() => {
     setProjectPage((current) => Math.min(current, Math.max(0, Math.ceil(projects.length / PROJECTS_PER_PAGE) - 1)));
@@ -1276,15 +1298,29 @@ function App() {
     scrollResponseToBottom(profileId, cause);
   }, [scrollResponseToBottom, scrollResponseToTurnAnchor]);
 
-  const scrollOpenChatToBottom = useCallback((profileId) => {
-    scrollResponseToBottom(profileId, "open-chat");
+  const restoreOpenResponseTurnAnchor = useCallback((profileId) => {
+    if (responseTurnAnchors.current.has(profileId)) return true;
+    const container = responseBodyRefs.current.get(profileId);
+    const anchor = [...(container?.querySelectorAll('.chat-transcript-message.is-user[data-audit-fingerprint]') || [])].at(-1);
+    if (!anchor) return false;
+    responseTurnAnchors.current.set(profileId, {
+      conversationId: String(requestTargetsRef.current[profileId] || chatResponseRef.current?.dataset.layoutConversationId || ""),
+      fingerprint: String(anchor.dataset.auditFingerprint || ""),
+      messageId: String(anchor.dataset.messageId || ""),
+      restoredAt: Date.now()
+    });
+    return true;
+  }, []);
+
+  const positionOpenChatViewport = useCallback((profileId, cause = "open-chat") => {
+    maintainResponsePosition(profileId, cause);
     const modal = chatModalRef.current;
     if (!modal) return;
     const previousBehavior = modal.style.scrollBehavior;
     modal.style.scrollBehavior = 'auto';
     modal.scrollTop = modal.scrollHeight;
     modal.style.scrollBehavior = previousBehavior;
-  }, [scrollResponseToBottom]);
+  }, [maintainResponsePosition]);
 
   const holdResponseAutoScroll = useCallback((profileId, container, deltaY = 0) => {
     if (responseTurnAnchors.current.has(profileId) && deltaY) {
@@ -1603,8 +1639,9 @@ function App() {
 
   useLayoutEffect(() => {
     if (!chatProfileId || !openChatScrollKey) return;
+    if (openChatTurnActive) restoreOpenResponseTurnAnchor(chatProfileId);
     maintainResponsePosition(chatProfileId, "layout-effect:open-chat-scroll-key");
-  }, [chatProfileId, openChatScrollKey, maintainResponsePosition]);
+  }, [chatProfileId, openChatScrollKey, openChatTurnActive, maintainResponsePosition, restoreOpenResponseTurnAnchor]);
 
   useEffect(() => {
     if (!chatProfileId) return undefined;
@@ -2023,8 +2060,8 @@ function App() {
     responseTurnAnchors.current.delete(profile.profile_id);
     setChatProfileId(profile.profile_id);
     window.requestAnimationFrame(() => {
-      scrollOpenChatToBottom(profile.profile_id);
-      window.setTimeout(() => scrollOpenChatToBottom(profile.profile_id), 180);
+      positionOpenChatViewport(profile.profile_id, "open-chat:initial");
+      window.setTimeout(() => positionOpenChatViewport(profile.profile_id, "open-chat:initial-settle"), 180);
     });
     if (profile.connected && conversationId && conversationId !== NEW_CHAT_TARGET) {
       setRequestResponses((current) => {
@@ -2034,8 +2071,8 @@ function App() {
       });
       void hydrateCachedResponse(profile, conversationId).finally(() => {
         window.requestAnimationFrame(() => {
-          scrollOpenChatToBottom(profile.profile_id);
-          window.setTimeout(() => scrollOpenChatToBottom(profile.profile_id), 180);
+          positionOpenChatViewport(profile.profile_id, "open-chat:hydrated");
+          window.setTimeout(() => positionOpenChatViewport(profile.profile_id, "open-chat:hydrated-settle"), 180);
         });
       });
     }
