@@ -8,6 +8,14 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
+async function canonicalPath(value) {
+  try {
+    return await fs.realpath(value);
+  } catch {
+    return path.resolve(value);
+  }
+}
+
 async function getFreePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -239,13 +247,13 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
       root: alternateTaskRoot,
       scope: 'all_allowed'
     });
-    if (!beganAllAllowed.structuredContent.verified || beganAllAllowed.structuredContent.scope !== 'all_allowed' || path.resolve(beganAllAllowed.structuredContent.root) !== path.resolve(alternateTaskRoot)) {
+    if (!beganAllAllowed.structuredContent.verified || beganAllAllowed.structuredContent.scope !== 'all_allowed' || await canonicalPath(beganAllAllowed.structuredContent.root) !== await canonicalPath(alternateTaskRoot)) {
       throw new Error(`all_allowed task did not activate the AI-selected workspace: ${JSON.stringify(beganAllAllowed.structuredContent)}`);
     }
     const allAllowedRead = await callTool(gated, 'read', { path: 'alternate.txt' });
     if (!allAllowedRead.structuredContent.text.includes('all allowed root')) throw new Error('all_allowed profile task did not use the selected alternate workspace');
     const switchedAllAllowed = await callTool(gated, 'open_workspace', { root: taskRoot, include_tree: false });
-    if (path.resolve(switchedAllAllowed.structuredContent.root) !== path.resolve(taskRoot)) throw new Error('all_allowed task could not switch to another allowed workspace');
+    if (await canonicalPath(switchedAllAllowed.structuredContent.root) !== await canonicalPath(taskRoot)) throw new Error('all_allowed task could not switch to another allowed workspace');
     const switchedAllAllowedRead = await callTool(gated, 'read', { path: 'gate.txt' });
     if (!switchedAllAllowedRead.structuredContent.text.includes('gate initial')) throw new Error('all_allowed task did not keep the newly selected workspace for subsequent tools');
     const allAllowedStatus = await callTool(gated, 'repo_task_status', { task_id: 'cpt_dddddddddddddddddddddddd' });
