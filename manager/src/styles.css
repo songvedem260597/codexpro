@@ -148,8 +148,8 @@ section { margin-bottom: 38px; }
 .profile-worker-dot { position: absolute; right: 5px; bottom: 5px; width: 11px; height: 11px; border: 2px solid #111720; border-radius: 50%; background: #e5484d; box-shadow: 0 0 10px #e5484db3; }
 .profile-worker.is-idle { border-color: #33855a; box-shadow: 0 9px 26px #0009, 0 0 14px #53e58e26, inset 0 1px 0 #ffffff0a; }
 .profile-worker.is-idle .profile-worker-dot { background: #53e58e; box-shadow: 0 0 9px #53e58e99; }
-.profile-worker.is-working { border-color: #5571ee; box-shadow: 0 9px 26px #0009, 0 0 15px #70a0ff33, inset 0 1px 0 #ffffff0a; }
-.profile-worker.is-working .profile-worker-dot { background: #70a0ff; box-shadow: 0 0 11px #70a0ffcc; }
+.profile-worker.is-working { border-color: #f4a340; box-shadow: 0 9px 26px #0009, 0 0 15px #f4a34038, inset 0 1px 0 #ffffff0a; }
+.profile-worker.is-working .profile-worker-dot { background: #f4a340; box-shadow: 0 0 11px #f4a340b3; }
 .profile-worker.is-hung { border-color: #98414c; box-shadow: 0 9px 26px #0009, 0 0 15px #e5484d2e, inset 0 1px 0 #ffffff0a; }
 .profile-worker.is-hung .profile-worker-dot { animation: worker-alert 850ms steps(1) infinite; }
 .browser-profile.is-idle .profile-worker { border-color: #53e58e; box-shadow: 0 9px 26px #0009, 0 0 14px #53e58e33, inset 0 1px 0 #ffffff0a; }
