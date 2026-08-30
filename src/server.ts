@@ -1279,7 +1279,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
   );
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.29.9" }, { instructions: serverInstructions(config, requireRepoTask) });
+  const server = new McpServer({ name: "CodexPro", version: "0.29.10" }, { instructions: serverInstructions(config, requireRepoTask) });
   runtimeTraceWorkspaceByServer.set(server as object, () => selectedRuntimeTraceWorkspace ?? workspaces.defaultWorkspace());
   repoTaskWorkspaceSelectorByServer.set(server as object, (root) => workspaces.openWorkspace(root));
   repoTaskGateRequiredByServer.set(server as object, requireRepoTask);
@@ -1920,6 +1920,18 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           task_owner_profile_id: gateProfileId,
           reason: "prepared_task_id_owner"
         });
+      }
+      if (managerPrepared && !preparedOwner && !gateProfileId) {
+        recordBrowserProfileTaskEvent("repo_task_owner_missing", {
+          task_id: taskId,
+          task_title: String(args.task_title || ""),
+          session_profile_id: sessionProfileId,
+          reason: "prepared_task_id_not_found"
+        });
+        throw new CodexProError(
+          "REPO_TASK_NOT_PREPARED: This Manager task id has no owning Chrome profile. Refresh the Manager task and call begin_repo_task with the newly prepared id.",
+          { code: "REPO_TASK_NOT_PREPARED", details: { task_id: taskId } }
+        );
       }
       const scope: "workspace" | "all_allowed" = managerPrepared && args.scope === "all_allowed" ? "all_allowed" : "workspace";
       if (requireRepoTask) {

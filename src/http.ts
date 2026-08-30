@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import cors from "cors";
 import { z } from "zod";
@@ -23,6 +25,9 @@ import { createCodexProServer } from "./server.js";
 import { ensureBrowserExtensionBridge, getBrowserExtensionProfilePendingTask, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles } from "./browserExtensionBridge.js";
 
 const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
+const RUNTIME_STARTED_AT = new Date().toISOString();
+const RUNTIME_ENTRY_STAT = fs.statSync(fileURLToPath(import.meta.url));
+const RUNTIME_BUILD_ID = `${Math.floor(RUNTIME_ENTRY_STAT.mtimeMs)}:${RUNTIME_ENTRY_STAT.size}`;
 
 function browserExtensionConnectorInfo(config: CodexProConfig, profileId = "") {
   const runtime = readRuntimeConnection(config.defaultRoot);
@@ -453,7 +458,7 @@ const LOCAL_FAVICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 6
   <rect x="8" y="8" width="48" height="48" rx="12" fill="#ffffff" fill-opacity=".12" stroke="#ffffff" stroke-opacity=".38"/>
   <path d="M38.4 40.3c-1.8 1.1-3.9 1.7-6.3 1.7-6.1 0-10.3-4.2-10.3-10s4.2-10 10.4-10c2.4 0 4.5.6 6.2 1.7l-2.1 4.1c-1.1-.7-2.3-1-3.8-1-2.9 0-4.9 2.1-4.9 5.2s2 5.2 4.9 5.2c1.5 0 2.8-.4 3.9-1.1l2 4.2Z" fill="#ffffff"/>
 </svg>`;
-const CODEXPRO_VERSION = "0.29.9";
+const CODEXPRO_VERSION = "0.29.10";
 
 function printHelp(): void {
   console.log(`CodexPro MCP HTTP server
@@ -1680,6 +1685,8 @@ async function main(): Promise<void> {
     res.json({
       ok: true,
       name: "CodexPro",
+      runtimeStartedAt: RUNTIME_STARTED_AT,
+      runtimeBuildId: RUNTIME_BUILD_ID,
       defaultRoot: config.defaultRoot,
       allowedRoots: config.allowedRoots,
       bashMode: config.bashMode,

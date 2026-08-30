@@ -184,6 +184,13 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const manager = await createClient('repo-task-manager');
     const gated = await createClient('repo-task-gate', 'gate-smoke');
     const gatedSibling = await createClient('repo-task-gate-sibling', 'gate-smoke');
+    await expectToolErrorCode(manager, 'begin_repo_task', {
+      task_id: 'cpt_ffffffffffffffffffffffff',
+      task_title: 'Reject orphan manager task',
+      task_kind: 'code',
+      root: taskRoot,
+      scope: 'workspace'
+    }, 'REPO_TASK_NOT_PREPARED');
     const general = await createClient('repo-task-general-chatgpt', 'general-smoke');
     const generalBegan = await callTool(general, 'begin_repo_task', { task_title: 'Research pixel models', task_kind: 'general' });
     if (!generalBegan.structuredContent.verified || generalBegan.structuredContent.gate_active !== false || generalBegan.structuredContent.global_rules_loaded !== false || generalBegan.structuredContent.codexgraph_active !== false) {
@@ -588,6 +595,9 @@ try {
   const authorizedJson = await authorized.json();
   if (authorizedJson.authRequired !== true) {
     throw new Error(`expected authenticated healthz to report authRequired=true, got ${JSON.stringify(authorizedJson)}`);
+  }
+  if (!/^\d+:\d+$/.test(String(authorizedJson.runtimeBuildId || '')) || !Number.isFinite(Date.parse(String(authorizedJson.runtimeStartedAt || '')))) {
+    throw new Error(`healthz must expose the loaded runtime build and start time: ${JSON.stringify(authorizedJson)}`);
   }
 
   for (const header of [`bearer ${token}`, `Bearer    ${token}`]) {
