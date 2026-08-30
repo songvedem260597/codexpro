@@ -420,7 +420,7 @@ function compactToolActivityMessages(messages) {
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.75";
+const WORKER_EXTENSION_VERSION = "0.5.76";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -2838,11 +2838,9 @@ function App() {
               const liveTab = profileTabs.find((tab) => tab.active) || profileTabs.find((tab) => tab.busy || tab.settling) || profileTabs[0];
               const rendererUnresponsive = Boolean(profile.connected && liveTab?.renderer_unresponsive);
               const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
-              const connectorObservedLive = Boolean((working || settling) && /^CodexPro đang\b/i.test(liveActivityText));
-              const connectorInstalled = Boolean(profile.connector_installed || connectorObservedLive);
-              const connectorMessage = connectorInstalled && !profile.connector_installed && connectorObservedLive
-                ? "CodexPro đang hoạt động trong ChatGPT."
-                : profile.connector_message;
+              const connectorInstalled = Boolean(profile.connector_installed && profile.connector_profile_bound !== false);
+              const connectorUpdateRequired = Boolean(profile.connector_update_required);
+              const connectorMessage = profile.connector_message;
               const idle = profile.connected && profile.activity === "idle" && (connectorInstalled || !ready);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
               const profileBorderState = profileCardBorderState({
@@ -2874,7 +2872,8 @@ function App() {
                       {settling && <span className="badge profile-settling">ĐANG HOÀN TẤT</span>}
                       {working && <WorkingBadge />}
                       {idle && <span className="badge connected">ĐANG RẢNH</span>}
-                      {!connectorInstalled && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
+                      {connectorUpdateRequired && <span className="badge profile-missing">CẦN CẬP NHẬT CONNECTOR</span>}
+                      {!connectorInstalled && !connectorUpdateRequired && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
                       <span
                         className={`active-repo-chip ${repoLabel ? "" : "is-empty"}`}
                         title={repoTitle}
@@ -2925,7 +2924,7 @@ function App() {
                         onClick={() => setupProfile(profile)}
                         disabled={Boolean(busy) || profileChecking || !profile.connected || !ready}
                       >
-                        {profileBusy ? "Đang thêm + test…" : "Thêm CodexPro"}
+                        {profileBusy ? (connectorUpdateRequired ? "Đang cập nhật + test…" : "Đang thêm + test…") : (connectorUpdateRequired ? "Cập nhật CodexPro" : "Thêm CodexPro")}
                       </button>
                     )}
                   </div>
