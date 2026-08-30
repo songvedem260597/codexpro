@@ -454,6 +454,8 @@ assert.match(server, /structuredContent: \{ error: errorEnvelope\(error\) \}/);
 assert.match(httpSource, /app\.get\("\/browser-events"/);
 assert.match(httpSource, /text\/event-stream/);
 assert.match(managerMain, /startBrowserProfileEventStream/);
+assert.match(managerMain, /async function waitForRuntimeBuild\([\s\S]*?Date\.now\(\) \+ timeoutMs[\s\S]*?setTimeout\(resolve, 750\)[\s\S]*?runtimeBaseStatus\(\{ forceRefresh: true \}\)/, "Manager must wait for a restarted runtime to expose its new build before reporting failure");
+assert.match(managerMain, /restartAttempt = await controlServer\("restart"\)[\s\S]*?waitForRuntimeBuild\(expectedBuildId, restartAttempt\)/, "runtime freshness checks must verify the restarted build across the bounded startup window");
 assert.match(managerMain, /latestBrowserProfileStream[\s\S]*?cachedBrowserProfileForSend/, "Manager must cache the live browser profile stream for latency-sensitive sends");
 assert.match(managerMain, /latestBrowserProfileStream = \{ connected: true, checkedAt:[\s\S]*?profiles: payload\.profiles \}/, "browser-events payloads must refresh the send-side profile cache");
 assert.match(managerMain, /latestBrowserProfileStream = \{ \.\.\.latestBrowserProfileStream, connected: false \}/, "a broken browser event stream must disable the send-side cache");
