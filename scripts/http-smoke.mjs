@@ -439,7 +439,11 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const tools = await primary.listTools();
     if (!tools.tools.length) throw new Error('active MCP session disappeared after capacity pressure');
   } finally {
-    for (const client of clients.reverse()) await client.close().catch(() => {});
+    for (const client of clients.reverse()) {
+      try {
+        await client.close();
+      } catch {}
+    }
     child.kill('SIGTERM');
     await waitForExit(child).catch(() => {});
   }

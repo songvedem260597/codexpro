@@ -367,9 +367,18 @@ type ExpectedRepoTask = {
 const expectedRepoTaskByProfile = new Map<string, ExpectedRepoTask>();
 
 
+function canonicalResolvedRoot(value: string): string {
+  const resolved = path.resolve(value);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
 function sameResolvedRoot(left: string, right: string): boolean {
-  const resolvedLeft = path.resolve(left);
-  const resolvedRight = path.resolve(right);
+  const resolvedLeft = canonicalResolvedRoot(left);
+  const resolvedRight = canonicalResolvedRoot(right);
   return process.platform === "win32"
     ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
     : resolvedLeft === resolvedRight;

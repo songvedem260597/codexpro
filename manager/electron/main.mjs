@@ -3518,6 +3518,9 @@ async function waitForRuntimeBuild(expectedBuildId, initialStatus, timeoutMs = 1
 }
 
 function ensureFreshRuntimeAfterManagerStart() {
+  if (process.env.CODEXPRO_MANAGER_SMOKE === "1") {
+    return Promise.resolve({ checked: true, restarted: false, reason: "smoke-mode" });
+  }
   if (runtimeFreshnessPromise) return runtimeFreshnessPromise;
   runtimeFreshnessPromise = (async () => {
     const base = await runtimeBaseStatus({ forceRefresh: true });
@@ -3934,10 +3937,10 @@ if (!hasSingleInstanceLock) {
       });
     }
     createWindow();
+    void ensureFreshRuntimeAfterManagerStart();
     void headlessWorkers.startAutoWorkers().catch((error) => {
       console.warn("Không thể tự khởi động headless worker:", error instanceof Error ? error.message : String(error));
     });
-    void ensureFreshRuntimeAfterManagerStart();
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
