@@ -42,6 +42,29 @@ export function recordResponseScroll(profileId, container, lockedProfiles, posit
   if (responseDistanceFromBottom(container) <= threshold) lockedProfiles.delete(profileId);
 }
 
+export function scheduleResponseAutoResume({ profileId, lockedProfiles, timers, resume, delay = 5000, windowObject = window }) {
+  if (!profileId || !lockedProfiles || !timers) return 0;
+  lockedProfiles.set(profileId, true);
+  const previousTimer = timers.get(profileId);
+  if (previousTimer) windowObject.clearTimeout(previousTimer);
+  const timer = windowObject.setTimeout(() => {
+    if (timers.get(profileId) !== timer) return;
+    timers.delete(profileId);
+    lockedProfiles.delete(profileId);
+    if (typeof resume === "function") resume(profileId);
+  }, Math.max(0, Number(delay) || 0));
+  timers.set(profileId, timer);
+  return timer;
+}
+
+export function cancelResponseAutoResume(profileId, timers, windowObject = window) {
+  const timer = timers?.get(profileId);
+  if (!timer) return false;
+  windowObject.clearTimeout(timer);
+  timers.delete(profileId);
+  return true;
+}
+
 export function installResponseAutoPin({
   panel,
   getContainer,

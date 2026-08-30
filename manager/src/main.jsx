@@ -19,7 +19,7 @@ import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
-import { handleResponseWheel, installResponseAutoPin, recordResponseScroll, responseScrollMetrics, scrollResponseToTurnAnchor as applyResponseTurnAnchor } from "./chat-scroll.js";
+import { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, recordResponseScroll, responseScrollMetrics, scheduleResponseAutoResume, scrollResponseToTurnAnchor as applyResponseTurnAnchor } from "./chat-scroll.js";
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
@@ -34,6 +34,7 @@ const api = window.codexpro;
 const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
 const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
+const RESPONSE_MANUAL_SCROLL_RESUME_MS = 5000;
 const REALTIME_WATCHDOG_MS = 30000;
 const PROJECT_REFRESH_MS = 5 * 60 * 1000;
 const NEW_CHAT_TARGET = "__codexpro_new_chat__";
@@ -861,6 +862,7 @@ function App() {
   const chatModalRef = useRef(null);
   const chatResponseRef = useRef(null);
   const responseScrollLocked = useRef(new Map());
+  const responseScrollResumeTimers = useRef(new Map());
   const responseScrollPositions = useRef(new Map());
   const responseScrollDiagnostics = useRef(new Map());
   const responseTurnAnchors = useRef(new Map());
@@ -1441,6 +1443,7 @@ function App() {
   }, []);
 
   const positionOpenChatViewport = useCallback((profileId, cause = "open-chat") => {
+    if (responseScrollLocked.current.get(profileId)) return;
     maintainResponsePosition(profileId, cause);
     const modal = chatModalRef.current;
     if (!modal) return;
@@ -1450,6 +1453,23 @@ function App() {
     modal.style.scrollBehavior = previousBehavior;
   }, [maintainResponsePosition]);
 
+  const scheduleOpenChatAutoResume = useCallback((profileId) => {
+    scheduleResponseAutoResume({
+      profileId,
+      lockedProfiles: responseScrollLocked.current,
+      timers: responseScrollResumeTimers.current,
+      delay: RESPONSE_MANUAL_SCROLL_RESUME_MS,
+      resume: (resumedProfileId) => {
+        window.requestAnimationFrame(() => positionOpenChatViewport(resumedProfileId, "manual-scroll-idle"));
+      }
+    });
+  }, [positionOpenChatViewport]);
+
+  const holdOpenChatAutoScroll = useCallback((profileId, deltaY = 0) => {
+    if (deltaY < 0) responseScrollLocked.current.set(profileId, true);
+    if (responseScrollLocked.current.get(profileId)) scheduleOpenChatAutoResume(profileId);
+  }, [scheduleOpenChatAutoResume]);
+
   const holdResponseAutoScroll = useCallback((profileId, container, deltaY = 0) => {
     if (responseTurnAnchors.current.has(profileId) && deltaY) {
       responseTurnAnchors.current.delete(profileId);
@@ -1457,13 +1477,17 @@ function App() {
       container.style.removeProperty("--chat-turn-anchor-space");
       responseScrollLocked.current.set(profileId, true);
       responseScrollPositions.current.set(profileId, container.scrollTop);
+      scheduleOpenChatAutoResume(profileId);
       return;
     }
     handleResponseWheel(profileId, container, deltaY, responseScrollLocked.current, RESPONSE_BOTTOM_THRESHOLD_PX);
-  }, []);
+    if (responseScrollLocked.current.get(profileId)) scheduleOpenChatAutoResume(profileId);
+    else cancelResponseAutoResume(profileId, responseScrollResumeTimers.current);
+  }, [scheduleOpenChatAutoResume]);
 
   const pauseResponseAutoScroll = useCallback((profileId, container) => {
     recordResponseScroll(profileId, container, responseScrollLocked.current, responseScrollPositions.current, RESPONSE_BOTTOM_THRESHOLD_PX);
+    if (!responseScrollLocked.current.get(profileId)) cancelResponseAutoResume(profileId, responseScrollResumeTimers.current);
   }, []);
 
   const captureResponseSelection = useCallback((key, container) => {
@@ -1771,8 +1795,10 @@ function App() {
 
   useEffect(() => {
     if (!chatProfileId) return;
+    cancelResponseAutoResume(chatProfileId, responseScrollResumeTimers.current);
     responseScrollLocked.current.delete(chatProfileId);
     responseScrollPositions.current.delete(chatProfileId);
+    return () => cancelResponseAutoResume(chatProfileId, responseScrollResumeTimers.current);
   }, [chatProfileId, requestTargets[chatProfileId]]);
 
   useEffect(() => {
@@ -2247,6 +2273,7 @@ function App() {
     const rememberedRoot = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
     if (projectRoot && projectRoot.toLowerCase() !== rememberedRoot.toLowerCase()) selectProjectForProfile(profile.profile_id, projectRoot);
     else if (projectRoot) setRequestProjectRoots((current) => ({ ...current, [profile.profile_id]: projectRoot }));
+    cancelResponseAutoResume(profile.profile_id, responseScrollResumeTimers.current);
     responseScrollLocked.current.delete(profile.profile_id);
     responseScrollPositions.current.delete(profile.profile_id);
     responseTurnAnchors.current.delete(profile.profile_id);
@@ -3244,7 +3271,7 @@ function App() {
 
     return (
       <div className="modal-backdrop chat-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setChatProfileId("")}>
-        <div className="modal chat-modal" ref={chatModalRef}>
+        <div className="modal chat-modal" ref={chatModalRef} onWheelCapture={(event) => holdOpenChatAutoScroll(profile.profile_id, event.deltaY)} onTouchMoveCapture={() => holdOpenChatAutoScroll(profile.profile_id, -1)}>
           <div className="modal-head chat-modal-head">
             <div className="chat-modal-profile">
               <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
