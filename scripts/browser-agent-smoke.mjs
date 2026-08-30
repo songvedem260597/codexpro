@@ -210,6 +210,24 @@ const [browserOps, worker, server, httpSource, bridge, managerMain, managerPrelo
 ]);
 
 const probeChatActivitySource = worker.slice(worker.indexOf("function probeChatActivityPage()"), worker.indexOf("async function chatDomActivityState"));
+const tabPolicySource = worker.slice(worker.indexOf("function isChatGptTabUrl"), worker.indexOf("async function probeChatGptTabHealth"));
+const planChatTabCleanup = Function("MAX_CHATGPT_TABS", "CHAT_TAB_HEALTH_FAILURES_TO_CLOSE", "conversationIdFromUrl", `${tabPolicySource}; return planChatTabCleanup;`)(6, 2, value => {
+  try { return new URL(String(value || "")).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || ""; } catch { return ""; }
+});
+const tabPolicyPlan = planChatTabCleanup([
+  { id: 1, url: "https://chatgpt.com/c/recent-chat", active: true, last_accessed: 900 },
+  { id: 2, url: "https://chatgpt.com/c/busy-chat", busy: true, last_accessed: 100 },
+  { id: 3, url: "https://chatgpt.com/c/pinned-chat", pinned: true, last_accessed: 50 },
+  { id: 4, url: "https://chatgpt.com/c/unreachable-chat", health_failures: 2, last_accessed: 200 },
+  { id: 5, url: "https://chatgpt.com/#settings/Plugins", last_accessed: 300 },
+  { id: 6, url: "https://chatgpt.com/c/old-chat", last_accessed: 400 },
+  { id: 7, url: "https://chatgpt.com/c/recent-two", last_accessed: 500 },
+  { id: 8, url: "https://example.com/", last_accessed: 1 }
+], { maxTabs: 5, recentConversationIds: ["recent-chat", "recent-two"] });
+assert.deepEqual(tabPolicyPlan.close_ids, [4, 5], "tab policy must close unreachable tabs first, then the oldest disposable ChatGPT tab until the cap is met");
+assert.equal(tabPolicyPlan.reasons[4], "codexpro_unreachable");
+assert.equal(tabPolicyPlan.reasons[5], "tab_limit");
+assert.ok(!tabPolicyPlan.close_ids.includes(1) && !tabPolicyPlan.close_ids.includes(2) && !tabPolicyPlan.close_ids.includes(3), "tab policy must protect active, busy, and pinned tabs");
 const runChatActivityProbe = ({ assistantText, controls = [], turnControls = [] }) => Function("document", "getComputedStyle", `${probeChatActivitySource}; return probeChatActivityPage();`)(
   {
     querySelectorAll(selector) {
@@ -499,7 +517,11 @@ assert.doesNotMatch(canonicalReaderSource, /status==='finished_successfully'/, "
 const responseReaderSource = worker.slice(worker.indexOf("if(action==='get_chat_response')"), worker.indexOf("if(action==='open_tab')"));
 assert.match(responseReaderSource, /const networkStreamLive=Boolean\(effectiveNetworkBusy&&networkStream\.available\)/, "closed network streams must be hidden after the request becomes terminal");
 assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'/, "DOM fallback must explicitly mark only settled latest-assistant content as ready");
-assert.equal(manifest.version, "0.5.76");
+assert.equal(manifest.version, "0.5.77");
+assert.match(worker, /const MAX_CHATGPT_TABS = 6/, "worker must cap ChatGPT tabs per Chrome profile");
+assert.match(worker, /CHAT_TAB_HEALTH_FAILURES_TO_CLOSE = 2/, "worker must require consecutive failed CodexPro probes before closing an unhealthy tab");
+assert.match(worker, /cleanupChatGptTabs\(tabs,recentConversations\)[\s\S]*?if\(tabCleanup\.closed_count\)tabs=await tabList\(\)/, "polling must clean tabs and refresh the heartbeat snapshot after closures");
+assert.match(worker, /current\.active\|\|current\.pinned\|\|current\.audible[\s\S]*?pendingConversationByTab\.has\(tabId\)[\s\S]*?chatAttachmentOwnershipByTab\.has\(tabId\)[\s\S]*?browserMutationTailsByTab\.has\(tabId\)[\s\S]*?networkState\.busy\|\|canonicalActivity\.busy\|\|domActivity\?\.busy/, "worker must re-check live work, attachment, automation, network, canonical, and DOM protection signals before closing a tab");
 assert.match(worker, /value==='codexpro'\|\|value\.startsWith\('codexpro '\)/, "worker must open a Settings plugin row whose accessible name includes the permission summary");
 assert.match(connectorInstaller, /value === 'codexpro' \|\| value\.startsWith\('codexpro '\)/, "connector installer must recognize ChatGPT's CodexPro Allow all row");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
