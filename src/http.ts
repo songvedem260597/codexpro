@@ -1814,6 +1814,7 @@ async function main(): Promise<void> {
         workers: [...workspace.workers].sort()
       })).sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
     };
+  }
 
   function releaseTransport(sessionId: string | undefined): void {
     if (!sessionId) return;
