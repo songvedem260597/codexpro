@@ -162,6 +162,15 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
           />
           <div className="diagnostic-toolbar-actions">
             <button className="button secondary diagnostic-refresh" type="button" onClick={onRefresh} disabled={busy}>{busy ? "Đang tải…" : "Làm mới"}</button>
+            {visibleCount < entries.length && (
+              <button
+                className="button secondary diagnostic-load-more"
+                type="button"
+                onClick={() => setVisibleCount((current) => Math.min(entries.length, current + DIAGNOSTIC_RENDER_BATCH))}
+              >
+                Hiển thị thêm {Math.min(DIAGNOSTIC_RENDER_BATCH, entries.length - visibleCount)} log
+              </button>
+            )}
             <button className="button danger-quiet" type="button" onClick={onClear} disabled={busy || !summary.total}>Xóa log</button>
           </div>
           <div className="diagnostic-filter-row">
@@ -197,16 +206,6 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
             );
           })}
         </div>
-        {visibleCount < entries.length && (
-          <button
-            className="button secondary diagnostic-load-more"
-            type="button"
-            onClick={() => setVisibleCount((current) => Math.min(entries.length, current + DIAGNOSTIC_RENDER_BATCH))}
-          >
-            Hiển thị thêm {Math.min(DIAGNOSTIC_RENDER_BATCH, entries.length - visibleCount)} log
-          </button>
-        )}
-
         {selected && (
           <div className="diagnostic-detail">
             <div className="diagnostic-detail-head">

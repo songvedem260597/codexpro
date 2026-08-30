@@ -2901,6 +2901,26 @@ function App() {
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
+              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} rảnh, ${profileSummary.hung} mất kết nối, ${profileSummary.missing} chưa cài`}>
+                <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
+                <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
+                <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
+                <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
+                {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
+                {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
+              </div>
+              <button
+                className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}
+                onClick={() => setWorkerUpdateConfirmOpen(true)}
+                disabled={Boolean(busy) || profileSummary.reload === 0}
+                title={profileSummary.reload
+                  ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${WORKER_EXTENSION_VERSION}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
+                  : profileSummary.deferredUpdate
+                    ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
+                    : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
+              >
+                {busy === "reload-profiles" ? "Đang update worker…" : "Update worker extension"}
+              </button>
               <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>
                 {busy === "start" ? "Đang khởi động..." : "Khởi động"}
               </button>
@@ -2930,28 +2950,6 @@ function App() {
               <p className="eyebrow">CHROME PROFILE BRIDGE</p>
               <h2>Profile đã kết nối</h2>
               <p className="section-note">Mỗi profile có extension CodexPro sẽ tự xuất hiện tại đây. Chọn đúng profile để app tự thêm và test MCP.</p>
-            </div>
-            <div className="profile-head-actions">
-              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} rảnh, ${profileSummary.hung} mất kết nối, ${profileSummary.missing} chưa cài`}>
-                <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
-                <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
-                <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
-                <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
-                {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
-                {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
-              </div>
-              <button
-                className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}
-                onClick={() => setWorkerUpdateConfirmOpen(true)}
-                disabled={Boolean(busy) || profileSummary.reload === 0}
-                title={profileSummary.reload
-                  ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${WORKER_EXTENSION_VERSION}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
-                  : profileSummary.deferredUpdate
-                    ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
-                    : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
-              >
-                {busy === "reload-profiles" ? "Đang update worker…" : "Update worker extension"}
-              </button>
             </div>
           </div>
           <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout`}>
