@@ -1648,7 +1648,7 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
           }))()`, true);
           attachmentPreviewProbe.escapeClosedLightbox = !escapeState.lightboxOpen;
           attachmentPreviewProbe.escapeKeptChatModal = escapeState.chatModalOpen;
-          const textPreview = await requestFilePreview(path.resolve(app.getAppPath(), "..", "README.md"));
+          const textPreview = await requestFilePreview(path.join(app.getAppPath(), "package.json"));
           attachmentPreviewProbe.textPreviewKind = String(textPreview?.kind || "");
           attachmentPreviewProbe.textPreviewHasContent = Boolean(String(textPreview?.text || "").trim());
         }
