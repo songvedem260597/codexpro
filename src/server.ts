@@ -24,7 +24,8 @@ import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges }
 import { CONTROL_PLANE_TOOL_NAMES, controlPlaneToolDefinitions } from "./controlPlaneOps.js";
 import { codexPatchToUnifiedDiff, codexPatchTouchedPaths, isCodexPatchEnvelope } from "./patchOps.js";
 import { projectCompactGraph } from "./analysis/projection.js";
-import { createRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
+import { createRuntimeTraceContext, currentRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
+import { recordRuntimeEvent, type RuntimeEventType } from "./runtimeEvents.js";
 import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
@@ -345,6 +346,7 @@ const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
 
 const registeredToolHandlersByServer = new WeakMap<object, Map<string, CodexToolHandler>>();
 const runtimeTraceWorkspaceByServer = new WeakMap<object, () => Workspace | undefined>();
+const runtimeWorkerIdByServer = new WeakMap<object, string>();
 const repoTaskGateRequiredByServer = new WeakMap<object, boolean>();
 const repoTaskGateProfileByServer = new WeakMap<object, string>();
 type ActiveRepoTask = {
@@ -495,6 +497,54 @@ async function recordToolRuntimeTrace(
   }).catch(() => undefined);
 }
 
+function activeRepoTaskForServer(server: McpServer): ActiveRepoTask | undefined {
+  const profileId = repoTaskGateProfileByServer.get(server as object) || "";
+  return (profileId ? activeRepoTaskByProfile.get(profileId) : undefined)
+    ?? activeRepoTaskByServer.get(server as object);
+}
+
+async function recordServerRuntimeEvent(
+  server: McpServer,
+  type: RuntimeEventType,
+  options: {
+    workspace?: Workspace;
+    context?: RuntimeTraceContext;
+    task?: ActiveRepoTask;
+    source?: string;
+    timestampMs?: number;
+    payload?: Record<string, string | number | boolean | null>;
+  } = {}
+): Promise<void> {
+  let workspace = options.workspace;
+  if (!workspace) {
+    try {
+      workspace = runtimeTraceWorkspaceByServer.get(server as object)?.();
+    } catch {
+      workspace = undefined;
+    }
+  }
+  if (!workspace) return;
+
+  const task = options.task ?? activeRepoTaskForServer(server);
+  const context = options.context?.workspaceId === workspace.id ? options.context : undefined;
+  const profileId = repoTaskGateProfileByServer.get(server as object) || "";
+  const workerId = runtimeWorkerIdByServer.get(server as object) || "";
+  await recordRuntimeEvent(workspace, {
+    type,
+    source: options.source ?? "mcp-runtime",
+    ...(options.timestampMs !== undefined ? { timestampMs: options.timestampMs } : {}),
+    ...(context ? {
+      traceId: context.traceId,
+      spanId: context.spanId,
+      ...(context.parentSpanId ? { parentSpanId: context.parentSpanId } : {})
+    } : {}),
+    ...(task ? { taskId: task.taskId, taskTitle: task.taskTitle } : {}),
+    ...(profileId ? { profileId } : {}),
+    ...(workerId ? { workerId } : {}),
+    ...(options.payload ? { payload: options.payload } : {})
+  }).catch(() => undefined);
+}
+
 function normalizeSupertoolAction(value: unknown): string {
   const raw = String(value ?? "list_actions").trim();
   const normalized = raw.toLowerCase().replace(/[\s-]+/g, "_");
@@ -536,6 +586,19 @@ function registerToolCompat(
       initialWorkspace = undefined;
     }
     const traceContext = initialWorkspace ? createRuntimeTraceContext(initialWorkspace) : undefined;
+    const rawAction = typeof usageArgs?.action === "string" ? usageArgs.action.trim().slice(0, 160) : "";
+    const eventPayload = {
+      tool: name,
+      ...(rawAction ? { action: rawAction } : {})
+    };
+    if (initialWorkspace) {
+      void recordServerRuntimeEvent(server, "tool.started", {
+        workspace: initialWorkspace,
+        context: traceContext,
+        timestampMs: started,
+        payload: eventPayload
+      });
+    }
     const invokeHandler = () => handler(usageArgs);
     try {
       const handled = traceContext
@@ -547,6 +610,12 @@ function registerToolCompat(
       logToolCall(name, status, started);
       recordMcpUsage(name, usageArgs, result, status, durationMs);
       await recordToolRuntimeTrace(server, name, usageArgs, status, started, started + durationMs, traceContext);
+      await recordServerRuntimeEvent(server, status === "ok" ? "tool.completed" : "tool.failed", {
+        workspace: initialWorkspace,
+        context: traceContext,
+        timestampMs: started + durationMs,
+        payload: { ...eventPayload, durationMs }
+      });
       return result;
     } catch (error) {
       const result = tagToolResult(errorResult(error), name, options);
@@ -554,6 +623,12 @@ function registerToolCompat(
       logToolCall(name, "error", started);
       recordMcpUsage(name, usageArgs, result, "error", durationMs);
       await recordToolRuntimeTrace(server, name, usageArgs, "error", started, started + durationMs, traceContext);
+      await recordServerRuntimeEvent(server, "tool.failed", {
+        workspace: initialWorkspace,
+        context: traceContext,
+        timestampMs: started + durationMs,
+        payload: { ...eventPayload, durationMs }
+      });
       return result;
     }
   };
@@ -1352,6 +1427,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
   const browser = getSharedBrowserAutomation();
   const server = new McpServer({ name: "CodexPro", version: "0.30.0" }, { instructions: serverInstructions(config, requireRepoTask) });
   runtimeTraceWorkspaceByServer.set(server as object, () => selectedRuntimeTraceWorkspace ?? workspaces.defaultWorkspace());
+  if (context.workerId) runtimeWorkerIdByServer.set(server as object, String(context.workerId));
   repoTaskWorkspaceSelectorByServer.set(server as object, (root) => workspaces.openWorkspace(root));
   repoTaskGateRequiredByServer.set(server as object, requireRepoTask);
   if (browserProfileId) repoTaskGateProfileByServer.set(server as object, browserProfileId);
@@ -2036,6 +2112,14 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         activeRepoTaskByProfile.delete(gateProfileId);
         activeRepoTaskByProfile.set(gateProfileId, activeTask);
       }
+      await recordServerRuntimeEvent(server, "task.started", {
+        workspace,
+        context: currentRuntimeTraceContext(),
+        task: activeTask,
+        source: "repo-task",
+        timestampMs: Date.parse(proof.startedAt),
+        payload: { scope: proof.scope }
+      });
       return textResult(withGlobalRules(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}\nCodexGraph: active (${codexGraph.coverage.symbolCount} symbols, ${codexGraph.coverage.relationshipCount} relationships)`, globalRules), {
         task_id: proof.taskId,
         task_title: proof.taskTitle,
