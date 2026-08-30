@@ -146,6 +146,7 @@ const WORKER_EXTENSION_VERSION = "0.5.81";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
+const SCHEDULED_TASK_CACHE_MS = 10 * 1000;
 const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
 const GIT_SUMMARY_CACHE_MS = 2 * 60 * 1000;
 const GIT_SUMMARY_CACHE_RETENTION_MS = 30 * 60 * 1000;
@@ -155,6 +156,8 @@ const REPO_SCAN_TIMEOUT_MS = 12000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
 let runtimeFreshnessPromise = null;
+let scheduledTaskCache = null;
+let scheduledTaskPromise = null;
 const runtimeHealthDiagnosticTracker = createRuntimeHealthDiagnosticTracker();
 let repoScanCache = null;
 let repoScanPromise = null;
@@ -1742,7 +1745,13 @@ function parseTaskArguments(args = "") {
   };
 }
 
-async function scheduledTask() {
+async function scheduledTask(options = {}) {
+  const forceRefresh = options?.forceRefresh === true;
+  if (!forceRefresh && scheduledTaskCache && Date.now() - scheduledTaskCache.at < SCHEDULED_TASK_CACHE_MS) {
+    return scheduledTaskCache.value;
+  }
+  if (forceRefresh) scheduledTaskCache = null;
+  if (scheduledTaskPromise) return scheduledTaskPromise;
   const script = [
     "$t=Get-ScheduledTask -TaskName 'CodexPro' -ErrorAction Stop",
     "$i=Get-ScheduledTaskInfo -TaskName 'CodexPro'",
@@ -1751,10 +1760,19 @@ async function scheduledTask() {
     "$tr=@($t.Triggers | ForEach-Object { [pscustomobject]@{ type=$_.CimClass.CimClassName; id=$_.Id; interval=$_.Repetition.Interval; delay=$_.Delay } })",
     "[pscustomobject]@{ state=[string]$t.State; lastRunTime=if($i.LastRunTime){$i.LastRunTime.ToString('o')}else{$null}; lastTaskResult=$i.LastTaskResult; execute=$a.Execute; arguments=$a.Arguments; workingDirectory=$a.WorkingDirectory; triggers=$tr; autoStartCommand=$auto } | ConvertTo-Json -Depth 5 -Compress"
   ].join("; ");
+  scheduledTaskPromise = (async () => {
+    try {
+      return JSON.parse(await runPowerShell(script));
+    } catch (error) {
+      return { state: "NotFound", error: error instanceof Error ? error.message : String(error), arguments: "" };
+    }
+  })();
   try {
-    return JSON.parse(await runPowerShell(script));
-  } catch (error) {
-    return { state: "NotFound", error: error instanceof Error ? error.message : String(error), arguments: "" };
+    const value = await scheduledTaskPromise;
+    scheduledTaskCache = { at: Date.now(), value };
+    return value;
+  } finally {
+    scheduledTaskPromise = null;
   }
 }
 
@@ -1816,7 +1834,7 @@ async function runtimeBaseStatus(options = {}) {
   if (runtimeBasePromise) return runtimeBasePromise;
   runtimeBasePromise = (async () => {
     const healthCycleId = `health_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`;
-    const task = await scheduledTask();
+    const task = await scheduledTask({ forceRefresh });
     const config = parseTaskArguments(task.arguments);
     const token = readToken(config.tokenFile);
     const localBase = `http://127.0.0.1:${config.port}`;
@@ -2004,27 +2022,30 @@ async function githubRepoForRoot(root) {
 
 async function readGitSummary(root) {
   try {
-    const { stdout: branchText } = await execFileAsync("git.exe", ["-C", root, "branch", "--show-current"], { windowsHide: true });
-    const { stdout: statusText } = await execFileAsync("git.exe", ["-C", root, "status", "--porcelain"], { windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
-    const { stdout: commitText } = await execFileAsync("git.exe", ["-C", root, "log", "-1", "--pretty=format:%h%x09%s%x09%cI"], { windowsHide: true });
-    let remoteUrl = "";
-    let upstream = "";
+    const [statusResult, commitResult, remoteResult] = await Promise.allSettled([
+      execFileAsync("git.exe", ["-C", root, "status", "--porcelain=v2", "--branch"], { windowsHide: true, maxBuffer: 2 * 1024 * 1024 }),
+      execFileAsync("git.exe", ["-C", root, "log", "-1", "--pretty=format:%h%x09%s%x09%cI"], { windowsHide: true }),
+      execFileAsync("git.exe", ["-C", root, "remote", "get-url", "origin"], { windowsHide: true })
+    ]);
+    if (statusResult.status !== "fulfilled") throw statusResult.reason;
+    if (commitResult.status !== "fulfilled") throw commitResult.reason;
+    const statusLines = statusResult.value.stdout.split(/\r?\n/).filter(Boolean);
+    const branchHead = statusLines.find((line) => line.startsWith("# branch.head "))?.slice(14).trim() || "";
+    const upstream = statusLines.find((line) => line.startsWith("# branch.upstream "))?.slice(18).trim() || "";
+    const branch = !branchHead || branchHead === "(detached)" ? "detached" : branchHead;
+    const changes = statusLines.filter((line) => !line.startsWith("# ")).length;
+    const commitText = commitResult.value.stdout;
+    const remoteUrl = remoteResult.status === "fulfilled" ? remoteResult.value.stdout.trim() : "";
     let pushedAt = "";
     let remoteCommitAt = "";
-    try {
-      const remote = await execFileAsync("git.exe", ["-C", root, "remote", "get-url", "origin"], { windowsHide: true });
-      remoteUrl = remote.stdout.trim();
-    } catch {}
-    try {
-      const upstreamResult = await execFileAsync("git.exe", ["-C", root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], { windowsHide: true });
-      upstream = upstreamResult.stdout.trim();
+    if (upstream) {
       const [remoteCommit, pushReflog] = await Promise.allSettled([
         execFileAsync("git.exe", ["-C", root, "log", "-1", "--pretty=format:%cI", upstream], { windowsHide: true }),
         execFileAsync("git.exe", ["-C", root, "reflog", "show", "-1", "--format=%gI", upstream], { windowsHide: true })
       ]);
       if (remoteCommit.status === "fulfilled") remoteCommitAt = remoteCommit.value.stdout.trim();
       if (pushReflog.status === "fulfilled") pushedAt = pushReflog.value.stdout.trim();
-    } catch {}
+    }
     const [hash = "", subject = "", date = ""] = commitText.trim().split("\t");
     const identity = repoIdentityFromRemote(remoteUrl);
     const latestActivity = [
@@ -2034,8 +2055,8 @@ async function readGitSummary(root) {
     ].sort((left, right) => right.timestamp - left.timestamp)[0];
     return {
       isGit: true,
-      branch: branchText.trim() || "detached",
-      changes: statusText.split(/\r?\n/).filter(Boolean).length,
+      branch,
+      changes,
       commit: { hash, subject, date },
       remoteUrl,
       upstream,
@@ -2165,6 +2186,7 @@ async function discoverGitRepositories(scanRoots) {
 }
 
 async function listProjects() {
+  const startedAt = Date.now();
   const task = await scheduledTask();
   const taskConfig = parseTaskArguments(task.arguments);
   const activeRoot = taskConfig.root;
@@ -2182,7 +2204,9 @@ async function listProjects() {
   }
   for (const root of managerProjects()) sources.set(path.resolve(root), sources.get(path.resolve(root)) || "Đã thêm");
   if (activeRoot) sources.set(path.resolve(activeRoot), "Đang chạy");
+  const discoveryStartedAt = Date.now();
   const discoveredRoots = await discoverGitRepositories(repoScanRoots(taskConfig));
+  const discoveryMs = Date.now() - discoveryStartedAt;
   for (const root of discoveredRoots) {
     const resolved = path.resolve(root);
     if (![...sources.keys()].some((known) => known.toLowerCase() === resolved.toLowerCase())) sources.set(resolved, "Tự quét");
@@ -2192,6 +2216,7 @@ async function listProjects() {
   pruneGitSummaryCache(new Set([...sources.keys()].map((root) => path.resolve(root).toLowerCase())));
   const projects = [];
   let nextIndex = 0;
+  const summariesStartedAt = Date.now();
   await Promise.all(Array.from({ length: Math.min(8, entries.length) }, async () => {
     while (nextIndex < entries.length) {
       const [root, source] = entries[nextIndex++];
@@ -2209,6 +2234,18 @@ async function listProjects() {
       });
     }
   }));
+  const summariesMs = Date.now() - summariesStartedAt;
+  const totalMs = Date.now() - startedAt;
+  if (totalMs >= 2_000) {
+    diagnostic("warn", "manager", "projects", `list-projects phase breakdown (${totalMs} ms)`, {
+      action: "list-projects-breakdown",
+      total_ms: totalMs,
+      discovery_ms: discoveryMs,
+      summaries_ms: summariesMs,
+      project_count: projects.length,
+      discovered_count: discoveredRoots.length
+    });
+  }
   return projects.sort((a, b) =>
     Number(Boolean(b.active || b.inUse)) - Number(Boolean(a.active || a.inUse))
     || Number(b.activityTimestamp || 0) - Number(a.activityTimestamp || 0)
@@ -3032,7 +3069,7 @@ async function controlServer(action) {
   if (action === "start" && current.local.ok) return current;
   runtimeBaseCache = null;
   if (action === "restart") {
-    const task = await scheduledTask();
+    const task = await scheduledTask({ forceRefresh: true });
     const config = parseTaskArguments(task.arguments);
     const rootLiteral = String(config.root || "").replace(/'/g, "''");
     const stopTree = [
