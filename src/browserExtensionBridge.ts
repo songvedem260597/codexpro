@@ -1,5 +1,8 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { CodexProError } from "./guard.js";
 import { createRuntimeTraceContext, currentRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext } from "./analysis/runtimeTrace.js";
 
@@ -16,6 +19,8 @@ const SEND_COMMAND_TIMEOUT_MS = 180_000;
 const COMMAND_EXPIRY_HEADROOM_MS = 5_000;
 const READ_RESPONSE_TIMEOUT_MS = 75_000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
+const PROFILE_TASK_STATE_VERSION = 1;
+const MAX_PERSISTED_PROFILE_TASKS = 200;
 
 export interface ExtensionProfileSummary {
   profile_id: string;
@@ -132,7 +137,69 @@ const profileWorkspaceRoots = new Map<string, string>();
 const profileWorkspaceBindings = new Map<string, string>();
 const profileTaskIds = new Map<string, string>();
 const profileTaskTitles = new Map<string, string>();
+const profileTaskUpdatedAt = new Map<string, string>();
 let singleton: BridgeState | undefined;
+
+function browserProfileTaskStatePath(): string {
+  const configuredHome = String(process.env.CODEXPRO_HOME || "").trim();
+  const home = configuredHome ? path.resolve(configuredHome) : path.join(os.homedir(), ".codexpro");
+  return path.join(home, "browser-profile-tasks.json");
+}
+
+function validPersistedProfileId(value: string): boolean {
+  return /^[A-Za-z0-9_-]{2,160}$/.test(value);
+}
+
+function loadBrowserProfileTasks(): void {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(browserProfileTaskStatePath(), "utf8")) as {
+      profiles?: Record<string, { task_id?: unknown; task_title?: unknown; updated_at?: unknown }>;
+    };
+    for (const [profileId, value] of Object.entries(parsed.profiles || {}).slice(-MAX_PERSISTED_PROFILE_TASKS)) {
+      const taskId = String(value?.task_id || "").trim();
+      const taskTitle = String(value?.task_title || "").trim();
+      const updatedAt = String(value?.updated_at || "").trim();
+      if (!validPersistedProfileId(profileId) || !/^cpt_[a-f0-9]{24}$/.test(taskId)) continue;
+      if (taskTitle.length < 4 || taskTitle.length > 56) continue;
+      const wordCount = taskTitle.split(/\s+/).filter(Boolean).length;
+      if (wordCount < 2 || wordCount > 6) continue;
+      profileTaskIds.set(profileId, taskId);
+      profileTaskTitles.set(profileId, taskTitle);
+      profileTaskUpdatedAt.set(profileId, updatedAt || new Date(0).toISOString());
+    }
+  } catch {
+    // Missing or malformed state must not prevent the local bridge from starting.
+  }
+}
+
+function persistBrowserProfileTasks(): void {
+  try {
+    const profiles = [...profileTaskTitles.keys()]
+      .map((profileId) => ({
+        profileId,
+        taskId: profileTaskIds.get(profileId) || "",
+        taskTitle: profileTaskTitles.get(profileId) || "",
+        updatedAt: profileTaskUpdatedAt.get(profileId) || new Date(0).toISOString()
+      }))
+      .filter((entry) => validPersistedProfileId(entry.profileId) && /^cpt_[a-f0-9]{24}$/.test(entry.taskId) && entry.taskTitle)
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+      .slice(-MAX_PERSISTED_PROFILE_TASKS);
+    const stateFile = browserProfileTaskStatePath();
+    fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+    fs.writeFileSync(stateFile, `${JSON.stringify({
+      version: PROFILE_TASK_STATE_VERSION,
+      profiles: Object.fromEntries(profiles.map((entry) => [entry.profileId, {
+        task_id: entry.taskId,
+        task_title: entry.taskTitle,
+        updated_at: entry.updatedAt
+      }]))
+    }, null, 2)}\n`, "utf8");
+  } catch {
+    // The in-memory title remains usable if persistence is temporarily unavailable.
+  }
+}
+
+loadBrowserProfileTasks();
 
 function scheduleProfileNotification(state: BridgeState): void {
   if (state.profileNotifyTimer) return;
@@ -631,10 +698,21 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
   const normalizedTaskId = String(taskId || "").trim();
   const taskTitle = String(title || "").trim();
   if (!id) return;
+  const changed = profileTaskIds.get(id) !== normalizedTaskId || profileTaskTitles.get(id) !== taskTitle;
+  if (!changed) {
+    if (singleton) scheduleProfileNotification(singleton);
+    return;
+  }
   if (normalizedTaskId) profileTaskIds.set(id, normalizedTaskId);
   else profileTaskIds.delete(id);
-  if (taskTitle) profileTaskTitles.set(id, taskTitle);
-  else profileTaskTitles.delete(id);
+  if (taskTitle) {
+    profileTaskTitles.set(id, taskTitle);
+    profileTaskUpdatedAt.set(id, new Date().toISOString());
+  } else {
+    profileTaskTitles.delete(id);
+    profileTaskUpdatedAt.delete(id);
+  }
+  persistBrowserProfileTasks();
   if (singleton) scheduleProfileNotification(singleton);
 }
 export function setBrowserExtensionProfileWorkspaceBinding(profileId: string, root: string): void {

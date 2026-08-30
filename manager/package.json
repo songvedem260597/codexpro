@@ -1,6 +1,6 @@
 {
   "name": "codexpro-manager",
-  "version": "0.2.80",
+  "version": "0.2.81",
   "private": true,
   "description": "Windows desktop manager for a local CodexPro MCP server.",
   "author": "CodexPro contributors",

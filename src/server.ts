@@ -1259,7 +1259,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
   );
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.29.3" }, { instructions: serverInstructions(config, requireRepoTask) });
+  const server = new McpServer({ name: "CodexPro", version: "0.29.4" }, { instructions: serverInstructions(config, requireRepoTask) });
   runtimeTraceWorkspaceByServer.set(server as object, () => selectedRuntimeTraceWorkspace ?? workspaces.defaultWorkspace());
   repoTaskWorkspaceSelectorByServer.set(server as object, (root) => workspaces.openWorkspace(root));
   repoTaskGateRequiredByServer.set(server as object, requireRepoTask);
@@ -1854,7 +1854,10 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       description: "Mandatory first call for every task sent by CodexPro Manager. Opens the initial workspace and records server-side proof that CodexPro was actually invoked. Normal tasks stay locked to that workspace; scope=all_allowed lets the task switch only between workspaces inside CodexPro's configured allowed roots.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).describe("Exact task id included by CodexPro Manager."),
-        task_title: z.string().trim().min(4).max(56).refine((value) => { const words = value.split(/\s+/).filter(Boolean).length; return words >= 2 && words <= 7; }, "Task title must contain 2-7 words.").describe("AI-generated short task name: 2-7 clear words describing the actual work. Do not copy a vague opening such as Làm sao, Sửa đi, or Làm đi."),
+        task_title: z.string().trim().min(4).max(56)
+          .refine((value) => { const words = value.split(/\s+/).filter(Boolean).length; return words >= 2 && words <= 6; }, "Task title must contain 2-6 words.")
+          .refine((value) => !/^(?:làm sao|sửa đi|làm đi|fix đi|check lỗi|kiểm tra|tiếp tục)$/iu.test(value.trim()), "Task title must describe the actual work, not a vague request.")
+          .describe("Required title chosen and returned by the AI: 2-6 short, clear words describing the actual work."),
         root: z.string().min(1).describe("Initial workspace root included by CodexPro Manager."),
         scope: z.enum(["workspace", "all_allowed"]).optional().describe("Task scope. Omit or use workspace for a locked workspace; use all_allowed only when Manager explicitly enables all allowed roots.")
       },
@@ -1923,6 +1926,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       return textResult(withGlobalRules(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}\nCodexGraph: active (${codexGraph.coverage.symbolCount} symbols, ${codexGraph.coverage.relationshipCount} relationships)`, globalRules), {
         task_id: proof.taskId,
         task_title: proof.taskTitle,
+        task_title_source: "ai",
         verified: true,
         root: proof.root,
         workspace_id: proof.workspaceId,
@@ -1956,6 +1960,9 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const gateActive = requireRepoTask
         ? Boolean(proof && expected?.taskId === args.task_id && sameRepoTask(active, expected) && rulesMatch)
         : Boolean(proof);
+      if (gateActive && gateProfileId && proof?.taskTitle) {
+        setBrowserExtensionProfileTask(gateProfileId, proof.taskId, proof.taskTitle);
+      }
       return textResult(gateActive ? `# Repo Task Verified\n\n${proof!.taskId} opened ${proof!.root} with scope ${proof!.scope}.` : `# Repo Task Missing\n\nNo active begin_repo_task gate was found for ${args.task_id}.`, {
         task_id: args.task_id,
         verified: gateActive,
@@ -1963,7 +1970,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         profile_id: gateProfileId || undefined,
         expected_task_id: expected?.taskId,
         active_task_id: active?.taskId,
-        ...(proof ? { task_title: proof.taskTitle, root: proof.root, workspace_id: proof.workspaceId, started_at: proof.startedAt, scope: proof.scope, codexgraph: proof.codexGraph } : {})
+        ...(proof ? { task_title: proof.taskTitle, task_title_source: "ai", root: proof.root, workspace_id: proof.workspaceId, started_at: proof.startedAt, scope: proof.scope, codexgraph: proof.codexGraph } : {})
       });
     }
   );
