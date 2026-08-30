@@ -57,7 +57,7 @@ const components = {
   }
 };
 
-export function ResponseText({ text, truncated }) {
+export const ResponseText = React.memo(function ResponseText({ text, truncated }) {
   const cleanText = String(text || "")
     .replace(/[^\r\n]*/g, "")
     .replace(/[ \t]+\n/g, "\n");
@@ -75,4 +75,4 @@ export function ResponseText({ text, truncated }) {
       </ReactMarkdown>
     </div>
   );
-}
+});

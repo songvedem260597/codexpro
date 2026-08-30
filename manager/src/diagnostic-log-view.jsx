@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 
 const LEVEL_LABELS = { info: "INFO", warn: "CẢNH BÁO", error: "LỖI" };
 const SOURCE_LABELS = { manager: "Manager", renderer: "Giao diện", mcp: "MCP", worker: "Worker", electron: "Electron" };
+const DIAGNOSTIC_RENDER_BATCH = 180;
+
 const CATEGORY_LABELS = {
   runtime: "Runtime",
   status: "Trạng thái",
@@ -102,7 +104,13 @@ export function logRendererDiagnostic(api, level, category, message, details = {
 
 export function DiagnosticLogView({ data, filters, busy, selected, onFilters, onRefresh, onClear, onSelect, onCopy }) {
   const entries = Array.isArray(data?.entries) ? data.entries : [];
+  const [visibleCount, setVisibleCount] = useState(DIAGNOSTIC_RENDER_BATCH);
+  const visibleEntries = entries.slice(0, visibleCount);
   const summary = data?.summary || { total: 0, info: 0, warn: 0, error: 0 };
+
+  useEffect(() => {
+    setVisibleCount(DIAGNOSTIC_RENDER_BATCH);
+  }, [data?.checked_at, filters.level, filters.source, filters.category, filters.hours, filters.query]);
   const available = data?.available || { levels: summary, sources: {}, categories: {} };
   const availableTotal = Object.values(available.levels || {}).reduce((total, count) => total + (Number(count) || 0), 0);
   const sourceOptions = ["all", ...new Set(["renderer", "mcp", ...(data?.sources || [])])];
@@ -174,7 +182,7 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
             <span>Thời gian</span><span>Mức</span><span>Nguồn / nhóm</span><span>Action</span><span>Nội dung</span><span>Thời lượng</span>
           </div>
           {!entries.length && <div className="diagnostic-empty">Không có log phù hợp trong khoảng thời gian đã chọn.</div>}
-          {entries.map((entry, index) => {
+          {visibleEntries.map((entry, index) => {
             const key = `${entry.timestamp || "log"}:${entry.source || ""}:${entry.action || ""}:${index}`;
             const active = selected === entry;
             return (
@@ -189,6 +197,15 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
             );
           })}
         </div>
+        {visibleCount < entries.length && (
+          <button
+            className="button secondary diagnostic-load-more"
+            type="button"
+            onClick={() => setVisibleCount((current) => Math.min(entries.length, current + DIAGNOSTIC_RENDER_BATCH))}
+          >
+            Hiển thị thêm {Math.min(DIAGNOSTIC_RENDER_BATCH, entries.length - visibleCount)} log
+          </button>
+        )}
 
         {selected && (
           <div className="diagnostic-detail">

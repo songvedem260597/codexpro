@@ -23,6 +23,7 @@ import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discard
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
+import { mergeBrowserProfilePayload, sameProjectList } from "./ui-performance.js";
 import { CodeGraphView } from "./code-graph-view.jsx";
 import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
 
@@ -40,6 +41,7 @@ const REPO_TASK_VERIFICATION_RETRY_MS = 1500;
 const LATEST_RESPONSE_RECOVERY_POLL_MS = 3000;
 const PROJECTS_PER_PAGE = 8;
 const PROFILE_TASK_LABELS_STORAGE_KEY = "codexpro.profileTaskLabels.v2";
+const DEEP_UI_DIAGNOSTICS_ENABLED = new URLSearchParams(window.location.search).get("debugUi") === "1";
 
 function loadProfileTaskLabels() {
   try {
@@ -839,9 +841,9 @@ function App() {
   const projectPageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE));
   const visibleProjects = useMemo(() => projects.slice(projectPage * PROJECTS_PER_PAGE, (projectPage + 1) * PROJECTS_PER_PAGE), [projects, projectPage]);
   const openChatResponse = chatProfileId ? requestResponses[chatProfileId] : null;
-  const openChatMessages = openChatResponse && chatProfileId
+  const openChatMessages = useMemo(() => openChatResponse && chatProfileId
     ? materializeTranscriptMessages(openChatResponse, String(openChatResponse.conversationId || ""))
-    : [];
+    : [], [chatProfileId, openChatResponse]);
   const openChatAwaitingAssistant = transcriptAwaitingAssistant(openChatMessages);
   const openChatLatestMessage = openChatMessages.at(-1);
   const openChatLatestMessageKey = openChatLatestMessage
@@ -1186,9 +1188,12 @@ function App() {
     if (foreground) setBusy("refresh");
     setError("");
     try {
-      const [nextStatus, nextProjects] = await Promise.all([api.getStatus(), api.listProjects()]);
+      const nextStatus = await api.getStatus();
       setStatus(applyConversationTitleOverrides(nextStatus, conversationTitleOverridesRef.current));
-      setProjects(nextProjects);
+      if (foreground) {
+        const nextProjects = await api.listProjects();
+        setProjects((current) => sameProjectList(current, nextProjects) ? current : nextProjects);
+      }
     } catch (err) {
       logRendererDiagnostic(api, "error", "status", `Không làm mới Manager: ${err?.message || String(err)}`, { action: "refresh", error: err });
       setError(err?.message || String(err));
@@ -1215,7 +1220,8 @@ function App() {
     if (projectRefreshInFlight.current || refreshInFlight.current) return;
     projectRefreshInFlight.current = true;
     try {
-      setProjects(await api.listProjects());
+      const nextProjects = await api.listProjects();
+      setProjects((current) => sameProjectList(current, nextProjects) ? current : nextProjects);
     } catch (err) {
       logRendererDiagnostic(api, "warn", "projects", `Background project refresh lỗi: ${err?.message || String(err)}`, { action: "refresh-projects", error: err });
       // Keep the last good project list when a background discovery refresh transiently fails.
@@ -1230,8 +1236,8 @@ function App() {
       const profiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
       setStatus((current) => {
         if (!current) return current;
-        const previousById = new Map((current.browserProfiles || []).map((profile) => [profile.profile_id, profile]));
-        const browserProfiles = profiles.map((profile) => ({ ...previousById.get(profile.profile_id), ...profile }));
+        const browserProfiles = mergeBrowserProfilePayload(current.browserProfiles, profiles);
+        if (browserProfiles === current.browserProfiles) return current;
         return applyConversationTitleOverrides({ ...current, checkedAt: payload?.checked_at || new Date().toISOString(), browserProfiles }, conversationTitleOverridesRef.current);
       });
     });
@@ -1435,7 +1441,7 @@ function App() {
   }, [chatProfileId, requestResponses]);
 
   useEffect(() => {
-    if (!chatProfileId || !openChatResponse?.responseAudit || typeof api.logChatResponseAudit !== "function") return undefined;
+    if (!DEEP_UI_DIAGNOSTICS_ENABLED || !chatProfileId || !openChatResponse?.responseAudit || typeof api.logChatResponseAudit !== "function") return undefined;
     const conversationId = String(openChatResponse.conversationId || "");
     const timer = window.setTimeout(() => {
       const transcript = responseBodyRefs.current.get(chatProfileId);
@@ -1494,7 +1500,7 @@ function App() {
   }, [chatProfileId, requestTargets[chatProfileId], scrollResponseToBottom]);
 
   useEffect(() => {
-    if (!chatProfileId || typeof api.logChatLayout !== "function") return undefined;
+    if (!DEEP_UI_DIAGNOSTICS_ENABLED || !chatProfileId || typeof api.logChatLayout !== "function") return undefined;
     const panel = chatResponseRef.current;
     if (!panel) return undefined;
     let animationFrame = 0;
