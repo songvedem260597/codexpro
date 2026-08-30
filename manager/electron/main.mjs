@@ -3468,6 +3468,18 @@ function expectedRuntimeBuildId(config) {
   }
 }
 
+async function waitForRuntimeBuild(expectedBuildId, initialStatus, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  let status = initialStatus;
+  while (true) {
+    const buildId = String(status?.local?.data?.runtimeBuildId || "").trim();
+    if (status?.local?.ok && buildId === expectedBuildId) return status;
+    if (Date.now() >= deadline) return status;
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    status = await runtimeBaseStatus({ forceRefresh: true }).catch(() => null);
+  }
+}
+
 function ensureFreshRuntimeAfterManagerStart() {
   if (runtimeFreshnessPromise) return runtimeFreshnessPromise;
   runtimeFreshnessPromise = (async () => {
@@ -3484,7 +3496,8 @@ function ensureFreshRuntimeAfterManagerStart() {
       expected_build_id: expectedBuildId,
       runtime_started_at: String(base.local.data?.runtimeStartedAt || "")
     });
-    const restarted = await controlServer("restart");
+    const restartAttempt = await controlServer("restart");
+    const restarted = await waitForRuntimeBuild(expectedBuildId, restartAttempt);
     const restartedBuildId = String(restarted?.local?.data?.runtimeBuildId || "").trim();
     if (!restarted?.local?.ok || restartedBuildId !== expectedBuildId) {
       throw new Error(`Runtime restart không nạp đúng build ${expectedBuildId}; đang chạy ${restartedBuildId || "unknown"}.`);
