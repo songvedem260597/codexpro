@@ -341,6 +341,7 @@ assert.match(server, /trace_ms/);
 assert.match(server, /delta:/);
 
 assert.match(bridge, /subscribeBrowserExtensionProfiles/);
+assert.match(bridge, /const chatgptTabSummaries = chatgptTabs[\s\S]*?chatgpt_tabs: chatgptTabSummaries/, "profile summaries must retain an open ChatGPT tab even when its URL has no conversation id yet");
 assert.match(bridge, /const observedCodexProToolActivity = conversationSummaries\.some/, "bridge must treat live CodexPro tool activity as stronger evidence than a stale connector false-negative");
 assert.match(bridge, /const connectorInstalled = profile\.connectorInstalled \|\| observedCodexProToolActivity/, "profile summaries must not show CodexPro missing while it is actively being used");
 assert.match(bridge, /function pruneExpiredProfiles/);
@@ -406,7 +407,7 @@ assert.match(managerMain, /GIT_SUMMARY_CACHE_MS = 2 \* 60 \* 1000/, "project Git
 assert.match(managerUi, /api\.onBrowserProfiles/);
 assert.doesNotMatch(managerUi, /REALTIME_POLL_MS = 1000/, "Manager must not poll status every second");
 assert.match(managerUi, /responseScrollLocked/, "manual transcript scrolling must lock auto-scroll");
-assert.match(managerUi, /rendererUnresponsive[\s\S]*?recoverProfileTab\(profile\)[\s\S]*?Khôi phục tab/, "an unresponsive ChatGPT renderer must expose a one-click replacement in the profile card");
+assert.match(managerUi, /rendererUnresponsive\s*\?\s*recoverProfileTab\(profile\)\s*:\s*openProfile\(profile, \{ focusOnly: true \}\)/, "the profile card must recover an unresponsive conversation or focus the already-open Chrome tab without navigating it");
 assert.match(managerUi, /responseScrollLocked\.current\.get\(chatProfileId\)/, "stream updates must respect the manual scroll lock");
 assert.match(managerUi, /responseScrollLocked\.current\.delete\(profile\.profile_id\)/, "sending a new message must resume auto-scroll");
 assert.match(managerUi, /const scrollOpenChatToBottom = useCallback\([\s\S]*?modal\.scrollTop = modal\.scrollHeight/, "opening Chat must drive the outer modal scrollbar to the real bottom");
