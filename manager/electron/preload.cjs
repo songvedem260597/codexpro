@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld("codexpro", {
   getDiagnosticLogs: (options) => invoke("codexpro:get-diagnostic-logs", options),
   clearDiagnosticLogs: () => invoke("codexpro:clear-diagnostic-logs"),
   pruneDiagnosticLogs: () => invoke("codexpro:prune-diagnostic-logs"),
+  getOperationsPerformance: (pids) => invoke("codexpro:operations-performance", pids),
+  showNotification: (payload) => invoke("codexpro:notify", payload),
   rotateLink: () => invoke("codexpro:rotate-link"),
   listProjects: () => invoke("codexpro:projects"),
   checkProfile: (profileId) => invoke("codexpro:check-profile", profileId),

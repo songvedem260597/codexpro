@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createRoot } from "react-dom/client";
 import managerPackage from "../package.json";
 import "./styles.css";
+import "./control-center.css";
 import "@fontsource/be-vietnam-pro/400.css";
 import "@fontsource/be-vietnam-pro/500.css";
 import "@fontsource/be-vietnam-pro/600.css";
@@ -18,7 +19,7 @@ import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
 import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
-import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
+import { handleResponseWheel, installResponseAutoPin, recordResponseScroll, responseScrollMetrics, scrollResponseToTurnAnchor as applyResponseTurnAnchor } from "./chat-scroll.js";
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
@@ -26,6 +27,7 @@ import { profileCardBorderState, profileChromeActionState, profileChromeTarget }
 import { mergeBrowserProfilePayload, sameProjectList } from "./ui-performance.js";
 import { CodeGraphView } from "./code-graph-view.jsx";
 import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
+import { ControlCenter } from "./control-center.jsx";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -112,6 +114,9 @@ const DEFAULT_MANAGER_SETTINGS = {
   fontSize: 14,
   profileLayout: "rows",
   maxSubagents: 1,
+  autoRecovery: false,
+  autoUpdateWorkers: false,
+  taskNotifications: true,
   globalRules: GLOBAL_RULES_TEMPLATE,
   repoSelections: {},
   selectedWorkerPackId: "default",
@@ -507,7 +512,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.79";
+const WORKER_EXTENSION_VERSION = "0.5.82";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -722,6 +727,9 @@ function App() {
   const [diagnosticFilters, setDiagnosticFilters] = useState({ level: "all", source: "all", category: "all", hours: 24, query: "" });
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [selectedDiagnostic, setSelectedDiagnostic] = useState(null);
+  const [operationsPerformance, setOperationsPerformance] = useState(null);
+  const [operationsLogs, setOperationsLogs] = useState([]);
+  const [uiPerformance, setUiPerformance] = useState({ fps: 60, longTasks: 0, maxLongTaskMs: 0 });
   const [managerSettings, setManagerSettings] = useState(DEFAULT_MANAGER_SETTINGS);
   const [chatWidthInput, setChatWidthInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatWidth));
   const [chatHeightInput, setChatHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatHeight));
@@ -773,7 +781,12 @@ function App() {
   const chatResponseRef = useRef(null);
   const responseScrollLocked = useRef(new Map());
   const responseScrollPositions = useRef(new Map());
+  const responseScrollDiagnostics = useRef(new Map());
+  const responseTurnAnchors = useRef(new Map());
   const responseAuditSignatures = useRef(new Map());
+  const operationsRecoveryTimes = useRef(new Map());
+  const operationsNotificationState = useRef(new Map());
+  const operationsAutoUpdateAt = useRef(0);
 
   const projectPageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE));
   const visibleProjects = useMemo(() => projects.slice(projectPage * PROJECTS_PER_PAGE, (projectPage + 1) * PROJECTS_PER_PAGE), [projects, projectPage]);
@@ -876,6 +889,75 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [activePage, loadDiagnosticLogs]);
 
+
+  useEffect(() => {
+    if (activePage !== "control") return undefined;
+    let cancelled = false;
+    const loadOperations = async () => {
+      const pids = (status?.processes || []).map((item) => Number(item?.pid)).filter(Boolean);
+      try {
+        const [nextPerformance, nextLogs] = await Promise.all([
+          api.getOperationsPerformance?.(pids),
+          api.getDiagnosticLogs?.({ level: "all", source: "all", category: "all", hours: 24, query: "", limit: 80 })
+        ]);
+        if (cancelled) return;
+        if (nextPerformance) setOperationsPerformance(nextPerformance);
+        if (Array.isArray(nextLogs?.entries)) setOperationsLogs(nextLogs.entries);
+      } catch (err) {
+        if (!cancelled) logRendererDiagnostic(api, "warn", "performance", `Không tải được Control Center: ${err?.message || String(err)}`, { action: "control-center-refresh", error: err });
+      }
+    };
+    void loadOperations();
+    const timer = window.setInterval(() => void loadOperations(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activePage, status?.processes]);
+
+  useEffect(() => {
+    if (activePage !== "control") return undefined;
+    let frameCount = 0;
+    let lastSampleAt = window.performance.now();
+    let rafId = 0;
+    const longTasks = [];
+    const tick = () => {
+      frameCount += 1;
+      rafId = window.requestAnimationFrame(tick);
+    };
+    rafId = window.requestAnimationFrame(tick);
+    let observer = null;
+    if (typeof PerformanceObserver !== "undefined") {
+      try {
+        observer = new PerformanceObserver((list) => {
+          const now = window.performance.now();
+          for (const entry of list.getEntries()) longTasks.push({ at: now, duration: Number(entry.duration) || 0 });
+        });
+        observer.observe({ type: "longtask", buffered: false });
+      } catch {
+        observer = null;
+      }
+    }
+    const timer = window.setInterval(() => {
+      const now = window.performance.now();
+      const elapsed = Math.max(1, now - lastSampleAt);
+      const fps = Math.min(120, frameCount * 1000 / elapsed);
+      frameCount = 0;
+      lastSampleAt = now;
+      while (longTasks.length && now - longTasks[0].at > 10_000) longTasks.shift();
+      setUiPerformance({
+        fps: Number(fps.toFixed(1)),
+        longTasks: longTasks.length,
+        maxLongTaskMs: longTasks.reduce((max, item) => Math.max(max, item.duration), 0)
+      });
+    }, 1000);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearInterval(timer);
+      observer?.disconnect();
+    };
+  }, [activePage]);
+
   useEffect(() => {
     const onError = (event) => logRendererDiagnostic(api, "error", "runtime", event?.message || "Renderer error", { action: "window.error", filename: event?.filename, lineno: event?.lineno, colno: event?.colno, error: event?.error });
     const onRejection = (event) => logRendererDiagnostic(api, "error", "runtime", event?.reason?.message || String(event?.reason || "Unhandled promise rejection"), { action: "unhandledrejection", reason: event?.reason });
@@ -926,6 +1008,71 @@ function App() {
       setSettingsBusy("");
     }
   }, [applyManagerSettings, notify]);
+
+
+  useEffect(() => {
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    for (const profile of profiles) {
+      const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+      const tab = tabs.find((item) => item.active) || tabs.find((item) => item.busy || item.settling) || tabs[0];
+      const taskId = String(profile?.current_task_id || "");
+      const title = String(profile?.current_task_title || tab?.title || profile?.active_chat_title || "Task CodexPro");
+      const working = Boolean(tab?.busy || tab?.settling || profile?.activity === "working" || Number(profile?.busy_request_count || 0) > 0);
+      const failed = Boolean(tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error);
+      const previous = operationsNotificationState.current.get(profile.profile_id);
+      if (managerSettings.taskNotifications !== false && previous) {
+        if (previous.working && !working && previous.taskId) {
+          void api.showNotification?.({ title: "CodexPro · Task hoàn tất", body: `${previous.title} · ${profile.label || profile.profile_id.slice(0, 8)}` });
+        } else if (!previous.failed && failed) {
+          void api.showNotification?.({ title: "CodexPro · Cần chú ý", body: `${title} gặp lỗi hoặc profile bị treo.` });
+        }
+      }
+      operationsNotificationState.current.set(profile.profile_id, { working, failed, taskId, title });
+    }
+  }, [managerSettings.taskNotifications, status?.browserProfiles]);
+
+  useEffect(() => {
+    if (!managerSettings.autoRecovery) return;
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    for (const profile of profiles) {
+      if (!profile?.connected) continue;
+      const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+      const targetTab = tabs.find((tab) => tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error);
+      if (!targetTab?.id) continue;
+      const conversationId = String(targetTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+      if (!conversationId) continue;
+      const key = `${profile.profile_id}:${conversationId}`;
+      const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
+      if (Date.now() - previous < 120_000) continue;
+      operationsRecoveryTimes.current.set(key, Date.now());
+      void api.recoverProfileChat?.({
+        profileId: profile.profile_id,
+        conversationId,
+        targetId: targetTab.id,
+        title: targetTab.title || profile.active_chat_title || "",
+        silent: true
+      }).then(() => {
+        logRendererDiagnostic(api, "info", "profile", "Auto Recovery đã thay tab ChatGPT bất thường", { action: "auto-recovery", profile_id: profile.profile_id, conversation_id: conversationId });
+        window.setTimeout(() => void refresh(false), 1200);
+      }).catch((err) => {
+        logRendererDiagnostic(api, "error", "profile", `Auto Recovery thất bại: ${err?.message || String(err)}`, { action: "auto-recovery-failed", profile_id: profile.profile_id, conversation_id: conversationId, error: err });
+      });
+    }
+  }, [managerSettings.autoRecovery, status?.browserProfiles]);
+
+  useEffect(() => {
+    if (!managerSettings.autoUpdateWorkers || busy) return;
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    const hasSafeOutdatedWorker = profiles.some((profile) => {
+      if (!profile?.connected || versionAtLeast(profile.extension_version)) return false;
+      const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
+      const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
+      return profile.activity === "idle" && Number(profile.busy_request_count || 0) === 0 && !hasBusyTab;
+    });
+    if (!hasSafeOutdatedWorker || Date.now() - operationsAutoUpdateAt.current < 60_000) return;
+    operationsAutoUpdateAt.current = Date.now();
+    void reloadProfiles();
+  }, [busy, managerSettings.autoUpdateWorkers, status?.browserProfiles]);
 
   useEffect(() => {
     setChatWidthInput(String(managerSettings.chatWidth));
@@ -1040,15 +1187,97 @@ function App() {
     }
   }, [applyManagerSettings, notify]);
 
-  const scrollResponseToBottom = useCallback((profileId) => {
-    const container = responseBodyRefs.current.get(profileId);
-    if (!container) return;
-    container.scrollTop = container.scrollHeight;
-    responseScrollPositions.current.set(profileId, container.scrollTop);
+  const logResponseScrollAdjustment = useCallback((profileId, container, before, after, cause, mode, extra = {}) => {
+    if (!before || !after) return;
+    const previous = responseScrollDiagnostics.current.get(profileId) || null;
+    const delta = {
+      scrollTop: after.scrollTop - before.scrollTop,
+      scrollHeight: previous ? before.scrollHeight - previous.scrollHeight : 0,
+      clientHeight: previous ? before.clientHeight - previous.clientHeight : 0,
+      distanceFromBottom: after.distanceFromBottom - before.distanceFromBottom
+    };
+    const signature = `${mode}:${cause}:${before.scrollTop}:${before.scrollHeight}:${before.clientHeight}:${after.scrollTop}:${after.scrollHeight}:${after.clientHeight}:${extra.anchorId || ""}`;
+    const shouldLog = Math.abs(delta.scrollTop) >= 2 || Math.abs(delta.scrollHeight) >= 2 || Math.abs(delta.clientHeight) >= 2;
+    responseScrollDiagnostics.current.set(profileId, { ...after, signature });
+    if (!shouldLog || previous?.signature === signature || typeof api.logChatLayout !== "function") return;
+    const panel = chatResponseRef.current;
+    api.logChatLayout({
+      at: new Date().toISOString(),
+      type: "scroll-jump",
+      profileId,
+      conversationId: String(requestTargetsRef.current[profileId] || panel?.dataset.layoutConversationId || ""),
+      cause,
+      mode,
+      locked: Boolean(responseScrollLocked.current.get(profileId)),
+      before,
+      after,
+      delta,
+      ...extra,
+      panel: panel ? {
+        height: Math.round(panel.getBoundingClientRect().height),
+        scrollHeight: Math.round(panel.scrollHeight),
+        clientHeight: Math.round(panel.clientHeight)
+      } : null,
+      messages: [...container.children].slice(-8).map((node) => ({
+        id: String(node.dataset.messageId || "").slice(0, 180),
+        role: String(node.dataset.auditRole || ""),
+        height: Math.round(node.getBoundingClientRect().height),
+        textLength: String(node.textContent || "").length
+      }))
+    });
   }, []);
 
+  const scrollResponseToBottom = useCallback((profileId, cause = "unspecified") => {
+    const container = responseBodyRefs.current.get(profileId);
+    if (!container) return;
+    container.classList.remove("has-turn-anchor");
+    container.style.removeProperty("--chat-turn-anchor-space");
+    const before = responseScrollMetrics(container);
+    container.scrollTop = container.scrollHeight;
+    const after = responseScrollMetrics(container);
+    responseScrollPositions.current.set(profileId, container.scrollTop);
+    logResponseScrollAdjustment(profileId, container, before, after, cause, "bottom");
+  }, [logResponseScrollAdjustment]);
+
+  const scrollResponseToTurnAnchor = useCallback((profileId, cause = "unspecified") => {
+    const container = responseBodyRefs.current.get(profileId);
+    const anchorState = responseTurnAnchors.current.get(profileId);
+    if (!container || !anchorState) return false;
+    const activeConversationId = String(requestTargetsRef.current[profileId] || chatResponseRef.current?.dataset.layoutConversationId || "");
+    if (anchorState.conversationId && activeConversationId && anchorState.conversationId !== activeConversationId) {
+      responseTurnAnchors.current.delete(profileId);
+      return false;
+    }
+    const userMessages = [...container.querySelectorAll('.chat-transcript-message.is-user[data-audit-fingerprint]')];
+    const anchor = anchorState.fingerprint
+      ? userMessages.findLast((node) => node.dataset.auditFingerprint === anchorState.fingerprint)
+      : userMessages.at(-1);
+    if (!anchor) return false;
+    container.classList.add("has-turn-anchor");
+    container.style.setProperty("--chat-turn-anchor-space", `${Math.max(240, Math.round(container.clientHeight * 0.58))}px`);
+    const before = responseScrollMetrics(container);
+    const beforeAnchorTop = Math.round(anchor.getBoundingClientRect().top - container.getBoundingClientRect().top);
+    const after = applyResponseTurnAnchor(container, anchor, 0.42);
+    const afterAnchorTop = Math.round(anchor.getBoundingClientRect().top - container.getBoundingClientRect().top);
+    responseScrollPositions.current.set(profileId, container.scrollTop);
+    logResponseScrollAdjustment(profileId, container, before, after, cause, "turn-anchor", {
+      anchorId: String(anchor.dataset.messageId || "").slice(0, 180),
+      anchorFingerprint: String(anchor.dataset.auditFingerprint || ""),
+      anchorViewportTopBefore: beforeAnchorTop,
+      anchorViewportTopAfter: afterAnchorTop,
+      anchorViewportDelta: afterAnchorTop - beforeAnchorTop
+    });
+    return true;
+  }, [logResponseScrollAdjustment]);
+
+  const maintainResponsePosition = useCallback((profileId, cause = "unspecified") => {
+    if (responseScrollLocked.current.get(profileId)) return;
+    if (scrollResponseToTurnAnchor(profileId, cause)) return;
+    scrollResponseToBottom(profileId, cause);
+  }, [scrollResponseToBottom, scrollResponseToTurnAnchor]);
+
   const scrollOpenChatToBottom = useCallback((profileId) => {
-    scrollResponseToBottom(profileId);
+    scrollResponseToBottom(profileId, "open-chat");
     const modal = chatModalRef.current;
     if (!modal) return;
     const previousBehavior = modal.style.scrollBehavior;
@@ -1058,6 +1287,14 @@ function App() {
   }, [scrollResponseToBottom]);
 
   const holdResponseAutoScroll = useCallback((profileId, container, deltaY = 0) => {
+    if (responseTurnAnchors.current.has(profileId) && deltaY) {
+      responseTurnAnchors.current.delete(profileId);
+      container.classList.remove("has-turn-anchor");
+      container.style.removeProperty("--chat-turn-anchor-space");
+      responseScrollLocked.current.set(profileId, true);
+      responseScrollPositions.current.set(profileId, container.scrollTop);
+      return;
+    }
     handleResponseWheel(profileId, container, deltaY, responseScrollLocked.current, RESPONSE_BOTTOM_THRESHOLD_PX);
   }, []);
 
@@ -1366,9 +1603,8 @@ function App() {
 
   useLayoutEffect(() => {
     if (!chatProfileId || !openChatScrollKey) return;
-    if (responseScrollLocked.current.get(chatProfileId)) return;
-    scrollResponseToBottom(chatProfileId);
-  }, [chatProfileId, openChatScrollKey, scrollResponseToBottom]);
+    maintainResponsePosition(chatProfileId, "layout-effect:open-chat-scroll-key");
+  }, [chatProfileId, openChatScrollKey, maintainResponsePosition]);
 
   useEffect(() => {
     if (!chatProfileId) return undefined;
@@ -1376,9 +1612,9 @@ function App() {
       panel: chatResponseRef.current,
       getContainer: () => responseBodyRefs.current.get(chatProfileId),
       isLocked: () => Boolean(responseScrollLocked.current.get(chatProfileId)),
-      scrollToBottom: () => scrollResponseToBottom(chatProfileId)
+      scrollToBottom: (cause) => maintainResponsePosition(chatProfileId, `observer:${cause}`)
     });
-  }, [chatProfileId, requestTargets[chatProfileId], scrollResponseToBottom]);
+  }, [chatProfileId, requestTargets[chatProfileId], maintainResponsePosition]);
 
   useEffect(() => {
     if (!DEEP_UI_DIAGNOSTICS_ENABLED || !chatProfileId || typeof api.logChatLayout !== "function") return undefined;
@@ -1784,6 +2020,7 @@ function App() {
     else if (projectRoot) setRequestProjectRoots((current) => ({ ...current, [profile.profile_id]: projectRoot }));
     responseScrollLocked.current.delete(profile.profile_id);
     responseScrollPositions.current.delete(profile.profile_id);
+    responseTurnAnchors.current.delete(profile.profile_id);
     setChatProfileId(profile.profile_id);
     window.requestAnimationFrame(() => {
       scrollOpenChatToBottom(profile.profile_id);
@@ -1806,6 +2043,7 @@ function App() {
 
   function startNewChat(profile) {
     setRenameChat(null);
+    responseTurnAnchors.current.delete(profile.profile_id);
     setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
     requestDraftsRef.current[profile.profile_id] = "";
     setRequestDraftResetVersions((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || 0) + 1 }));
@@ -1995,6 +2233,15 @@ function App() {
       }
     }
     responseScrollLocked.current.delete(profile.profile_id);
+    if (text) {
+      responseTurnAnchors.current.set(profile.profile_id, {
+        conversationId,
+        fingerprint: responseAuditTextFingerprint(text),
+        createdAt: Date.now()
+      });
+    } else {
+      responseTurnAnchors.current.delete(profile.profile_id);
+    }
     setBusy(`request:${profile.profile_id}`);
     setError("");
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
@@ -2043,6 +2290,8 @@ function App() {
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
       const resolvedConversationId = String(result?.conversation_id || conversationId);
+      const activeTurnAnchor = responseTurnAnchors.current.get(profile.profile_id);
+      if (activeTurnAnchor) responseTurnAnchors.current.set(profile.profile_id, { ...activeTurnAnchor, conversationId: resolvedConversationId });
       if (submissionState === "failed") {
         throw new Error(String(result?.error || "ChatGPT không chuẩn bị được tin nhắn để gửi."));
       }
@@ -2147,6 +2396,7 @@ function App() {
           return true;
         }
       }
+      responseTurnAnchors.current.delete(profile.profile_id);
       setRequestFiles((current) => {
         if (!attachments.length || (current[profile.profile_id] || []).length) return current;
         return { ...current, [profile.profile_id]: attachments };
@@ -2777,10 +3027,10 @@ function App() {
                     const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
                     const responseSpaceClass = !isLastAssistant ? "" : responseTurnActive && !(response.networkStreamAvailable && hasResponseContent) ? "is-response-cage" : "is-response-runway";
                     if (message.toolActivity) {
-                      return <div className="chat-transcript-message is-tool-activity" key={message.id}><div className="tool-activity-live"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{message.text}</span></div></div>;
+                      return <div className="chat-transcript-message is-tool-activity" key={message.id} data-message-id={message.id}><div className="tool-activity-live"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{message.text}</span></div></div>;
                     }
                     return (
-                      <div className={`chat-transcript-message is-${message.role} ${responseSpaceClass}`} key={message.id} data-audit-role={message.role} data-audit-fingerprint={responseAuditTextFingerprint(message.text)} data-audit-length={String(message.text || "").length}>
+                      <div className={`chat-transcript-message is-${message.role} ${responseSpaceClass}`} key={message.id} data-message-id={message.id} data-audit-role={message.role} data-audit-fingerprint={responseAuditTextFingerprint(message.text)} data-audit-length={String(message.text || "").length}>
                         <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
                         <div className="latest-response-content" onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
                           <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
@@ -2883,6 +3133,7 @@ function App() {
         </div>
         <nav>
           <button type="button" className={activePage === "overview" ? "active" : ""} onClick={() => setActivePage("overview")}><Icon>⌁</Icon>Tổng quan</button>
+          <button type="button" className={activePage === "control" ? "active" : ""} onClick={() => setActivePage("control")}><Icon>◫</Icon>Điều phối</button>
           <button type="button" className={activePage === "logs" ? "active" : ""} onClick={() => setActivePage("logs")}><Icon>≡</Icon>Nhật ký</button>
           <button type="button" className={activePage === "settings" ? "active" : ""} onClick={() => setActivePage("settings")}><Icon>⚙</Icon>Cài đặt</button>
         </nav>
@@ -2892,12 +3143,12 @@ function App() {
         </div>
       </aside>
 
-      <main className={activePage === "settings" ? "page-settings" : activePage === "logs" ? "page-logs" : "page-overview"}>
+      <main className={activePage === "settings" ? "page-settings" : activePage === "logs" ? "page-logs" : activePage === "control" ? "page-control" : "page-overview"}>
         <header>
           <div>
-            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : "WINDOWS CONTROL CENTER"}</p>
-            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : "CodexPro của bạn"}</h1>
-            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
+            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : activePage === "control" ? "AGENT OPERATIONS" : "WINDOWS CONTROL CENTER"}</p>
+            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "control" ? "Trung tâm điều phối" : "CodexPro của bạn"}</h1>
+            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : activePage === "control" ? "Theo dõi task, hiệu suất, tự phục hồi, phiên bản và an toàn repo trong một màn hình." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
@@ -3114,6 +3365,27 @@ function App() {
             </nav>
           )}
         </section>
+        </div>
+
+        <div className="control-page" hidden={activePage !== "control"}>
+          <ControlCenter
+            status={status}
+            projects={projects}
+            performance={operationsPerformance}
+            uiPerformance={uiPerformance}
+            diagnosticEntries={operationsLogs}
+            settings={managerSettings}
+            managerVersion={managerPackage.version}
+            workerVersion={WORKER_EXTENSION_VERSION}
+            profileSummary={profileSummary}
+            busy={busy}
+            onOpenChat={setChatProfileId}
+            onOpenChrome={(profile) => void openProfile(profile, { focusOnly: true })}
+            onRecover={(profile) => void recoverProfileTab(profile)}
+            onOpenRepo={(root) => void api.openFolder(root)}
+            onToggleSetting={(key, value) => void saveManagerSetting({ [key]: value }, value ? "Đã bật tự động hóa" : "Đã tắt tự động hóa")}
+            onUpdateWorkers={() => void reloadProfiles()}
+          />
         </div>
 
         <div className="diagnostic-page" hidden={activePage !== "logs"}>

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, shell } from "electron";
+import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, Notification, shell } from "electron";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
+import { collectOperationsPerformance } from "./operations-metrics.mjs";
 
 const execFileAsync = promisify(execFile);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -142,7 +143,7 @@ const DEFAULT_GLOBAL_RULES = `# CodexPro Global Rules
 - Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
 `;
 
-const WORKER_EXTENSION_VERSION = "0.5.81";
+const WORKER_EXTENSION_VERSION = "0.5.82";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -457,6 +458,9 @@ function defaultManagerSettings() {
     fontSize: 14,
     profileLayout: "rows",
     maxSubagents: 1,
+    autoRecovery: false,
+    autoUpdateWorkers: false,
+    taskNotifications: true,
     globalRules: readGlobalRulesFile(),
     repoSelections: {},
     selectedWorkerPackId: DEFAULT_WORKER_PACK_ID,
@@ -489,6 +493,9 @@ function readManagerSettings() {
       fontSize: Math.max(12, Math.min(18, Number(parsed?.fontSize) || defaults.fontSize)),
       profileLayout: parsed?.profileLayout === "cards" ? "cards" : defaults.profileLayout,
       maxSubagents: Math.max(1, Math.min(1, Number(parsed?.maxSubagents) || defaults.maxSubagents)),
+      autoRecovery: parsed?.autoRecovery === true,
+      autoUpdateWorkers: parsed?.autoUpdateWorkers === true,
+      taskNotifications: parsed?.taskNotifications !== false,
       globalRules: readGlobalRulesFile(),
       repoSelections: Object.fromEntries(Object.entries(parsed?.repoSelections && typeof parsed.repoSelections === "object" ? parsed.repoSelections : {})
         .filter(([profileId, root]) => /^[A-Za-z0-9._-]{1,160}$/.test(profileId) && typeof root === "string" && root.trim())
@@ -659,6 +666,9 @@ function saveManagerSettingsPatch(patch = {}) {
   if (Object.prototype.hasOwnProperty.call(patch, "maxSubagents")) {
     next.maxSubagents = Math.max(1, Math.min(1, Number(patch.maxSubagents) || current.maxSubagents));
   }
+  if (Object.prototype.hasOwnProperty.call(patch, "autoRecovery")) next.autoRecovery = patch.autoRecovery === true;
+  if (Object.prototype.hasOwnProperty.call(patch, "autoUpdateWorkers")) next.autoUpdateWorkers = patch.autoUpdateWorkers === true;
+  if (Object.prototype.hasOwnProperty.call(patch, "taskNotifications")) next.taskNotifications = patch.taskNotifications !== false;
   if (Object.prototype.hasOwnProperty.call(patch, "globalRules")) {
     next.globalRules = normalizeGlobalRules(patch.globalRules);
   }
@@ -989,6 +999,7 @@ function startBrowserProfileEventStream(win) {
 function createWindow() {
   const smokeMode = process.env.CODEXPRO_MANAGER_SMOKE === "1";
   const diagnosticSmokeMode = smokeMode && process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "logs";
+  const controlSmokeMode = smokeMode && process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "control";
   const win = new BrowserWindow({
     width: smokeMode && !diagnosticSmokeMode ? 1900 : 1240,
     height: smokeMode ? 1000 : 820,
@@ -1076,7 +1087,20 @@ function createWindow() {
         const bridge = await win.webContents.executeJavaScript("typeof window.codexpro", true);
         if (bridge !== "object") throw new Error(`Preload bridge unavailable: ${bridge}`);
         const status = await win.webContents.executeJavaScript("window.codexpro.getStatus().then((value) => JSON.parse(JSON.stringify(value)))", true);
+        if (Array.isArray(status?.browserProfiles) && status.browserProfiles.length) {
+          win.webContents.send("codexpro:browser-profiles", { checked_at: status.checkedAt, profiles: status.browserProfiles });
+          await new Promise((resolve) => setTimeout(resolve, 350));
+        }
         const projects = await win.webContents.executeJavaScript("window.codexpro.listProjects().then((value) => JSON.parse(JSON.stringify(value)))", true);
+        if (controlSmokeMode) {
+          const controlPageClicked = await win.webContents.executeJavaScript(`(() => {
+            const button = [...document.querySelectorAll('nav button')].find((item) => /Điều phối/i.test(item.textContent || ''));
+            button?.click();
+            return Boolean(button);
+          })()`, true);
+          if (!controlPageClicked) throw new Error("Smoke không tìm thấy màn Điều phối.");
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+        }
         let inspection = null;
         if (status.local?.ok && projects[0]?.root) {
           inspection = await win.webContents.executeJavaScript(`window.codexpro.inspectProject(${JSON.stringify(projects[0].root)})`, true);
@@ -1304,6 +1328,12 @@ function createWindow() {
         let chatModalProbe = null;
         if (chatSmokeRequested) {
           const preferredProfile = String(process.env.CODEXPRO_MANAGER_SMOKE_SCROLL_PROFILE || "").trim();
+          const profileCardDeadline = Date.now() + 10_000;
+          while (Date.now() < profileCardDeadline) {
+            const profileCardsReady = await win.webContents.executeJavaScript("document.querySelectorAll('.browser-profile').length > 0", true);
+            if (profileCardsReady) break;
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
           const clickProbe = await win.webContents.executeJavaScript(`(() => {
             const cards = [...document.querySelectorAll('.browser-profile')];
             const card = cards.find((item) => ${JSON.stringify(preferredProfile)} && item.querySelector('code')?.textContent?.includes(${JSON.stringify(preferredProfile)}))
@@ -2034,6 +2064,14 @@ async function readGitSummary(root) {
     const upstream = statusLines.find((line) => line.startsWith("# branch.upstream "))?.slice(18).trim() || "";
     const branch = !branchHead || branchHead === "(detached)" ? "detached" : branchHead;
     const changes = statusLines.filter((line) => !line.startsWith("# ")).length;
+    const branchAb = statusLines.find((line) => line.startsWith("# branch.ab "))?.slice(12).trim() || "";
+    const branchAbMatch = branchAb.match(/^\+(\d+)\s+-(\d+)$/);
+    const ahead = Number(branchAbMatch?.[1] || 0);
+    const behind = Number(branchAbMatch?.[2] || 0);
+    const worktreeLines = statusLines.filter((line) => !line.startsWith("# "));
+    const untracked = worktreeLines.filter((line) => line.startsWith("? ")).length;
+    const conflicted = worktreeLines.filter((line) => line.startsWith("u ")).length;
+    const modified = worktreeLines.filter((line) => line.startsWith("1 ") || line.startsWith("2 ")).length;
     const commitText = commitResult.value.stdout;
     const remoteUrl = remoteResult.status === "fulfilled" ? remoteResult.value.stdout.trim() : "";
     let pushedAt = "";
@@ -2057,6 +2095,11 @@ async function readGitSummary(root) {
       isGit: true,
       branch,
       changes,
+      modified,
+      untracked,
+      conflicted,
+      ahead,
+      behind,
       commit: { hash, subject, date },
       remoteUrl,
       upstream,
@@ -2069,7 +2112,7 @@ async function readGitSummary(root) {
       ...identity
     };
   } catch {
-    return { isGit: false, branch: "", changes: 0, commit: null, remoteUrl: "", upstream: "", pushedAt: "", remoteCommitAt: "", activityAt: "", activityTimestamp: 0, activityKind: "", githubRepo: "", officialName: "", repoFullName: "" };
+    return { isGit: false, branch: "", changes: 0, modified: 0, untracked: 0, conflicted: 0, ahead: 0, behind: 0, commit: null, remoteUrl: "", upstream: "", pushedAt: "", remoteCommitAt: "", activityAt: "", activityTimestamp: 0, activityKind: "", githubRepo: "", officialName: "", repoFullName: "" };
   }
 }
 
@@ -2658,6 +2701,7 @@ async function recoverProfileChatTab(payload) {
   const conversationId = String(payload?.conversationId || "").trim();
   const targetId = String(payload?.targetId ?? "").trim();
   const title = String(payload?.title || "").trim();
+  const silent = payload?.silent === true;
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat cần khôi phục không hợp lệ.");
   if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome cần khôi phục.");
@@ -2669,7 +2713,7 @@ async function recoverProfileChatTab(payload) {
     conversation_id: conversationId,
     target_id: targetId
   }, 60000);
-  const windowFocus = await focusChromeWindow(title);
+  const windowFocus = silent ? { ok: false, skipped: true, source: "auto-recovery" } : await focusChromeWindow(title);
   return { ...result, window_focus: windowFocus };
 }
 
@@ -3180,6 +3224,14 @@ ipcMain.on("codexpro:log-diagnostic", (_event, payload) => diagnostic(
 ipcMain.handle("codexpro:get-diagnostic-logs", (_event, options) => readDiagnosticLogs(codexProHome, options || {}));
 ipcMain.handle("codexpro:clear-diagnostic-logs", () => clearDiagnosticLogs(codexProHome));
 ipcMain.handle("codexpro:prune-diagnostic-logs", () => pruneDiagnosticLogs(codexProHome));
+diagnosticIpcHandle("codexpro:operations-performance", { category: "performance", action: "operations-performance", slowMs: 2_500 }, (_event, pids) => collectOperationsPerformance(Array.isArray(pids) ? pids : []));
+ipcMain.handle("codexpro:notify", (_event, payload) => {
+  if (!Notification.isSupported()) return false;
+  const title = String(payload?.title || "CodexPro").trim().slice(0, 120) || "CodexPro";
+  const body = String(payload?.body || "").trim().slice(0, 500);
+  new Notification({ title, body, silent: payload?.silent === true }).show();
+  return true;
+});
 diagnosticIpcHandle("codexpro:rotate-link", {
   category: "settings",
   action: "rotate-mcp-link",

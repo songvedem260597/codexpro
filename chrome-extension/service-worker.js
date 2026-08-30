@@ -1721,6 +1721,20 @@ async function promiseWithTimeout(promise,timeoutMs,label) {
   }finally{if(timer)clearTimeout(timer);}
 }
 
+function stopChatGenerationPage() {
+  const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
+  const stopControl=Array.from(document.querySelectorAll('button,[role="button"]')).find(control=>{
+    if(!visible(control)||control.disabled||control.getAttribute?.('aria-disabled')==='true')return false;
+    const testId=String(control.getAttribute?.('data-testid')||'').trim();
+    if(testId==='stop-button')return true;
+    const label=String(control.getAttribute?.('aria-label')||control.innerText||control.textContent||'').trim();
+    return /^(?:stop(?: answering| generating| streaming)?|dừng(?: trả lời)?)$/i.test(label);
+  });
+  if(!stopControl)return {ok:true,stopped:false,reason:'not_generating'};
+  stopControl.click();
+  return {ok:true,stopped:true};
+}
+
 async function probeConversationLimit(tabId) {
   try{
     const [injected]=await promiseWithTimeout(
@@ -1758,6 +1772,16 @@ async function execute(command) {
   if(action==='check_chatgpt')return {action,...await checkConnectorInstalled()};
   if(action==='setup_chatgpt')return {action,...await installConnector()};
   if(action==='list_tabs')return {action,tabs:await tabList()};
+  if(action==='stop_chat_generation'){
+    const requestedId=Number(args.target_id);
+    const conversationId=String(args.conversation_id||'').trim();
+    const tabs=await chrome.tabs.query({});
+    const tab=tabs.find(candidate=>candidate.id===requestedId)||tabs.find(candidate=>conversationId&&conversationIdFromUrl(candidate.url)===conversationId);
+    if(!tab?.id)throw new Error('Không tìm thấy tab ChatGPT cần dừng.');
+    const [injected]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:tab.id},func:stopChatGenerationPage}),5000,'Chrome renderer không phản hồi khi dừng task.');
+    const result=injected?.result&&typeof injected.result==='object'?injected.result:{ok:false,stopped:false};
+    return {action,ok:Boolean(result.ok),stopped:Boolean(result.stopped),reason:String(result.reason||''),target_id:tab.id,conversation_id:conversationId||conversationIdFromUrl(tab.url)};
+  }
   if(action==='recover_chat_tab'){
     const conversationId=String(args.conversation_id||'').trim();
     const requestedId=Number(args.target_id);

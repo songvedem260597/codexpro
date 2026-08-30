@@ -3,6 +3,32 @@ export function responseDistanceFromBottom(container) {
   return Math.max(0, container.scrollHeight - container.scrollTop - container.clientHeight);
 }
 
+export function responseScrollMetrics(container) {
+  if (!container) return null;
+  return {
+    scrollTop: Math.round(container.scrollTop),
+    scrollHeight: Math.round(container.scrollHeight),
+    clientHeight: Math.round(container.clientHeight),
+    distanceFromBottom: Math.round(responseDistanceFromBottom(container))
+  };
+}
+
+export function responseTurnAnchorScrollTop(container, anchor, viewportRatio = 0.42) {
+  if (!container || !anchor) return 0;
+  const containerRect = container.getBoundingClientRect();
+  const anchorRect = anchor.getBoundingClientRect();
+  const anchorCenterInContent = anchorRect.top - containerRect.top + container.scrollTop + (anchorRect.height / 2);
+  const desiredCenter = container.clientHeight * Math.max(0.2, Math.min(0.7, viewportRatio));
+  const maximum = Math.max(0, container.scrollHeight - container.clientHeight);
+  return Math.max(0, Math.min(maximum, Math.round(anchorCenterInContent - desiredCenter)));
+}
+
+export function scrollResponseToTurnAnchor(container, anchor, viewportRatio = 0.42) {
+  if (!container || !anchor) return null;
+  container.scrollTop = responseTurnAnchorScrollTop(container, anchor, viewportRatio);
+  return responseScrollMetrics(container);
+}
+
 export function handleResponseWheel(profileId, container, deltaY, lockedProfiles, threshold = 18) {
   if (deltaY < 0) {
     lockedProfiles.set(profileId, true);
@@ -27,8 +53,9 @@ export function installResponseAutoPin({
 }) {
   if (!panel) return () => {};
   let animationFrame = 0;
+  const pendingCauses = new Set();
   const observedSizes = new WeakSet();
-  const resizeObserver = new ResizeObserverClass(() => schedule());
+  const resizeObserver = new ResizeObserverClass(() => schedule("resize"));
   const observeSizes = () => {
     const container = getContainer();
     if (!container) return;
@@ -39,16 +66,19 @@ export function installResponseAutoPin({
     }
   };
   const pin = () => {
+    const cause = [...pendingCauses].join("+") || "unknown";
+    pendingCauses.clear();
     observeSizes();
-    if (!isLocked()) scrollToBottom();
+    if (!isLocked()) scrollToBottom(cause);
   };
-  function schedule() {
+  function schedule(cause = "unknown") {
+    pendingCauses.add(cause);
     windowObject.cancelAnimationFrame(animationFrame);
     animationFrame = windowObject.requestAnimationFrame(pin);
   }
   const mutationObserver = new MutationObserverClass(() => {
     observeSizes();
-    schedule();
+    schedule("mutation");
   });
   mutationObserver.observe(panel, {
     childList: true,
@@ -58,7 +88,7 @@ export function installResponseAutoPin({
     attributeFilter: ["class", "style", "data-layout-sending", "data-layout-busy", "data-layout-settling", "data-layout-stream", "data-layout-network-state", "data-layout-message-count"]
   });
   observeSizes();
-  schedule();
+  schedule("attach");
   return () => {
     windowObject.cancelAnimationFrame(animationFrame);
     mutationObserver.disconnect();
