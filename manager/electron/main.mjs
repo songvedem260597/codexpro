@@ -161,6 +161,7 @@ const REPO_SCAN_TIMEOUT_MS = 12000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
 let runtimeFreshnessPromise = null;
+let runtimeFreshnessRetryTimer = null;
 let scheduledTaskCache = null;
 let scheduledTaskPromise = null;
 const runtimeHealthDiagnosticTracker = createRuntimeHealthDiagnosticTracker();
@@ -1354,8 +1355,14 @@ function createWindow() {
           chatModalProbe = await win.webContents.executeJavaScript(`(() => {
             const modal = document.querySelector('.chat-modal');
             const transcript = modal?.querySelector('.latest-response');
+            const latestUser = [...(transcript?.querySelectorAll('.chat-transcript-message.is-user') || [])].at(-1);
             const scrollMetrics = (element) => element ? { scrollTop: element.scrollTop, scrollHeight: element.scrollHeight, clientHeight: element.clientHeight, distanceFromBottom: Math.max(0, element.scrollHeight - element.scrollTop - element.clientHeight) } : null;
-            return { open: Boolean(modal), profile: modal?.querySelector('.chat-modal-profile code')?.textContent || '', hasProjectDropdown: Boolean(modal?.querySelector('.project-dropdown')), selectedProject: modal?.querySelector('.project-dropdown-value strong')?.textContent?.trim() || '', hasChatSelector: Boolean(modal?.querySelector('.chat-dropdown, .chat-manage-actions')), hasResponse: Boolean(modal?.querySelector('.chat-response')), hasTextarea: Boolean(modal?.querySelector('textarea')), modalScroll: scrollMetrics(modal), transcriptScroll: scrollMetrics(transcript) };
+            const latestUserRect = latestUser?.getBoundingClientRect();
+            const transcriptRect = transcript?.getBoundingClientRect();
+            const anchorTop = latestUserRect && transcriptRect ? latestUserRect.top - transcriptRect.top : null;
+            const anchorCenter = anchorTop == null || !latestUserRect ? null : anchorTop + latestUserRect.height / 2;
+            const anchorTarget = transcript ? transcript.clientHeight * 0.42 : null;
+            return { open: Boolean(modal), profile: modal?.querySelector('.chat-modal-profile code')?.textContent || '', hasProjectDropdown: Boolean(modal?.querySelector('.project-dropdown')), selectedProject: modal?.querySelector('.project-dropdown-value strong')?.textContent?.trim() || '', hasChatSelector: Boolean(modal?.querySelector('.chat-dropdown, .chat-manage-actions')), hasResponse: Boolean(modal?.querySelector('.chat-response')), hasTextarea: Boolean(modal?.querySelector('textarea')), modalScroll: scrollMetrics(modal), transcriptScroll: scrollMetrics(transcript), turnAnchor: { active: Boolean(transcript?.classList.contains('has-turn-anchor')), latestUserTop: anchorTop == null ? null : Math.round(anchorTop), latestUserCenter: anchorCenter == null ? null : Math.round(anchorCenter), targetCenter: anchorTarget == null ? null : Math.round(anchorTarget), errorPx: anchorCenter == null || anchorTarget == null ? null : Math.round(anchorCenter - anchorTarget) } };
           })()`, true);
           chatModalProbe.click = clickProbe;
           await win.webContents.executeJavaScript("document.querySelector('.project-dropdown-trigger:not(:disabled)')?.click()", true);
@@ -1759,7 +1766,10 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         }
         const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        console.log(JSON.stringify({ ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, inspectionUiProbe, settingsProbe, diagnosticProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe, activeRepoProbe, toastProbe }));
+        const smokeResult = { ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, inspectionUiProbe, settingsProbe, diagnosticProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe, activeRepoProbe, toastProbe };
+        const smokeResultFile = String(process.env.CODEXPRO_MANAGER_SMOKE_RESULT || "").trim();
+        if (smokeResultFile) fs.writeFileSync(smokeResultFile, `${JSON.stringify(smokeResult, null, 2)}\n`, "utf8");
+        console.log(JSON.stringify(smokeResult));
       } catch (error) {
         console.error(error instanceof Error ? error.stack || error.message : String(error));
         process.exitCode = 1;
@@ -3548,6 +3558,24 @@ function expectedRuntimeBuildId(config) {
   }
 }
 
+function activeRuntimeProfiles(profiles) {
+  return (Array.isArray(profiles) ? profiles : []).filter((profile) => {
+    const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+    return ["working", "completing"].includes(String(profile?.activity || "").toLowerCase())
+      || tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "").toLowerCase() === "generating");
+  });
+}
+
+function scheduleRuntimeFreshnessRetry(delayMs = 15_000) {
+  if (runtimeFreshnessRetryTimer) return;
+  runtimeFreshnessRetryTimer = setTimeout(() => {
+    runtimeFreshnessRetryTimer = null;
+    runtimeFreshnessPromise = null;
+    void ensureFreshRuntimeAfterManagerStart();
+  }, delayMs);
+  runtimeFreshnessRetryTimer.unref?.();
+}
+
 async function waitForRuntimeBuild(expectedBuildId, initialStatus, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   let status = initialStatus;
@@ -3566,6 +3594,13 @@ function ensureFreshRuntimeAfterManagerStart() {
   }
   if (runtimeFreshnessPromise) return runtimeFreshnessPromise;
   runtimeFreshnessPromise = (async () => {
+    if (managerSmokeMode && process.env.CODEXPRO_MANAGER_SMOKE_ALLOW_RUNTIME_RESTART !== "1") {
+      diagnostic("info", "manager", "runtime", "Manager smoke bỏ qua tự động restart runtime đang dùng", {
+        action: "runtime-build-refresh-skipped",
+        reason: "smoke-mode"
+      });
+      return { checked: false, restarted: false, reason: "smoke-mode" };
+    }
     const base = await runtimeBaseStatus({ forceRefresh: true });
     if (!base.local.ok) return { checked: true, restarted: false, reason: "runtime-offline" };
     const expectedBuildId = expectedRuntimeBuildId(base.config);
@@ -3573,7 +3608,45 @@ function ensureFreshRuntimeAfterManagerStart() {
     if (!expectedBuildId || activeBuildId === expectedBuildId) {
       return { checked: true, restarted: false, reason: expectedBuildId ? "current" : "build-unavailable" };
     }
-    diagnostic("warn", "manager", "runtime", "Runtime CodexPro đang chạy bản cũ; Manager sẽ restart server", {
+    const profiles = await listBrowserProfilesThroughMcp(base.config, base.token).catch((error) => {
+      diagnostic("warn", "manager", "runtime", "Chưa xác minh được profile trước khi đồng bộ runtime; Manager sẽ hoãn restart", {
+        action: "runtime-build-refresh-profile-check-failed",
+        active_build_id: activeBuildId,
+        expected_build_id: expectedBuildId,
+        error
+      });
+      return null;
+    });
+    if (!profiles) {
+      scheduleRuntimeFreshnessRetry();
+      return { checked: true, restarted: false, reason: "profile-check-failed" };
+    }
+    const activeProfiles = activeRuntimeProfiles(profiles);
+    if (activeProfiles.length) {
+      diagnostic("warn", "manager", "runtime", "Runtime CodexPro đang chạy bản cũ nhưng còn task hoạt động; Manager hoãn restart", {
+        action: "runtime-build-refresh-deferred",
+        active_build_id: activeBuildId,
+        expected_build_id: expectedBuildId,
+        active_profile_count: activeProfiles.length,
+        active_profiles: activeProfiles.map((profile) => ({
+          profile_id: String(profile?.profile_id || ""),
+          activity: String(profile?.activity || ""),
+          task_title: String(profile?.current_task_title || profile?.last_task_title || ""),
+          active_target_ids: (Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [])
+            .filter((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "").toLowerCase() === "generating")
+            .map((tab) => String(tab?.id || "")),
+          active_network_states: (Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [])
+            .filter((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "").toLowerCase() === "generating")
+            .map((tab) => String(tab?.network_state || "")),
+          active_tab_titles: (Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [])
+            .filter((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "").toLowerCase() === "generating")
+            .map((tab) => String(tab?.title || ""))
+        }))
+      });
+      scheduleRuntimeFreshnessRetry();
+      return { checked: true, restarted: false, reason: "active-profiles", activeProfileCount: activeProfiles.length };
+    }
+    diagnostic("warn", "manager", "runtime", "Runtime CodexPro đang chạy bản cũ và mọi profile đã rảnh; Manager sẽ restart server", {
       action: "runtime-build-mismatch",
       active_build_id: activeBuildId,
       expected_build_id: expectedBuildId,

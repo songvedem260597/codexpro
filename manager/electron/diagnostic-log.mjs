@@ -46,6 +46,11 @@ function profileTaskEventLogPaths(home) {
   return [`${current}.1`, current];
 }
 
+function runtimeLifecycleLogPaths(home) {
+  const current = path.join(home, "runtime-lifecycle.jsonl");
+  return [`${current}.1`, current];
+}
+
 function scrubString(value) {
   return String(value || "")
     .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s,;]+/gi, "$1[REDACTED]")
@@ -158,6 +163,24 @@ async function readProfileTaskEventRecords(home) {
   }
   const cutoff = Date.now() - RETENTION_MS;
   return records.filter((record) => Date.parse(record.timestamp) >= cutoff);
+}
+
+async function readRuntimeLifecycleRecords(home) {
+  const records = [];
+  for (const file of runtimeLifecycleLogPaths(home)) {
+    try {
+      const text = await fs.promises.readFile(file, "utf8");
+      for (const line of text.split(/\r?\n/).filter(Boolean)) {
+        const record = parseLine(line);
+        if (!record) continue;
+        records.push(sanitizeDiagnosticValue(record.parsed));
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+  const cutoff = Date.now() - RETENTION_MS;
+  return records.filter((record) => Date.parse(record.timestamp || "") >= cutoff);
 }
 
 function trimToByteLimit(records) {
@@ -334,7 +357,11 @@ export async function readDiagnosticLogs(home, options = {}) {
   const category = String(options.category || "all").toLowerCase();
   const query = String(options.query || "").trim().toLowerCase().slice(0, 200);
   const limit = Math.max(1, Math.min(MAX_READ_ENTRIES, Number(options.limit) || 1000));
-  const windowRecords = [...await readValidRecords(home), ...await readProfileTaskEventRecords(home)].filter((item) => {
+  const windowRecords = [
+    ...await readValidRecords(home),
+    ...await readProfileTaskEventRecords(home),
+    ...await readRuntimeLifecycleRecords(home)
+  ].filter((item) => {
     const timestamp = Date.parse(item.timestamp || "");
     return Number.isFinite(timestamp) && timestamp >= cutoff;
   }).sort((left, right) => Date.parse(left.timestamp || "") - Date.parse(right.timestamp || ""));
@@ -380,7 +407,8 @@ export async function clearDiagnosticLogs(home) {
   const task = writeQueue.catch(() => undefined).then(async () => {
     await Promise.all([
       fs.promises.rm(logPath(home), { force: true }),
-      ...profileTaskEventLogPaths(home).map((file) => fs.promises.rm(file, { force: true }))
+      ...profileTaskEventLogPaths(home).map((file) => fs.promises.rm(file, { force: true })),
+      ...runtimeLifecycleLogPaths(home).map((file) => fs.promises.rm(file, { force: true }))
     ]);
     state.fileSizeBytes = 0;
     state.lastPruneAt = Date.now();
