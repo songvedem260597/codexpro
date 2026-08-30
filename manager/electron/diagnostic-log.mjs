@@ -6,13 +6,39 @@ const RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_LOG_BYTES = 8 * 1024 * 1024;
 const MAX_READ_ENTRIES = 5000;
 const MAX_STRING_LENGTH = 4000;
+const MAX_WRITE_BATCH_ENTRIES = 250;
+const MAX_WRITE_BATCH_BYTES = 256 * 1024;
+const MAX_PENDING_RECORDS = 20_000;
+const MAX_PENDING_BYTES = 16 * 1024 * 1024;
+const PENDING_BACKLOG_TARGET_RATIO = 0.9;
+const PRUNE_INTERVAL_MS = 30 * 60 * 1000;
 const SENSITIVE_KEY = /(authorization|cookie|password|passwd|secret|token|api[_-]?key|access[_-]?key|refresh[_-]?token|data[_-]?base64|base64)/i;
 let writeQueue = Promise.resolve();
-let lastPruneAt = 0;
 let recordSequence = 0;
+const writeStates = new Map();
 
 function logPath(home) {
   return path.join(home, "manager-diagnostic.jsonl");
+}
+
+function writeState(home) {
+  const key = path.resolve(home);
+  let state = writeStates.get(key);
+  if (!state) {
+    state = {
+      key,
+      pending: [],
+      pendingBytes: 0,
+      droppedCount: 0,
+      scheduled: false,
+      flushPromise: Promise.resolve(),
+      directoryReady: false,
+      fileSizeBytes: null,
+      lastPruneAt: Date.now()
+    };
+    writeStates.set(key, state);
+  }
+  return state;
 }
 
 function profileTaskEventLogPaths(home) {
@@ -147,39 +173,160 @@ function trimToByteLimit(records) {
   return kept;
 }
 
-export async function pruneDiagnosticLogs(home) {
+async function ensureWriteTarget(home, state) {
   const file = logPath(home);
+  if (!state.directoryReady) {
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    state.directoryReady = true;
+  }
+  if (state.fileSizeBytes == null) {
+    try {
+      state.fileSizeBytes = (await fs.promises.stat(file)).size;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      state.fileSizeBytes = 0;
+    }
+  }
+  return file;
+}
+
+async function pruneDiagnosticFile(home, state) {
+  const file = await ensureWriteTarget(home, state);
   const records = trimToByteLimit(await readValidRecords(home));
-  await fs.promises.mkdir(path.dirname(file), { recursive: true });
   if (!records.length) {
     await fs.promises.rm(file, { force: true });
+    state.fileSizeBytes = 0;
   } else {
+    const payload = `${records.map((item) => JSON.stringify(item)).join("\n")}\n`;
     const temp = `${file}.tmp`;
-    await fs.promises.writeFile(temp, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
+    await fs.promises.writeFile(temp, payload, "utf8");
     await fs.promises.rm(file, { force: true });
     await fs.promises.rename(temp, file);
+    state.fileSizeBytes = Buffer.byteLength(payload, "utf8");
   }
-  lastPruneAt = Date.now();
+  state.lastPruneAt = Date.now();
   return records.length;
+}
+
+function takeWriteBatch(state) {
+  let count = 0;
+  let bytes = 0;
+  while (count < state.pending.length && count < MAX_WRITE_BATCH_ENTRIES) {
+    const nextBytes = state.pending[count].bytes;
+    if (count > 0 && bytes + nextBytes > MAX_WRITE_BATCH_BYTES) break;
+    bytes += nextBytes;
+    count += 1;
+  }
+  const batch = state.pending.splice(0, Math.max(1, count));
+  state.pendingBytes = Math.max(0, state.pendingBytes - bytes);
+  return { batch, bytes };
+}
+
+function trimPendingBacklog(state) {
+  if (state.pending.length <= MAX_PENDING_RECORDS && state.pendingBytes <= MAX_PENDING_BYTES) return 0;
+  const targetRecords = Math.floor(MAX_PENDING_RECORDS * PENDING_BACKLOG_TARGET_RATIO);
+  const targetBytes = Math.floor(MAX_PENDING_BYTES * PENDING_BACKLOG_TARGET_RATIO);
+  let count = 0;
+  let bytes = 0;
+  while (
+    count < state.pending.length
+    && (state.pending.length - count > targetRecords || state.pendingBytes - bytes > targetBytes)
+  ) {
+    bytes += state.pending[count].bytes;
+    count += 1;
+  }
+  if (!count) return 0;
+  const dropped = state.pending.splice(0, count);
+  state.pendingBytes = Math.max(0, state.pendingBytes - bytes);
+  state.droppedCount += dropped.length;
+  for (const item of dropped) item.resolve({ dropped: true });
+  return dropped.length;
+}
+
+function scheduleDiagnosticFlush(home, state) {
+  if (state.scheduled) return state.flushPromise;
+  state.scheduled = true;
+  const task = writeQueue.catch(() => undefined).then(async () => {
+    try {
+      const file = await ensureWriteTarget(home, state);
+      while (state.pending.length) {
+        const { batch, bytes } = takeWriteBatch(state);
+        try {
+          await fs.promises.appendFile(file, batch.map((item) => item.line).join(""), "utf8");
+          state.fileSizeBytes = Math.max(0, Number(state.fileSizeBytes) || 0) + bytes;
+          for (const item of batch) item.resolve();
+        } catch (error) {
+          for (const item of batch) item.reject(error);
+          throw error;
+        }
+      }
+      if (state.droppedCount > 0) {
+        const droppedCount = state.droppedCount;
+        const warning = normalizeRecord({
+          level: "warn",
+          source: "manager",
+          category: "logging",
+          action: "diagnostic-backpressure",
+          message: `Đã bỏ qua ${droppedCount} log cũ do hàng đợi ghi quá lớn`,
+          details: {
+            dropped_count: droppedCount,
+            max_pending_records: MAX_PENDING_RECORDS,
+            max_pending_bytes: MAX_PENDING_BYTES
+          }
+        });
+        const warningLine = `${JSON.stringify(warning)}\n`;
+        await fs.promises.appendFile(file, warningLine, "utf8");
+        state.fileSizeBytes = Math.max(0, Number(state.fileSizeBytes) || 0) + Buffer.byteLength(warningLine, "utf8");
+        state.droppedCount = 0;
+      }
+      if (Date.now() - state.lastPruneAt >= PRUNE_INTERVAL_MS || Number(state.fileSizeBytes) > MAX_LOG_BYTES) {
+        await pruneDiagnosticFile(home, state);
+      }
+    } catch (error) {
+      const pending = state.pending.splice(0);
+      state.pendingBytes = 0;
+      for (const item of pending) item.reject(error);
+    } finally {
+      state.scheduled = false;
+      if (state.pending.length) scheduleDiagnosticFlush(home, state);
+    }
+  });
+  state.flushPromise = task;
+  writeQueue = task;
+  return task;
 }
 
 export function appendDiagnosticLog(home, entry) {
   const record = normalizeRecord(entry);
-  writeQueue = writeQueue.catch(() => undefined).then(async () => {
-    const file = logPath(home);
-    await fs.promises.mkdir(path.dirname(file), { recursive: true });
-    if (Date.now() - lastPruneAt > 30 * 60 * 1000) await pruneDiagnosticLogs(home);
-    await fs.promises.appendFile(file, `${JSON.stringify(record)}\n`, "utf8");
-    try {
-      const stat = await fs.promises.stat(file);
-      if (stat.size > MAX_LOG_BYTES) await pruneDiagnosticLogs(home);
-    } catch {}
+  const line = `${JSON.stringify(record)}\n`;
+  const state = writeState(home);
+  const promise = new Promise((resolve, reject) => {
+    const bytes = Buffer.byteLength(line, "utf8");
+    state.pending.push({ line, bytes, resolve, reject });
+    state.pendingBytes += bytes;
+    trimPendingBacklog(state);
   });
-  return writeQueue;
+  scheduleDiagnosticFlush(home, state);
+  return promise;
+}
+
+export async function flushDiagnosticLogs(home) {
+  const state = writeState(home);
+  if (state.pending.length && !state.scheduled) scheduleDiagnosticFlush(home, state);
+  await state.flushPromise.catch(() => undefined);
+}
+
+export async function pruneDiagnosticLogs(home) {
+  await flushDiagnosticLogs(home);
+  const state = writeState(home);
+  const task = writeQueue.catch(() => undefined).then(() => pruneDiagnosticFile(home, state));
+  writeQueue = task;
+  state.flushPromise = task;
+  return task;
 }
 
 export async function readDiagnosticLogs(home, options = {}) {
-  await writeQueue.catch(() => undefined);
+  await flushDiagnosticLogs(home);
   const hours = Math.max(1, Math.min(24, Number(options.hours) || 24));
   const cutoff = Date.now() - hours * 60 * 60 * 1000;
   const level = String(options.level || "all");
@@ -228,13 +375,20 @@ export async function readDiagnosticLogs(home, options = {}) {
 }
 
 export async function clearDiagnosticLogs(home) {
-  await writeQueue.catch(() => undefined);
-  await Promise.all([
-    fs.promises.rm(logPath(home), { force: true }),
-    ...profileTaskEventLogPaths(home).map((file) => fs.promises.rm(file, { force: true }))
-  ]);
-  lastPruneAt = Date.now();
-  return { cleared: true, timestamp: new Date().toISOString() };
+  await flushDiagnosticLogs(home);
+  const state = writeState(home);
+  const task = writeQueue.catch(() => undefined).then(async () => {
+    await Promise.all([
+      fs.promises.rm(logPath(home), { force: true }),
+      ...profileTaskEventLogPaths(home).map((file) => fs.promises.rm(file, { force: true }))
+    ]);
+    state.fileSizeBytes = 0;
+    state.lastPruneAt = Date.now();
+    return { cleared: true, timestamp: new Date().toISOString() };
+  });
+  writeQueue = task;
+  state.flushPromise = task;
+  return task;
 }
 
 export const DIAGNOSTIC_RETENTION_HOURS = 24;
