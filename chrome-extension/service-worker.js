@@ -27,6 +27,10 @@ const ATTACHMENT_UPLOAD_TIMEOUT_MS = 30000;
 const ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS = 2500;
 const CONVERSATION_LIMIT_PROBE_TIMEOUT_MS = 1500;
 const PENDING_CONVERSATION_TTL_MS = 60 * 1000;
+const MAX_CHATGPT_TABS = 6;
+const CHAT_TAB_CLEANUP_INTERVAL_MS = 30 * 1000;
+const CHAT_TAB_HEALTH_TIMEOUT_MS = 1200;
+const CHAT_TAB_HEALTH_FAILURES_TO_CLOSE = 2;
 let polling = false;
 let installing = false;
 const chatNetworkStateByTab = new Map();
@@ -44,6 +48,8 @@ const chatCanonicalActivityProbesByTab = new Map();
 const pendingConversationByTab = new Map();
 const chatAttachmentOwnershipByTab = new Map();
 const chatDomActivityByTab = new Map();
+const chatTabHealthByTab = new Map();
+let lastChatTabCleanupAt = 0;
 let chatNetworkStateLoaded = false;
 let chatNetworkStateLoadPromise = null;
 let chatAttachmentOwnershipLoaded = false;
@@ -54,6 +60,99 @@ let conversationTitleOverrides = null;
 
 function conversationIdFromUrl(value) {
   try{return new URL(String(value||'')).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1]||'';}catch{return '';}
+}
+
+function isChatGptTabUrl(value) {
+  try{const url=new URL(String(value||''));return url.origin==='https://chatgpt.com';}catch{return false;}
+}
+
+function planChatTabCleanup(tabs,options={}) {
+  const maxTabs=Math.max(1,Number(options.maxTabs)||MAX_CHATGPT_TABS);
+  const recentIds=new Set((Array.isArray(options.recentConversationIds)?options.recentConversationIds:[]).map(String));
+  const managed=(Array.isArray(tabs)?tabs:[]).filter(tab=>Number.isInteger(tab?.id)&&isChatGptTabUrl(tab?.url));
+  const protectedTab=tab=>Boolean(tab.active||tab.pinned||tab.audible||tab.status==='loading'||tab.busy||tab.settling||tab.pending);
+  const closable=managed.filter(tab=>!protectedTab(tab));
+  const oldest=(left,right)=>Number(left.last_accessed||0)-Number(right.last_accessed||0)||Number(left.id)-Number(right.id);
+  const planned=[],reasons={};
+  for(const tab of closable.filter(tab=>Number(tab.health_failures||0)>=CHAT_TAB_HEALTH_FAILURES_TO_CLOSE).sort(oldest)){
+    planned.push(tab.id);reasons[tab.id]='codexpro_unreachable';
+  }
+  let remaining=managed.length-planned.length;
+  const overflow=Math.max(0,remaining-maxTabs);
+  if(overflow){
+    const candidates=closable.filter(tab=>!planned.includes(tab.id)).sort((left,right)=>{
+      const leftConversation=conversationIdFromUrl(left.url),rightConversation=conversationIdFromUrl(right.url);
+      const leftPriority=!leftConversation?0:recentIds.has(leftConversation)?2:1;
+      const rightPriority=!rightConversation?0:recentIds.has(rightConversation)?2:1;
+      return leftPriority-rightPriority||oldest(left,right);
+    });
+    for(const tab of candidates.slice(0,overflow)){planned.push(tab.id);reasons[tab.id]='tab_limit';remaining-=1;}
+  }
+  return {close_ids:planned,reasons,managed_count:managed.length,remaining_count:remaining,max_tabs:maxTabs};
+}
+
+async function probeChatGptTabHealth(tabId) {
+  try{
+    const [injected]=await promiseWithTimeout(
+      chrome.scripting.executeScript({target:{tabId},func:()=>({ok:Boolean(document.documentElement)&&location.hostname==='chatgpt.com'})}),
+      CHAT_TAB_HEALTH_TIMEOUT_MS,
+      'Chrome renderer không phản hồi health probe của CodexPro.'
+    );
+    return injected?.result?.ok===true;
+  }catch{return false;}
+}
+
+async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
+  const now=Date.now();
+  if(options.force!==true&&now-lastChatTabCleanupAt<CHAT_TAB_CLEANUP_INTERVAL_MS)return {skipped:true,closed_count:0};
+  lastChatTabCleanupAt=now;
+  await ensureChatAttachmentOwnershipLoaded();
+  const rawTabs=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(tab=>Number.isInteger(tab.id));
+  const liveIds=new Set(rawTabs.map(tab=>tab.id));
+  for(const tabId of chatTabHealthByTab.keys())if(!liveIds.has(tabId))chatTabHealthByTab.delete(tabId);
+  const summaryById=new Map((Array.isArray(tabSummaries)?tabSummaries:[]).map(tab=>[tab.id,tab]));
+  const probeCandidates=rawTabs.filter(tab=>{
+    const summary=summaryById.get(tab.id)||{};
+    const debuggerBusy=Number(debuggerSessionsByTab.get(tab.id)?.refs||0)>0;
+    return !tab.active&&!tab.pinned&&!tab.audible&&tab.status!=='loading'&&!summary.busy&&!summary.settling&&!pendingConversationByTab.has(tab.id)&&!chatAttachmentOwnershipByTab.has(tab.id)&&!browserMutationTailsByTab.has(tab.id)&&!debuggerBusy;
+  });
+  await Promise.all(probeCandidates.map(async tab=>{
+    const healthy=await probeChatGptTabHealth(tab.id);
+    const previous=chatTabHealthByTab.get(tab.id)||{failures:0};
+    const failures=healthy?0:Number(previous.failures||0)+1;
+    chatTabHealthByTab.set(tab.id,{failures,last_probe_at:now});
+  }));
+  const policyTabs=rawTabs.map(tab=>{
+    const summary=summaryById.get(tab.id)||{};
+    const debuggerBusy=Number(debuggerSessionsByTab.get(tab.id)?.refs||0)>0;
+    const pending=pendingConversationByTab.has(tab.id)||chatAttachmentOwnershipByTab.has(tab.id)||browserMutationTailsByTab.has(tab.id)||debuggerBusy;
+    return {...tab,...summary,last_accessed:Number(tab.lastAccessed)||0,pending,health_failures:Number(chatTabHealthByTab.get(tab.id)?.failures||0)};
+  });
+  const plan=planChatTabCleanup(policyTabs,{
+    maxTabs:MAX_CHATGPT_TABS,
+    recentConversationIds:(Array.isArray(recentConversations)?recentConversations:[]).map(item=>item?.id)
+  });
+  const closed=[];
+  for(const tabId of plan.close_ids){
+    try{
+      const current=await chrome.tabs.get(tabId);
+      const summary=summaryById.get(tabId)||{};
+      const conversationId=conversationIdFromUrl(current.url);
+      const networkState=await chatRequestState(tabId,conversationId);
+      const canonicalActivity=canonicalActivityState(tabId,conversationId);
+      const domActivity=chatDomActivityByTab.get(tabId)?.value;
+      const debuggerBusy=Number(debuggerSessionsByTab.get(tabId)?.refs||0)>0;
+      if(current.active||current.pinned||current.audible||current.status==='loading'||pendingConversationByTab.has(tabId)||chatAttachmentOwnershipByTab.has(tabId)||browserMutationTailsByTab.has(tabId)||debuggerBusy||summary.busy||summary.settling||networkState.busy||canonicalActivity.busy||domActivity?.busy)continue;
+      await chrome.tabs.remove(tabId);
+      closed.push({tab_id:tabId,reason:plan.reasons[tabId]||'tab_limit'});
+    }catch{}
+  }
+  if(closed.length){
+    await chrome.storage.local.set({codexproChatTabCleanup:{at:new Date().toISOString(),max_tabs:MAX_CHATGPT_TABS,closed}}).catch(()=>{});
+    recentConversationCache={at:0,items:[]};
+    scheduleRealtimeProfilePush(0);
+  }
+  return {...plan,closed,closed_count:closed.length};
 }
 
 function isChatGenerationRequest(details) {
@@ -410,7 +509,7 @@ chrome.webRequest.onBeforeRequest.addListener(details=>{const attributed=attribu
 chrome.webRequest.onCompleted.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'completed',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onErrorOccurred.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'failed',0,details.error);finishChatRequest(attributed,'failed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onBeforeRedirect.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'redirected',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
-chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
+chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatTabHealthByTab.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
 
 async function profileInfo() {
   const stored = await chrome.storage.local.get(['profileId','active','connectorInstall','connectorServerFingerprint']);
@@ -528,6 +627,10 @@ async function tabList() {
       id:tab.id,
       window_id:tab.windowId,
       active:Boolean(tab.active),
+      pinned:Boolean(tab.pinned),
+      audible:Boolean(tab.audible),
+      status:String(tab.status||''),
+      last_accessed:Number(tab.lastAccessed)||0,
       title:String(titleOverride?.title||tab.title||''),
       url:tab.url || '',
       busy:networkBusy||domToolBusy||canonicalBusy,
@@ -2402,7 +2505,9 @@ async function pollLoop() {
   try{
     while(true){
       try{
-        const [tabs,recentConversations]=await Promise.all([tabList(),recentConversationList(3)]);
+        let [tabs,recentConversations]=await Promise.all([tabList(),recentConversationList(3)]);
+        const tabCleanup=await cleanupChatGptTabs(tabs,recentConversations);
+        if(tabCleanup.closed_count)tabs=await tabList();
         await confirmConnectorFromLiveToolActivity(tabs);
         const profile=await profileInfo();
         const response=await fetch(`${BRIDGE}/poll`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,active:profile.active,tabs,recent_conversations:recentConversations})});
