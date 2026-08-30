@@ -46,7 +46,7 @@ const DEFAULT_GLOBAL_RULES = `# CodexPro Global Rules
 - Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
 `;
 
-const WORKER_EXTENSION_VERSION = "0.5.74";
+const WORKER_EXTENSION_VERSION = "0.5.76";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const REPO_SCAN_CACHE_MS = 10 * 60 * 1000;
@@ -2312,6 +2312,23 @@ async function sendProfileRequestUnlocked(payload) {
     }
     if (!profile?.connected || !versionAtLeast(profile.extension_version)) {
       throw new Error(`Không thể tự update worker extension lên ${WORKER_EXTENSION_VERSION}. Hãy mở chrome://extensions và reload CodexPro.`);
+    }
+  }
+  if (profile.connector_update_required || profile.connector_profile_bound === false) {
+    if (sendDebug) console.error(`[manager-send] rebinding CodexPro connector to profile ${profileId}`);
+    await localMcpToolInSession(session, "browser_control", {
+      action: "setup_chatgpt",
+      profile_id: profileId
+    }, 310000);
+    const connectorDeadline = Date.now() + 20000;
+    while (Date.now() < connectorDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const connectorProfiles = await localMcpToolInSession(session, "browser_control", { action: "list_profiles" });
+      profile = (Array.isArray(connectorProfiles.profiles) ? connectorProfiles.profiles : []).find((item) => item.profile_id === profileId);
+      if (profile?.connected && profile.connector_installed && profile.connector_profile_bound) break;
+    }
+    if (!profile?.connected || !profile.connector_installed || !profile.connector_profile_bound) {
+      throw new Error("CodexPro connector chưa được gắn đúng profile Chrome. Hãy cập nhật connector rồi gửi lại.");
     }
   }
   const selectedConversationTab = newChat ? null : (profile.conversation_tabs || []).find((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] === conversationId);

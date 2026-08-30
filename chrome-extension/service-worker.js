@@ -413,28 +413,21 @@ chrome.webRequest.onBeforeRedirect.addListener(details=>{const attributed=attrib
 chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
 
 async function profileInfo() {
-  const stored = await chrome.storage.local.get(['profileId','active','connectorInstall']);
+  const stored = await chrome.storage.local.get(['profileId','active','connectorInstall','connectorServerFingerprint']);
   const profileId = stored.profileId || crypto.randomUUID();
   if (!stored.profileId) await chrome.storage.local.set({profileId});
   let email = '';
   try { email = (await chrome.identity.getProfileUserInfo({accountStatus:'ANY'})).email || ''; } catch {}
-  return {id:profileId,email,label:email || `Chrome ${profileId.slice(0,8)}`,version:chrome.runtime.getManifest().version,connector_install:stored.connectorInstall||null,active:Boolean(stored.active)};
+  return {id:profileId,email,label:email || `Chrome ${profileId.slice(0,8)}`,version:chrome.runtime.getManifest().version,connector_install:stored.connectorInstall||null,connector_server_fingerprint:String(stored.connectorServerFingerprint||''),active:Boolean(stored.active)};
 }
 
 async function confirmConnectorFromLiveToolActivity(tabs) {
   const observed=Array.isArray(tabs)&&tabs.some(tab=>Boolean(tab?.busy||tab?.settling)&&/^CodexPro đang\b/i.test(String(tab?.activity_text||'').trim()));
   if(!observed)return false;
-  const stored=await chrome.storage.local.get(['connectorInstall']);
-  if(stored.connectorInstall?.ok===true)return false;
-  await chrome.storage.local.set({connectorInstall:{
-    ok:true,
-    message:'CodexPro đã được xác nhận qua tool activity trong ChatGPT.',
-    at:new Date().toISOString(),
-    source:'live_tool_activity'
-  }});
-  await chrome.action.setBadgeBackgroundColor({color:'#39d98a'}).catch(()=>{});
-  await chrome.action.setBadgeText({text:'OK'}).catch(()=>{});
-  return true;
+  // Tool activity proves that some CodexPro definition is callable, but it
+  // does not prove that its URL carries this Chrome profile id. Only the
+  // fingerprint saved by installConnector may mark a connector profile-bound.
+  return false;
 }
 
 async function getConversationTitleOverrides() {
@@ -2292,7 +2285,10 @@ async function openConnectorDetailPage() {
   const deadline=Date.now()+20000;
   while(Date.now()<deadline){
     const root=settingsRoot();
-    const button=root?[...root.querySelectorAll('button')].filter(visible).find(item=>normalized(item)==='codexpro'):null;
+    const button=root?[...root.querySelectorAll('button')].filter(visible).find(item=>{
+      const value=normalized(item);
+      return value==='codexpro'||value.startsWith('codexpro ');
+    }):null;
     if(button)button.click();
     for(let attempt=0;attempt<10;attempt+=1){if(detailReady())return {ok:true,already_open:false,url:location.href};await sleep(150);}
   }

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -22,7 +22,7 @@ import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges }
 import { projectCompactGraph } from "./analysis/projection.js";
 import { createRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import { runBrowserControl } from "./browserOps.js";
-import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, runBrowserExtensionCommand, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 
@@ -748,7 +748,7 @@ function serverInstructions(config: CodexProConfig, requireRepoTask = false): st
     "",
     "Preferred workflow:",
     requireRepoTask
-      ? "1. This profile-bound ChatGPT MCP session is repo-task gated. CodexPro Manager first prepares the exact task id/root/scope; call begin_repo_task with that exact prepared task before any repository/workspace tool. A newly prepared Manager request invalidates the previous active task immediately. The codexpro wrapper may be used for action=list_actions/help and action=begin_repo_task; repo_task_status is also available before activation."
+      ? "1. This profile-bound ChatGPT MCP session is repo-task gated. Before any repository/workspace tool, call begin_repo_task and choose a clear AI-generated task_title of 2-6 words. If a CodexPro Manager prompt supplies an exact task id/root/scope, pass those exact values. For a request typed directly in ChatGPT, omit task_id and root; CodexPro generates the task id and uses this profile's locked workspace. A newly begun task invalidates the previous active task immediately. The codexpro wrapper may be used for action=list_actions/help and action=begin_repo_task; repo_task_status is also available before activation."
       : "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
     requireRepoTask
       ? `2. begin_repo_task loads the latest mandatory global rules from ${path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE)} and binds their SHA-256 to this MCP session. If that file changes, the next gated tool fails closed until begin_repo_task runs again.`
@@ -1228,6 +1228,7 @@ const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, d
 type RepoTaskProof = {
   taskId: string;
   taskTitle: string;
+  taskSource: "manager" | "chatgpt_direct";
   root: string;
   workspaceId: string;
   startedAt: string;
@@ -1259,7 +1260,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
   );
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.29.4" }, { instructions: serverInstructions(config, requireRepoTask) });
+  const server = new McpServer({ name: "CodexPro", version: "0.29.6" }, { instructions: serverInstructions(config, requireRepoTask) });
   runtimeTraceWorkspaceByServer.set(server as object, () => selectedRuntimeTraceWorkspace ?? workspaces.defaultWorkspace());
   repoTaskWorkspaceSelectorByServer.set(server as object, (root) => workspaces.openWorkspace(root));
   repoTaskGateRequiredByServer.set(server as object, requireRepoTask);
@@ -1850,15 +1851,15 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     server,
     "begin_repo_task",
     {
-      title: "Begin Manager Repo Task",
-      description: "Mandatory first call for every task sent by CodexPro Manager. Opens the initial workspace and records server-side proof that CodexPro was actually invoked. Normal tasks stay locked to that workspace; scope=all_allowed lets the task switch only between workspaces inside CodexPro's configured allowed roots.",
+      title: "Begin Profile Repo Task",
+      description: "Mandatory first call for every profile-bound ChatGPT task. The AI must return a clear 2-6 word task_title. Manager requests pass their exact prepared id/root/scope; direct ChatGPT requests omit task_id/root so CodexPro creates a task in the profile's locked workspace.",
       inputSchema: {
-        task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).describe("Exact task id included by CodexPro Manager."),
+        task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional().describe("Exact task id included by CodexPro Manager. Omit only for a request typed directly in ChatGPT."),
         task_title: z.string().trim().min(4).max(56)
           .refine((value) => { const words = value.split(/\s+/).filter(Boolean).length; return words >= 2 && words <= 6; }, "Task title must contain 2-6 words.")
           .refine((value) => !/^(?:làm sao|sửa đi|làm đi|fix đi|check lỗi|kiểm tra|tiếp tục)$/iu.test(value.trim()), "Task title must describe the actual work, not a vague request.")
           .describe("Required title chosen and returned by the AI: 2-6 short, clear words describing the actual work."),
-        root: z.string().min(1).describe("Initial workspace root included by CodexPro Manager."),
+        root: z.string().min(1).optional().describe("Initial workspace root included by CodexPro Manager. Omit for a direct ChatGPT request to use the profile's locked workspace."),
         scope: z.enum(["workspace", "all_allowed"]).optional().describe("Task scope. Omit or use workspace for a locked workspace; use all_allowed only when Manager explicitly enables all allowed roots.")
       },
       annotations: SESSION_READ_ANNOTATIONS,
@@ -1869,17 +1870,25 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
     },
     async (args) => {
-      const scope: "workspace" | "all_allowed" = args.scope === "all_allowed" ? "all_allowed" : "workspace";
       const gateProfileId = repoTaskGateProfileByServer.get(server as object) || "";
-      const expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
+      let expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
+      const managerPrepared = Boolean(args.task_id);
+      const taskId = args.task_id || (gateProfileId ? `cpt_${randomBytes(12).toString("hex")}` : "");
+      const scope: "workspace" | "all_allowed" = managerPrepared && args.scope === "all_allowed" ? "all_allowed" : "workspace";
       if (requireRepoTask) {
-        if (!gateProfileId || !expected) {
+        if (!gateProfileId) {
           throw new CodexProError(
-            "REPO_TASK_NOT_PREPARED: CodexPro Manager has not prepared a current task for this Chrome profile.",
-            { code: "REPO_TASK_NOT_PREPARED", details: { profile_id: gateProfileId || undefined, task_id: args.task_id } }
+            "REPO_TASK_PROFILE_REQUIRED: The MCP connector is not bound to a Chrome profile.",
+            { code: "REPO_TASK_PROFILE_REQUIRED", details: { task_id: taskId || undefined } }
           );
         }
-        if (expected.taskId !== args.task_id || expected.scope !== scope) {
+        if (managerPrepared && !expected) {
+          throw new CodexProError(
+            "REPO_TASK_NOT_PREPARED: CodexPro Manager has not prepared the supplied task for this Chrome profile.",
+            { code: "REPO_TASK_NOT_PREPARED", details: { profile_id: gateProfileId, task_id: taskId } }
+          );
+        }
+        if (managerPrepared && expected && (expected.taskId !== taskId || expected.scope !== scope)) {
           throw new CodexProError(
             `REPO_TASK_MISMATCH: begin_repo_task must use the exact task id and scope prepared by CodexPro Manager (${expected.taskId}, ${expected.scope}).`,
             {
@@ -1887,7 +1896,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
               details: {
                 profile_id: gateProfileId,
                 expected_task_id: expected.taskId,
-                received_task_id: args.task_id,
+                received_task_id: taskId,
                 expected_scope: expected.scope,
                 received_scope: scope
               }
@@ -1895,20 +1904,37 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           );
         }
       }
-      const workspace = workspaces.openWorkspace(args.root);
-      if (expected && !sameResolvedRoot(workspace.root, expected.root)) {
+      if (!taskId) {
+        throw new CodexProError("REPO_TASK_ID_REQUIRED: task_id is required outside a profile-bound ChatGPT connector.", { code: "REPO_TASK_ID_REQUIRED" });
+      }
+      const requestedRoot = args.root || getBrowserExtensionProfileWorkspaceBinding(gateProfileId) || expected?.root || config.defaultRoot;
+      const workspace = workspaces.openWorkspace(requestedRoot);
+      if (managerPrepared && expected && !sameResolvedRoot(workspace.root, expected.root)) {
         throw new CodexProError(
           `REPO_TASK_ROOT_MISMATCH: begin_repo_task must open the exact workspace prepared by CodexPro Manager: ${expected.root}`,
           {
             code: "REPO_TASK_ROOT_MISMATCH",
-            details: { profile_id: gateProfileId, task_id: args.task_id, expected_root: expected.root, received_root: workspace.root }
+            details: { profile_id: gateProfileId, task_id: taskId, expected_root: expected.root, received_root: workspace.root }
           }
         );
       }
+      if (gateProfileId && !managerPrepared) {
+        expected = rememberExpectedRepoTask(gateProfileId, { taskId, root: workspace.root, scope: "workspace" });
+      }
       const globalRules = await readGlobalRulesSnapshot();
       const codexGraph = await requireCodexGraphForWorkspace(config, guard, workspace);
-      const proof: RepoTaskProof = { taskId: args.task_id, taskTitle: args.task_title.trim(), root: workspace.root, workspaceId: workspace.id, startedAt: new Date().toISOString(), scope, globalRulesPath: globalRules.path, globalRulesSha256: globalRules.sha256, codexGraph };
+      const taskSource: RepoTaskProof["taskSource"] = managerPrepared ? "manager" : "chatgpt_direct";
+      const proof: RepoTaskProof = { taskId, taskTitle: args.task_title.trim(), taskSource, root: workspace.root, workspaceId: workspace.id, startedAt: new Date().toISOString(), scope, globalRulesPath: globalRules.path, globalRulesSha256: globalRules.sha256, codexGraph };
       if (gateProfileId) setBrowserExtensionProfileTask(gateProfileId, proof.taskId, proof.taskTitle);
+      recordBrowserProfileTaskEvent("repo_task_started", {
+        profile_id: gateProfileId,
+        task_id: proof.taskId,
+        task_title: proof.taskTitle,
+        task_title_requested_by: "mcp_server",
+        task_title_returned_by: "ai",
+        task_source: taskSource,
+        root: proof.root
+      });
       rememberRepoTaskProof(proof);
       const activeTask: ActiveRepoTask = {
         taskId: proof.taskId,
@@ -1927,6 +1953,9 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         task_id: proof.taskId,
         task_title: proof.taskTitle,
         task_title_source: "ai",
+        task_title_requested_by: "mcp_server",
+        task_title_returned_by: "ai",
+        task_source: proof.taskSource,
         verified: true,
         root: proof.root,
         workspace_id: proof.workspaceId,
@@ -1970,7 +1999,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         profile_id: gateProfileId || undefined,
         expected_task_id: expected?.taskId,
         active_task_id: active?.taskId,
-        ...(proof ? { task_title: proof.taskTitle, task_title_source: "ai", root: proof.root, workspace_id: proof.workspaceId, started_at: proof.startedAt, scope: proof.scope, codexgraph: proof.codexGraph } : {})
+        ...(proof ? { task_title: proof.taskTitle, task_title_source: "ai", task_title_requested_by: "mcp_server", task_title_returned_by: "ai", task_source: proof.taskSource, root: proof.root, workspace_id: proof.workspaceId, started_at: proof.startedAt, scope: proof.scope, codexgraph: proof.codexGraph } : {})
       });
     }
   );

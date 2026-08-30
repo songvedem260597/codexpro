@@ -1,5 +1,5 @@
 (() => {
-  const INSTALLER_REVISION = '2026-08-28-23';
+  const INSTALLER_REVISION = '2026-08-30-24';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
 
@@ -373,7 +373,13 @@
     if (!root) return null;
     return [...root.querySelectorAll('button')]
       .filter(visible)
-      .find(button => text(button) === 'codexpro') || null;
+      .find(button => {
+        const value = text(button);
+        // ChatGPT appends the current permission summary to the row's
+        // accessible text (for example "CodexPro Allow all"). Match the
+        // plugin-name prefix while keeping the search scoped to Settings.
+        return value === 'codexpro' || value.startsWith('codexpro ');
+      }) || null;
   }
 
   async function deleteConnectorDefinition() {

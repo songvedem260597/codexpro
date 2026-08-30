@@ -1,5 +1,5 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +21,8 @@ const READ_RESPONSE_TIMEOUT_MS = 75_000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const PROFILE_TASK_STATE_VERSION = 1;
 const MAX_PERSISTED_PROFILE_TASKS = 200;
+const PROFILE_TASK_EVENT_LOG_MAX_BYTES = 2 * 1024 * 1024;
+const PROFILE_TASK_EVENT_THROTTLE_MS = 30_000;
 
 export interface ExtensionProfileSummary {
   profile_id: string;
@@ -30,6 +32,8 @@ export interface ExtensionProfileSummary {
   connector_installed: boolean;
   connector_message: string;
   connector_checked_at: string;
+  connector_profile_bound: boolean;
+  connector_update_required: boolean;
   active: boolean;
   connected: boolean;
   last_seen: string;
@@ -97,6 +101,7 @@ interface ExtensionProfile {
   connectorInstalled: boolean;
   connectorMessage: string;
   connectorCheckedAt: string;
+  connectorServerFingerprint: string;
   workspaceRoot: string;
   lastSeen: number;
   tabs: unknown[];
@@ -138,12 +143,48 @@ const profileWorkspaceBindings = new Map<string, string>();
 const profileTaskIds = new Map<string, string>();
 const profileTaskTitles = new Map<string, string>();
 const profileTaskUpdatedAt = new Map<string, string>();
+const profileTaskEventSignatures = new Map<string, { signature: string; at: number }>();
 let singleton: BridgeState | undefined;
 
 function browserProfileTaskStatePath(): string {
   const configuredHome = String(process.env.CODEXPRO_HOME || "").trim();
   const home = configuredHome ? path.resolve(configuredHome) : path.join(os.homedir(), ".codexpro");
   return path.join(home, "browser-profile-tasks.json");
+}
+
+function browserProfileTaskEventLogPath(): string {
+  return path.join(path.dirname(browserProfileTaskStatePath()), "profile-task-events.jsonl");
+}
+
+export function recordBrowserProfileTaskEvent(event: string, details: Record<string, unknown> = {}): void {
+  try {
+    const logPath = browserProfileTaskEventLogPath();
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    if (fs.existsSync(logPath) && fs.statSync(logPath).size >= PROFILE_TASK_EVENT_LOG_MAX_BYTES) {
+      const previousPath = `${logPath}.1`;
+      if (fs.existsSync(previousPath)) fs.rmSync(previousPath, { force: true });
+      fs.renameSync(logPath, previousPath);
+    }
+    const safeDetails = Object.fromEntries(Object.entries(details).slice(0, 40).map(([key, value]) => [
+      String(key).slice(0, 100),
+      typeof value === "string" ? value.slice(0, 500) : typeof value === "number" || typeof value === "boolean" || value == null ? value : String(value).slice(0, 500)
+    ]));
+    fs.appendFileSync(logPath, `${JSON.stringify({ at: new Date().toISOString(), event: String(event).slice(0, 120), ...safeDetails })}\n`, "utf8");
+  } catch {
+    // Diagnostics must never break the profile bridge or MCP runtime.
+  }
+}
+
+function connectorFingerprint(serverUrl: string): string {
+  return createHash("sha256").update(String(serverUrl || ""), "utf8").digest("hex");
+}
+
+function expectedConnectorFingerprint(state: BridgeState, profileId: string): string {
+  try {
+    return state.connectorInfo ? connectorFingerprint(state.connectorInfo(profileId).server_url) : "";
+  } catch {
+    return "";
+  }
 }
 
 function validPersistedProfileId(value: string): boolean {
@@ -321,6 +362,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     connectorInstalled: false,
     connectorMessage: "",
     connectorCheckedAt: "",
+    connectorServerFingerprint: "",
     workspaceRoot: profileWorkspaceRoots.get(id) || "",
     lastSeen: 0,
     tabs: [],
@@ -330,6 +372,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   profile.email = String(source.email ?? profile.email ?? "").trim().slice(0, 320);
   profile.label = String(source.label ?? profile.label ?? profile.email ?? `Chrome ${id.slice(0, 8)}`).trim().slice(0, 320);
   profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
+  profile.connectorServerFingerprint = String(source.connector_server_fingerprint ?? profile.connectorServerFingerprint ?? "").trim().slice(0, 128);
   if (source.connector_install && typeof source.connector_install === "object") {
     const incomingInstalled = source.connector_install.ok === true;
     const incomingCheckedAt = String(source.connector_install.at ?? "").trim().slice(0, 64);
@@ -349,10 +392,21 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   const observedCodexProToolActivity = profile.tabs.some((tab: any) =>
     Boolean(tab?.busy || tab?.settling) && /^CodexPro đang\b/i.test(String(tab?.activity_text ?? "").trim())
   );
-  if (observedCodexProToolActivity) {
-    profile.connectorInstalled = true;
-    profile.connectorMessage = "CodexPro đã được xác nhận qua tool activity trong ChatGPT.";
-    profile.connectorCheckedAt = new Date(profile.lastSeen).toISOString();
+  if (observedCodexProToolActivity && !profileTaskTitles.get(id)) {
+    const activeTab = profile.tabs.find((tab: any) => tab?.active) as any || profile.tabs.find((tab: any) => tab?.busy || tab?.settling) as any;
+    const signature = [activeTab?.url, activeTab?.activity_text, activeTab?.network_state].map((value) => String(value || "").slice(0, 240)).join("|");
+    const previous = profileTaskEventSignatures.get(id);
+    if (!previous || previous.signature !== signature || profile.lastSeen - previous.at >= PROFILE_TASK_EVENT_THROTTLE_MS) {
+      profileTaskEventSignatures.set(id, { signature, at: profile.lastSeen });
+      recordBrowserProfileTaskEvent("profile_activity_without_task", {
+        profile_id: id,
+        conversation_url: String(activeTab?.url || ""),
+        activity_text: String(activeTab?.activity_text || ""),
+        network_state: String(activeTab?.network_state || ""),
+        connector_fingerprint_present: Boolean(profile.connectorServerFingerprint),
+        connector_fingerprint_expected: Boolean(expectedConnectorFingerprint(state, id))
+      });
+    }
   }
   state.profiles.set(id, profile);
   scheduleProfileNotification(state);
@@ -644,9 +698,16 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       const observedCodexProToolActivity = conversationSummaries.some((tab) =>
         (tab.busy || tab.settling) && /^CodexPro đang\b/i.test(tab.activity_text)
       );
-      const connectorInstalled = profile.connectorInstalled || observedCodexProToolActivity;
-      const connectorMessage = connectorInstalled && !profile.connectorInstalled && observedCodexProToolActivity
-        ? "CodexPro đang hoạt động trong ChatGPT."
+      const expectedFingerprint = expectedConnectorFingerprint(state, profile.id);
+      const connectorProfileBound = expectedFingerprint
+        ? Boolean(profile.connectorServerFingerprint && profile.connectorServerFingerprint === expectedFingerprint)
+        : profile.connectorInstalled;
+      const connectorUpdateRequired = Boolean(expectedFingerprint && profile.connectorInstalled && profile.connectorServerFingerprint !== expectedFingerprint);
+      const connectorInstalled = profile.connectorInstalled && connectorProfileBound;
+      const connectorMessage = connectorUpdateRequired
+        ? observedCodexProToolActivity
+          ? "CodexPro đang gọi tool qua connector cũ chưa gắn đúng profile. Cần cập nhật connector."
+          : "CodexPro hiện có đang dùng URL cũ, chưa gắn đúng profile Chrome."
         : profile.connectorMessage;
       return {
       profile_id: profile.id,
@@ -656,6 +717,8 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       connector_installed: connectorInstalled,
       connector_message: connectorMessage,
       connector_checked_at: profile.connectorCheckedAt,
+      connector_profile_bound: connectorProfileBound,
+      connector_update_required: connectorUpdateRequired,
       active: state.activeProfileId === profile.id,
       connected: true,
       last_seen: new Date(profile.lastSeen).toISOString(),
@@ -713,6 +776,12 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
     profileTaskUpdatedAt.delete(id);
   }
   persistBrowserProfileTasks();
+  recordBrowserProfileTaskEvent("profile_task_persisted", {
+    profile_id: id,
+    task_id: normalizedTaskId,
+    task_title: taskTitle,
+    task_title_source: "ai"
+  });
   if (singleton) scheduleProfileNotification(singleton);
 }
 export function setBrowserExtensionProfileWorkspaceBinding(profileId: string, root: string): void {

@@ -181,6 +181,21 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const manager = await createClient('repo-task-manager');
     const gated = await createClient('repo-task-gate', 'gate-smoke');
     const gatedSibling = await createClient('repo-task-gate-sibling', 'gate-smoke');
+    const direct = await createClient('repo-task-direct-chatgpt', 'direct-smoke');
+    const directBegan = await callTool(direct, 'begin_repo_task', { task_title: 'Inspect direct request' });
+    if (!directBegan.structuredContent.verified || !/^cpt_[a-f0-9]{24}$/.test(String(directBegan.structuredContent.task_id || ''))) {
+      throw new Error(`direct profile task did not receive a server-generated id: ${JSON.stringify(directBegan.structuredContent)}`);
+    }
+    if (directBegan.structuredContent.task_title !== 'Inspect direct request' || directBegan.structuredContent.task_source !== 'chatgpt_direct') {
+      throw new Error(`direct profile task did not preserve the AI title/source: ${JSON.stringify(directBegan.structuredContent)}`);
+    }
+    if (directBegan.structuredContent.task_title_requested_by !== 'mcp_server' || directBegan.structuredContent.task_title_returned_by !== 'ai') {
+      throw new Error(`direct profile task did not identify who requested/returned the title: ${JSON.stringify(directBegan.structuredContent)}`);
+    }
+    const directRead = await callTool(direct, 'read', { path: 'task-workspace/gate.txt' });
+    if (!directRead.structuredContent.text.includes('gate initial')) throw new Error('direct profile task remained blocked after begin_repo_task');
+    await direct.close();
+    clients.splice(clients.indexOf(direct), 1);
     const actions = await callTool(gated, 'codexpro', { action: 'list_actions' });
     const actionNames = Array.isArray(actions?.structuredContent?.actions) ? actions.structuredContent.actions : [];
     if (actionNames.includes('prepare_repo_task')) throw new Error('gated ChatGPT session must not expose prepare_repo_task');
@@ -228,6 +243,13 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const persistedProfileTask = persistedProfileTasks?.profiles?.['gate-smoke'];
     if (persistedProfileTask?.task_id !== 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa' || persistedProfileTask?.task_title !== 'Verify repo gate') {
       throw new Error(`AI task title was not persisted for Manager restart recovery: ${JSON.stringify(persistedProfileTasks)}`);
+    }
+    const taskEvents = (await fs.readFile(path.join(codexProHome, 'profile-task-events.jsonl'), 'utf8')).trim().split(/\r?\n/).map((line) => JSON.parse(line));
+    if (!taskEvents.some((event) => event.event === 'mcp_session_initialized' && event.profile_id === 'direct-smoke' && event.profile_bound === true)) {
+      throw new Error(`profile-bound MCP session initialization was not logged: ${JSON.stringify(taskEvents)}`);
+    }
+    if (!taskEvents.some((event) => event.event === 'repo_task_started' && event.profile_id === 'direct-smoke' && event.task_source === 'chatgpt_direct' && event.task_title_returned_by === 'ai')) {
+      throw new Error(`direct AI task title was not logged: ${JSON.stringify(taskEvents)}`);
     }
     const gatedSelfTest = await callTool(gated, 'codexpro_self_test', {
       write_probe: false,
