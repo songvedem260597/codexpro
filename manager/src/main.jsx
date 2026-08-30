@@ -3529,7 +3529,7 @@ function App() {
               const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
               const connectorInstalled = Boolean(profile.connector_installed && profile.connector_profile_bound !== false);
               const connectorUpdateRequired = Boolean(profile.connector_update_required);
-              const connectorMessage = profile.connector_message;
+              const connectorMessage = connectorInstalled ? "CodexPro READY" : profile.connector_message;
               const idle = profile.connected && profile.activity === "idle" && (connectorInstalled || !ready);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
               const profileBorderState = profileCardBorderState({
