@@ -234,18 +234,31 @@ assert.deepEqual(tabPolicyPlan.close_ids, [4, 5], "tab policy must close unreach
 assert.equal(tabPolicyPlan.reasons[4], "codexpro_unreachable");
 assert.equal(tabPolicyPlan.reasons[5], "tab_limit");
 assert.ok(!tabPolicyPlan.close_ids.includes(1) && !tabPolicyPlan.close_ids.includes(2) && !tabPolicyPlan.close_ids.includes(3), "tab policy must protect active, busy, and pinned tabs");
-const runChatActivityProbe = ({ assistantText, controls = [], turnControls = [] }) => Function("document", "getComputedStyle", `${probeChatActivitySource}; return probeChatActivityPage();`)(
-  {
-    querySelectorAll(selector) {
-      if (selector === 'button,[role="button"]') return controls;
-      if (selector === '[data-message-author-role="assistant"]') return [{ innerText: assistantText, textContent: assistantText }];
-      if (selector === '[data-testid^="conversation-turn-"]') return [{ querySelectorAll: () => turnControls }];
-      return [];
+const runChatActivityProbe = ({ assistantText, controls = [], turnControls = [], includeLatestUser = true }) => {
+  const assistantNode = { innerText: assistantText, textContent: assistantText };
+  const userNode = { innerText: "latest user", textContent: "latest user" };
+  const userTurn = {
+    querySelector(selector) { return selector === '[data-message-author-role="user"]' ? userNode : null; },
+    querySelectorAll: () => []
+  };
+  const assistantTurn = {
+    querySelector(selector) { return selector === '[data-message-author-role="assistant"]' ? assistantNode : null; },
+    querySelectorAll: (selector) => selector === 'button,[role="button"],summary' ? turnControls : []
+  };
+  const conversationTurns = includeLatestUser ? [userTurn, assistantTurn] : [assistantTurn];
+  return Function("document", "getComputedStyle", `${probeChatActivitySource}; return probeChatActivityPage();`)(
+    {
+      querySelectorAll(selector) {
+        if (selector === 'button,[role="button"]') return controls;
+        if (selector === '[data-message-author-role="assistant"]') return [assistantNode];
+        if (selector === '[data-testid^="conversation-turn-"]') return conversationTurns;
+        return [];
+      },
+      body: { innerText: assistantText, textContent: assistantText }
     },
-    body: { innerText: assistantText, textContent: assistantText }
-  },
-  () => ({ display: "block", visibility: "visible" })
-);
+    () => ({ display: "block", visibility: "visible" })
+  );
+};
 const visibleStopControl = {
   getBoundingClientRect: () => ({ width: 20, height: 20 }),
   getAttribute: (name) => name === "data-testid" ? "stop-button" : "",
@@ -268,11 +281,20 @@ assert.equal(domToolActivity.source, "dom_tool", "visible ChatGPT tool calls mus
 assert.equal(domToolActivity.activity_text, "CodexPro đang gọi tool", "DOM tool status must not reuse stale assistant prose as live activity");
 const domGenericActivity = runChatActivityProbe({ assistantText: "Phản hồi tạm chưa hoàn tất", controls: [visibleStopControl] });
 assert.equal(domGenericActivity.source, "dom_stop");
+assert.equal(domGenericActivity.response_ready, false, "a visible stop control must keep the current turn unfinished");
 assert.equal(domGenericActivity.activity_text, "ChatGPT đang tiếp tục xử lý", "generic DOM work must use a stable status instead of assistant response text");
+const domCompletedActivity = runChatActivityProbe({ assistantText: "Đã hoàn tất phản hồi.", controls: [] });
+assert.equal(domCompletedActivity.busy, false, "a finished assistant turn must not remain busy when the stop control is gone");
+assert.equal(domCompletedActivity.response_ready, true, "a finished text response after the latest user must become authoritative completion evidence");
+assert.equal(domCompletedActivity.source, "dom_response_ready", "finished text responses must be distinguishable from stale generic DOM state");
 
 assert.match(server, /task_title:[\s\S]*?words >= 2 && words <= 6/, "begin_repo_task must require a short AI-generated task title");
+assert.match(server, /task_kind: z\.enum\(\["general", "code"\]\)/, "every profile task must declare whether it needs coding context");
+assert.match(server, /args\.task_kind === "code" \? await readGlobalRulesSnapshot\(\) : undefined[\s\S]*?args\.task_kind === "code" \? await requireCodexGraphForWorkspace/, "only code tasks may load global rules and CodexGraph");
+assert.match(server, /proof\.taskKind === "general"[\s\S]*?global_rules_loaded: false[\s\S]*?codexgraph_active: false/, "general tasks must retain their title without loading coding context");
 assert.match(server, /task_title_source: "ai"/, "repo task results must identify the AI task-title source");
-assert.match(server, /task_id:[\s\S]*?optional\(\)[\s\S]*?task_title:[\s\S]*?root:[\s\S]*?optional\(\)/, "direct profile ChatGPT tasks must be able to begin with an AI title and a server-generated id");
+assert.match(server, /title: "Register Profile Task"[\s\S]*?Registering the CodexPro task[\s\S]*?CodexPro task registered/, "the universal task-title call must not be mislabeled as a repo lock");
+assert.match(server, /task_id:[\s\S]*?optional\(\)[\s\S]*?task_title:[\s\S]*?task_kind:[\s\S]*?root:[\s\S]*?optional\(\)/, "direct profile ChatGPT tasks must begin with an AI title, task kind, and a server-generated id");
 assert.match(bridge, /browser-profile-tasks\.json/, "profile task titles must survive a runtime restart");
 assert.match(bridge, /profile-task-events\.jsonl/, "missing task titles must leave persistent profile/session diagnostics");
 assert.match(bridge, /connector_profile_bound:[\s\S]*?connector_update_required:/, "Manager profile summaries must expose connector/profile identity state");
@@ -282,6 +304,8 @@ assert.ok(managerUi.includes('working || settling ? "Task hi\\u1ec7n t\\u1ea1i" 
 assert.match(managerMain, /const MANAGER_VERSION = app\.getVersion\(\)/, "MCP client metadata must use the packaged Manager version");
 assert.match(managerUi, /CodexPro Manager \{managerPackage\.version\}/, "Manager footer must use package.json instead of a stale hard-coded version");
 assert.doesNotMatch(managerUi, /CodexPro Manager 0\.2\.\d+/, "Manager UI must not hard-code a release version");
+assert.match(managerUi, /begin_repo_task: "Đang ghi nhận task"/, "Manager must describe begin_repo_task as universal task registration");
+assert.match(managerUi, /function repoTaskEvidenceSummary[\s\S]*?GENERAL · không tải Rules\/CodexGraph[\s\S]*?CODE · Rules[\s\S]*?CodexGraph \$\{symbols\} symbols \/ \$\{relationships\} edges/, "Manager must distinguish title-only GENERAL evidence from CODE Rules/CodexGraph evidence");
 
 for (const action of ["trusted_click", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch"]) {
   assert.match(browserOps, new RegExp(`\\| \\"${action}\\"`), `dedicated browser action ${action} must be exposed`);
@@ -421,28 +445,36 @@ assert.match(sendProfileRequestSource, /runtimeConnectionForSend\(\)[\s\S]*?fast
 assert.doesNotMatch(sendProfileRequestSource, /const base = await readyRuntimeBaseStatus\(\)/, "healthy chat sends must not unconditionally run the full runtime health scan");
 assert.match(sendProfileRequestSource, /workspaceSelectSkipped[\s\S]*?if \(!workspaceSelectSkipped\)/, "Manager must skip redundant workspace selection when the profile is already scoped correctly");
 assert.match(sendProfileRequestSource, /action: "select_workspace"[\s\S]*?}, 75000\)/, "workspace selection must allow the bounded reconnect window");
-assert.match(sendProfileRequestSource, /localMcpToolInSession\(session, "prepare_repo_task", \{[\s\S]*?profile_id: profileId[\s\S]*?task_id: taskId[\s\S]*?root: initialWorkspaceRoot[\s\S]*?scope: requestScope[\s\S]*?preparedTask\?\.prepared !== true[\s\S]*?action: "send_chat_request"/, "Manager must prepare the exact repo task gate before dispatching the ChatGPT request");
+assert.match(sendProfileRequestSource, /workspaceSelectSkipped = requestScope === "all_allowed"/, "all_allowed requests must not bind the Chrome profile to the Manager default workspace before dispatch");
+assert.match(sendProfileRequestSource, /localMcpToolInSession\(session, "prepare_repo_task", \{[\s\S]*?profile_id: profileId[\s\S]*?task_id: taskId[\s\S]*?requestScope === "workspace" \? \{ root: initialWorkspaceRoot \} : \{\}[\s\S]*?scope: requestScope[\s\S]*?preparedTask\?\.prepared !== true[\s\S]*?action: "send_chat_request"/, "Manager must prepare workspace tasks with an exact root while leaving all_allowed task roots unbound");
+assert.match(sendProfileRequestSource, /task_kind[\s\S]*?<general hoặc code>[\s\S]*?task_kind=general chỉ ghi title[\s\S]*?task_kind=code mới nạp rule, chạy CodexGraph/, "Manager must require titles for all tasks while reserving Rules/CodexGraph for code tasks");
+assert.match(sendProfileRequestSource, /Không được mặc định dùng workspace CodexPro hiện tại\/default/, "all_allowed prompt must force the AI to choose the actual target instead of defaulting to CodexPro's current workspace");
+assert.doesNotMatch(sendProfileRequestSource, /root:\\"\$\{initialWorkspaceRoot\.replace\([\s\S]{0,120}?scope:\\"all_allowed/, "all_allowed prompt must not hardcode the Manager default workspace root");
 assert.match(sendProfileRequestSource, /action: "send_chat_request"[\s\S]*?}, 235000\)/, "chat submission must preserve the action timeout after a reconnect wait");
 const managerSendUiSource = managerUi.slice(managerUi.indexOf("async function sendRequest(profile)"), managerUi.indexOf("async function rolloverFullConversation"));
 assert.match(managerSendUiSource, /setRequestDrafts\([\s\S]*?profile\.profile_id\]: ""[\s\S]*?setRequestFiles\([\s\S]*?profile\.profile_id\]: \[\][\s\S]*?api\.sendProfileRequest/, "Manager must clear submitted text/files before awaiting the IPC send result");
+assert.match(managerSendUiSource, /scope: allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "all_allowed sends must preserve scope and provide known workspace candidates to the backend");
 assert.match(managerSendUiSource, /restoreSubmittedInputs\(\)[\s\S]*?Trạng thái gửi chưa chắc chắn/, "an uncertain submission must restore the submitted draft instead of silently losing it");
 assert.match(managerSendUiSource, /CONVERSATION_LIMIT_REACHED:[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a terminal full-conversation banner must roll the pending user request and attachments into a new chat");
 const conversationRolloverSource = managerUi.slice(managerUi.indexOf("async function rolloverFullConversation"), managerUi.indexOf("async function verifyRepoTaskUse"));
 assert.match(conversationRolloverSource, /newChat: true[\s\S]*?text: handoffText[\s\S]*?attachments:/, "conversation rollover must create a fresh ChatGPT chat and send the preserved context once");
+assert.match(conversationRolloverSource, /rolloverAllAllowed[\s\S]*?scope: rolloverAllAllowed \? "all_allowed" : "workspace"[\s\S]*?workspaceCandidates: rolloverAllAllowed \? projects\.map/, "conversation rollover must not collapse all_allowed back to a locked workspace");
+assert.match(managerUi, /continueAllAllowed[\s\S]*?scope: continueAllAllowed \? "all_allowed" : "workspace"[\s\S]*?workspaceCandidates: continueAllAllowed \? projects\.map/, "continue-response resend must preserve all_allowed scope");
 assert.match(conversationRolloverSource, /previousAttempt\?\.status === "creating" \|\| previousAttempt\?\.status === "done"/, "conversation rollover must deduplicate repeated terminal-banner observations");
 assert.match(managerUi, /function buildConversationRolloverPrompt\([\s\S]*?Bối cảnh gần nhất từ chat trước:[\s\S]*?Tiếp tục từ đúng việc còn dang dở/, "the new chat handoff must preserve recent conversation context instead of restarting blindly");
 assert.match(worker, /ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS = 2500/, "attachment upload fallback must not impose the old 12 second wait");
 assert.match(worker, /Date\.now\(\)\+400,Date\.now\(\)\+400/, "attachment preview stability should use the shorter verified window");
+assert.match(worker, /const maxAgeMs=.*DOM_ACTIVITY_PROBE_CACHE_MS/, "DOM activity probes must support a bounded freshness override for send preflight reuse");
 assert.match(worker, /image-gen-loading-state/, "ChatGPT image generation must have a dedicated DOM loading signal");
 assert.match(worker, /Generated image:/, "a completed generated image must be recognized as a final response");
 assert.match(worker, /ChatGPT đang tạo ảnh/, "image generation must expose a dedicated activity label instead of generic processing");
 assert.match(worker, /image_response_ready/, "image completion evidence must propagate through profile and response state");
-assert.match(worker, /reconcileChatNetworkCompletion\(tab\.id,conversationId,'dom_image'\)/, "final generated-image DOM must reconcile stale generation state");
-assert.match(worker, /canonicalActivity\.busy&&!domActivity\.image_response_ready/, "final generated-image DOM must suppress stale canonical busy state");
-assert.match(worker, /networkStream\.in_progress&&!domActivity\.image_response_ready/, "final generated-image DOM must suppress a stale network stream");
+assert.match(worker, /response_ready:Boolean\(domActivity\.response_ready\)/, "generic DOM completion evidence must propagate through profile state");
+assert.match(worker, /reconcileChatNetworkCompletion\(tab\.id,conversationId,domActivity\.image_response_ready\?'dom_image':'dom_response'\)/, "finished DOM responses must reconcile stale generation state for both image and text turns");
+assert.match(worker, /canonicalActivity\.busy&&!domActivity\.response_ready/, "finished DOM responses must suppress stale canonical busy state even when canonical reads are rate-limited");
+assert.match(worker, /networkStream\.in_progress&&!domActivity\.response_ready/, "finished DOM responses must suppress a stale network stream");
 assert.match(worker, /response_kind:imageResponseReady\|\|imageGenerationLoading\?'image':'text'/, "DOM response reads must classify image generations without requiring assistant text");
-assert.match(worker, /imageResponseReady\?\{canonical_busy:false,canonical_response_ready:true,network_stream_in_progress:false,response_ready:true,response_kind:'image'\}/, "completed image responses must clear stale canonical and stream busy flags returned to Manager");
-assert.match(worker, /const maxAgeMs=.*DOM_ACTIVITY_PROBE_CACHE_MS/, "DOM activity probes must support a bounded freshness override for send preflight reuse");
+assert.match(worker, /domResponseReady\?\{canonical_busy:false,canonical_response_ready:true,network_stream_in_progress:false,response_ready:true,response_kind:imageResponseReady\?'image':String\(domResult\.response_kind\|\|'text'\)\}/, "completed DOM responses must clear stale canonical and stream busy flags returned to Manager");
 assert.match(worker, /Promise\.all\(\[[\s\S]*?ensureChatNetworkStreamCapture\(tab\.id\)[\s\S]*?chatRequestState\(tab\.id,conversationId\)[\s\S]*?chatDomActivityState\(tab\.id,conversationId,\{maxAgeMs:750\}\)[\s\S]*?chatAttachmentOwnership\(tab\.id,targetConversationId\)/, "send preflight checks must run in parallel and reuse only a sub-second DOM probe");
 const workerSendSource = worker.slice(worker.indexOf("if(action==='send_chat_request')"), worker.indexOf("if(action==='rename_chat')"));
 assert.doesNotMatch(workerSendSource, /chatDomActivityState\(tab\.id,conversationId,\{fresh:true\}\)/, "send must not force a duplicate DOM activity probe immediately after list_profiles");

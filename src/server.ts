@@ -360,7 +360,7 @@ const activeRepoTaskByProfile = new Map<string, ActiveRepoTask>();
 const repoTaskWorkspaceSelectorByServer = new WeakMap<object, (root: string) => Workspace>();
 type ExpectedRepoTask = {
   taskId: string;
-  root: string;
+  root?: string;
   scope: "workspace" | "all_allowed";
   preparedAt: number;
 };
@@ -392,13 +392,18 @@ function rememberExpectedRepoTask(profileId: string, expected: Omit<ExpectedRepo
   return prepared;
 }
 
+function repoTaskRootMatches(leftRoot: string, right: ExpectedRepoTask | ActiveRepoTask): boolean {
+  if (right.scope === "all_allowed" && !right.root) return true;
+  return Boolean(right.root && sameResolvedRoot(leftRoot, right.root));
+}
+
 function sameRepoTask(left: ActiveRepoTask | undefined, right: ExpectedRepoTask | ActiveRepoTask | undefined): boolean {
   return Boolean(
     left
     && right
     && left.taskId === right.taskId
     && left.scope === right.scope
-    && sameResolvedRoot(left.root, right.root)
+    && repoTaskRootMatches(left.root, right)
   );
 }
 
@@ -787,7 +792,7 @@ function registerCodexTool(
 }
 
 function serverInstructions(config: CodexProConfig, requireRepoTask = false): string {
-  const globalRules = readGlobalRulesSnapshotSync();
+  const globalRules = requireRepoTask ? undefined : readGlobalRulesSnapshotSync();
   const editInstruction =
     config.connectionTest
       ? "5. Connection test mode is read-only. Write, patch, export, and handoff-writing tools are unavailable."
@@ -804,23 +809,25 @@ function serverInstructions(config: CodexProConfig, requireRepoTask = false): st
   return [
     "CodexPro connects ChatGPT to explicitly allowed local development workspaces.",
     "",
-    "MANDATORY GLOBAL RULES — loaded before any repository/project tool work:",
-    `Source: ${globalRules.path}`,
-    `SHA-256: ${globalRules.sha256}`,
-    globalRules.text || "(No global rules configured.)",
+    requireRepoTask
+      ? `Global rules from ${path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE)} are intentionally not loaded until begin_repo_task declares task_kind="code".`
+      : "MANDATORY GLOBAL RULES — loaded before any repository/project tool work:",
+    requireRepoTask ? "" : `Source: ${globalRules!.path}`,
+    requireRepoTask ? "" : `SHA-256: ${globalRules!.sha256}`,
+    requireRepoTask ? "" : (globalRules!.text || "(No global rules configured.)"),
     "",
     "Preferred workflow:",
     requireRepoTask
-      ? "1. This profile-bound ChatGPT MCP session is repo-task gated. Before any repository/workspace tool, call begin_repo_task and choose a clear AI-generated task_title of 2-6 words. If a CodexPro Manager prompt supplies an exact task id/root/scope, pass those exact values. For a request typed directly in ChatGPT, omit task_id and root; CodexPro generates the task id and uses this profile's locked workspace. A newly begun task invalidates the previous active task immediately. The codexpro wrapper may be used for action=list_actions/help and action=begin_repo_task; repo_task_status is also available before activation."
+      ? "1. Every profile-bound ChatGPT task must call begin_repo_task once with a clear AI-generated task_title of 2-6 words and task_kind=general or code. Use general for answers/research that do not touch source; use code before any repository/workspace tool. If a CodexPro Manager prompt supplies an exact task id/root/scope, pass those exact values. For a direct ChatGPT request, omit task_id and root; CodexPro generates the task id and uses this profile's locked workspace. A newly begun task invalidates the previous active task immediately. The codexpro wrapper may be used for action=list_actions/help and action=begin_repo_task; repo_task_status is also available before activation."
       : config.controlPlaneUrl && config.toolMode !== "minimal"
         ? "1. In a role-bound CodexPro Worker Chat, call worker_cycle_start exactly once for each Control Plane wake job. It automatically ACKs governance and claims the next role-compatible task without a schedule. If it returns TASK_CLAIMED, open_workspace with the returned workerBinding.worktreePath and continue tool calls until its nextAction and pendingInstructions are completed or a real blocker is recorded; do not stop after narrating what you will do. If it returns IDLE, stop cleanly. In an ordinary session, start with open_current_workspace."
         : "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
     requireRepoTask
-      ? `2. begin_repo_task loads the latest mandatory global rules from ${path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE)} and binds their SHA-256 to this MCP session. If that file changes, the next gated tool fails closed until begin_repo_task runs again.`
+      ? `2. task_kind=general records the task title only and does not load global rules or CodexGraph. task_kind=code loads the latest mandatory global rules from ${path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE)}, activates CodexGraph, and binds both to the repository gate. If the rules change, the next gated tool fails closed until begin_repo_task runs again.`
       : `2. The mandatory global rules above come from ${path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE)} and are loaded when the MCP server/session starts. begin_repo_task, open_current_workspace, and open_workspace also return the latest file contents before repo-local AGENTS.md-style instructions.`,
     "3. Follow any AGENTS.md-style instructions returned by the workspace open call before editing files.",
     requireRepoTask
-      ? "4. After begin_repo_task succeeds, use open_current_workspace/open_workspace as needed, then inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading."
+      ? "4. Only after begin_repo_task succeeds with task_kind=code may you use open_current_workspace/open_workspace, tree, search, read, write, or bash. A general task remains workspace-gated. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading."
       : "4. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
     editInstruction,
     bashInstruction,
@@ -1310,14 +1317,16 @@ const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, d
 type RepoTaskProof = {
   taskId: string;
   taskTitle: string;
+  taskKind: "general" | "code";
   taskSource: "manager" | "chatgpt_direct";
   root: string;
   workspaceId: string;
   startedAt: string;
   scope: "workspace" | "all_allowed";
-  globalRulesPath: string;
-  globalRulesSha256: string;
-  codexGraph: Awaited<ReturnType<typeof requireCodexGraphForWorkspace>>;
+  globalRulesPath?: string;
+  globalRulesSha256?: string;
+  globalRulesLoadedAt?: string;
+  codexGraph?: Awaited<ReturnType<typeof requireCodexGraphForWorkspace>>;
 };
 
 const repoTaskProofs = new Map<string, RepoTaskProof>();
@@ -1932,30 +1941,34 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
     "prepare_repo_task",
     {
       title: "Prepare Manager Repo Task",
-      description: "Manager-only control-plane action. Bind the next CodexPro Manager task id/root/scope to a Chrome profile before the request is dispatched to ChatGPT.",
+      description: "Manager-only control-plane action. Bind the next CodexPro Manager task id/scope to a Chrome profile before the request is dispatched to ChatGPT. A workspace-scoped task must include root; all_allowed deliberately leaves root unbound so the AI can choose the correct allowed workspace.",
       inputSchema: {
         profile_id: z.string().regex(/^[A-Za-z0-9._-]{1,160}$/).describe("Chrome profile id receiving the Manager request."),
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).describe("Exact task id generated by CodexPro Manager."),
-        root: z.string().min(1).describe("Initial workspace root for this task."),
+        root: z.string().min(1).optional().describe("Locked workspace root for workspace scope. Omit for all_allowed so the AI chooses the actual workspace."),
         scope: z.enum(["workspace", "all_allowed"]).optional().describe("Task scope. Default: workspace.")
       },
       annotations: HANDOFF_WRITE_ANNOTATIONS
     },
     async (args) => {
-      const workspace = workspaces.openWorkspace(args.root, { select: false });
       const scope: "workspace" | "all_allowed" = args.scope === "all_allowed" ? "all_allowed" : "workspace";
+      if (scope === "workspace" && !args.root) {
+        throw new CodexProError("REPO_TASK_ROOT_REQUIRED: workspace-scoped Manager tasks must prepare an exact root.", { code: "REPO_TASK_ROOT_REQUIRED" });
+      }
+      const preparedRoot = args.root ? workspaces.openWorkspace(args.root, { select: false }).root : undefined;
       const expected: ExpectedRepoTask = {
         taskId: args.task_id,
-        root: workspace.root,
+        root: scope === "workspace" ? preparedRoot : undefined,
         scope,
         preparedAt: Date.now()
       };
       rememberExpectedRepoTask(args.profile_id, expected);
-      return textResult(`# Repo Task Prepared\n\nProfile: ${args.profile_id}\nTask: ${expected.taskId}\nRoot: ${expected.root}\nScope: ${expected.scope}`, {
+      return textResult(`# Repo Task Prepared\n\nProfile: ${args.profile_id}\nTask: ${expected.taskId}\nRoot: ${expected.root || "(AI chooses an allowed workspace)"}\nScope: ${expected.scope}`, {
         prepared: true,
         profile_id: args.profile_id,
         task_id: expected.taskId,
         root: expected.root,
+        root_unbound: scope === "all_allowed",
         scope: expected.scope,
         prepared_at: new Date(expected.preparedAt).toISOString()
       });
@@ -1967,22 +1980,23 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
     server,
     "begin_repo_task",
     {
-      title: "Begin Profile Repo Task",
-      description: "Mandatory first call for every profile-bound ChatGPT task. The AI must return a clear 2-6 word task_title. Manager requests pass their exact prepared id/root/scope; direct ChatGPT requests omit task_id/root so CodexPro creates a task in the profile's locked workspace.",
+      title: "Register Profile Task",
+      description: "Mandatory lightweight first call for every profile-bound ChatGPT task. Always return a clear 2-6 word task_title. Use task_kind=general for answers/research without source access; only task_kind=code loads global rules, activates CodexGraph, and unlocks repository tools.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional().describe("Exact task id included by CodexPro Manager. Omit only for a request typed directly in ChatGPT."),
         task_title: z.string().trim().min(4).max(56)
           .refine((value) => { const words = value.split(/\s+/).filter(Boolean).length; return words >= 2 && words <= 6; }, "Task title must contain 2-6 words.")
           .refine((value) => !/^(?:làm sao|sửa đi|làm đi|fix đi|check lỗi|kiểm tra|tiếp tục)$/iu.test(value.trim()), "Task title must describe the actual work, not a vague request.")
           .describe("Required title chosen and returned by the AI: 2-6 short, clear words describing the actual work."),
+        task_kind: z.enum(["general", "code"]).describe("Use general when no source/workspace tool is needed. Use code before reading, changing, building, or testing a repository."),
         root: z.string().min(1).optional().describe("Initial workspace root included by CodexPro Manager. Omit for a direct ChatGPT request to use the profile's locked workspace."),
         scope: z.enum(["workspace", "all_allowed"]).optional().describe("Task scope. Omit or use workspace for a locked workspace; use all_allowed only when Manager explicitly enables all allowed roots.")
       },
       annotations: SESSION_READ_ANNOTATIONS,
       _meta: {
         ...toolCardMeta(),
-        "openai/toolInvocation/invoking": "Locking the requested CodexPro repo...",
-        "openai/toolInvocation/invoked": "CodexPro repo task verified"
+        "openai/toolInvocation/invoking": "Registering the CodexPro task...",
+        "openai/toolInvocation/invoked": "CodexPro task registered"
       }
     },
     async (args) => {
@@ -2023,24 +2037,50 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       if (!taskId) {
         throw new CodexProError("REPO_TASK_ID_REQUIRED: task_id is required outside a profile-bound ChatGPT connector.", { code: "REPO_TASK_ID_REQUIRED" });
       }
-      const requestedRoot = args.root || getBrowserExtensionProfileWorkspaceBinding(gateProfileId) || expected?.root || config.defaultRoot;
-      const workspace = workspaces.openWorkspace(requestedRoot);
-      if (managerPrepared && expected && !sameResolvedRoot(workspace.root, expected.root)) {
+      const managerAllAllowed = Boolean(managerPrepared && expected?.scope === "all_allowed");
+      if (managerAllAllowed && args.task_kind === "code" && !args.root) {
+        throw new CodexProError(
+          "REPO_TASK_ROOT_REQUIRED: all_allowed code tasks must choose the actual allowed workspace root instead of inheriting the Manager default workspace.",
+          { code: "REPO_TASK_ROOT_REQUIRED", details: { profile_id: gateProfileId, task_id: taskId, scope } }
+        );
+      }
+      let requestedRoot = String(args.root || "").trim();
+      if (!requestedRoot && !managerAllAllowed) {
+        requestedRoot = getBrowserExtensionProfileWorkspaceBinding(gateProfileId) || expected?.root || config.defaultRoot;
+      }
+      const workspace = args.task_kind === "code" ? workspaces.openWorkspace(requestedRoot) : undefined;
+      const resolvedRoot = workspace?.root || (requestedRoot ? path.resolve(requestedRoot) : "");
+      if (managerPrepared && expected?.root && !sameResolvedRoot(resolvedRoot, expected.root)) {
         throw new CodexProError(
           `REPO_TASK_ROOT_MISMATCH: begin_repo_task must open the exact workspace prepared by CodexPro Manager: ${expected.root}`,
           {
             code: "REPO_TASK_ROOT_MISMATCH",
-            details: { profile_id: gateProfileId, task_id: taskId, expected_root: expected.root, received_root: workspace.root }
+            details: { profile_id: gateProfileId, task_id: taskId, expected_root: expected.root, received_root: resolvedRoot }
           }
         );
       }
       if (gateProfileId && !managerPrepared) {
-        expected = rememberExpectedRepoTask(gateProfileId, { taskId, root: workspace.root, scope: "workspace" });
+        expected = rememberExpectedRepoTask(gateProfileId, { taskId, root: resolvedRoot, scope: "workspace" });
       }
-      const globalRules = await readGlobalRulesSnapshot();
-      const codexGraph = await requireCodexGraphForWorkspace(config, guard, workspace);
       const taskSource: RepoTaskProof["taskSource"] = managerPrepared ? "manager" : "chatgpt_direct";
-      const proof: RepoTaskProof = { taskId, taskTitle: args.task_title.trim(), taskSource, root: workspace.root, workspaceId: workspace.id, startedAt: new Date().toISOString(), scope, globalRulesPath: globalRules.path, globalRulesSha256: globalRules.sha256, codexGraph };
+      const startedAt = new Date().toISOString();
+      const globalRules = args.task_kind === "code" ? await readGlobalRulesSnapshot() : undefined;
+      const globalRulesLoadedAt = globalRules ? new Date().toISOString() : undefined;
+      const codexGraph = args.task_kind === "code" ? await requireCodexGraphForWorkspace(config, guard, workspace!) : undefined;
+      const proof: RepoTaskProof = {
+        taskId,
+        taskTitle: args.task_title.trim(),
+        taskKind: args.task_kind,
+        taskSource,
+        root: resolvedRoot,
+        workspaceId: workspace?.id || "",
+        startedAt,
+        scope,
+        globalRulesPath: globalRules?.path,
+        globalRulesSha256: globalRules?.sha256,
+        globalRulesLoadedAt,
+        codexGraph
+      };
       if (gateProfileId) setBrowserExtensionProfileTask(gateProfileId, proof.taskId, proof.taskTitle);
       recordBrowserProfileTaskEvent("repo_task_started", {
         profile_id: gateProfileId,
@@ -2048,17 +2088,51 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         task_title: proof.taskTitle,
         task_title_requested_by: "mcp_server",
         task_title_returned_by: "ai",
+        task_kind: proof.taskKind,
         task_source: taskSource,
-        root: proof.root
+        root: proof.root,
+        global_rules_loaded: Boolean(globalRules),
+        global_rules_path: globalRules?.path,
+        global_rules_sha256: globalRules?.sha256,
+        global_rules_loaded_at: globalRulesLoadedAt,
+        codexgraph_active: Boolean(codexGraph),
+        codexgraph_workspace_id: codexGraph ? proof.workspaceId : undefined,
+        codexgraph_symbol_count: codexGraph?.coverage.symbolCount,
+        codexgraph_relationship_count: codexGraph?.coverage.relationshipCount
       });
       rememberRepoTaskProof(proof);
+      activeRepoTaskByServer.delete(server as object);
+      if (gateProfileId) activeRepoTaskByProfile.delete(gateProfileId);
+      if (proof.taskKind === "general") {
+        return textResult(`# Profile Task Registered\n\nTask: ${proof.taskId}\nTitle: ${proof.taskTitle}\nKind: general\n\nGlobal rules and CodexGraph were not loaded because this task does not use repository tools.`, {
+          task_id: proof.taskId,
+          task_title: proof.taskTitle,
+          task_title_source: "ai",
+          task_title_requested_by: "mcp_server",
+          task_title_returned_by: "ai",
+          task_kind: proof.taskKind,
+          task_source: proof.taskSource,
+          verified: true,
+          gate_active: false,
+          workspace_access: false,
+          root: proof.root,
+          workspace_id: proof.workspaceId,
+          started_at: proof.startedAt,
+          scope: proof.scope,
+          global_rules_loaded: false,
+          codexgraph_active: false
+        });
+      }
+      if (!workspace || !globalRules || !codexGraph) {
+        throw new CodexProError("REPO_TASK_CODE_CONTEXT_MISSING: code task activation requires a workspace, global rules, and CodexGraph.", { code: "REPO_TASK_CODE_CONTEXT_MISSING" });
+      }
       const activeTask: ActiveRepoTask = {
         taskId: proof.taskId,
         taskTitle: proof.taskTitle,
         root: proof.root,
         workspaceId: proof.workspaceId,
         scope: proof.scope,
-        globalRulesSha256: proof.globalRulesSha256
+        globalRulesSha256: proof.globalRulesSha256!
       };
       activeRepoTaskByServer.set(server as object, activeTask);
       if (gateProfileId) {
@@ -2071,16 +2145,22 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         task_title_source: "ai",
         task_title_requested_by: "mcp_server",
         task_title_returned_by: "ai",
+        task_kind: proof.taskKind,
         task_source: proof.taskSource,
         verified: true,
+        gate_active: true,
+        workspace_access: true,
         root: proof.root,
         workspace_id: proof.workspaceId,
         started_at: proof.startedAt,
         scope: proof.scope,
-        global_rules_path: globalRules.path,
-        global_rules_sha256: globalRules.sha256,
-        global_rules_source: globalRules.source,
-        global_rules: globalRules.text,
+        global_rules_loaded: true,
+        global_rules_loaded_at: proof.globalRulesLoadedAt,
+        global_rules_path: globalRules!.path,
+        global_rules_sha256: globalRules!.sha256,
+        global_rules_source: globalRules!.source,
+        global_rules: globalRules!.text,
+        codexgraph_active: true,
         codexgraph: codexGraph
       });
     }
@@ -2102,20 +2182,38 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       const expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
       const active = gateProfileId ? activeRepoTaskByProfile.get(gateProfileId) : activeRepoTaskByServer.get(server as object);
       const rulesMatch = Boolean(active && readGlobalRulesSnapshotSync().sha256 === active.globalRulesSha256);
-      const gateActive = requireRepoTask
-        ? Boolean(proof && expected?.taskId === args.task_id && sameRepoTask(active, expected) && rulesMatch)
+      const taskVerified = requireRepoTask
+        ? Boolean(proof && expected && expected.taskId === args.task_id && expected.scope === proof.scope && repoTaskRootMatches(proof.root, expected))
         : Boolean(proof);
-      if (gateActive && gateProfileId && proof?.taskTitle) {
+      const gateActive = Boolean(taskVerified && proof?.taskKind === "code" && sameRepoTask(active, expected) && rulesMatch);
+      if (taskVerified && gateProfileId && proof?.taskTitle) {
         setBrowserExtensionProfileTask(gateProfileId, proof.taskId, proof.taskTitle);
       }
-      return textResult(gateActive ? `# Repo Task Verified\n\n${proof!.taskId} opened ${proof!.root} with scope ${proof!.scope}.` : `# Repo Task Missing\n\nNo active begin_repo_task gate was found for ${args.task_id}.`, {
+      return textResult(taskVerified ? `# Profile Task Verified\n\n${proof!.taskId} registered “${proof!.taskTitle}” as ${proof!.taskKind}.` : `# Profile Task Missing\n\nNo begin_repo_task proof was found for ${args.task_id}.`, {
         task_id: args.task_id,
-        verified: gateActive,
+        verified: taskVerified,
         gate_active: gateActive,
         profile_id: gateProfileId || undefined,
         expected_task_id: expected?.taskId,
         active_task_id: active?.taskId,
-        ...(proof ? { task_title: proof.taskTitle, task_title_source: "ai", task_title_requested_by: "mcp_server", task_title_returned_by: "ai", task_source: proof.taskSource, root: proof.root, workspace_id: proof.workspaceId, started_at: proof.startedAt, scope: proof.scope, codexgraph: proof.codexGraph } : {})
+        ...(proof ? {
+          task_title: proof.taskTitle,
+          task_title_source: "ai",
+          task_title_requested_by: "mcp_server",
+          task_title_returned_by: "ai",
+          task_kind: proof.taskKind,
+          task_source: proof.taskSource,
+          root: proof.root,
+          workspace_id: proof.workspaceId,
+          started_at: proof.startedAt,
+          scope: proof.scope,
+          global_rules_loaded: Boolean(proof.globalRulesSha256),
+          global_rules_path: proof.globalRulesPath,
+          global_rules_sha256: proof.globalRulesSha256,
+          global_rules_loaded_at: proof.globalRulesLoadedAt,
+          codexgraph_active: Boolean(proof.codexGraph),
+          codexgraph: proof.codexGraph
+        } : {})
       });
     }
   );

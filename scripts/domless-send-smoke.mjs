@@ -324,6 +324,6 @@ const responseSource = extractFunction("readChatResponsePage");
 assert.match(responseSource, /thinkingPlaceholder/, "DOM fallback must classify the Thinking placeholder as incomplete");
 assert.match(responseSource, /generation_in_progress/, "DOM fallback must expose active generation rather than treating it as a completed answer");
 assert.match(responseSource, /connection interrupted\\\.\\s\*waiting for the complete answer/i, "DOM fallback must detect ChatGPT's interrupted connection placeholder");
-assert.match(responseSource, /incomplete_reason:messageDeliveryTimedOut\?'message_delivery_timeout':connectionInterrupted\?'connection_interrupted'/, "recoverable ChatGPT errors must remain incomplete until the exact chat is recovered");
+assert.match(responseSource, /incomplete_reason:imageGenerationLoading\?'image_generation_in_progress':messageDeliveryTimedOut\?'message_delivery_timeout':connectionInterrupted\?'connection_interrupted'/, "image generation and recoverable ChatGPT errors must remain incomplete until the exact chat is recovered");
 
 console.log("✓ ChatGPT trusted-Enter primary send smoke test passed");

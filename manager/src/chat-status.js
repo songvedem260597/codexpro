@@ -10,7 +10,17 @@ export function isRecoverableAbortedChatNetworkFailure({ networkState, networkEr
   return Math.max(0, Number(nowMs) - completedAtMs) < Math.max(1000, Number(graceMs) || 120000);
 }
 
-export function shouldShowChatBusy({ networkState, tabBusy, responseCurrent, responseBusy, streamBusy, canonicalBusy }) {
+export function shouldShowChatBusy({ networkState, tabBusy, responseCurrent, responseBusy, responseReady = false, responseLoading = false, streamBusy, canonicalBusy }) {
+  const verifiedComplete = Boolean(
+    responseCurrent
+    && responseReady
+    && !responseLoading
+    && !responseBusy
+    && !streamBusy
+    && !canonicalBusy
+    && networkState !== "generating"
+  );
+  if (verifiedComplete) return false;
   if (tabBusy || streamBusy || canonicalBusy) return true;
   if (isTerminalChatNetworkState(networkState)) return false;
   return networkState === "generating" || Boolean(responseCurrent && responseBusy);
