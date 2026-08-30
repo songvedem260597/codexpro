@@ -5,14 +5,24 @@
   font-synthesis: none;
   font-feature-settings: "kern" 1, "liga" 1;
   text-rendering: optimizeLegibility;
-  --font-xs: 12px;
-  --font-base: 14px;
-  --font-brand: 16px;
+  /* Semantic typography roles: caption < description < reading/control < title. */
+  --font-micro: 10px;
+  --font-description: 12px;
+  --font-body: 14px;
+  --font-control: 14px;
+  --font-title: 17px;
+  --font-xs: var(--font-description);
+  --font-base: var(--font-body);
+  --font-brand: var(--font-title);
   --font-section: 20px;
   --font-page: 28px;
   --leading-tight: 1.25;
   --leading-body: 1.5;
   --weight-regular: 400;
+  --weight-description: 400;
+  --weight-body: 400;
+  --weight-control: 600;
+  --weight-title: 600;
   --response-weight: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
@@ -610,6 +620,134 @@ h4.response-heading, h5.response-heading, h6.response-heading { font-size: 13px;
 input::placeholder,
 textarea::placeholder { font-family: inherit; font-size: inherit; line-height: inherit; font-weight: inherit; letter-spacing: inherit; opacity: 1; }
 
+/* Role-based typography: size and weight follow content purpose instead of component. */
+body { font-size: var(--font-body); font-weight: var(--weight-body); }
+button, input, select, textarea { font-size: var(--font-control); }
+input, select, textarea { font-weight: var(--weight-body); }
+
+/* Titles: entity/card names are visibly larger and consistently semibold. */
+.profile-title strong,
+.profile-list.is-card-layout .profile-title strong,
+.project-title strong,
+.worker-setting-copy > div > strong { font-size: var(--font-title); line-height: 1.3; font-weight: var(--weight-title); }
+
+/* Reading text: normal size and regular weight for sustained reading/editing. */
+.subtitle,
+.connection-copy p:not(.eyebrow),
+.empty,
+.alert,
+.toast-message,
+.response-empty,
+.response-error,
+.chat-message-text,
+.thinking-state,
+.request-card .request-composer textarea,
+.global-rules-editor,
+.attachment-lightbox-body.is-text pre { font-size: var(--font-body); line-height: var(--leading-body); font-weight: var(--weight-body); }
+
+/* Descriptions and metadata: smaller, lighter, but still comfortably readable. */
+.section-note,
+.brand span,
+.status-card small,
+.profile-main > code,
+.profile-meta,
+.profile-task-summary,
+.profile-task-summary > strong,
+.profile-live-activity,
+.project-main > code,
+.project-meta,
+.request-label small,
+.chat-dropdown-value small,
+.chat-option-copy small,
+.project-dropdown-value small,
+.project-dropdown-copy small,
+.project-dropdown-empty,
+.request-card-head code,
+.request-file-copy strong,
+.request-file-copy small,
+.request-card-foot > span,
+.chat-response-send-state,
+.conversation-rollover-notice,
+.conversation-rollover-notice strong,
+.network-response-notice,
+.network-response-notice strong,
+.worker-update-copy p,
+.inspection-grid small,
+.inspection-grid code,
+.global-rules-actions > span,
+.subagent-limit-copy span,
+.subagent-limit-meter > span small,
+.width-scale,
+.font-size-value span,
+.settings-dropdown-value small,
+.settings-dropdown-option-copy small,
+.worker-pack-help,
+.worker-setting-copy p,
+.settings-footer { font-size: var(--font-description); font-weight: var(--weight-description); }
+
+/* Labels: description size, medium weight. */
+.status-label,
+.request-label,
+.font-setting-row label,
+.font-size-setting-row > label,
+.profile-layout-select > label,
+.worker-pack-select > label,
+.subagent-limit-copy strong { font-size: var(--font-description); font-weight: var(--weight-medium); }
+
+/* Primary control text: one standard size across real and custom inputs/dropdowns. */
+.button,
+nav button,
+.copy-button,
+.text-button,
+.already-connected,
+.project-actions button,
+.project-pagination button,
+.chat-manage-actions button,
+.chat-rename-editor button,
+.attach-button,
+.chat-response-head button { font-size: var(--font-control); font-weight: var(--weight-control); }
+.chat-rename-input,
+.project-dropdown-search input,
+.project-dropdown-search input:hover,
+.project-dropdown-search input:focus,
+.settings-number-field input,
+.worker-pack-creator input { font-size: var(--font-control); font-weight: var(--weight-body); }
+.chat-dropdown-value strong,
+.chat-option-copy strong,
+.project-dropdown-value strong,
+.project-dropdown-copy strong,
+.settings-dropdown-value strong,
+.settings-dropdown-option-copy strong { font-size: var(--font-control); font-weight: var(--weight-control); }
+
+/* Compact status/caption text stays smallest by design. */
+.eyebrow,
+.last-check,
+.profile-task-summary > span,
+.badge,
+.update-needed,
+.checking-profile,
+.chat-option-active,
+.project-dropdown-changes,
+.project-dropdown-activity,
+.request-composer-toolbar > span,
+.send-debug-row strong,
+.chat-response-head small,
+.chat-message-role,
+.global-rules-badge,
+.subagent-test-badge,
+.customized-badge { font-size: var(--font-micro); }
+
+.profile-count { font-size: var(--font-description); }
+.font-size-value strong { font-size: var(--font-title); font-weight: var(--weight-title); }
+.response-table,
+.response-code-block { font-size: var(--font-description); }
+h1.response-heading,
+h2.response-heading { font-size: var(--font-title); font-weight: var(--weight-title); }
+h3.response-heading,
+h4.response-heading,
+h5.response-heading,
+h6.response-heading { font-size: var(--font-body); font-weight: var(--weight-title); }
+
 .settings-view { width: 100%; max-width: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 18px; }
 .settings-view > * { grid-column: 1 / -1; }
 .settings-view > .settings-panel:has(input[aria-label="Độ rộng popup chat"]) { grid-column: 1; min-width: 0; }
@@ -760,6 +898,34 @@ textarea::placeholder { font-family: inherit; font-size: inherit; line-height: i
 .worker-setting-actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .worker-setting-actions .button { width: 100%; padding: 8px 10px; font-size: 12px; }
 .settings-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 4px 0 24px; color: #707b8d; font-size: 12px; }
+
+/* Settings controls come later in this file, so pin them back to the same semantic roles. */
+.global-rules-editor { font-size: var(--font-body); font-weight: var(--weight-body); }
+.settings-number-field input { font-size: var(--font-control); font-weight: var(--weight-body); }
+.settings-number-field span,
+.global-rules-actions > span,
+.subagent-limit-copy span,
+.subagent-limit-meter > span small,
+.width-scale,
+.font-size-value span,
+.settings-dropdown-value small,
+.settings-dropdown-option-copy small,
+.worker-pack-help,
+.worker-setting-copy p,
+.settings-footer { font-size: var(--font-description); font-weight: var(--weight-description); }
+.subagent-limit-copy strong,
+.font-setting-row label,
+.font-size-setting-row > label,
+.profile-layout-select > label,
+.worker-pack-select > label { font-size: var(--font-description); font-weight: var(--weight-medium); }
+.settings-dropdown-value strong,
+.settings-dropdown-option-copy strong,
+.worker-setting-actions .button { font-size: var(--font-control); font-weight: var(--weight-control); }
+.font-size-value strong,
+.subagent-limit-meter > span b { font-size: var(--font-title); font-weight: var(--weight-title); }
+.global-rules-badge,
+.subagent-test-badge,
+.customized-badge { font-size: var(--font-micro); }
 
 @media (max-width: 1080px) {
   .status-grid { grid-template-columns: repeat(2, 1fr); }

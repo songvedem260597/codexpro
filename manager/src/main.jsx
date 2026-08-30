@@ -2702,9 +2702,14 @@ function App() {
     "--chat-response-height": `${managerSettings.chatHeight}px`,
     "--chat-response-runway-height": `${Math.max(108, Math.round((managerSettings.chatHeight - 45) / 2))}px`,
     "--app-font-family": selectedFont.css,
-    "--font-xs": `${Math.max(10, managerSettings.fontSize - 2)}px`,
+    "--font-micro": `${Math.max(10, managerSettings.fontSize - 4)}px`,
+    "--font-description": `${Math.max(11, managerSettings.fontSize - 2)}px`,
+    "--font-body": `${managerSettings.fontSize}px`,
+    "--font-control": `${managerSettings.fontSize}px`,
+    "--font-title": `${managerSettings.fontSize + 3}px`,
+    "--font-xs": `${Math.max(11, managerSettings.fontSize - 2)}px`,
     "--font-base": `${managerSettings.fontSize}px`,
-    "--font-brand": `${managerSettings.fontSize + 2}px`,
+    "--font-brand": `${managerSettings.fontSize + 3}px`,
     "--font-section": `${managerSettings.fontSize + 6}px`,
     "--font-page": `${managerSettings.fontSize + 14}px`
   };
