@@ -64,6 +64,9 @@ export function createApiWorkerPlugin(options = {}) {
           current_task_title: run?.activity === "working" ? run.title : "",
           current_workspace_root: run?.activity === "working" ? run.root : "",
           run_id: run?.jobId || "",
+          last_task_id: run?.jobId || "",
+          last_result: run?.result?.text || "",
+          finished_at: run?.finishedAt || "",
           capabilities: ["send", "read", "stop", "tool-calling"],
           last_error: run?.error || "",
           usage: run?.result?.usage
