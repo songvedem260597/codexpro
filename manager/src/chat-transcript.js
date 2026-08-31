@@ -88,6 +88,14 @@ export function transcriptAwaitingAssistant(messages) {
   return latestUserIndex >= 0 && !usable.slice(latestUserIndex + 1).some((message) => message?.role === "assistant" && message?.provisional !== true && message?.endTurn !== false);
 }
 
+export function latestTurnHasProvisionalAssistant(messages) {
+  const usable = Array.isArray(messages) ? messages.filter(messageHasContent) : [];
+  const latestUserIndex = usable.findLastIndex((message) => message?.role === "user");
+  const turnMessages = latestUserIndex >= 0 ? usable.slice(latestUserIndex + 1) : usable;
+  const latestAssistant = turnMessages.findLast((message) => message?.role === "assistant");
+  return Boolean(latestAssistant && (latestAssistant.provisional === true || latestAssistant.endTurn === false));
+}
+
 export function discardProvisionalAssistantAfterLatestUser(messages, { includeUnverified = false } = {}) {
   const usable = Array.isArray(messages) ? messages : [];
   const latestUserIndex = usable.findLastIndex((message) => message?.role === "user");
