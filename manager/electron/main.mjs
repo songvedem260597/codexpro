@@ -3092,7 +3092,7 @@ async function reloadChromeProfiles() {
   const safeToReload = (profile) => {
     const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
     const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
-    return profile.activity === "idle" && Number(profile.busy_request_count || 0) === 0 && !hasBusyTab;
+    return ["idle", "no_chatgpt"].includes(profile.activity) && Number(profile.busy_request_count || 0) === 0 && !hasBusyTab;
   };
   const reloadable = outdated.filter(safeToReload);
   const deferred = outdated.filter((profile) => !safeToReload(profile));

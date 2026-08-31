@@ -469,10 +469,14 @@ function repoTaskEvidenceSummary(proof) {
   return `${title} · CODE · Rules ${rulesHash || "thiếu hash"} ✓ · CodexGraph ${symbols} symbols / ${relationships} edges ✓`;
 }
 
+function profileVisibleInWorkerList(profile) {
+  return Number(profile?.tab_count || 0) > 0 || Boolean(profile?.connector_installed);
+}
+
 function profileSafeForWorkerUpdate(profile) {
   const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
   const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
-  return profile?.activity === "idle" && Number(profile?.busy_request_count || 0) === 0 && !hasBusyTab;
+  return ["idle", "no_chatgpt"].includes(profile?.activity) && Number(profile?.busy_request_count || 0) === 0 && !hasBusyTab;
 }
 
 function conversationIdFromTab(tab) {
@@ -2217,13 +2221,15 @@ function App() {
 
   const profileSummary = useMemo(() => {
     const allProfiles = status?.browserProfiles || [];
-    const profiles = allProfiles.filter((profile) => profile.connected);
+    const visibleProfiles = allProfiles.filter(profileVisibleInWorkerList);
+    const profiles = visibleProfiles.filter((profile) => profile.connected);
+    const connectedProfiles = allProfiles.filter((profile) => profile.connected);
     const apiWorkers = (status?.workers || []).filter((worker) => worker.worker_type === "api");
-    const outdated = profiles.filter((profile) => !extensionReady(profile.extension_version));
+    const outdated = connectedProfiles.filter((profile) => !extensionReady(profile.extension_version));
     return {
       working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length + apiWorkers.filter((worker) => worker.connected && worker.activity === "working").length,
       idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile.extension_version))).length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
-      hung: allProfiles.filter((profile) => !profile.connected).length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
+      hung: visibleProfiles.filter((profile) => !profile.connected).length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
       missing: profiles.filter((profile) => profile.activity === "no_chatgpt" && !profile.connector_installed).length,
       reload: outdated.filter(profileSafeForWorkerUpdate).length,
       deferredUpdate: outdated.filter((profile) => !profileSafeForWorkerUpdate(profile)).length,
@@ -3885,6 +3891,7 @@ function App() {
               }}
             />
             {[...(status?.browserProfiles || [])]
+              .filter(profileVisibleInWorkerList)
               .sort((left, right) => {
                 const rank = (profile) => {
                   if (!profile.connected) return 3;
