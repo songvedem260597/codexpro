@@ -14,6 +14,7 @@
     "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
+    "test:icon": "node scripts/icon-asset-smoke.mjs",
     "dist": "npm run build && electron-builder --win nsis --x64",
     "preview": "vite preview --host 127.0.0.1"
   },

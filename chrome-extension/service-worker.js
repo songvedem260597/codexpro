@@ -5,6 +5,7 @@ const CHAT_NETWORK_STATE_KEY = 'codexproChatNetworkStateV1';
 const CHAT_ATTACHMENT_OWNERSHIP_KEY = 'codexproChatAttachmentOwnershipV1';
 const CHAT_ATTACHMENT_OWNERSHIP_TTL_MS = 30 * 60 * 1000;
 const DOM_READ_TIMEOUT_MS = 2500;
+const NETWORK_STREAM_READ_TIMEOUT_MS = 650;
 const DOM_ACTIVITY_PROBE_TIMEOUT_MS = 800;
 const DOM_ACTIVITY_PROBE_CACHE_MS = 5000;
 const DOM_ACTIVITY_RECENT_NETWORK_MS = 2*60*1000;
@@ -1530,16 +1531,16 @@ async function ensureChatNetworkStreamCapture(tabId) {
 }
 
 async function chatNetworkStreamCapture(tabId,conversationId) {
-  const installed=await ensureChatNetworkStreamCapture(tabId);
-  if(!installed)return {available:false,capture_installed:false,conversation_id:String(conversationId||'')};
   try{
     const [injected]=await promiseWithTimeout(
       chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:readChatNetworkStreamCapturePage,args:[conversationId]}),
-      DOM_ACTION_TIMEOUT_MS,
+      NETWORK_STREAM_READ_TIMEOUT_MS,
       'ChatGPT network stream read timeout.'
     );
-    return injected?.result&&typeof injected.result==='object'?injected.result:{available:false,capture_installed:true,conversation_id:String(conversationId||'')};
-  }catch(error){return {available:false,capture_installed:true,conversation_id:String(conversationId||''),error:String(error?.message||error).slice(0,500)};}
+    const result=injected?.result&&typeof injected.result==='object'?injected.result:{available:false,capture_installed:false,conversation_id:String(conversationId||'')};
+    if(result.capture_installed===false)void ensureChatNetworkStreamCapture(tabId);
+    return result;
+  }catch(error){return {available:false,capture_installed:false,conversation_id:String(conversationId||''),error:String(error?.message||error).slice(0,500)};}
 }
 
 async function reconcileChatNetworkCompletion(tabId,conversationId,source='canonical_api') {
@@ -2128,6 +2129,7 @@ if(action==='rename_chat'){
       network_duration_ms:state.network_duration_ms
     });
     let networkPayload=networkPayloadOf(networkState);
+    const networkOnly=args.read_dom===false&&args.canonical_only!==true;
     const networkStreamStartedAt=Date.now();
     const networkStream=await chatNetworkStreamCapture(tab.id,conversationId);
     addResponsePhaseTiming('network_stream_ms',networkStreamStartedAt);
@@ -2139,7 +2141,10 @@ if(action==='rename_chat'){
       addResponsePhaseTiming('network_reconcile_ms',networkReconcileStartedAt);
     }else if(networkState.busy&&!networkStream.available){
       const startedAt=Date.parse(networkState.network_last_started_at||'');
-      if(Number.isFinite(startedAt)&&Date.now()-startedAt>=CANONICAL_COMPLETION_PROBE_AFTER_MS&&await probeCanonicalCompletion(tab.id,conversationId,false)){
+      const shouldProbeCanonical=Number.isFinite(startedAt)&&Date.now()-startedAt>=CANONICAL_COMPLETION_PROBE_AFTER_MS;
+      if(shouldProbeCanonical&&networkOnly){
+        void probeCanonicalCompletion(tab.id,conversationId,false).catch(()=>{});
+      }else if(shouldProbeCanonical&&await probeCanonicalCompletion(tab.id,conversationId,false)){
         networkState=await chatRequestState(tab.id,conversationId);
         networkPayload=networkPayloadOf(networkState);
       }
@@ -2164,7 +2169,7 @@ if(action==='rename_chat'){
       network_stream_started_at:String(networkStream.started_at||''),
       network_stream_updated_at:String(networkStream.updated_at||'')
     };
-    if(args.read_dom===false&&args.canonical_only!==true){
+    if(networkOnly){
       return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:visibleNetworkStreamText,text_length:visibleNetworkStreamText.length,truncated:false,incomplete:effectiveNetworkBusy,incomplete_reason:effectiveNetworkBusy?(visibleNetworkStreamText?'network_stream_in_progress':visibleNetworkStreamActivityText?'tool_activity_in_progress':'generation_in_progress'):'',conversation_limit_reached:false,conversation_limit_message:'',message_count:visibleNetworkStreamMessages.length,total_message_count:visibleNetworkStreamMessages.length,messages:visibleNetworkStreamMessages,busy:effectiveNetworkBusy,dom_available:false,dom_skipped:true,dom_error:'',response_ready:false,response_source:visibleNetworkStreamText?'network_stream':visibleNetworkStreamActivityText?'network_tool_activity':'network_state',updated_at:networkStream.updated_at||new Date().toISOString(),...networkStreamPayload,...networkPayload,...responseTimingPayload()},{networkStream});
     }
     let canonical={ok:false,error:''};
@@ -2701,7 +2706,7 @@ async function checkConnectorInstalled() {
       at:new Date().toISOString()
     };
     await chrome.storage.local.set({connectorInstall:saved});
-    return {ok:true,installed:saved.ok,message:saved.message};
+    return {ok:true,installed:saved.ok,message:saved.message,checked_at:saved.at,diagnostic:result.diagnostic||{}};
   }finally{
     await chrome.tabs.remove(tab.id).catch(()=>{});
     if(previousActive?.id)await chrome.tabs.update(previousActive.id,{active:true}).catch(()=>{});

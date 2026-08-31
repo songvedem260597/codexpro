@@ -222,6 +222,15 @@ const [browserOps, worker, server, httpSource, bridge, managerMain, managerPrelo
   readFile(join(root, "chrome-extension", "connector-installer.js"), "utf8")
 ]);
 
+const connectorMatcherSource = connectorInstaller.slice(
+  connectorInstaller.indexOf("function connectorActionLabelMatches"),
+  connectorInstaller.indexOf("function installedConnectorAction")
+);
+const connectorActionLabelMatches = new Function(`${connectorMatcherSource}; return connectorActionLabelMatches;`)();
+assert.equal(connectorActionLabelMatches("actions for codexpro", "", true), true, "legacy connector action aria must remain recognized");
+assert.equal(connectorActionLabelMatches("", "codexpro allow all", true), true, "current ChatGPT CodexPro permission-row text must be recognized");
+assert.equal(connectorActionLabelMatches("", "codexpro conversation", false), false, "non-interactive conversation text must not be mistaken for an installed connector row");
+
 const probeChatActivitySource = worker.slice(worker.indexOf("function probeChatActivityPage()"), worker.indexOf("async function chatDomActivityState"));
 const tabPolicySource = worker.slice(worker.indexOf("function isChatGptTabUrl"), worker.indexOf("async function probeChatGptTabHealth"));
 const planChatTabCleanup = Function("MAX_CHATGPT_TABS", "CHAT_TAB_HEALTH_FAILURES_TO_CLOSE", "conversationIdFromUrl", `${tabPolicySource}; return planChatTabCleanup;`)(6, 2, value => {
@@ -624,6 +633,11 @@ const canonicalReaderSource = worker.slice(worker.indexOf("function readCanonica
 assert.match(canonicalReaderSource, /message\.role==='user'\|\|message\.end_turn===true/, "canonical transcript reads must exclude internal assistant progress fragments");
 assert.doesNotMatch(canonicalReaderSource, /status==='finished_successfully'/, "finished_successfully progress nodes must not be mistaken for an end-turn response");
 const responseReaderSource = worker.slice(worker.indexOf("if(action==='get_chat_response')"), worker.indexOf("if(action==='open_tab')"));
+const networkStreamCaptureSource = worker.slice(worker.indexOf("async function chatNetworkStreamCapture"), worker.indexOf("async function reconcileChatNetworkCompletion"));
+assert.doesNotMatch(networkStreamCaptureSource, /const installed=await ensureChatNetworkStreamCapture/, "response polling must not synchronously reinstall the document-start stream capture");
+assert.match(networkStreamCaptureSource, /NETWORK_STREAM_READ_TIMEOUT_MS/, "response polling must bound its auxiliary stream read instead of waiting for the generic DOM timeout");
+assert.match(responseReaderSource, /const networkOnly=args\.read_dom===false&&args\.canonical_only!==true/, "network-only response polling must have an explicit fast path");
+assert.match(responseReaderSource, /shouldProbeCanonical&&networkOnly[\s\S]*?void probeCanonicalCompletion\(tab\.id,conversationId,false\)\.catch/, "network-only response polling must move slow canonical completion probing off the blocking path");
 assert.match(responseReaderSource, /response_phase_timings[\s\S]*?extension_total_ms/, "response reads must return extension phase timings for slow-load investigations");
 assert.match(responseReaderSource, /find_tab_ms[\s\S]*?network_state_ms[\s\S]*?network_stream_ms[\s\S]*?canonical_read_ms[\s\S]*?dom_read_ms/, "response timing telemetry must separate tab lookup, network, canonical, and DOM phases");
 assert.match(bridge, /bridge_phase_timings[\s\S]*?queue_wait_ms[\s\S]*?extension_roundtrip_ms[\s\S]*?bridge_total_ms/, "browser bridge results must expose queue and extension round-trip timings");
@@ -644,6 +658,8 @@ assert.match(worker, /cleanupChatGptTabs\(tabs,recentConversations\)[\s\S]*?if\(
 assert.match(worker, /current\.active\|\|current\.pinned\|\|current\.audible[\s\S]*?pendingConversationByTab\.has\(tabId\)[\s\S]*?chatAttachmentOwnershipByTab\.has\(tabId\)[\s\S]*?browserMutationTailsByTab\.has\(tabId\)[\s\S]*?networkState\.busy\|\|canonicalActivity\.busy\|\|domActivity\?\.busy/, "worker must re-check live work, attachment, automation, network, canonical, and DOM protection signals before closing a tab");
 assert.match(worker, /value==='codexpro'\|\|value\.startsWith\('codexpro '\)/, "worker must open a Settings plugin row whose accessible name includes the permission summary");
 assert.match(connectorInstaller, /value === 'codexpro' \|\| value\.startsWith\('codexpro '\)/, "connector installer must recognize ChatGPT's CodexPro Allow all row");
+assert.match(connectorInstaller, /function connectorCheckEvidence[\s\S]*?codexpro_candidate_count[\s\S]*?match_text[\s\S]*?match_aria/, "connector checks must return bounded selector evidence for false-positive and false-negative investigations");
+assert.match(connectorInstaller, /installed: true, diagnostic: connectorCheckEvidence\(connectorAction\)[\s\S]*?installed: false, diagnostic: connectorCheckEvidence\(\)/, "connector checks must preserve selector evidence for both installed and missing results");
 assert.match(worker, /value\.includes\('settings'\)\|\|value\.includes\('cai dat'\)/, "worker setup must recognize localized Settings dialogs");
 assert.match(worker, /value\.includes\('connection'\)\|\|value\.includes\('ket noi'\)/, "worker setup must recognize localized Connection details");
 assert.match(worker, /CODEXPRO_SETUP_EVIDENCE/, "worker setup failures must preserve bounded selector evidence for Manager diagnostics");
@@ -655,6 +671,9 @@ assert.match(connectorInstaller, /CONNECT_CONSENT_NOT_FOUND[\s\S]*?CODEXPRO_SETU
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.match(managerMain, /profile\.connector_update_required \|\| profile\.connector_profile_bound === false[\s\S]*?action: "setup_chatgpt"[\s\S]*?profile\.connector_installed && profile\.connector_profile_bound/, "Manager send preflight must rebind an old connector before dispatching a task");
+assert.match(managerMain, /function profileDiagnosticSnapshot[\s\S]*?connector_installed[\s\S]*?connector_profile_bound[\s\S]*?connector_checked_at/, "profile transition diagnostics must retain connector verification state");
+assert.match(managerMain, /CodexPro connector bị hạ xuống chưa xác minh[\s\S]*?CodexPro connector đã được xác minh[\s\S]*?CodexPro connector không còn khớp profile/, "Manager must log connector verification and binding transitions");
+assert.match(managerMain, /codexpro:check-profile[\s\S]*?result\?\.installed \?\? result\?\.connector_installed[\s\S]*?connector_check_diagnostic/, "automatic connector checks must log the actual installed result and selector evidence");
 assert.match(managerUi, /connectorUpdateRequired \? "Cập nhật CodexPro" : "Thêm CodexPro"/, "old profile connectors must offer an update action instead of pretending CodexPro is missing");
 assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");
 assert.match(managerUi, /className="worker-update-dialog"[\s\S]*?Cập nhật CodexPro Worker[\s\S]*?Cập nhật worker/, "Manager must render the custom worker update confirmation dialog");
