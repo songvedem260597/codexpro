@@ -7,7 +7,7 @@ import { WorkerPluginRegistry } from "../manager/electron/worker-core/plugin-reg
 import { createApiWorkerPlugin } from "../manager/electron/worker-plugins/api-worker-plugin.mjs";
 import { createWorkerMcpClients } from "../manager/electron/mcp/http-client.mjs";
 
-const secret = "sk-provider-fixture-secret-12345";
+const secret = "sk-" + "A".repeat(36);
 const requests = [];
 let completionTurn = 0;
 

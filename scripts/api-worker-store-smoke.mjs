@@ -5,7 +5,7 @@ import path from "node:path";
 import { createApiWorkerStore } from "../manager/electron/worker-core/api-worker-store.mjs";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-api-worker-store-"));
-const secret = "sk-store-fixture-secret";
+const secret = "sk-" + "A".repeat(36);
 const safeStorage = {
   isEncryptionAvailable: () => true,
   encryptString: (value) => Buffer.from(`encrypted:${Buffer.from(value).toString("base64")}`),

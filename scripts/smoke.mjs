@@ -87,7 +87,7 @@ await fs.writeFile(path.join(alternateWorkspace, 'selected.txt'), 'alternate wor
 await fs.writeFile(path.join(tmp, 'demo.txt'), 'alpha\nread\nread\nomega\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'other.txt'), 'keep\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'patch-race.txt'), 'patch race initial\n', 'utf8');
-await fs.writeFile(path.join(tmp, 'config.txt'), 'OPENAI_API_KEY=sk-realSecretValue123\n', 'utf8');
+await fs.writeFile(path.join(tmp, 'config.txt'), 'OPENAI_API_KEY=fixture-api-secret-1234567890\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'AGENTS.md'), '# Smoke Agents\n\n- Preserve demo.txt.\n', 'utf8');
 const codexHistoryDir = path.join(tmp, 'codex-history');
 const codexSessionDir = path.join(codexHistoryDir, 'sessions', '2026', '06', '20');
@@ -535,7 +535,7 @@ await fs.writeFile(path.join(tmp, 'tokens.txt'), [
 ].join('\n'), 'utf8');
 const secretRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'config.txt' } });
 const secretPayload = JSON.stringify(secretRead);
-if (secretPayload.includes('sk-realSecretValue123') || !secretPayload.includes('[REDACTED_SECRET]')) {
+if (secretPayload.includes('fixture-api-secret-1234567890') || !secretPayload.includes('[REDACTED_SECRET]')) {
   throw new Error('read did not redact secret-looking content');
 }
 const tokenRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'tokens.txt' } });
@@ -547,7 +547,7 @@ if (!tokenPayload.includes('/Users/rebel/.codexpro/cloudflare-tunnel-token')) {
   throw new Error('redaction hid a non-secret Cloudflare token-file path');
 }
 const secretLikeWrites = [
-  ['notes.md', 'OPENAI_API_KEY=sk-realSecretValue123\n'],
+  ['notes.md', 'OPENAI_API_KEY=fixture-api-secret-1234567890\n'],
   ['token.txt', 'codexpro_token=shorttok\n'],
   ['notes.yaml', 'api_key: yamlsecretvalueabcdefghijklmnop\n']
 ];
@@ -562,7 +562,7 @@ await client.request('tools/call', {
   arguments: {
     workspace_id: ws,
     path: 'notes.md',
-    old_text: 'sk-realSecretValue123',
+    old_text: 'fixture-api-secret-1234567890',
     new_text: fakeOpenAiReplacementKey
   }
 });
