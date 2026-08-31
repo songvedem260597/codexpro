@@ -25,3 +25,13 @@ export function filterDropdownOptions(options, query, getSearchText) {
     return normalizeSearchText(text).includes(needle);
   });
 }
+
+export function resolveDropdownEnterOption(options, query, customOption) {
+  const list = Array.isArray(options) ? options : [];
+  const needle = normalizeSearchText(query);
+  if (!needle) return null;
+  const exact = list.find((option) => [option?.value, option?.label].some((value) => normalizeSearchText(value) === needle));
+  if (exact) return exact;
+  if (customOption) return customOption;
+  return list.length === 1 ? list[0] : null;
+}

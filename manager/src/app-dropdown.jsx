@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from "react";
-import { dropdownSearchEnabled, filterDropdownOptions } from "./dropdown-options.js";
+import { dropdownSearchEnabled, filterDropdownOptions, resolveDropdownEnterOption } from "./dropdown-options.js";
 
 function sameValue(left, right) {
   return String(left ?? "") === String(right ?? "");
@@ -18,6 +18,7 @@ export function AppDropdown({
   getSearchText,
   renderValue,
   renderOption,
+  createOption,
   emptyText = "Không tìm thấy lựa chọn phù hợp.",
   className = "",
   compact = false,
@@ -31,6 +32,11 @@ export function AppDropdown({
   const selected = options.find((option) => sameValue(option?.value, value));
   const useSearch = dropdownSearchEnabled(options, searchable, searchThreshold);
   const filtered = useMemo(() => filterDropdownOptions(options, query, getSearchText), [getSearchText, options, query]);
+  const customOption = useMemo(() => {
+    const trimmed = query.trim();
+    return trimmed && typeof createOption === "function" ? createOption(trimmed, filtered, options) : null;
+  }, [createOption, filtered, options, query]);
+  const visibleOptions = customOption ? [customOption, ...filtered] : filtered;
 
   useEffect(() => {
     if (!open) return undefined;
@@ -112,19 +118,34 @@ export function AppDropdown({
           {useSearch && (
             <div className="app-dropdown-search">
               <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></svg>
-              <input ref={searchRef} type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={searchPlaceholder} aria-label={searchPlaceholder} />
+              <input
+                ref={searchRef}
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  const option = resolveDropdownEnterOption(filtered, query, customOption);
+                  if (!option) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  choose(option);
+                }}
+                placeholder={searchPlaceholder}
+                aria-label={searchPlaceholder}
+              />
               {query && <button type="button" aria-label="Xóa từ khóa" onClick={() => { setQuery(""); searchRef.current?.focus(); }}>×</button>}
             </div>
           )}
           <div className="app-dropdown-options" id={menuId} role="listbox" aria-label={ariaLabel}>
-            {filtered.map((option, index) => {
+            {visibleOptions.map((option, index) => {
               const active = sameValue(option.value, value);
               return (
                 <button
                   type="button"
                   role="option"
                   aria-selected={active}
-                  className={`app-dropdown-option ${active ? "is-selected" : ""}`}
+                  className={`app-dropdown-option ${active ? "is-selected" : ""} ${option.className || ""}`.trim()}
                   key={String(option.key ?? option.value ?? index)}
                   disabled={option.disabled}
                   onClick={() => choose(option)}
@@ -135,7 +156,7 @@ export function AppDropdown({
                 </button>
               );
             })}
-            {!filtered.length && <div className="app-dropdown-empty">{emptyText}</div>}
+            {!visibleOptions.length && <div className="app-dropdown-empty">{emptyText}</div>}
           </div>
         </div>
       )}

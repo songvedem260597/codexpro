@@ -105,6 +105,8 @@ select option { color: #edf1f7; background: #11151d; }
 .app-dropdown-option { width: 100%; min-width: 0; min-height: 43px; display: flex; align-items: center; gap: 10px; padding: 8px 10px; color: #cad3e1; border: 1px solid transparent; border-radius: var(--radius-control); background: transparent; text-align: left; }
 .app-dropdown-option:hover:not(:disabled), .app-dropdown-option:focus-visible { color: #fff; border-color: #303e55; outline: 0; background: #192333; }
 .app-dropdown-option.is-selected { color: #fff; border-color: #405a91; background: #1a2740; }
+.app-dropdown-option.is-create { color: #d9f9e7; border-color: #315d45; background: #13271d; }
+.app-dropdown-option.is-create:hover, .app-dropdown-option.is-create:focus-visible { border-color: #4b9369; background: #183524; }
 .app-dropdown-option-content { min-width: 0; flex: 1; display: flex; align-items: center; gap: 10px; }
 .app-dropdown-check { flex: 0 0 auto; color: #83a2ff; font-weight: var(--weight-bold); }
 .app-dropdown-empty { padding: 22px 12px; color: #7e899a; text-align: center; font-size: var(--font-description); }
