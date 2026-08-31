@@ -65,8 +65,36 @@ async function readBoundedBody(response, maxBytes) {
   }
 }
 
+function providerErrorMessage(body) {
+  let value = body;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (value && typeof value === "object") {
+      const nested = value?.error?.message ?? value?.message ?? value?.detail;
+      if (nested === undefined || nested === null) break;
+      value = nested;
+      continue;
+    }
+    const text = String(value ?? "").trim();
+    if (!text) return "";
+    try {
+      value = JSON.parse(text);
+      continue;
+    } catch {
+      const objectStart = text.indexOf("{");
+      if (objectStart >= 0) {
+        try {
+          value = JSON.parse(text.slice(objectStart));
+          continue;
+        } catch {}
+      }
+      return text;
+    }
+  }
+  return typeof value === "string" ? value : JSON.stringify(value ?? "");
+}
+
 function safeProviderError(status, body) {
-  const message = clean(body, 1200)
+  const message = clean(providerErrorMessage(body), 1200)
     .replace(/(?:sk|key|token)-[A-Za-z0-9._-]{8,}/gi, "[REDACTED]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [REDACTED]");
   return new Error(`Provider HTTP ${status}${message ? `: ${message}` : ""}`);

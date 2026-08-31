@@ -59,7 +59,7 @@ const server = http.createServer(async (req, res) => {
   if (body.model === "fixture/error") {
     res.statusCode = 401;
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ error: { message: `credential rejected: ${secret}` } }));
+    res.end(JSON.stringify({ error: { message: `[openai-compatible][400]: ${JSON.stringify({ error: { message: `The tool_choice parameter is unsupported: ${secret}` } })}` } }));
     return;
   }
   if (body.model === "fixture/redirect") {
@@ -225,7 +225,7 @@ try {
   ]);
   const completionRequests = requests.filter((request) => request.url === "/v1/chat/completions");
   assert.deepEqual(completionRequests[0].body.tools.map((tool) => tool.function.name), ["begin_repo_task"], "AI title bootstrap must expose only begin_repo_task");
-  assert.equal(completionRequests[0].body.tool_choice, "required");
+  assert.equal(completionRequests[0].body.tool_choice, "auto", "thinking models must not receive unsupported tool_choice=required");
   assert.equal(completionRequests[1].body.tools[0].function.name, "read");
   assert.equal(completionRequests[1].body.tools.some((tool) => tool.function.name === "begin_repo_task" || tool.function.name === "finalize_worker_job"), false, "provider must not receive MCP lifecycle tools after bootstrap");
   assert.match(completionRequests[2].body.messages.findLast((message) => message.role === "tool")?.content || "", /MCP-only content/);
@@ -233,7 +233,7 @@ try {
   const failingProvider = createOpenAICompatibleProvider({ baseUrl, model: "fixture/error", getApiKey: async () => secret });
   await assert.rejects(
     () => failingProvider.complete({ messages: [{ role: "user", content: "fail" }] }),
-    (error) => /Provider HTTP 401/.test(error.message) && !error.message.includes(secret)
+    (error) => /Provider HTTP 401: The tool_choice parameter is unsupported/.test(error.message) && !error.message.includes(secret) && !error.message.includes('\\"error\\"')
   );
   const redirectProvider = createOpenAICompatibleProvider({ baseUrl, model: "fixture/redirect", getApiKey: async () => secret });
   await assert.rejects(() => redirectProvider.complete({ messages: [{ role: "user", content: "redirect" }] }), /fetch|redirect/i);

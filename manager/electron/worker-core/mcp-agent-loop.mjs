@@ -110,7 +110,7 @@ export async function runMcpAgentJob(input = {}) {
       const completion = await input.provider.complete({
         messages,
         tools: bootstrapTools,
-        toolChoice: "required",
+        toolChoice: "auto",
         signal: input.signal,
         onDelta: input.onDelta
       });
