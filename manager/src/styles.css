@@ -227,7 +227,7 @@ section { margin-bottom: 38px; }
 .already-connected { width: 100%; padding: 10px 13px; color: #9df0bd; border: 1px solid #34734e; background: #153321; border-radius: var(--radius-control); text-align: center; font-size: 14px; font-weight: 800; }
 
 .profile-list.is-card-layout { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
-.profile-list.is-card-layout .browser-profile { min-width: 0; min-height: 390px; align-items: center; flex-direction: column; gap: 14px; padding: 22px 18px 18px; text-align: center; }
+.profile-list.is-card-layout .browser-profile { min-width: 0; min-height: var(--profile-card-height, 390px); align-items: center; flex-direction: column; gap: 14px; padding: 22px 18px 18px; text-align: center; }
 .profile-list.is-card-layout .browser-profile.is-online { box-shadow: inset 0 3px 0 #53e58e; }
 .profile-list.is-card-layout .browser-profile.is-idle { box-shadow: inset 0 3px 0 #53e58e; }
 .profile-list.is-card-layout .browser-profile.is-working { box-shadow: inset 0 3px 0 #f4a340; }
@@ -856,6 +856,14 @@ h6.response-heading { font-size: var(--font-body); font-weight: var(--weight-tit
 .font-preview.is-title { font-size: var(--font-title); font-weight: var(--weight-semibold); }
 .font-preview.is-mono { font-size: var(--font-description); }
 .profile-layout-setting-head { align-items: end; }
+.profile-layout-controls { width: min(760px, 58vw); display: grid; grid-template-columns: minmax(300px, 1fr) minmax(250px, 300px); align-items: end; gap: 12px; }
+.profile-card-height-control { min-width: 0; }
+.profile-card-height-control > label { display: block; margin-bottom: 7px; color: #9da9bb; font-size: 11px; font-weight: 700; }
+.profile-card-height-field { min-height: 54px; display: grid; grid-template-columns: 42px minmax(118px, 1fr) 42px; align-items: stretch; gap: 7px; }
+.profile-card-height-field .setting-step-button { min-width: 42px; height: 54px; }
+.profile-card-height-number { min-width: 0; height: 54px; }
+.profile-card-height-number input { width: 100%; min-width: 0; }
+.profile-card-height-control > small { display: block; margin-top: 6px; color: #65738a; font-size: 10px; }
 .profile-layout-select { width: min(430px, 42vw); }
 .profile-layout-select > label { display: block; margin-bottom: 7px; color: #9da9bb; font-size: 11px; font-weight: 700; }
 .profile-layout-preview { min-height: 118px; display: grid; gap: 10px; padding: 13px; border: 1px solid #29364a; border-radius: 9px; background: #0a0f16; }
@@ -1046,6 +1054,7 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
   .settings-view > .settings-panel:has(input[aria-label="Chiều cao khung chat bên trong"]) { grid-column: 1 / -1; }
   .profile-list.is-card-layout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .profile-layout-setting-head { align-items: stretch; }
+  .profile-layout-controls { width: 100%; grid-template-columns: 1fr; }
   .profile-layout-select { width: 100%; }
   .api-worker-form { grid-template-columns: 1fr; }
   .api-worker-wide { grid-column: auto; }

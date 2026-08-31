@@ -122,6 +122,7 @@ const DEFAULT_MANAGER_SETTINGS = {
   fontSize: 14,
   fontWeight: 400,
   profileLayout: "rows",
+  profileCardHeight: 390,
   maxSubagents: 1,
   autoRecovery: false,
   autoUpdateWorkers: false,
@@ -859,6 +860,7 @@ function App() {
   const [managerSettings, setManagerSettings] = useState(DEFAULT_MANAGER_SETTINGS);
   const [chatWidthInput, setChatWidthInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatWidth));
   const [chatHeightInput, setChatHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatHeight));
+  const [profileCardHeightInput, setProfileCardHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.profileCardHeight));
   const [globalRulesDraft, setGlobalRulesDraft] = useState(DEFAULT_MANAGER_SETTINGS.globalRules);
   const [settingsBusy, setSettingsBusy] = useState("");
   const [workerPackDraft, setWorkerPackDraft] = useState("");
@@ -1244,6 +1246,10 @@ function App() {
   }, [managerSettings.chatHeight]);
 
   useEffect(() => {
+    setProfileCardHeightInput(String(managerSettings.profileCardHeight));
+  }, [managerSettings.profileCardHeight]);
+
+  useEffect(() => {
     setGlobalRulesDraft(managerSettings.globalRules || GLOBAL_RULES_TEMPLATE);
   }, [managerSettings.globalRules]);
 
@@ -1260,6 +1266,13 @@ function App() {
     setChatHeightInput(String(nextHeight));
     if (nextHeight !== managerSettings.chatHeight) void saveManagerSetting({ chatHeight: nextHeight }, "Đã lưu chiều cao khung chat");
   }, [chatHeightInput, managerSettings.chatHeight, saveManagerSetting]);
+
+  const commitProfileCardHeightInput = useCallback(() => {
+    const parsed = Number(profileCardHeightInput);
+    const nextHeight = Math.max(390, Math.min(760, Number.isFinite(parsed) ? Math.round(parsed / 10) * 10 : managerSettings.profileCardHeight));
+    setProfileCardHeightInput(String(nextHeight));
+    if (nextHeight !== managerSettings.profileCardHeight) void saveManagerSetting({ profileCardHeight: nextHeight }, "Đã lưu chiều cao thẻ profile");
+  }, [profileCardHeightInput, managerSettings.profileCardHeight, saveManagerSetting]);
 
   const changeWorkerImage = useCallback(async (state) => {
     setSettingsBusy(`worker:${state}`);
@@ -3449,6 +3462,7 @@ function App() {
     "--chat-modal-width": `${managerSettings.chatWidth}px`,
     "--chat-response-height": `${managerSettings.chatHeight}px`,
     "--chat-response-runway-height": `${Math.max(108, Math.round((managerSettings.chatHeight - 45) / 2))}px`,
+    "--profile-card-height": `${managerSettings.profileCardHeight}px`,
     "--app-font-family": selectedFont.css,
     "--heading-font-family": selectedHeadingFont?.css || selectedFont.css,
     "--mono-font-family": selectedMonoFont?.css || selectedFont.css,
@@ -3984,18 +3998,50 @@ function App() {
                 <h2>Bố cục profile đã kết nối</h2>
                 <p className="section-note">Chọn danh sách ngang gọn gàng hoặc thẻ dọc với ảnh worker lớn. Thẻ dọc hiển thị tối đa 4 profile mỗi hàng.</p>
               </div>
-              <div className="profile-layout-select">
-                <label>Kiểu hiển thị</label>
-                <SettingsDropdown
-                  value={managerSettings.profileLayout}
-                  options={[
-                    { value: "rows", label: "Danh sách ngang", hint: "Gọn, ưu tiên thông tin profile" },
-                    { value: "cards", label: "Thẻ dọc", hint: "Ảnh worker lớn, tối đa 4 thẻ mỗi hàng" }
-                  ]}
-                  disabled={settingsBusy === "save"}
-                  ariaLabel="Chọn bố cục profile"
-                  onChange={(value) => void saveManagerSetting({ profileLayout: value }, value === "cards" ? "Đã chuyển sang thẻ dọc" : "Đã chuyển sang danh sách ngang")}
-                />
+              <div className="profile-layout-controls">
+                <div className="profile-layout-select">
+                  <label>Kiểu hiển thị</label>
+                  <SettingsDropdown
+                    value={managerSettings.profileLayout}
+                    options={[
+                      { value: "rows", label: "Danh sách ngang", hint: "Gọn, ưu tiên thông tin profile" },
+                      { value: "cards", label: "Thẻ dọc", hint: "Ảnh worker lớn, tối đa 4 thẻ mỗi hàng" }
+                    ]}
+                    disabled={settingsBusy === "save"}
+                    ariaLabel="Chọn bố cục profile"
+                    onChange={(value) => void saveManagerSetting({ profileLayout: value }, value === "cards" ? "Đã chuyển sang thẻ dọc" : "Đã chuyển sang danh sách ngang")}
+                  />
+                </div>
+                <div className="profile-card-height-control">
+                  <label>Chiều cao thẻ dọc</label>
+                  <div className="profile-card-height-field">
+                    <button type="button" className="setting-step-button" aria-label="Giảm chiều cao thẻ profile" disabled={settingsBusy === "save" || managerSettings.profileCardHeight <= 390} onClick={() => void saveManagerSetting({ profileCardHeight: Math.max(390, managerSettings.profileCardHeight - 20) }, "Đã giảm chiều cao thẻ profile")}>−</button>
+                    <div className="settings-number-field profile-card-height-number">
+                      <input
+                        type="number"
+                        min="390"
+                        max="760"
+                        step="10"
+                        inputMode="numeric"
+                        aria-label="Chiều cao thẻ profile"
+                        value={profileCardHeightInput}
+                        disabled={settingsBusy === "save"}
+                        onChange={(event) => setProfileCardHeightInput(event.target.value.replace(/[^0-9]/g, ""))}
+                        onBlur={commitProfileCardHeightInput}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") event.currentTarget.blur();
+                          if (event.key === "Escape") {
+                            setProfileCardHeightInput(String(managerSettings.profileCardHeight));
+                            event.currentTarget.blur();
+                          }
+                        }}
+                      />
+                      <span>px</span>
+                    </div>
+                    <button type="button" className="setting-step-button" aria-label="Tăng chiều cao thẻ profile" disabled={settingsBusy === "save" || managerSettings.profileCardHeight >= 760} onClick={() => void saveManagerSetting({ profileCardHeight: Math.min(760, managerSettings.profileCardHeight + 20) }, "Đã tăng chiều cao thẻ profile")}>＋</button>
+                  </div>
+                  <small>390–760 px · áp dụng cho thẻ dọc</small>
+                </div>
               </div>
             </div>
             <div className={`profile-layout-preview is-${managerSettings.profileLayout === "cards" ? "card" : "row"}`} aria-hidden="true">
