@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import vm from "node:vm";
 
-const [popupHtml, popupJs, worker, bridge, manifestText] = await Promise.all([
+const [popupHtml, popupJs, worker, bridge, manifestText, managerBackend, managerUi] = await Promise.all([
   fs.readFile(new URL("../chrome-extension/popup.html", import.meta.url), "utf8"),
   fs.readFile(new URL("../chrome-extension/popup.js", import.meta.url), "utf8"),
   fs.readFile(new URL("../chrome-extension/service-worker.js", import.meta.url), "utf8"),
   fs.readFile(new URL("../src/browserExtensionBridge.ts", import.meta.url), "utf8"),
-  fs.readFile(new URL("../chrome-extension/manifest.json", import.meta.url), "utf8")
+  fs.readFile(new URL("../chrome-extension/manifest.json", import.meta.url), "utf8"),
+  fs.readFile(new URL("../manager/electron/main.mjs", import.meta.url), "utf8"),
+  fs.readFile(new URL("../manager/src/main.jsx", import.meta.url), "utf8")
 ]);
 
 const manifest = JSON.parse(manifestText);
@@ -30,6 +32,9 @@ assert.deepEqual(manifest.icons, {
   128: "icons/icon128.png"
 }, "extension package must provide a complete branded icon set");
 assert.deepEqual(manifest.action.default_icon, manifest.icons, "toolbar action must use the branded extension icons");
+const escapedVersion = manifest.version.replace(/\./g, "\\.");
+assert.match(managerBackend, new RegExp(`const WORKER_EXTENSION_VERSION = "${escapedVersion}";`), "Manager backend updater target must match the packaged extension version");
+assert.match(managerUi, new RegExp(`const WORKER_EXTENSION_VERSION = "${escapedVersion}";`), "Manager UI update badge target must match the packaged extension version");
 await Promise.all(Object.values(manifest.icons).map(async (iconPath) => {
   const icon = await fs.readFile(new URL(`../chrome-extension/${iconPath}`, import.meta.url));
   assert.equal(icon.subarray(1, 4).toString("ascii"), "PNG", `${iconPath} must be a real PNG asset`);
