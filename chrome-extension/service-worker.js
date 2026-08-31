@@ -2562,26 +2562,31 @@ async function navigateInstallerTab(tabId,url) {
 async function openConnectorDetailPage() {
   const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const visible=element=>{if(!(element instanceof Element))return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
-  const normalized=element=>String(element?.innerText||element?.textContent||'').replace(/\s+/g,' ').trim().toLowerCase();
-  const settingsRoot=()=>[...document.querySelectorAll('[role="dialog"],dialog')].filter(visible).find(dialog=>{const value=normalized(dialog);return value.includes('settings')&&value.includes('plugins');})||null;
-  const detailReady=()=>{const root=settingsRoot();if(!root)return null;const value=normalized(root);return location.hash.toLowerCase().includes('/plugin_')||(value.includes('codexpro')&&value.includes('connection'))?root:null;};
-  if(detailReady())return {ok:true,already_open:true,url:location.href};
+  const normalizedValue=value=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[đĐ]/g,'d').replace(/\s+/g,' ').trim().toLowerCase();
+  const normalized=element=>normalizedValue(element?.innerText||element?.textContent||element?.getAttribute?.('aria-label')||'');
+  const settingsRoot=()=>[...document.querySelectorAll('[role="dialog"],dialog')].filter(visible).find(dialog=>{const value=normalized(dialog);const settingsMarker=value.includes('settings')||value.includes('cai dat');const pluginMarker=value.includes('plugin')||value.includes('ung dung');return settingsMarker&&pluginMarker;})||null;
+  const connectionMarker=value=>value.includes('connection')||value.includes('ket noi');
+  const detailReady=()=>{const root=settingsRoot();if(!root)return null;const value=normalized(root);return location.hash.toLowerCase().includes('/plugin_')||(value.includes('codexpro')&&connectionMarker(value))?root:null;};
+  const candidates=root=>root?[...root.querySelectorAll('button,a,[role="button"]')].filter(visible).filter(item=>{const value=normalized(item);return value==='codexpro'||value.startsWith('codexpro ');}):[];
+  const pointerClick=element=>{if(!(element instanceof Element))return false;element.scrollIntoView({block:'center',inline:'center'});try{element.focus({preventScroll:true});}catch{}const rect=element.getBoundingClientRect(),clientX=rect.left+Math.max(1,rect.width/2),clientY=rect.top+Math.max(1,rect.height/2),base={bubbles:true,cancelable:true,composed:true,view:window,button:0,clientX,clientY};try{element.dispatchEvent(new PointerEvent('pointerdown',{...base,buttons:1,pointerId:1,pointerType:'mouse',isPrimary:true}));}catch{}try{element.dispatchEvent(new MouseEvent('mousedown',{...base,buttons:1}));}catch{}try{element.dispatchEvent(new PointerEvent('pointerup',{...base,buttons:0,pointerId:1,pointerType:'mouse',isPrimary:true}));}catch{}try{element.dispatchEvent(new MouseEvent('mouseup',{...base,buttons:0}));}catch{}try{element.dispatchEvent(new MouseEvent('click',{...base,buttons:0}));}catch{element.click();}return true;};
+  if(detailReady())return {ok:true,already_open:true,url:location.href,language:String(document.documentElement.lang||'')};
   const deadline=Date.now()+20000;
+  let clickAttempts=0;
   while(Date.now()<deadline){
     const root=settingsRoot();
-    const button=root?[...root.querySelectorAll('button')].filter(visible).find(item=>{
-      const value=normalized(item);
-      return value==='codexpro'||value.startsWith('codexpro ');
-    }):null;
-    if(button)button.click();
+    const button=candidates(root)[0]||null;
+    if(button){clickAttempts+=1;if(clickAttempts===1)button.click();else pointerClick(button);}
     for(let attempt=0;attempt<10;attempt+=1){if(detailReady())return {ok:true,already_open:false,url:location.href};await sleep(150);}
   }
-  return {ok:false,error:'Không mở được trang chi tiết CodexPro trong Settings.',url:location.href};
+  const dialogs=[...document.querySelectorAll('[role="dialog"],dialog')].filter(visible);
+  const root=settingsRoot();
+  const rootValue=normalized(root);
+  return {ok:false,error:'Không mở được trang chi tiết CodexPro trong Settings.',diagnostic:{code:'SETTINGS_PLUGIN_DETAIL_NOT_FOUND',url:location.href,hash:location.hash,language:String(document.documentElement.lang||''),visible_dialog_count:dialogs.length,settings_root_found:Boolean(root),settings_marker:rootValue.includes('settings')?'settings':rootValue.includes('cai dat')?'cai_dat':'',plugin_marker:rootValue.includes('plugin')?'plugin':rootValue.includes('ung dung')?'ung_dung':'',connection_marker:connectionMarker(rootValue),codexpro_candidate_count:candidates(root).length,click_attempts:clickAttempts}};
 }
 
 async function ensureConnectorDetailTab(tabId) {
   const [injected]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:openConnectorDetailPage}),30000,'Chrome renderer không phản hồi khi mở chi tiết CodexPro.');
-  if(!injected?.result?.ok)throw new Error(injected?.result?.error||'Không mở được trang chi tiết CodexPro trong Settings.');
+  if(!injected?.result?.ok){const evidence=JSON.stringify(injected?.result?.diagnostic||{}).slice(0,3000);throw new Error(`${injected?.result?.error||'Không mở được trang chi tiết CodexPro trong Settings.'} [CODEXPRO_SETUP_EVIDENCE ${evidence}]`);}
   return injected.result;
 }
 

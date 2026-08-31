@@ -1,5 +1,5 @@
 (() => {
-  const INSTALLER_REVISION = '2026-08-30-24';
+  const INSTALLER_REVISION = '2026-08-31-26';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
 
@@ -365,13 +365,13 @@
       .filter(visible)
       .find(dialog => {
         const value = text(dialog);
-        return value.includes('settings') && value.includes('plugins');
+        return (value.includes('settings') || value.includes('cai dat')) && (value.includes('plugin') || value.includes('ung dung'));
       }) || null;
   }
 
   function settingsCodexProButton(root) {
     if (!root) return null;
-    return [...root.querySelectorAll('button')]
+    return [...root.querySelectorAll('button,a,[role="button"]')]
       .filter(visible)
       .find(button => {
         const value = text(button);
@@ -430,14 +430,15 @@
     if (!root) throw new Error('ChatGPT chưa mở được Settings > Plugins để kết nối CodexPro.');
 
     const initialValue = text(root);
-    const detailAlreadyOpen = location.hash.toLowerCase().includes('/plugin_') || (initialValue.includes('codexpro') && initialValue.includes('connection'));
+    const hasConnectionMarker = value => value.includes('connection') || value.includes('ket noi');
+    const detailAlreadyOpen = location.hash.toLowerCase().includes('/plugin_') || (initialValue.includes('codexpro') && hasConnectionMarker(initialValue));
     const pluginButton = detailAlreadyOpen ? null : settingsCodexProButton(root);
     if (pluginButton) {
       const detailView = () => {
         const current = settingsDialog();
         if (!current) return null;
         const value = text(current);
-        return location.hash.toLowerCase().includes('/plugin_') || (value.includes('codexpro') && value.includes('connection')) ? current : null;
+        return location.hash.toLowerCase().includes('/plugin_') || (value.includes('codexpro') && hasConnectionMarker(value)) ? current : null;
       };
       // This row is an ordinary React navigation control, not a protected
       // submit/consent action. Native click is more reliable than CDP here
@@ -455,19 +456,19 @@
       const current = settingsDialog();
       if (!current) return null;
       const value = text(current);
-      return value.includes('codexpro') && value.includes('connection') ? current : null;
+      return value.includes('codexpro') && hasConnectionMarker(value) ? current : null;
     }, 18000, 150);
     if (!root) throw new Error('Không mở được trang chi tiết CodexPro trong Settings.');
 
-    const connection = await waitFor(() => [...root.querySelectorAll('button')]
+    const connection = await waitFor(() => [...root.querySelectorAll('button,[role="button"]')]
       .filter(visible)
       .find(button => {
         const value = text(button);
-        return value.includes('connection') && (value.includes('connect') || value.includes('connected') || value.includes('ket noi'));
+        return hasConnectionMarker(value) && (value.includes('connect') || value.includes('connected') || value.includes('ket noi'));
       }) || null, 5000, 100);
     if (!connection) {
       const pageText = text(root);
-      if (pageText.includes('connection') && pageText.includes('codexpro')) {
+      if (hasConnectionMarker(pageText) && pageText.includes('codexpro')) {
         return {ok: true, connected: true, alreadyConnected: true};
       }
       throw new Error('Không tìm thấy mục Connection của CodexPro.');
@@ -479,20 +480,34 @@
     }
     await trustedClick(connection);
 
+    const consentMarker = value => value.includes('add codexpro to chatgpt')
+      || value.includes('them codexpro vao chatgpt')
+      || (value.includes('codexpro') && (value.includes('permissions always respected') || value.includes('cac quyen nay se luon duoc tuan thu')));
     const consent = await waitFor(() => [...document.querySelectorAll('[role="dialog"],dialog')]
       .filter(visible)
       .reverse()
       .find(dialog => {
         const value = text(dialog);
-        return value.includes('add codexpro to chatgpt') || (value.includes('codexpro') && value.includes('permissions always respected'));
+        return consentMarker(value);
       }) || null, 15000, 120);
     if (!consent) {
       const current = settingsDialog();
-      const currentConnection = current ? [...current.querySelectorAll('button')].filter(visible).find(button => text(button).includes('connection')) : null;
+      const currentConnection = current ? [...current.querySelectorAll('button,[role="button"]')].filter(visible).find(button => hasConnectionMarker(text(button))) : null;
       if (currentConnection && (text(currentConnection).includes('connected') || text(currentConnection).includes('da ket noi'))) {
         return {ok: true, connected: true, alreadyConnected: true};
       }
-      throw new Error('ChatGPT không mở hộp xác nhận Connect cho CodexPro.');
+      const visibleDialogs = [...document.querySelectorAll('[role="dialog"],dialog')].filter(visible);
+      const evidence = JSON.stringify({
+        code: 'CONNECT_CONSENT_NOT_FOUND',
+        url: location.href,
+        language: String(document.documentElement.lang || ''),
+        visible_dialog_count: visibleDialogs.length,
+        dialog_markers: visibleDialogs.slice(-4).map(dialog => {
+          const value = text(dialog);
+          return {codexpro: value.includes('codexpro'), connection: hasConnectionMarker(value), consent: consentMarker(value), text_prefix: value.slice(0, 240)};
+        })
+      }).slice(0, 3000);
+      throw new Error(`ChatGPT không mở hộp xác nhận Connect cho CodexPro. [CODEXPRO_SETUP_EVIDENCE ${evidence}]`);
     }
     // The consent copy can render one frame before its primary action. Wait
     // for the actual button instead of treating visible dialog text as proof
