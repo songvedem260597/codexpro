@@ -23,7 +23,7 @@ assert.match(source, /<span className="already-connected">✓ Đã kết nối C
 assert.match(source, /onClick=\{\(\) => onRun\(worker\)\}>Chat<\/button>/, "API worker cards must use the same Chat action label as Chrome profiles");
 assert.match(source, /<Dot ok=\{worker\.connected\} \/>\{worker\.model\}/, "API worker model metadata must show its online status dot");
 assert.match(source, /<div className=\{`profile-action-buttons \$\{worker\.activity === "working" \? "" : "is-single"\}`\}>[\s\S]*?onClick=\{\(\) => onRun\(worker\)\}>Chat<\/button>[\s\S]*?worker\.activity === "working"[\s\S]*?onClick=\{\(\) => onStop\(worker\.worker_id\)\}>Dừng<\/button>/, "working API cards must keep Chat available next to Stop");
-assert.match(styles, /\.profile-list \.profile-action-buttons\.is-single \{ grid-template-columns: 1fr; \}/, "idle API cards must override card layout and keep Chat full width");
+assert.match(styles, /\.profile-list\.is-card-layout \.profile-action-buttons\.is-single \{ grid-template-columns: 1fr; \}/, "idle API cards must outrank the card-layout grid and keep Chat full width");
 assert.match(source, /profile-task-summary[\s\S]*?Task gần nhất/, "completed API cards must show the latest task title");
 assert.doesNotMatch(source, /Kết quả job gần nhất/, "API cards must keep the latest response inside Chat instead of expanding it on the overview");
 assert.doesNotMatch(source, />Chạy job<\/button>/, "the legacy API worker action label must be removed");
