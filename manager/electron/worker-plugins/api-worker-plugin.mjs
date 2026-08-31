@@ -86,14 +86,16 @@ export function createApiWorkerPlugin(options = {}) {
         throw new Error("API worker runtime dependencies are unavailable.");
       }
       const controller = new AbortController();
+      const scope = payload.scope === "all_allowed" ? "all_allowed" : "workspace";
       const root = clean(payload.root, 2048);
-      const sameWorkspace = Boolean(existing?.root && root && existing.root.toLowerCase() === root.toLowerCase());
+      const sameWorkspace = Boolean(existing?.scope === scope && (scope === "all_allowed" || (existing?.root && root && existing.root.toLowerCase() === root.toLowerCase())));
       const history = sameWorkspace && Array.isArray(existing?.history) ? existing.history.slice(-12) : [];
       const attachmentNames = Array.isArray(payload.attachment_names) ? payload.attachment_names.map((name) => clean(name, 260)).filter(Boolean) : [];
       const request = clean(payload.text || payload.request, 12_000) || `Đã gửi ${attachmentNames.length} file: ${attachmentNames.join(", ")}`;
       const state = {
         jobId: clean(payload.task_id || payload.taskId, 40),
         title: "",
+        scope,
         root,
         request,
         history,
@@ -127,15 +129,19 @@ export function createApiWorkerPlugin(options = {}) {
           id: state.jobId,
           workerId,
           kind: payload.task_kind || payload.taskKind,
-          scope: payload.scope,
-          root: state.root
+          scope,
+          root: state.root,
+          workspaceCandidates: payload.workspaceCandidates || payload.workspace_candidates
         },
         request: payload.text || payload.request,
         messages: [...history, ...(Array.isArray(payload.messages) ? payload.messages : [])],
         limits: payload.limits,
         signal: controller.signal,
         onDelta: payload.onDelta,
-        onTaskTitle: (title) => { state.title = clean(title, 56); },
+        onTaskTitle: (title, bootstrap) => {
+          state.title = clean(title, 56);
+          state.root = clean(bootstrap?.root || state.root, 2048);
+        },
         onEvent: (event) => state.events.push(event)
       }).then((result) => {
         state.title = clean(result?.task_title || state.title, 56);

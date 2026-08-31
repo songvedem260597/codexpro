@@ -277,6 +277,7 @@ section { margin-bottom: 38px; }
 .reload-all { min-width: 142px; min-height: 42px; box-sizing: border-box; font-size: var(--font-xs); font-weight: var(--weight-semibold); }
 .profile-actions { width: 244px; flex: 0 0 244px; display: flex; align-items: stretch; flex-direction: column; gap: 8px; }
 .profile-action-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; width: 100%; }
+.profile-list .profile-action-buttons.is-single { grid-template-columns: 1fr; }
 .profile-action-buttons .button { width: 100%; white-space: nowrap; }
 .profile-chat { padding-left: 12px; padding-right: 12px; }
 .open-profile { border-color: #354055; background: #151b25; }
