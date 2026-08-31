@@ -45,8 +45,54 @@ function bootstrapMessage(result) {
   ].join("\n");
 }
 
+function transientProviderDelay(error, attempt) {
+  const message = String(error?.message || error || "");
+  const status = Number(error?.status || message.match(/Provider HTTP\s+(429|502|503|504)\b/i)?.[1] || 0);
+  if (![429, 502, 503, 504].includes(status)) return 0;
+  const reset = message.match(/(?:reset|retry)\s+after\s+(\d+(?:\.\d+)?)\s*(ms|s|sec|seconds?)?/i);
+  const resetMs = reset ? Number(reset[1]) * (String(reset[2] || "s").toLowerCase() === "ms" ? 1 : 1000) : 0;
+  return Math.max(250, Math.min(Number(error?.retryAfterMs) || resetMs || 500 * (2 ** (attempt - 1)), 10_000));
+}
+
+async function completeProviderWithRetry(provider, input, onRetry) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await provider.complete(input);
+    } catch (error) {
+      const delayMs = transientProviderDelay(error, attempt);
+      if (!delayMs || attempt >= 3 || input.signal?.aborted) throw error;
+      onRetry?.({ attempt, delayMs, error: clean(error?.message || error, 300) });
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (input.signal?.aborted) throw input.signal.reason || new Error("Worker job cancelled.");
+    }
+  }
+  throw new Error("Provider retry loop ended unexpectedly.");
+}
+
 function titleWordCount(value) {
   return clean(value, 56).split(/\s+/).filter(Boolean).length;
+}
+
+function matchingWorkspaceRoot(value, workspaceCandidates) {
+  const requested = clean(value, 2048);
+  if (!requested) return "";
+  return workspaceCandidates.find((candidate) => candidate === requested)
+    || workspaceCandidates.find((candidate) => candidate.toLowerCase() === requested.toLowerCase())
+    || "";
+}
+
+function parseTitleSelection(value) {
+  const text = clean(value, 12_000);
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || text;
+  const start = fenced.indexOf("{");
+  const end = fenced.lastIndexOf("}");
+  if (start < 0 || end <= start) return {};
+  try {
+    const parsed = JSON.parse(fenced.slice(start, end + 1));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function titleBootstrapMessage({ jobId, kind, scope, root, workspaceCandidates }) {
@@ -113,13 +159,13 @@ export async function runMcpAgentJob(input = {}) {
     const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost: 0 };
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       emit("title_bootstrap_turn", { job_id: jobId, attempt });
-      const completion = await input.provider.complete({
+      const completion = await completeProviderWithRetry(input.provider, {
         messages,
         tools: bootstrapTools,
         toolChoice: "auto",
         signal: input.signal,
         onDelta: input.onDelta
-      });
+      }, (retry) => emit("provider_retry", { phase: "title_bootstrap", ...retry }));
       providerState = completion?.providerState || providerState;
       for (const key of ["prompt_tokens", "completion_tokens", "total_tokens", "cost"]) {
         usage[key] += Number(completion?.usage?.[key] || 0);
@@ -132,7 +178,7 @@ export async function runMcpAgentJob(input = {}) {
       const requestedTitle = clean(call?.arguments?.task_title, 56);
       const requestedRoot = clean(call?.arguments?.root, 2048);
       const selectedCandidate = scope === "all_allowed" && kind === "code" && !root
-        ? workspaceCandidates.find((candidate) => candidate === requestedRoot) || workspaceCandidates.find((candidate) => candidate.toLowerCase() === requestedRoot.toLowerCase()) || ""
+        ? matchingWorkspaceRoot(requestedRoot, workspaceCandidates)
         : root;
       const assistantMessage = {
         role: "assistant",
@@ -152,7 +198,7 @@ export async function runMcpAgentJob(input = {}) {
           messages.push({ role: "system", content: `Retry: call ${BEGIN_TASK_TOOL} exactly once with a task_title containing 2-6 words${kind === "code" && !root ? " and an exact root from the allowed workspace list" : ""}.` });
           continue;
         }
-        throw new Error(kind === "code" && !selectedCandidate ? "API worker AI did not select an allowed workspace root through CodexPro MCP." : "API worker AI did not return a valid 2-6 word task title through CodexPro MCP.");
+        break;
       }
       root = selectedCandidate;
       const beginArgs = { task_id: jobId, task_title: requestedTitle, task_kind: kind, scope, ...(root ? { root } : {}) };
@@ -162,6 +208,39 @@ export async function runMcpAgentJob(input = {}) {
       title = clean(bootstrap?.task_title || requestedTitle, 56);
       if (titleWordCount(title) < 2 || titleWordCount(title) > 6) throw new Error("CodexPro MCP returned an invalid AI task title.");
       break;
+    }
+    if (!bootstrap) {
+      emit("title_bootstrap_fallback", { job_id: jobId });
+      const rootInstruction = kind === "code" && scope === "all_allowed" && !root
+        ? ` Include \"root\" using exactly one of these values: ${JSON.stringify(workspaceCandidates)}.`
+        : root ? ` Include \"root\": ${JSON.stringify(root)}.` : " Do not include root.";
+      const fallbackCompletion = await completeProviderWithRetry(input.provider, {
+        messages: [...messages, { role: "system", content: `Tool calling was not emitted. Return only one JSON object with \"task_title\" containing 2-6 words.${rootInstruction} Do not add Markdown or explanation.` }],
+        tools: [],
+        signal: input.signal
+      }, (retry) => emit("provider_retry", { phase: "title_fallback", ...retry }));
+      providerState = fallbackCompletion?.providerState || providerState;
+      for (const key of ["prompt_tokens", "completion_tokens", "total_tokens", "cost"]) {
+        usage[key] += Number(fallbackCompletion?.usage?.[key] || 0);
+      }
+      const selection = parseTitleSelection(fallbackCompletion?.text);
+      const requestedTitle = clean(selection.task_title, 56);
+      const selectedCandidate = scope === "all_allowed" && kind === "code" && !root
+        ? matchingWorkspaceRoot(selection.root, workspaceCandidates)
+        : root;
+      if (titleWordCount(requestedTitle) < 2 || titleWordCount(requestedTitle) > 6) {
+        throw new Error("API worker AI did not return a valid 2-6 word task title in its MCP bootstrap fallback.");
+      }
+      if (kind === "code" && !selectedCandidate) {
+        throw new Error("API worker AI did not select an allowed workspace root in its MCP bootstrap fallback.");
+      }
+      root = selectedCandidate;
+      const beginArgs = { task_id: jobId, task_title: requestedTitle, task_kind: kind, scope, ...(root ? { root } : {}) };
+      emit("bootstrapping", { job_id: jobId, kind, title: requestedTitle, source: "json_fallback" });
+      bootstrap = await input.jobMcp.callTool(BEGIN_TASK_TOOL, beginArgs, { signal: input.signal });
+      messages.push({ role: "assistant", content: JSON.stringify({ task_title: requestedTitle, ...(root ? { root } : {}) }) });
+      title = clean(bootstrap?.task_title || requestedTitle, 56);
+      if (titleWordCount(title) < 2 || titleWordCount(title) > 6) throw new Error("CodexPro MCP returned an invalid AI task title.");
     }
     if (!bootstrap?.verified) throw new Error("CodexPro MCP did not verify the worker job bootstrap.");
     if (kind === "code" && (!bootstrap.gate_active || !bootstrap.global_rules_loaded || !bootstrap.agents_loaded || !bootstrap.codexgraph_active)) {
@@ -182,13 +261,13 @@ export async function runMcpAgentJob(input = {}) {
     for (let turn = 1; turn <= limits.maxTurns; turn += 1) {
       if (input.signal?.aborted) throw input.signal.reason || new Error("Worker job cancelled.");
       emit("provider_turn", { turn, tool_call_count: toolCallCount });
-      const completion = await input.provider.complete({
+      const completion = await completeProviderWithRetry(input.provider, {
         messages,
         tools: providerTools,
         toolChoice: kind === "code" && turn === 1 ? "auto" : "auto",
         signal: input.signal,
         onDelta: input.onDelta
-      });
+      }, (retry) => emit("provider_retry", { phase: "agent_turn", turn, ...retry }));
       providerState = completion?.providerState || providerState;
       for (const key of ["prompt_tokens", "completion_tokens", "total_tokens", "cost"]) {
         usage[key] += Number(completion?.usage?.[key] || 0);
