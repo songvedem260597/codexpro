@@ -20,7 +20,7 @@ try {
   await writeJson(path.join(sourceRoot, "manifest.json"), {
     manifest_version: 3,
     name: "CodexPro Profile Bridge",
-    version: "0.5.84",
+    version: "0.5.88",
     key
   });
   await fs.promises.writeFile(path.join(sourceRoot, "service-worker.js"), "new-worker\n", "utf8");
@@ -52,13 +52,13 @@ try {
 
   const result = await syncUnpackedCodexProExtensions({
     sourceRoot,
-    targetVersion: "0.5.84",
+    targetVersion: "0.5.88",
     codexProHome,
     userDataRoot
   });
 
   assert.equal(result.synced.length, 1);
-  assert.equal(JSON.parse(await fs.promises.readFile(path.join(targetRoot, "manifest.json"), "utf8")).version, "0.5.84");
+  assert.equal(JSON.parse(await fs.promises.readFile(path.join(targetRoot, "manifest.json"), "utf8")).version, "0.5.88");
   assert.equal(await fs.promises.readFile(path.join(targetRoot, "service-worker.js"), "utf8"), "new-worker\n");
 
   const backupPath = result.synced[0].backupPath;
@@ -70,7 +70,7 @@ try {
 
   const second = await syncUnpackedCodexProExtensions({
     sourceRoot,
-    targetVersion: "0.5.84",
+    targetVersion: "0.5.88",
     codexProHome,
     userDataRoot
   });
