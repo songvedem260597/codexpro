@@ -36,6 +36,13 @@ Reference files are under the active local DeepSeek runtime at:
 
 Relevant files include `ChatView.tsx`, `AssistantNodeView.tsx`, `AssistantMarkdown.tsx`, `use-throttled-visual-update.ts`, plus `ui-primitives/src/markdown/incremental.ts`.
 
+### Reference-access prerequisite
+
+- When the Manager-selected workspace is the active CodexPro runtime root, dispatch the task with `scope=all_allowed` while keeping CodexPro as the initial/main workspace.
+- Include every runtime-configured allowed root in the task handoff so the implementation agent can temporarily `open_workspace` into reference source outside the CodexPro repo, including the DeepSeek Harness path above.
+- External allowed roots are read-only reference locations for this plan. Source edits, builds, and tests stay in CodexPro unless the user explicitly requests a change in another workspace.
+- Explicit **Tất cả vùng được cấp quyền** mode remains generic: it must not silently bind to CodexPro merely because CodexPro is the Manager default root.
+
 ## 3. Current CodexPro state and root causes
 
 CodexPro already has useful foundations:

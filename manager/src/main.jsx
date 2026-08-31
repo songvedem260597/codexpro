@@ -3027,7 +3027,8 @@ function App() {
     try {
       const handoffText = buildConversationRolloverPrompt(result);
       const rolloverProjectRoot = result?.projectRoot || projectRootForProfile(profile);
-      const rolloverAllAllowed = result?.repo_task_scope === "all_allowed" || result?.repoTaskScope === "all_allowed" || rolloverProjectRoot === ALL_ALLOWED_WORKSPACES;
+      const rolloverWorkspaceExpanded = result?.repoTaskScope === "all_allowed" && result?.repoTaskRequest?.scope === "workspace" && rolloverProjectRoot !== ALL_ALLOWED_WORKSPACES;
+      const rolloverAllAllowed = !rolloverWorkspaceExpanded && (result?.repo_task_scope === "all_allowed" || result?.repoTaskScope === "all_allowed" || rolloverProjectRoot === ALL_ALLOWED_WORKSPACES);
       const created = await api.sendProfileRequest({
         profileId,
         conversationId: "",
