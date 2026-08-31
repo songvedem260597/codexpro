@@ -434,12 +434,14 @@ assert.doesNotMatch(extensionBatch, /await execute\(/, "extension batch must not
 assert.doesNotMatch(worker, /if\(action==='press'\)\{\s*const target=\{tabId:tab\.id\};await chrome\.debugger\.attach/, "press must not attach/detach a fresh debugger session per action");
 
 const openProfileChat = managerMain.slice(managerMain.indexOf("async function openProfileChat"), managerMain.indexOf("async function reloadChromeProfiles"));
+assert.match(openProfileChat, /if \(!resolvedTargetId\)[\s\S]*?action: "open_tab"[\s\S]*?url: conversationId \? `https:\/\/chatgpt\.com\/c\/\$\{conversationId\}` : "https:\/\/chatgpt\.com\/"/, "Manager must create a ChatGPT tab in the selected online profile when none is open");
 assert.match(openProfileChat, /action: "activate_tab"[\s\S]*?}, 32000\)/, "Manager must wait longer than the 25-second extension bridge command timeout");
 assert.match(openProfileChat, /catch \(error\) \{\s*activationError = error;\s*\}[\s\S]*?focusChromeWindow\(title\)/, "a delayed activate acknowledgement must still verify whether Chrome actually opened");
 assert.match(openProfileChat, /activation_acknowledgement_delayed: Boolean\(activationError\)/, "open-profile diagnostics must expose delayed activation acknowledgements");
 assert.match(openProfileChat, /let navigation = null[\s\S]*?navigation = await localMcpTool[\s\S]*?target_conversation_id: targetConversationId[\s\S]*?navigation,\s*activation:/, "open-profile results must preserve navigation and target-selection evidence");
 assert.match(managerMain, /codexpro:open-profile-chat[\s\S]*?logSuccess: true[\s\S]*?selection_reason:[\s\S]*?activation_target_id:[\s\S]*?window_focus:/, "every successful open-profile request must persist the requested target and actual activation evidence");
 assert.match(managerUi, /action: "profile-tab-open-selection"[\s\S]*?tab_candidates:[\s\S]*?action: "profile-tab-open-result"[\s\S]*?activation_target_id:[\s\S]*?action: "profile-tab-open-error"/, "renderer diagnostics must capture tab candidates, selection reason, activation result, and failures");
+assert.match(managerUi, /className="button primary profile-chat"[\s\S]*?disabled=\{!profile\.connected \|\| !connectorInstalled\}[\s\S]*?CodexPro sẽ tự mở tab ChatGPT khi gửi/, "an online prepared profile must allow opening the composer before a ChatGPT tab exists");
 assert.match(managerMain, /async function recoverProfileChatTab[\s\S]*?action: "recover_chat_tab"[\s\S]*?60000/, "Manager must expose the bounded replace-tab recovery command");
 assert.match(managerMain, /async function stopProfileTask[\s\S]*?action: "stop_chat_generation"[\s\S]*?15000/, "Manager must route task stop through the bounded MCP command");
 assert.match(managerMain, /codexpro:stop-profile-task[\s\S]*?stopProfileTask\(payload\)/, "Manager IPC must expose task stop to the renderer");
@@ -487,6 +489,7 @@ assert.match(managerMain, /latestBrowserProfileStream = \{ \.\.\.latestBrowserPr
 assert.match(managerMain, /selectedConversationTab\?\.busy \|\| selectedNetworkState === "generating"/, "Manager backend must reject active network generations");
 assert.doesNotMatch(managerMain, /selectedConversationTab\?\.busy \|\| selectedConversationTab\?\.settling/, "Manager backend must leave cached DOM settling decisions to the worker's fresh probe");
 const sendProfileRequestSource = managerMain.slice(managerMain.indexOf("async function sendProfileRequestUnlocked"), managerMain.indexOf("async function sendProfileRequest(payload)"));
+assert.match(sendProfileRequestSource, /profileHadChatGptTab[\s\S]*?action: "send_chat_request"[\s\S]*?chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean\(result\?\.target_id\)/, "send diagnostics must prove when the worker auto-opened a missing ChatGPT tab");
 assert.doesNotMatch(sendProfileRequestSource, /if \(!profile\?\.connected\) throw/, "Manager must not reject a retained profile before the bridge can wait for reconnection");
 assert.match(sendProfileRequestSource, /localMcpToolInSession\(session, "browser_control", \{ action: "list_profiles" \}\)[\s\S]*?setTimeout\(resolve, 120\)[\s\S]*?refreshedProfiles = await localMcpToolInSession\(session, "browser_control", \{ action: "list_profiles" \}\)/, "Manager must refresh a possibly stale profile on the same MCP session without a full runtime scan");
 assert.doesNotMatch(sendProfileRequestSource, /await listProjects\(\)/, "chat send preflight must not rescan every known project");

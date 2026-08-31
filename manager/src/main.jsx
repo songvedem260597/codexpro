@@ -3788,7 +3788,8 @@ function App() {
                       <button
                         className="button primary profile-chat"
                         onClick={() => openChat(profile)}
-                        disabled={!profile.connected || !connectorInstalled || !profileRequestChats(profile).length}
+                        disabled={!profile.connected || !connectorInstalled}
+                        title={profileRequestChats(profile).length ? "Mở khung chat của profile" : "Nhập task; CodexPro sẽ tự mở tab ChatGPT khi gửi"}
                       >
                         Chat
                       </button>

@@ -14,7 +14,8 @@ export function profileChromeTarget(profile) {
 
 export function profileChromeActionState({ profile, busy, rendererUnresponsive }) {
   const target = profileChromeTarget(profile);
-  const open = Boolean(profile?.connected && target);
+  const connected = Boolean(profile?.connected);
+  const open = Boolean(connected && target);
   if (rendererUnresponsive) {
     return {
       target,
@@ -25,8 +26,8 @@ export function profileChromeActionState({ profile, busy, rendererUnresponsive }
   }
   return {
     target,
-    disabled: Boolean(busy) || !open,
-    label: open ? "Đi tới Chrome" : "Chưa mở",
-    title: open ? "Đưa profile Chrome đang mở lên trước" : "Profile chưa có tab ChatGPT đang mở"
+    disabled: Boolean(busy) || !connected,
+    label: open ? "Đi tới Chrome" : "Mở ChatGPT",
+    title: open ? "Đưa profile Chrome đang mở lên trước" : "Mở một tab ChatGPT mới trong đúng Chrome profile"
   };
 }

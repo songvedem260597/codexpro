@@ -18,6 +18,11 @@ assert.deepEqual(profileChromeActionState({ profile: newChatProfile, busy: "", r
   label: "Đi tới Chrome",
   title: "Đưa profile Chrome đang mở lên trước"
 }, "an already-open profile must not be presented as unopened");
-assert.equal(profileChromeActionState({ profile: { connected: true, chatgpt_tabs: [], conversation_tabs: [] }, busy: "", rendererUnresponsive: false }).label, "Chưa mở");
+assert.deepEqual(profileChromeActionState({ profile: { connected: true, chatgpt_tabs: [], conversation_tabs: [] }, busy: "", rendererUnresponsive: false }), {
+  target: null,
+  disabled: false,
+  label: "Mở ChatGPT",
+  title: "Mở một tab ChatGPT mới trong đúng Chrome profile"
+}, "an online profile without a ChatGPT tab must remain actionable");
 
 console.log("✓ Profile card state smoke test passed");
