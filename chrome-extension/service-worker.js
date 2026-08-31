@@ -437,6 +437,7 @@ function scheduleRealtimeProfilePush(delayMs=40) {
     void (async()=>{
       try{
         const [profile,tabs]=await Promise.all([profileInfo(),tabList()]);
+        if(!profile.enabled)return;
         await fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,tabs})});
       }catch{}
     })();
@@ -513,12 +514,12 @@ chrome.webRequest.onBeforeRedirect.addListener(details=>{const attributed=attrib
 chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatTabHealthByTab.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();});
 
 async function profileInfo() {
-  const stored = await chrome.storage.local.get(['profileId','active','connectorInstall','connectorServerFingerprint']);
+  const stored = await chrome.storage.local.get(['profileId','active','connectorInstall','connectorServerFingerprint','workerEnabled','workerEnabledUpdatedAt']);
   const profileId = stored.profileId || crypto.randomUUID();
   if (!stored.profileId) await chrome.storage.local.set({profileId});
   let email = '';
   try { email = (await chrome.identity.getProfileUserInfo({accountStatus:'ANY'})).email || ''; } catch {}
-  return {id:profileId,email,label:email || `Chrome ${profileId.slice(0,8)}`,version:chrome.runtime.getManifest().version,connector_install:stored.connectorInstall||null,connector_server_fingerprint:String(stored.connectorServerFingerprint||''),active:Boolean(stored.active)};
+  return {id:profileId,email,label:email || `Chrome ${profileId.slice(0,8)}`,version:chrome.runtime.getManifest().version,connector_install:stored.connectorInstall||null,connector_server_fingerprint:String(stored.connectorServerFingerprint||''),active:Boolean(stored.active),enabled:stored.workerEnabled!==false,worker_enabled_updated_at:Math.max(0,Number(stored.workerEnabledUpdatedAt)||0)};
 }
 
 async function confirmConnectorFromLiveToolActivity(tabs) {
@@ -2722,18 +2723,19 @@ async function pollLoop() {
   try{
     while(true){
       try{
+        const profile=await profileInfo();
+        if(!profile.enabled){await new Promise(resolve=>setTimeout(resolve,2000));continue;}
         let [tabs,recentConversations]=await Promise.all([tabList(),recentConversationList(3)]);
         const tabCleanup=await cleanupChatGptTabs(tabs,recentConversations);
         if(tabCleanup.closed_count)tabs=await tabList();
         await confirmConnectorFromLiveToolActivity(tabs);
-        const profile=await profileInfo();
         const response=await fetch(`${BRIDGE}/poll`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,active:profile.active,tabs,recent_conversations:recentConversations})});
         if(!response.ok)throw new Error(`Bridge HTTP ${response.status}`);
         const message=await response.json();
         const isActive=message.active_profile_id===profile.id;
         if(profile.active!==isActive)await chrome.storage.local.set({active:isActive});
         if(message.command){
-          const heartbeat=setInterval(()=>{void fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile})}).catch(()=>{});},10000);
+          const heartbeat=setInterval(()=>{void chrome.storage.local.get('workerEnabled').then(({workerEnabled})=>workerEnabled===false?null:fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile})})).catch(()=>{});},10000);
           try{await postResult(profile,message.command,await execute(message.command));}
           catch(error){await postResult(profile,message.command,null,error);}
           finally{clearInterval(heartbeat);}

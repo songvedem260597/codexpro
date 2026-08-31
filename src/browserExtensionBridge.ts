@@ -95,6 +95,8 @@ export interface BrowserExtensionBridgeOptions {
 
 interface ExtensionProfile {
   id: string;
+  enabled: boolean;
+  enabledUpdatedAt: number;
   email: string;
   label: string;
   extensionVersion: string;
@@ -399,6 +401,8 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   const existing = state.profiles.get(id);
   const profile: ExtensionProfile = existing ?? {
     id,
+    enabled: true,
+    enabledUpdatedAt: 0,
     email: "",
     label: "",
     extensionVersion: "",
@@ -412,6 +416,12 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     recentConversations: [],
     queued: []
   };
+  const incomingEnabledUpdatedAt = Math.max(0, Number(source.worker_enabled_updated_at) || 0);
+  if (!profile.enabledUpdatedAt || incomingEnabledUpdatedAt >= profile.enabledUpdatedAt) {
+    profile.enabled = source.enabled !== false;
+    profile.enabledUpdatedAt = incomingEnabledUpdatedAt;
+  }
+  if (!profile.enabled && state.activeProfileId === id) state.activeProfileId = undefined;
   profile.email = String(source.email ?? profile.email ?? "").trim().slice(0, 320);
   profile.label = String(source.label ?? profile.label ?? profile.email ?? `Chrome ${id.slice(0, 8)}`).trim().slice(0, 320);
   profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
@@ -524,6 +534,7 @@ function deliver(state: BridgeState, profile: ExtensionProfile, command: BridgeC
 }
 
 function nextLiveCommand(state: BridgeState, profile: ExtensionProfile): BridgeCommand | null {
+  if (!profile.enabled) return null;
   while(profile.queued.length){
     const command=profile.queued.shift()!;
     if(command.expires_at_ms<=Date.now()||!state.pending.has(command.id))continue;
@@ -662,7 +673,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
   const now = Date.now();
   pruneExpiredProfiles(state, now);
   const visibleProfiles = [...state.profiles.values()]
-    .filter((profile) => now - profile.lastSeen <= PROFILE_TTL_MS);
+    .filter((profile) => profile.enabled && now - profile.lastSeen <= PROFILE_TTL_MS);
   if (state.activeProfileId && !visibleProfiles.some((profile) => profile.id === state.activeProfileId)) {
     state.activeProfileId = undefined;
   }

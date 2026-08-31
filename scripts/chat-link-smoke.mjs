@@ -23,8 +23,8 @@ assert.match(responseReader, /text_length:text\.length,links,truncated:/, "the l
 assert.match(markdownRenderer, /safeMarkdownHref[\s\S]*?https\?:\\\/\\\/[\s\S]*?mailto:/, "Manager Markdown rendering must whitelist safe clickable link schemes");
 assert.match(markdownRenderer, /onClick=\{\(event\) => openExternalLink\(event, safeHref\)\}/, "Manager Markdown links must route clicks through the Electron openExternal bridge instead of a denied popup");
 assert.match(markdownRenderer, /globalThis\.window\?\.codexpro\?\.openExternal[\s\S]*?event\.preventDefault\(\)/, "clickable response links must prevent the denied in-app navigation only when the external-link bridge exists");
-assert.equal(manifest.version, "0.5.89", "worker connector auth fix must remain packaged with the latest response-reader fixes");
-assert.match(managerMain, /const WORKER_EXTENSION_VERSION = "0\.5\.89";/, "Manager updater must require the worker version with connector auth and response timing fixes");
+assert.equal(manifest.version, "0.5.90", "worker popup and enable toggle must remain packaged with the latest response-reader fixes");
+assert.match(managerMain, /const WORKER_EXTENSION_VERSION = "0\.5\.90";/, "Manager updater must require the worker version with the popup and connection toggle fixes");
 assert.match(managerMain, /\["http:", "https:", "mailto:"\][\s\S]*?shell\.openExternal/, "Manager external-link IPC must allow the same safe schemes rendered by response Markdown");
 
 console.log("✓ Chat response link extraction/render smoke test passed");
