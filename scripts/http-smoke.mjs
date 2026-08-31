@@ -451,6 +451,103 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
   }
 }
 
+async function expectPreparedTaskSurvivesRuntimeRestart() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-prepared-restart-'));
+  const codexProHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-prepared-restart-home-'));
+  const taskRoot = path.join(root, 'task-workspace');
+  await fs.mkdir(taskRoot, { recursive: true });
+  await fs.writeFile(path.join(taskRoot, 'gate.txt'), 'restart gate survived\n', 'utf8');
+  const port = await getFreePort();
+  const token = createHash('sha256').update('prepared task restart smoke').digest('hex');
+  const taskId = 'cpt_121212121212121212121212';
+  const profileId = 'restart-gate';
+  const env = {
+    ...process.env,
+    CODEXPRO_ROOT: root,
+    CODEXPRO_ALLOWED_ROOTS: root,
+    CODEXPRO_HOST: '127.0.0.1',
+    CODEXPRO_PORT: String(port),
+    CODEXPRO_HTTP_TOKEN: token,
+    CODEXPRO_BASH_MODE: 'safe',
+    CODEXPRO_WRITE_MODE: 'workspace',
+    CODEXPRO_HOME: codexProHome
+  };
+  const startServer = () => spawn(process.execPath, ['dist/http.js'], {
+    cwd: path.resolve('.'),
+    env,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  const createClient = async (name, boundProfileId = '') => {
+    const client = new Client({ name, version: '0.0.0' });
+    const url = new URL(`http://127.0.0.1:${port}/mcp`);
+    if (boundProfileId) url.searchParams.set('codexpro_profile', boundProfileId);
+    const transport = new StreamableHTTPClientTransport(url, {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } }
+    });
+    await client.connect(transport);
+    return client;
+  };
+
+  let child = startServer();
+  let client;
+  try {
+    await waitForListening(child);
+    client = await createClient('prepared-task-manager');
+    const prepared = await callTool(client, 'prepare_repo_task', {
+      profile_id: profileId,
+      task_id: taskId,
+      scope: 'all_allowed'
+    });
+    if (!prepared.structuredContent.prepared) throw new Error('manager could not prepare restart-survival task');
+    await client.close();
+    client = undefined;
+
+    const persistedBeforeRestart = JSON.parse(await fs.readFile(path.join(codexProHome, 'browser-profile-tasks.json'), 'utf8'));
+    const pendingBeforeRestart = persistedBeforeRestart?.profiles?.[profileId];
+    if (pendingBeforeRestart?.pending_task_id !== taskId || pendingBeforeRestart?.pending_scope !== 'all_allowed' || pendingBeforeRestart?.pending_root) {
+      throw new Error(`prepared task gate was not persisted before restart: ${JSON.stringify(persistedBeforeRestart)}`);
+    }
+
+    child.kill('SIGTERM');
+    await waitForExit(child);
+    child = startServer();
+    await waitForListening(child);
+
+    client = await createClient('prepared-task-worker', profileId);
+    const began = await callTool(client, 'begin_repo_task', {
+      task_id: taskId,
+      task_title: 'Resume prepared task',
+      task_kind: 'code',
+      root: taskRoot,
+      scope: 'all_allowed'
+    });
+    if (!began.structuredContent.verified || began.structuredContent.profile_id !== profileId || began.structuredContent.task_id !== taskId) {
+      throw new Error(`prepared task did not survive runtime restart: ${JSON.stringify(began.structuredContent)}`);
+    }
+    const read = await callTool(client, 'read', { path: 'gate.txt' });
+    if (!String(read.structuredContent.text || '').includes('restart gate survived')) {
+      throw new Error('rehydrated prepared task did not unlock the prepared workspace');
+    }
+    await client.close();
+    client = undefined;
+
+    const persistedAfterBegin = JSON.parse(await fs.readFile(path.join(codexProHome, 'browser-profile-tasks.json'), 'utf8'));
+    const taskAfterBegin = persistedAfterBegin?.profiles?.[profileId];
+    if (taskAfterBegin?.pending_task_id) throw new Error(`pending task gate was not cleared after begin_repo_task: ${JSON.stringify(taskAfterBegin)}`);
+    if (taskAfterBegin?.task_id !== taskId || taskAfterBegin?.task_title !== 'Resume prepared task') {
+      throw new Error(`active task state was not persisted after restart recovery: ${JSON.stringify(taskAfterBegin)}`);
+    }
+    const taskEvents = (await fs.readFile(path.join(codexProHome, 'profile-task-events.jsonl'), 'utf8')).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    if (!taskEvents.some((event) => event.event === 'repo_task_prepared_rehydrated' && event.profile_id === profileId && event.task_id === taskId)) {
+      throw new Error(`runtime restart recovery was not logged: ${JSON.stringify(taskEvents)}`);
+    }
+  } finally {
+    if (client) await client.close().catch(() => {});
+    if (child && child.exitCode == null && child.signalCode == null) child.kill('SIGTERM');
+    if (child && child.exitCode == null && child.signalCode == null) await waitForExit(child).catch(() => {});
+  }
+}
+
 function toolNames(tools) {
   return tools.map((tool) => tool.name);
 }
@@ -473,6 +570,7 @@ await expectHttpTokenRequired('non-loopback-allow-no-token', { CODEXPRO_HOST: '0
 await expectHttpTokenRequired('tunnel-mode', { CODEXPRO_TUNNEL_MODE: '1' });
 await expectWeakHttpTokenRejected();
 await expectActiveSessionPreservedUnderCapacityPressure();
+await expectPreparedTaskSurvivesRuntimeRestart();
 
 async function withClient(url, fn) {
   const client = new Client({ name: 'codexpro-http-smoke', version: '0.0.0' });
