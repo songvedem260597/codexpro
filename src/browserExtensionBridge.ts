@@ -752,7 +752,10 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       const connectorProfileBound = expectedFingerprint
         ? Boolean(profile.connectorServerFingerprint && profile.connectorServerFingerprint === expectedFingerprint)
         : profile.connectorInstalled;
-      const connectorUpdateRequired = Boolean(expectedFingerprint && profile.connectorInstalled && profile.connectorServerFingerprint !== expectedFingerprint);
+      const connectorUpdateRequired = Boolean(expectedFingerprint && (
+        (profile.connectorInstalled && profile.connectorServerFingerprint !== expectedFingerprint) ||
+        (!profile.connectorInstalled && profile.connectorServerFingerprint)
+      ));
       const connectorInstalled = profile.connectorInstalled && connectorProfileBound;
       const connectorMessage = connectorUpdateRequired
         ? observedCodexProToolActivity

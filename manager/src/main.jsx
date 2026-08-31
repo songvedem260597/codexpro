@@ -24,7 +24,7 @@ import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discard
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
-import { mergeBrowserProfilePayload, sameProjectList } from "./ui-performance.js";
+import { mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList } from "./ui-performance.js";
 import { createApiWorkerDraft, normalizeApiWorkerModels, switchApiWorkerProvider, validateApiWorkerDraft } from "./api-worker-form.js";
 import { AppDropdown } from "./app-dropdown.jsx";
 import { CodeGraphView } from "./code-graph-view.jsx";
@@ -37,6 +37,7 @@ const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((mo
 const api = window.codexpro;
 const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
+const CONNECTOR_AUTO_MIGRATION_RETRY_MS = 5 * 60 * 1000;
 const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
 const RESPONSE_MANUAL_SCROLL_RESUME_MS = 5000;
 const REALTIME_WATCHDOG_MS = 30000;
@@ -444,7 +445,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.82";
+const WORKER_EXTENSION_VERSION = "0.5.89";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -767,6 +768,18 @@ function ApiWorkerSettings({ onChanged, notify, onError }) {
     } catch (error) { onError(error); }
     finally { setBusy(""); }
   };
+  const toggleEnabled = async (config) => {
+    const nextEnabled = config?.enabled === false;
+    setBusy(`toggle:${config.id}`);
+    try {
+      await api.saveApiWorker({ ...config, enabled: nextEnabled, api_key: "" });
+      await load();
+      if (editingId === config.id) setDraft((current) => ({ ...current, enabled: nextEnabled }));
+      await onChanged?.();
+      notify(nextEnabled ? "Đã bật API worker" : "Đã tắt API worker");
+    } catch (error) { onError(error); }
+    finally { setBusy(""); }
+  };
   const remove = async (id) => {
     setBusy(`delete:${id}`);
     try {
@@ -801,7 +814,7 @@ function ApiWorkerSettings({ onChanged, notify, onError }) {
       <div className="api-worker-form-actions"><span className={`api-worker-save-status ${validation.valid ? "is-ready" : "is-blocked"}`}>{validation.message}</span><button className="button ghost" type="button" onClick={createNew} disabled={Boolean(busy)}>Tạo mới</button><button className="button primary" type="button" onClick={() => void save()} disabled={Boolean(busy) || !validation.valid}>{busy === "save" ? "Đang mã hóa…" : editingId ? "Lưu thay đổi" : "Lưu worker"}</button></div>
       <div className="api-worker-config-list">
         {!configs.length && <div className="empty">Chưa cấu hình API worker. Feature vẫn tắt cho đến khi có cấu hình và API key.</div>}
-        {configs.map((config) => <article key={config.id} className="api-worker-config"><div><strong>{config.label}</strong><code>api:{config.id}</code><small>{config.provider} · {config.model}</small></div><span className={`badge ${config.credential_available ? "connected" : "profile-missing"}`}>{config.credential_available ? "KEY ĐÃ MÃ HÓA" : "THIẾU KEY"}</span><div><button className="button ghost" type="button" onClick={() => edit(config)} disabled={Boolean(busy)}>Sửa</button><button className="button secondary" type="button" onClick={() => void test(config.id)} disabled={Boolean(busy) || !config.credential_available}>{busy === `test:${config.id}` ? "Đang test…" : "Test"}</button><button className="button danger-quiet" type="button" onClick={() => void remove(config.id)} disabled={Boolean(busy)}>{busy === `delete:${config.id}` ? "Đang xóa…" : "Xóa"}</button></div></article>)}
+        {configs.map((config) => <article key={config.id} className={`api-worker-config ${config.enabled === false ? "is-disabled" : ""}`}><div><strong>{config.label}</strong><code>api:{config.id}</code><small>{config.provider} · {config.model}{config.enabled === false ? " · ĐÃ TẮT" : ""}</small></div><span className={`badge api-worker-key-status ${config.credential_available ? "connected" : "profile-missing"}`}>{config.credential_available ? "KEY ĐÃ MÃ HÓA" : "THIẾU KEY"}</span><div><button className={`button ${config.enabled === false ? "primary" : "ghost"}`} type="button" onClick={() => void toggleEnabled(config)} disabled={Boolean(busy)}>{busy === `toggle:${config.id}` ? "Đang lưu…" : config.enabled === false ? "Bật" : "Tắt"}</button><button className="button ghost" type="button" onClick={() => edit(config)} disabled={Boolean(busy)}>Sửa</button><button className="button secondary" type="button" onClick={() => void test(config.id)} disabled={Boolean(busy) || !config.credential_available}>{busy === `test:${config.id}` ? "Đang test…" : "Test"}</button><button className="button danger-quiet" type="button" onClick={() => void remove(config.id)} disabled={Boolean(busy)}>{busy === `delete:${config.id}` ? "Đang xóa…" : "Xóa"}</button></div></article>)}
       </div>
     </section>
   );
@@ -982,6 +995,7 @@ function App() {
   const [apiJobWorker, setApiJobWorker] = useState(null);
   const [inspection, setInspection] = useState(null);
   const [checkingProfiles, setCheckingProfiles] = useState([]);
+  const [autoMigratingProfileId, setAutoMigratingProfileId] = useState("");
   const requestDraftsRef = useRef({});
   const [requestDraftResetVersions, setRequestDraftResetVersions] = useState({});
   const [requestTargets, setRequestTargets] = useState({});
@@ -1002,6 +1016,9 @@ function App() {
   const projectRefreshInFlight = useRef(false);
   const statusRefreshInFlight = useRef(false);
   const profileCheckTimes = useRef(new Map());
+  const profileChecksInFlight = useRef(new Set());
+  const connectorAutoMigrationAttempts = useRef(new Map());
+  const connectorAutoMigrationInFlight = useRef("");
   const responseFetches = useRef(new Set());
   const responseCacheLoads = useRef(new Set());
   const responseCacheSaveSignatures = useRef(new Map());
@@ -1645,7 +1662,7 @@ function App() {
     setError("");
     try {
       const nextStatus = await api.getStatus();
-      setStatus(applyConversationTitleOverrides(nextStatus, conversationTitleOverridesRef.current));
+      setStatus((current) => applyConversationTitleOverrides(mergeRuntimeStatus(current, nextStatus), conversationTitleOverridesRef.current));
       if (foreground) {
         const nextProjects = await api.listProjects();
         setProjects((current) => sameProjectList(current, nextProjects) ? current : nextProjects);
@@ -1669,7 +1686,8 @@ function App() {
     if (statusRefreshInFlight.current || refreshInFlight.current) return;
     statusRefreshInFlight.current = true;
     try {
-      setStatus(applyConversationTitleOverrides(await api.getStatus(), conversationTitleOverridesRef.current));
+      const nextStatus = await api.getStatus();
+      setStatus((current) => applyConversationTitleOverrides(mergeRuntimeStatus(current, nextStatus), conversationTitleOverridesRef.current));
     } catch (err) {
       logRendererDiagnostic(api, "warn", "status", `Background status refresh lỗi: ${err?.message || String(err)}`, { action: "refresh-status", error: err });
       // Background realtime refresh should not flash a global error for a transient miss.
@@ -1733,6 +1751,7 @@ function App() {
       const recentlyVerified = Number.isFinite(checkedAt) && Date.now() - checkedAt < PROFILE_CHECK_TTL_MS;
       if (!profile.connected || !extensionReady(profile.extension_version) || recentlyVerified || Date.now() - lastCheck < PROFILE_CHECK_RETRY_MS) continue;
       profileCheckTimes.current.set(profile.profile_id, Date.now());
+      profileChecksInFlight.current.add(profile.profile_id);
       setCheckingProfiles((current) => [...new Set([...current, profile.profile_id])]);
       void api.checkProfile(profile.profile_id)
         .catch((err) => {
@@ -1740,11 +1759,52 @@ function App() {
           return null;
         })
         .finally(() => {
+          profileChecksInFlight.current.delete(profile.profile_id);
           setCheckingProfiles((current) => current.filter((id) => id !== profile.profile_id));
           window.setTimeout(() => void refresh(false), 1200);
         });
     }
   }, [status?.browserProfiles, refresh]);
+
+  useEffect(() => {
+    if (busy || connectorAutoMigrationInFlight.current) return;
+    const now = Date.now();
+    const candidate = (status?.browserProfiles || []).find((profile) => {
+      if (!profile?.connected || profile.connector_update_required !== true || !extensionReady(profile.extension_version)) return false;
+      if (!profileSafeForWorkerUpdate(profile) || profileChecksInFlight.current.has(profile.profile_id) || checkingProfiles.includes(profile.profile_id)) return false;
+      const lastAttempt = connectorAutoMigrationAttempts.current.get(profile.profile_id) || 0;
+      return now - lastAttempt >= CONNECTOR_AUTO_MIGRATION_RETRY_MS;
+    });
+    if (!candidate) return;
+
+    const profileId = candidate.profile_id;
+    connectorAutoMigrationInFlight.current = profileId;
+    connectorAutoMigrationAttempts.current.set(profileId, now);
+    setAutoMigratingProfileId(profileId);
+    logRendererDiagnostic(api, "info", "profile", `Tự cập nhật connector ${profileId}`, { action: "auto-migrate-profile-connector", profile_id: profileId });
+    void api.setupProfile(profileId)
+      .then((result) => {
+        logRendererDiagnostic(api, "info", "profile", `Tự cập nhật connector ${profileId} hoàn tất`, {
+          action: "auto-migrate-profile-connector-success",
+          profile_id: profileId,
+          connector_profile_bound: result?.connector_profile_bound,
+          connector_installed: result?.connector_installed
+        });
+      })
+      .catch((err) => {
+        logRendererDiagnostic(api, "warn", "profile", `Tự cập nhật connector ${profileId} lỗi: ${err?.message || String(err)}`, {
+          action: "auto-migrate-profile-connector-error",
+          profile_id: profileId,
+          error: err
+        });
+      })
+      .finally(() => {
+        connectorAutoMigrationAttempts.current.set(profileId, Date.now());
+        if (connectorAutoMigrationInFlight.current === profileId) connectorAutoMigrationInFlight.current = "";
+        setAutoMigratingProfileId((current) => current === profileId ? "" : current);
+        window.setTimeout(() => void refresh(false), 1200);
+      });
+  }, [busy, checkingProfiles, status?.browserProfiles, refresh]);
 
   useEffect(() => {
     profilesRef.current = status?.browserProfiles || [];
@@ -2167,7 +2227,7 @@ function App() {
     try {
       const result = await api.rotateLink();
       if (!result.cancelled) {
-        setStatus(result);
+        setStatus((current) => applyConversationTitleOverrides(mergeRuntimeStatus(current, result), conversationTitleOverridesRef.current));
         await api.copyText(result.mcpLink);
         notify("Đã tạo và copy link mới");
       }
@@ -2182,7 +2242,8 @@ function App() {
     setBusy(action);
     setError("");
     try {
-      setStatus(await api.controlServer(action));
+      const nextStatus = await api.controlServer(action);
+      setStatus((current) => applyConversationTitleOverrides(mergeRuntimeStatus(current, nextStatus), conversationTitleOverridesRef.current));
       notify(action === "restart" ? "CodexPro đã restart" : "CodexPro đã khởi động");
     } catch (err) {
       setError(err?.message || String(err));
@@ -3548,6 +3609,8 @@ function App() {
                 <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, event.deltaY)} onTouchMove={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, -1)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
                   {(displayResponseMessages.length ? displayResponseMessages : [fallbackResponseMessage]).map((message, messageIndex, allMessages) => {
                     const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
+                    const showLiveStreamTail = Boolean(responseTurnActive && isLastAssistant && (response?.networkStreamAvailable || message.provisional === true || message.endTurn === false));
+                    const inlineLiveStatus = Boolean(showLiveStreamTail && !message.images?.length && String(message.text || "").length <= 80 && !/[\r\n]/.test(String(message.text || "")));
                     const responseSpaceClass = !isLastAssistant ? "" : showSyntheticThinking ? "is-response-cage" : "is-response-runway";
                     if (message.toolActivity) {
                       return <div className="chat-transcript-message is-tool-activity" key={message.id} data-message-id={message.id}><div className="tool-activity-live"><span className="tool-activity-text">{message.text}</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></div></div>;
@@ -3555,12 +3618,12 @@ function App() {
                     return (
                       <div className={`chat-transcript-message is-${message.role} ${responseSpaceClass}`} key={message.id} data-message-id={message.id} data-audit-role={message.role} data-audit-fingerprint={responseAuditTextFingerprint(message.text)} data-audit-length={String(message.text || "").length}>
                         <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
-                        <div className="latest-response-content" onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
+                        <div className={`latest-response-content ${inlineLiveStatus ? "is-inline-live-status" : ""}`} onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
                           <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
                           {message.role === "assistant" ? <>
                             {message.text && <React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>}
                             {Boolean(message.images?.length) && <div className={`chat-message-images ${message.images.length === 1 ? "is-single" : "is-grid"}`}>{message.images.map((image, imageIndex) => <button type="button" className="chat-generated-image" key={image.id || `${message.id}-image-${imageIndex}`} title="Mở ảnh" aria-label={`Mở ${image.alt || image.name || "ảnh tạo bởi ChatGPT"}`} onClick={() => setAttachmentPreview({ loading: false, name: image.name || "Ảnh tạo bởi ChatGPT", size: Number(image.size) || 0, mimeType: image.mimeType || "image/jpeg", kind: "image", dataUrl: image.dataUrl, generated: true })}><img src={image.dataUrl} alt={image.alt || image.name || "Ảnh tạo bởi ChatGPT"} /></button>)}</div>}
-                            {responseTurnActive && isLastAssistant && (response?.networkStreamAvailable || message.provisional === true || message.endTurn === false) && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}
+                            {showLiveStreamTail && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}
                             {message.text && turnReady && (
                               <div className="chat-message-actions">
                                 <button type="button" className="chat-message-copy" title="Copy response" aria-label="Copy phản hồi" onClick={async () => { await api.copyText(message.text); notify("Đã copy phản hồi"); }}>
@@ -3735,6 +3798,11 @@ function App() {
               <p className="section-note">Hãy kết nối API worker và Chrome profile của bạn</p>
             </div>
           </div>
+          {status?.workerSnapshotStale && (
+            <div className="worker-snapshot-warning" role="status">
+              MCP tạm thời không phản hồi. Đang hiển thị snapshot worker gần nhất và sẽ tự cập nhật khi kết nối phục hồi.
+            </div>
+          )}
           <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout`}>
             {!(status?.workers || []).some((worker) => worker.worker_type === "api") && !status?.browserProfiles?.length && (
               <div className="empty">Chưa có worker nào kết nối. Hãy lưu API worker hoặc Load unpacked extension CodexPro trong Chrome profile cần dùng.</div>
@@ -3765,7 +3833,7 @@ function App() {
               })
               .map((profile) => {
               const ready = extensionReady(profile.extension_version);
-              const profileBusy = busy === `profile:${profile.profile_id}`;
+              const profileBusy = busy === `profile:${profile.profile_id}` || autoMigratingProfileId === profile.profile_id;
               const profileChecking = checkingProfiles.includes(profile.profile_id);
               const hung = !profile.connected;
               const settling = profile.connected && profile.activity === "settling";
@@ -3849,12 +3917,12 @@ function App() {
                       </button>
                     </div>
                     {connectorInstalled ? (
-                      <span className="already-connected">✓ Đã thêm CodexPro</span>
+                      <span className={`already-connected ${connectorUpdateRequired ? "is-update-required" : working || settling ? "is-working" : idle ? "is-idle" : "is-default"}`}>✓ Đã thêm CodexPro</span>
                     ) : (
                       <button
                         className="button primary profile-setup"
                         onClick={() => setupProfile(profile)}
-                        disabled={Boolean(busy) || profileChecking || !profile.connected || !ready}
+                        disabled={Boolean(busy) || Boolean(autoMigratingProfileId) || profileChecking || !profile.connected || !ready}
                       >
                         {profileBusy ? (connectorUpdateRequired ? "Đang cập nhật + test…" : "Đang thêm + test…") : (connectorUpdateRequired ? "Cập nhật CodexPro" : "Thêm CodexPro")}
                       </button>

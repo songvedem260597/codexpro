@@ -2564,9 +2564,13 @@ async function probeConnectorEndpoint(serverUrl) {
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),15000);
   try{
-    const response=await fetch(serverUrl,{
+    const endpoint=new URL(serverUrl);
+    const token=endpoint.searchParams.get('codexpro_token')||endpoint.searchParams.get('token')||'';
+    const headers={'content-type':'application/json','accept':'application/json, text/event-stream'};
+    if(token)headers.authorization=`Bearer ${token}`;
+    const response=await fetch(endpoint.toString(),{
       method:'POST',
-      headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},
+      headers,
       body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'CodexPro Profile Bridge',version:'0.5.39'}}}),
       signal:controller.signal
     });

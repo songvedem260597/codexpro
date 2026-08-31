@@ -31,6 +31,34 @@ export function mergeBrowserProfilePayload(previousProfiles, incomingProfiles) {
   return merged;
 }
 
+export function mergeRuntimeStatus(previousStatus, incomingStatus) {
+  if (!incomingStatus || typeof incomingStatus !== "object") return previousStatus;
+  const previous = previousStatus && typeof previousStatus === "object" ? previousStatus : null;
+  const workerSnapshotAvailable = incomingStatus.workerSnapshotAvailable !== false;
+  const workerJobsAvailable = incomingStatus.workerJobsAvailable !== false;
+
+  if (workerSnapshotAvailable) {
+    const browserProfiles = mergeBrowserProfilePayload(previous?.browserProfiles, incomingStatus.browserProfiles);
+    return {
+      ...incomingStatus,
+      browserProfiles,
+      workerJobs: workerJobsAvailable ? incomingStatus.workerJobs : (previous?.workerJobs || []),
+      workerSnapshotStale: false,
+      workerSnapshotStaleSince: ""
+    };
+  }
+
+  return {
+    ...incomingStatus,
+    browserProfiles: previous?.browserProfiles || incomingStatus.browserProfiles || [],
+    workers: previous?.workers || incomingStatus.workers || [],
+    workerSources: previous?.workerSources || incomingStatus.workerSources || [],
+    workerJobs: workerJobsAvailable ? incomingStatus.workerJobs : (previous?.workerJobs || incomingStatus.workerJobs || []),
+    workerSnapshotStale: true,
+    workerSnapshotStaleSince: previous?.workerSnapshotStaleSince || incomingStatus.checkedAt || new Date().toISOString()
+  };
+}
+
 export function sameProjectList(previousProjects, nextProjects) {
   const previous = Array.isArray(previousProjects) ? previousProjects : [];
   const next = Array.isArray(nextProjects) ? nextProjects : [];
