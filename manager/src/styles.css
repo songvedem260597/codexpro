@@ -215,8 +215,8 @@ section { margin-bottom: 38px; }
 .browser-profile.is-online { border-color: #28503a; box-shadow: inset 3px 0 0 #53e58e; }
 .browser-profile.is-offline { opacity: .72; }
 .browser-profile.is-idle { border-color: #53e58e; box-shadow: inset 3px 0 0 #53e58e; }
-.browser-profile.is-working { border-color: #f4a340; box-shadow: inset 3px 0 0 #f4a340; }
-.browser-profile.is-working::before { content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none; background: conic-gradient(from var(--profile-border-shine-angle), transparent 0deg 250deg, #f4a340 278deg, #ffd39a 302deg, #fff0d2 316deg, #ffb45f 330deg, transparent 352deg 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0) border-box; mask-composite: exclude; filter: drop-shadow(0 0 4px #f4a34080); animation: profile-border-shine 3s linear infinite; }
+.browser-profile.is-working { border-color: #ffc15c; box-shadow: inset 0 0 0 1px #ffd78fcc, inset 3px 0 0 #ff9f1c, 0 0 12px #ffae32aa, 0 0 30px #f4a34066; }
+.browser-profile.is-working::before { content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 2px; pointer-events: none; background: conic-gradient(from var(--profile-border-shine-angle), transparent 0deg 225deg, #f4a340 244deg, #ffb13c 270deg, #ffe0a3 295deg, #fff8e9 315deg, #ffd37a 330deg, #ff9f1c 346deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0) border-box; mask-composite: exclude; filter: drop-shadow(0 0 7px #ffe0a3ff) drop-shadow(0 0 16px #ff9f1ccc); animation: profile-border-shine 2.2s linear infinite; }
 .browser-profile.is-error { border-color: var(--red); box-shadow: inset 3px 0 0 var(--red); opacity: 1; }
 @keyframes profile-border-shine { to { --profile-border-shine-angle: 360deg; } }
 @media (prefers-reduced-motion: reduce) { .browser-profile.is-working::before { animation: none; --profile-border-shine-angle: 24deg; } }
