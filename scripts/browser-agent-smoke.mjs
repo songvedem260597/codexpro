@@ -206,7 +206,7 @@ const matchingResponseAudit = buildChatResponseAuditRecord({
   ]
 });
 assert.equal(matchingResponseAudit.comparison, "match", "audit must confirm the ChatGPT DOM response reaches the Manager UI unchanged");
-const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller] = await Promise.all([
+const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "src", "server.ts"), "utf8"),
@@ -220,7 +220,9 @@ const [browserOps, worker, server, httpSource, bridge, managerMain, managerPrelo
   readFile(join(root, "manager", "src", "app-dropdown.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "chat-scroll.js"), "utf8"),
   readFile(join(root, "chrome-extension", "manifest.json"), "utf8"),
-  readFile(join(root, "chrome-extension", "connector-installer.js"), "utf8")
+  readFile(join(root, "chrome-extension", "connector-installer.js"), "utf8"),
+  readFile(join(root, "chrome-extension", "popup.html"), "utf8"),
+  readFile(join(root, "chrome-extension", "popup.js"), "utf8")
 ]);
 
 const connectorMatcherSource = connectorInstaller.slice(
@@ -662,7 +664,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.89");
+assert.equal(manifest.version, "0.5.90");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
@@ -682,6 +684,15 @@ assert.match(connectorInstaller, /hasConnectionMarker = value => value\.includes
 assert.match(connectorInstaller, /value\.includes\('them codexpro vao chatgpt'\)/, "connector installer must recognize the Vietnamese CodexPro consent heading");
 assert.match(connectorInstaller, /value\.includes\('cac quyen nay se luon duoc tuan thu'\)/, "connector installer must recognize the Vietnamese consent permission copy");
 assert.match(connectorInstaller, /CONNECT_CONSENT_NOT_FOUND[\s\S]*?CODEXPRO_SETUP_EVIDENCE/, "connector installer must preserve bounded evidence when the consent dialog is missing");
+assert.match(popupHtml, /class="brand-icon"[\s\S]*?<svg/, "extension popup must use a real brand icon instead of a text-only heading");
+assert.match(popupHtml, /id="activeState"[\s\S]*?Profile đang ACTIVE/, "the active profile must render as a compact status instead of a redundant action button");
+assert.match(popupJs, /button\.hidden=isActive[\s\S]*?activeState\.hidden=!isActive/, "the activate action must disappear after the profile becomes active");
+assert.match(popupJs, /installButton\.hidden=true/, "the reinstall action must disappear when CodexPro is already ready");
+assert.doesNotMatch(popupHtml + popupJs, /CÀI LẠI \/ KIỂM TRA LẠI/, "the ready popup must not keep a redundant reinstall button");
+assert.match(popupHtml, /id="workerToggle"[\s\S]*?role="switch"/, "the popup must expose an accessible worker connection toggle");
+assert.match(popupJs, /workerEnabled[\s\S]*?BRIDGE}\/register[\s\S]*?enabled:false/, "disabling a worker must immediately publish a hidden profile state to the Bridge");
+assert.match(worker, /if\(!profile\.enabled\)[\s\S]*?setTimeout\(resolve,2000\)[\s\S]*?continue/, "a disabled extension must stop polling the Bridge");
+assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && now - profile\.lastSeen <= PROFILE_TTL_MS/, "disabled profiles must be retained internally but excluded from the connected worker list");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.match(managerMain, /profile\.connector_update_required \|\| profile\.connector_profile_bound === false[\s\S]*?action: "setup_chatgpt"[\s\S]*?profile\.connector_installed && profile\.connector_profile_bound/, "Manager send preflight must rebind an old connector before dispatching a task");

@@ -479,6 +479,7 @@ function scheduleRealtimeProfilePush(delayMs=40) {
     void (async()=>{
       try{
         const [profile,tabs]=await Promise.all([profileInfo(),tabList()]);
+        if(!profile.enabled)return;
         await fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,tabs})});
       }catch{}
     })();
@@ -587,7 +588,7 @@ async function headlessIdentity(stored) {
 }
 
 async function profileInfo() {
-  const stored = await chrome.storage.local.get(['profileId','active','connectorInstall','connectorServerFingerprint','headlessWorkerId','headlessWorkerLabel','headlessSourceProfileId']);
+  const stored = await chrome.storage.local.get(['profileId','active','connectorInstall','connectorServerFingerprint','headlessWorkerId','headlessWorkerLabel','headlessSourceProfileId','workerEnabled','workerEnabledUpdatedAt']);
   const headless=await headlessIdentity(stored);
   const profileId = headless?.id || stored.profileId || crypto.randomUUID();
   if (!headless && !stored.profileId) await chrome.storage.local.set({profileId});
@@ -601,6 +602,8 @@ async function profileInfo() {
     connector_install:stored.connectorInstall||null,
     connector_server_fingerprint:String(stored.connectorServerFingerprint||''),
     active:Boolean(stored.active),
+    enabled:stored.workerEnabled!==false,
+    worker_enabled_updated_at:Math.max(0,Number(stored.workerEnabledUpdatedAt)||0),
     headless:Boolean(headless),
     source_profile_id:headless?.source_profile_id||''
   };
@@ -2809,18 +2812,19 @@ async function pollLoop() {
   try{
     while(true){
       try{
+        const profile=await profileInfo();
+        if(!profile.enabled){await new Promise(resolve=>setTimeout(resolve,2000));continue;}
         let [tabs,recentConversations]=await Promise.all([tabList(),recentConversationList(3)]);
         const tabCleanup=await cleanupChatGptTabs(tabs,recentConversations);
         if(tabCleanup.closed_count)tabs=await tabList();
         await confirmConnectorFromLiveToolActivity(tabs);
-        const profile=await profileInfo();
         const response=await fetch(`${BRIDGE}/poll`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,active:profile.active,tabs,recent_conversations:recentConversations})});
         if(!response.ok)throw new Error(`Bridge HTTP ${response.status}`);
         const message=await response.json();
         const isActive=message.active_profile_id===profile.id;
         if(profile.active!==isActive)await chrome.storage.local.set({active:isActive});
         if(message.command){
-          const heartbeat=setInterval(()=>{void fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile})}).catch(()=>{});},10000);
+          const heartbeat=setInterval(()=>{void chrome.storage.local.get('workerEnabled').then(({workerEnabled})=>workerEnabled===false?null:fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile})})).catch(()=>{});},10000);
           try{await postResult(profile,message.command,await execute(message.command));}
           catch(error){await postResult(profile,message.command,null,error);}
           finally{clearInterval(heartbeat);}
