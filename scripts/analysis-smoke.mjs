@@ -113,8 +113,10 @@ try {
   assert.equal(cached.cache.hit, true);
   await fs.appendFile(path.join(tmp, 'src/auth.ts'), 'export function authorize() { return true; }\n', 'utf8');
   analysisApi.invalidateWorkspaceAnalysis(workspace.id);
-  const refreshed = await analysisApi.inspectWorkspace(config, guard, workspace);
-  assert.equal(refreshed.cache.hit, false);
+  const concurrentRefreshes = await Promise.all(Array.from({ length: 4 }, () => analysisApi.inspectWorkspace(config, guard, workspace)));
+  const refreshed = concurrentRefreshes[0];
+  assert.equal(concurrentRefreshes.filter((item) => item.cache.hit === false).length, 1, 'concurrent graph inspections must share one build');
+  assert.equal(concurrentRefreshes.filter((item) => item.cache.hit === true).length, 3, 'coalesced graph inspections must report cache hits');
   assert(refreshed.symbols.some((symbol) => symbol.name === 'authorize'));
 
   const review = await analysisApi.reviewWorkspaceChanges(config, guard, workspace, { changedPaths: ['src/auth.ts'] });

@@ -1,5 +1,6 @@
 import type { CodexProConfig } from "../config.js";
 import fsp from "node:fs/promises";
+import { Worker } from "node:worker_threads";
 import type { PathGuard, Workspace } from "../guard.js";
 import { redactSensitiveText } from "../redact.js";
 import { detectProjectTypes } from "./classify.js";
@@ -9,10 +10,11 @@ import { buildRelationships, mergeRelationships, reverseSymbolNeighborhood } fro
 import { inventoryWorkspace } from "./inventory.js";
 import { classifySearchIntent, emptySearchGroups, groupForFile, sortStructuredMatches } from "./rank.js";
 import { loadPersistentWorkspaceAnalysis, savePersistentWorkspaceAnalysis } from "./persistent.js";
-import { analyzeTypeScriptSemanticGraph } from "./semanticGraph.js";
+import type { SemanticGraphResult } from "./semanticGraph.js";
 import type { AnalysisSearchIntent, StructuredSearchMatch, StructuredSearchResult, WorkspaceAnalysis } from "./types.js";
 
 const CODEXGRAPH_ENGINE_VERSION = 3;
+const workspaceAnalysisInFlight = new Map<string, Promise<WorkspaceAnalysis>>();
 
 function cacheKey(workspace: Workspace, fingerprint: string, config: CodexProConfig): string {
   return `${workspace.id}:graph-v${CODEXGRAPH_ENGINE_VERSION}:${fingerprint}:${JSON.stringify(config.analysisLimits)}`;
@@ -30,6 +32,24 @@ function areasFor(files: WorkspaceAnalysis["files"]): WorkspaceAnalysis["areas"]
   return [...counts.entries()].map(([areaPath, value]) => ({ path: areaPath, ...value })).sort((a, b) => b.files - a.files || a.path.localeCompare(b.path));
 }
 
+function analyzeTypeScriptSemanticGraphInWorker(root: string, inventoryFiles: WorkspaceAnalysis["files"], maxSymbols: number, maxRelationships: number): Promise<SemanticGraphResult> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./semanticGraphWorker.js", import.meta.url), {
+      workerData: { root, inventoryFiles, maxSymbols, maxRelationships }
+    });
+    let settled = false;
+    worker.once("message", (result: SemanticGraphResult) => {
+      settled = true;
+      resolve(result);
+    });
+    worker.once("error", reject);
+    worker.once("exit", (code) => {
+      if (settled) return;
+      reject(new Error(code === 0 ? "CodexGraph semantic worker exited without a result." : `CodexGraph semantic worker exited with code ${code}.`));
+    });
+  });
+}
+
 export async function inspectWorkspace(config: CodexProConfig, guard: PathGuard, workspace: Workspace): Promise<WorkspaceAnalysis> {
   if (!config.analysisEnabled) throw new Error("Repository analysis is disabled by CODEXPRO_ANALYSIS=0.");
   const inventory = await inventoryWorkspace(config, guard, workspace);
@@ -42,6 +62,10 @@ export async function inspectWorkspace(config: CodexProConfig, guard: PathGuard,
     return { ...persisted, cache: { hit: true, key } };
   }
 
+  const existing = workspaceAnalysisInFlight.get(key);
+  if (existing) return { ...(await existing), cache: { hit: true, key } };
+
+  const inspection = (async () => {
   const extraction = await extractWorkspaceFiles(config, guard, workspace, inventory.files);
   const legacySymbols = extraction.files.flatMap((file) => file.symbols);
   let semanticWarnings: string[] = [];
@@ -50,7 +74,7 @@ export async function inspectWorkspace(config: CodexProConfig, guard: PathGuard,
   let semanticRelationships: WorkspaceAnalysis["relationships"] = [];
   let semanticPaths = new Set<string>();
   try {
-    const semantic = analyzeTypeScriptSemanticGraph(workspace.root, inventory.files, config.analysisLimits.maxSymbols, config.analysisLimits.maxRelationships);
+    const semantic = await analyzeTypeScriptSemanticGraphInWorker(workspace.root, inventory.files, config.analysisLimits.maxSymbols, config.analysisLimits.maxRelationships);
     semanticWarnings = semantic.warnings;
     semanticTruncated = semantic.truncated;
     semanticSymbols = semantic.symbols;
@@ -95,6 +119,13 @@ export async function inspectWorkspace(config: CodexProConfig, guard: PathGuard,
   setCachedWorkspaceAnalysis(key, result);
   await savePersistentWorkspaceAnalysis(workspace, result).catch(() => undefined);
   return result;
+  })();
+  workspaceAnalysisInFlight.set(key, inspection);
+  try {
+    return await inspection;
+  } finally {
+    if (workspaceAnalysisInFlight.get(key) === inspection) workspaceAnalysisInFlight.delete(key);
+  }
 }
 
 export async function searchWorkspaceStructured(
