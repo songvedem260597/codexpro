@@ -21,6 +21,13 @@ const subscribe = (channel, callback) => {
 contextBridge.exposeInMainWorld("codexpro", {
   getStatus: () => invoke("codexpro:status"),
   listWorkers: () => invoke("codexpro:workers"),
+  sendWorkerRequest: (payload) => invoke("codexpro:worker-send", payload),
+  readWorkerResponse: (payload) => invoke("codexpro:worker-read", payload),
+  stopWorkerTask: (payload) => invoke("codexpro:worker-stop", payload),
+  listApiWorkers: () => invoke("codexpro:api-worker-configs"),
+  saveApiWorker: (payload) => invoke("codexpro:save-api-worker", payload),
+  deleteApiWorker: (id) => invoke("codexpro:delete-api-worker", id),
+  testApiWorker: (id) => invoke("codexpro:test-api-worker", id),
   onBrowserProfiles: (callback) => subscribe("codexpro:browser-profiles", callback),
   controlServer: (action) => invoke("codexpro:control", action),
   copyText: (text) => invoke("codexpro:copy", text),

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, Notification, shell } from "electron";
+import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, Notification, safeStorage, shell } from "electron";
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -12,6 +12,10 @@ import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnosti
 import { syncUnpackedCodexProExtensions } from "./extension-sync.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
 import { WorkerPluginRegistry } from "./worker-core/plugin-registry.mjs";
+import { createApiWorkerStore } from "./worker-core/api-worker-store.mjs";
+import { createWorkerMcpClients } from "./mcp/http-client.mjs";
+import { createOpenAICompatibleProvider, createOpenRouterProvider } from "./provider-core/openai-compatible-provider.mjs";
+import { createApiWorkerPlugin } from "./worker-plugins/api-worker-plugin.mjs";
 import { createChromeWorkerPlugin } from "./worker-plugins/chrome-worker-plugin.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -126,6 +130,20 @@ const isWindows = process.platform === "win32";
 const isMac = process.platform === "darwin";
 const platformLabel = isWindows ? "Windows" : isMac ? "macOS" : process.platform;
 const managerSettingsFile = path.join(codexProHome, "manager-settings.json");
+const apiWorkerStore = createApiWorkerStore({ home: codexProHome, safeStorage });
+workerPluginRegistry.register(createApiWorkerPlugin({
+  listConfigurations: () => apiWorkerStore.list(),
+  createProvider: async ({ config }) => createProviderForApiWorker(config),
+  createMcpClients: async ({ workerId }) => {
+    const base = await readyRuntimeBaseStatus();
+    if (!base.local?.ok) throw new Error("Local CodexPro MCP is offline; API worker cannot start.");
+    return await createWorkerMcpClients({
+      url: `http://127.0.0.1:${base.config.port}/mcp`,
+      token: base.token,
+      workerId
+    });
+  }
+}));
 const globalRulesFile = path.join(codexProHome, "CODEXPRO.md");
 const managerChatCacheFile = path.join(codexProHome, "manager-chat-cache.json");
 const managerAssetsDir = path.join(codexProHome, "manager-assets");
@@ -155,6 +173,18 @@ const DEFAULT_GLOBAL_RULES = `# CodexPro Global Rules
 - Đọc và tuân thủ file này trước khi đọc rule riêng của từng repo/dự án.
 - Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
 `;
+
+function createProviderForApiWorker(config) {
+  const options = {
+    id: `provider-${String(config.id || "api").toLowerCase()}`,
+    baseUrl: config.base_url,
+    model: config.model,
+    getApiKey: async () => apiWorkerStore.credential(config.id)
+  };
+  return config.provider === "openrouter"
+    ? createOpenRouterProvider({ ...options, appName: config.app_name || "CodexPro", appUrl: config.app_url || "" })
+    : createOpenAICompatibleProvider(options);
+}
 
 const WORKER_EXTENSION_VERSION = "0.5.85";
 const RUNTIME_BASE_CACHE_MS = 10000;
@@ -3752,6 +3782,58 @@ diagnosticIpcHandle("codexpro:status", { category: "status", action: "runtime-st
 diagnosticIpcHandle("codexpro:workers", { category: "status", action: "list-workers", slowMs: 5_000 }, async () => {
   const status = await runtimeStatus();
   return { workers: status.workers, sources: status.workerSources };
+});
+diagnosticIpcHandle("codexpro:worker-send", {
+  category: "worker",
+  action: "worker-send",
+  logSuccess: true,
+  successMessage: "Worker đã nhận job",
+  failureMessage: "Không gửi được job tới worker",
+  details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || ""), task_id: String(payload?.task_id || payload?.taskId || ""), task_kind: String(payload?.task_kind || payload?.taskKind || "") })
+}, (_event, payload) => workerPluginRegistry.invoke("send", String(payload?.workerId || payload?.worker_id || ""), payload));
+diagnosticIpcHandle("codexpro:worker-read", {
+  category: "worker",
+  action: "worker-read",
+  failureMessage: "Không đọc được trạng thái worker",
+  details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || "") })
+}, (_event, payload) => workerPluginRegistry.invoke("read", String(payload?.workerId || payload?.worker_id || ""), payload));
+diagnosticIpcHandle("codexpro:worker-stop", {
+  category: "worker",
+  action: "worker-stop",
+  logSuccess: true,
+  successMessage: "Đã gửi lệnh dừng worker",
+  failureMessage: "Không dừng được worker",
+  details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || "") })
+}, (_event, payload) => workerPluginRegistry.invoke("stop", String(payload?.workerId || payload?.worker_id || ""), payload));
+diagnosticIpcHandle("codexpro:api-worker-configs", { category: "settings", action: "list-api-workers" }, () => apiWorkerStore.list());
+diagnosticIpcHandle("codexpro:save-api-worker", {
+  category: "settings",
+  action: "save-api-worker",
+  logSuccess: true,
+  successMessage: "Đã lưu API worker",
+  failureMessage: "Không lưu được API worker",
+  details: (payload) => ({ id: String(payload?.id || ""), provider: String(payload?.provider || ""), model: String(payload?.model || ""), credential_changed: Boolean(payload?.api_key || payload?.apiKey || payload?.clear_credential || payload?.clearCredential) })
+}, (_event, payload) => apiWorkerStore.save(payload));
+diagnosticIpcHandle("codexpro:delete-api-worker", {
+  category: "settings",
+  action: "delete-api-worker",
+  logSuccess: true,
+  successMessage: "Đã xóa API worker",
+  failureMessage: "Không xóa được API worker",
+  details: (id) => ({ id: String(id || "") })
+}, (_event, id) => apiWorkerStore.remove(id));
+diagnosticIpcHandle("codexpro:test-api-worker", {
+  category: "settings",
+  action: "test-api-worker",
+  slowMs: 15_000,
+  logSuccess: true,
+  successMessage: "API worker kết nối thành công",
+  failureMessage: "API worker không kết nối được",
+  details: (id) => ({ id: String(id || "") })
+}, async (_event, id) => {
+  const config = apiWorkerStore.list().find((item) => item.id === String(id || ""));
+  if (!config) throw new Error("API worker configuration was not found.");
+  return await createProviderForApiWorker(config).probe();
 });
 diagnosticIpcHandle("codexpro:control", {
   category: "status",

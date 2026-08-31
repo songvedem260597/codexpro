@@ -1046,6 +1046,29 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
   .header-server-actions .profile-count { width: 100%; height: auto; min-height: 42px; flex-wrap: wrap; }
 }
 
+.api-worker-card-list, .api-worker-config-list { display: grid; gap: 10px; }
+.api-worker-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 16px; border: 1px solid #293448; border-radius: var(--radius-card); background: linear-gradient(135deg, #111824, #0e1219); }
+.api-worker-card.is-working { border-color: #4867a8; box-shadow: inset 3px 0 0 #6b8cff; }
+.api-worker-card.is-failed { border-color: #6f3540; box-shadow: inset 3px 0 0 #d45b6b; }
+.api-worker-card-icon { width: 48px; height: 48px; display: grid; place-items: center; color: #b8caff; border: 1px solid #3b5488; border-radius: 12px; background: #172440; font-family: var(--font-mono); font-size: 12px; font-weight: var(--weight-bold); }
+.api-worker-card > div:nth-child(2) { min-width: 0; display: grid; gap: 7px; }
+.api-worker-card code, .api-worker-config code { color: #8fa7cc; overflow-wrap: anywhere; }
+.api-worker-settings { grid-column: 1 / -1; }
+.api-worker-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.api-worker-form label { min-width: 0; display: grid; gap: 6px; color: #9ba8ba; font-size: var(--font-description); }
+.api-worker-form input, .api-worker-form select, .api-worker-form textarea { width: 100%; min-height: 42px; padding: 9px 11px; color: #e4e9f1; border: 1px solid #303b4c; border-radius: var(--radius-control); background: #0c1118; font: inherit; }
+.api-worker-form textarea { resize: vertical; line-height: 1.5; }
+.api-worker-form input:focus, .api-worker-form select:focus, .api-worker-form textarea:focus { outline: 2px solid #4669ae; outline-offset: 1px; }
+.api-worker-wide { grid-column: 1 / -1; }
+.api-worker-form-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.api-worker-config { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid #283241; border-radius: var(--radius-control); background: #0e131a; }
+.api-worker-config > div:first-child { min-width: 0; display: grid; gap: 3px; }
+.api-worker-config > div:last-child { display: flex; gap: 7px; }
+.api-worker-config small { color: #8592a5; }
+.api-job-overlay { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 24px; background: rgba(3, 6, 10, .78); backdrop-filter: blur(8px); }
+.api-job-modal { width: min(760px, 100%); max-height: calc(100vh - 48px); display: grid; gap: 18px; padding: 22px; overflow: auto; border: 1px solid #3a4f78; border-radius: var(--radius-card); background: #101721; box-shadow: 0 28px 90px rgba(0, 0, 0, .55); }
+.api-job-modal .api-worker-form-actions { align-items: center; justify-content: space-between; }
+
 @media (max-width: 1080px) {
   .status-grid { grid-template-columns: repeat(2, 1fr); }
   main { padding-left: 34px; padding-right: 34px; }
@@ -1073,6 +1096,10 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
   .profile-list.is-card-layout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .profile-layout-setting-head { align-items: stretch; }
   .profile-layout-select { width: 100%; }
+  .api-worker-form { grid-template-columns: 1fr; }
+  .api-worker-wide { grid-column: auto; }
+  .api-worker-config, .api-worker-card { grid-template-columns: 1fr; align-items: stretch; }
+  .api-worker-config > div:last-child { flex-wrap: wrap; }
 }
 
 @media (max-width: 1500px) and (min-width: 1081px) {
