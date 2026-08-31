@@ -10,6 +10,7 @@ const {
   WORKER_POLICY_VERSION,
   bootstrapWorkerJob,
   finalizeWorkerJob,
+  listWorkerJobs,
   prepareWorkerJob,
   readWorkerJob,
   workerJobPublicRecord
@@ -77,6 +78,8 @@ try {
   assert.deepEqual(bootstrapped.completedObligations, ["global_rules", "agents_chain", "codexgraph"]);
   assert.equal((await finalizeWorkerJob({ jobId: codeId, workerId: "api.custom", outcome: "completed" })).status, "completed");
   assert.equal(readWorkerJob(codeId)?.codexGraphSymbolCount, 12);
+  assert.deepEqual(listWorkerJobs({ statuses: ["completed"], limit: 10 }).map((job) => job.jobId), [codeId, generalId], "completed job history must be newest first");
+  assert.deepEqual(listWorkerJobs({ statuses: ["failed"], limit: 10 }), [], "job history status filter must exclude other terminal states");
   await assert.rejects(
     () => finalizeWorkerJob({ jobId: codeId, workerId: "api.other", outcome: "failed" }),
     /owner mismatch/

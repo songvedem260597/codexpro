@@ -55,6 +55,7 @@ function queueWorkerUpdate(update) {
     stream_phase: String(update?.stream_phase || ""),
     stream_updated_at: String(update?.stream_updated_at || ""),
     stream_tool_status: String(update?.stream_tool_status || ""),
+    started_at: String(update?.started_at || ""),
     finished_at: String(update?.finished_at || ""),
     usage: update?.result?.usage
   });
@@ -2443,10 +2444,11 @@ async function runtimeBaseStatus(options = {}) {
   }
 }
 
-async function runtimeStatus() {
-  const base = await runtimeBaseStatus();
-  const browserProfilesRaw = base.local.ok
-    ? await listBrowserProfilesThroughMcp(base.config, base.token).catch((error) => {
+async function runtimeStatus(options = {}) {
+  const base = await runtimeBaseStatus(options);
+  const [browserProfilesRaw, workerJobs] = base.local.ok
+    ? await Promise.all([
+      listBrowserProfilesThroughMcp(base.config, base.token).catch((error) => {
         if (diagnosticAllowed(`runtime-list-profiles:${String(error?.message || error).slice(0, 160)}`, 30_000)) {
           diagnostic("warn", "manager", "profile", `Không đọc được danh sách profile trong runtime status: ${error?.message || String(error)}`, {
             action: "runtime-list-profiles-fallback",
@@ -2454,8 +2456,13 @@ async function runtimeStatus() {
           });
         }
         return [];
-      })
-    : [];
+      }),
+      localMcpTool(base.config, base.token, "worker_job_history", {
+        statuses: ["completed", "failed", "cancelled", "blocked"],
+        limit: 60
+      }).then((result) => Array.isArray(result?.jobs) ? result.jobs : []).catch(() => [])
+    ])
+    : [[], []];
   const browserProfilesVisible = browserProfilesRaw.filter((profile) => {
     const headless = profile.headless === true || String(profile.profile_id || "").startsWith("headless-");
     return profile.connected || !headless;
@@ -2476,6 +2483,7 @@ async function runtimeStatus() {
     browserProfiles,
     workers: workerStatus.workers,
     workerSources: workerStatus.sources,
+    workerJobs,
     mcpLink: base.mcpLink,
     tokenConfigured: base.tokenConfigured,
     autoStart: base.autoStart

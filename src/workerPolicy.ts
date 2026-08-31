@@ -114,6 +114,23 @@ export function readWorkerJob(jobId: string): WorkerJobRecord | undefined {
   }
 }
 
+export function listWorkerJobs(options: { statuses?: WorkerJobStatus[]; limit?: number } = {}): WorkerJobRecord[] {
+  const limit = Math.max(1, Math.min(200, Math.floor(Number(options.limit) || 50)));
+  const statuses = new Set((Array.isArray(options.statuses) ? options.statuses : [])
+    .filter((status): status is WorkerJobStatus => ["prepared", "running", "completed", "failed", "cancelled", "blocked"].includes(String(status))));
+  try {
+    return fs.readdirSync(workerJobsDir(), { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^cpt_[a-f0-9]{24}\.json$/.test(entry.name))
+      .map((entry) => readWorkerJob(entry.name.slice(0, -5)))
+      .filter((record): record is WorkerJobRecord => Boolean(record) && (!statuses.size || statuses.has(record!.status)))
+      .sort((left, right) => Date.parse(right.finishedAt || right.updatedAt || right.startedAt || right.preparedAt) - Date.parse(left.finishedAt || left.updatedAt || left.startedAt || left.preparedAt))
+      .slice(0, limit);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    return [];
+  }
+}
+
 async function atomicWrite(record: WorkerJobRecord): Promise<void> {
   const destination = jobPath(record.jobId);
   await fsp.mkdir(path.dirname(destination), { recursive: true });

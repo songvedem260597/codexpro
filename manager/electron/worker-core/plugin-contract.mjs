@@ -91,6 +91,7 @@ export function normalizeWorkerSummary(manifest, value) {
     stream_phase: clean(source.stream_phase ?? source.streamPhase, 40),
     stream_updated_at: clean(source.stream_updated_at ?? source.streamUpdatedAt, 80),
     stream_tool_status: clean(source.stream_tool_status ?? source.streamToolStatus, 300),
+    started_at: clean(source.started_at ?? source.startedAt, 80),
     finished_at: clean(source.finished_at ?? source.finishedAt, 80),
     capabilities,
     last_error: clean(source.last_error ?? source.lastError, 1000),

@@ -30,7 +30,7 @@ import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
-import { bootstrapWorkerJob, finalizeWorkerJob, prepareWorkerJob, readWorkerJob, workerJobPublicRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
+import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, workerJobPublicRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const CODEXPRO_GLOBAL_RULES_FILE = "CODEXPRO.md";
@@ -435,6 +435,7 @@ const REPO_TASK_GATE_EXEMPT_TOOLS = new Set<string>([
   "begin_repo_task",
   "repo_task_status",
   "worker_job_status",
+  "worker_job_history",
   "finalize_worker_job"
 ]);
 
@@ -693,6 +694,7 @@ const MINIMAL_TOOL_NAMES = [
   "begin_repo_task",
   "repo_task_status",
   "worker_job_status",
+  "worker_job_history",
   "finalize_worker_job",
   "open_current_workspace",
   "open_workspace",
@@ -741,6 +743,7 @@ const FULL_TOOL_NAMES = [
   "begin_repo_task",
   "repo_task_status",
   "worker_job_status",
+  "worker_job_history",
   "finalize_worker_job",
   "codexpro_inventory",
   "load_skill",
@@ -2472,6 +2475,28 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         found: Boolean(record),
         policy_version: record?.policyVersion || WORKER_POLICY_VERSION,
         job: workerJobPublicRecord(record)
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "worker_job_history",
+    {
+      title: "Worker Job History",
+      description: "List recent durable worker jobs for the CodexPro control center, including terminal status and start/finish timestamps.",
+      inputSchema: {
+        statuses: z.array(z.enum(["prepared", "running", "completed", "failed", "cancelled", "blocked"])).max(6).optional(),
+        limit: z.number().int().min(1).max(200).optional()
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const jobs = listWorkerJobs({ statuses: args.statuses, limit: args.limit });
+      return textResult(`# Worker Job History\n\n${jobs.length} recent job(s).`, {
+        count: jobs.length,
+        jobs: jobs.map((record) => workerJobPublicRecord(record))
       });
     }
   );
