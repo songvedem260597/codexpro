@@ -738,6 +738,111 @@ function ChatRequestComposer({
   );
 }
 
+const EMPTY_API_WORKER = { id: "", label: "", provider: "openrouter", base_url: "https://openrouter.ai/api/v1", model: "", api_key: "", enabled: true };
+
+function ApiWorkerSettings({ onChanged, notify, onError }) {
+  const [configs, setConfigs] = useState([]);
+  const [draft, setDraft] = useState(EMPTY_API_WORKER);
+  const [busy, setBusy] = useState("");
+  const load = useCallback(async () => {
+    try { setConfigs(await api.listApiWorkers?.() || []); }
+    catch (error) { onError(error); }
+  }, [onError]);
+  useEffect(() => { void load(); }, [load]);
+  const update = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
+  const edit = (config) => setDraft({ ...EMPTY_API_WORKER, ...config, api_key: "" });
+  const save = async () => {
+    setBusy("save");
+    try {
+      await api.saveApiWorker(draft);
+      setDraft(EMPTY_API_WORKER);
+      await load();
+      await onChanged?.();
+      notify("Đã lưu API worker bằng kho bí mật của hệ điều hành");
+    } catch (error) { onError(error); }
+    finally { setBusy(""); }
+  };
+  const test = async (id) => {
+    setBusy(`test:${id}`);
+    try {
+      const result = await api.testApiWorker(id);
+      notify(result?.model_available === false ? "API online, model chưa có trong danh sách provider" : "API worker kết nối thành công");
+    } catch (error) { onError(error); }
+    finally { setBusy(""); }
+  };
+  const remove = async (id) => {
+    setBusy(`delete:${id}`);
+    try {
+      await api.deleteApiWorker(id);
+      if (draft.id === id) setDraft(EMPTY_API_WORKER);
+      await load();
+      await onChanged?.();
+      notify("Đã xóa API worker và credential mã hóa");
+    } catch (error) { onError(error); }
+    finally { setBusy(""); }
+  };
+  return (
+    <section className="settings-panel api-worker-settings">
+      <div className="settings-panel-head">
+        <div><p className="eyebrow">API WORKER PLUGINS</p><h2>OpenRouter / API tương thích OpenAI</h2><p className="section-note">API chỉ làm inference. Rule, AGENTS, CodexGraph, workspace và mọi tool luôn đi qua phiên MCP riêng của worker.</p></div>
+        <span className="global-rules-badge">MCP-ONLY</span>
+      </div>
+      <div className="api-worker-form">
+        <label><span>ID worker</span><input value={draft.id} disabled={Boolean(configs.find((item) => item.id === draft.id))} placeholder="openrouter-main" onChange={(event) => update("id", event.target.value)} /></label>
+        <label><span>Tên hiển thị</span><input value={draft.label} placeholder="OpenRouter chính" onChange={(event) => update("label", event.target.value)} /></label>
+        <label><span>Provider</span><select value={draft.provider} onChange={(event) => update("provider", event.target.value)}><option value="openrouter">OpenRouter</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
+        <label><span>Model</span><input value={draft.model} placeholder="openai/gpt-5" onChange={(event) => update("model", event.target.value)} /></label>
+        <label className="api-worker-wide"><span>Base URL</span><input value={draft.base_url} placeholder="https://openrouter.ai/api/v1" onChange={(event) => update("base_url", event.target.value)} /></label>
+        <label className="api-worker-wide"><span>API key {configs.find((item) => item.id === draft.id)?.credential_available ? "(để trống để giữ key hiện tại)" : ""}</span><input type="password" autoComplete="new-password" value={draft.api_key} placeholder="Được mã hóa bằng kho bí mật của hệ điều hành" onChange={(event) => update("api_key", event.target.value)} /></label>
+      </div>
+      <div className="api-worker-form-actions"><button className="button ghost" type="button" onClick={() => setDraft(EMPTY_API_WORKER)} disabled={Boolean(busy)}>Tạo mới</button><button className="button primary" type="button" onClick={() => void save()} disabled={Boolean(busy) || !draft.id.trim() || !draft.model.trim()}>{busy === "save" ? "Đang mã hóa…" : "Lưu worker"}</button></div>
+      <div className="api-worker-config-list">
+        {!configs.length && <div className="empty">Chưa cấu hình API worker. Feature vẫn tắt cho đến khi có cấu hình và API key.</div>}
+        {configs.map((config) => <article key={config.id} className="api-worker-config"><div><strong>{config.label}</strong><code>api:{config.id}</code><small>{config.provider} · {config.model}</small></div><span className={`badge ${config.credential_available ? "connected" : "profile-missing"}`}>{config.credential_available ? "KEY ĐÃ MÃ HÓA" : "THIẾU KEY"}</span><div><button className="button ghost" type="button" onClick={() => edit(config)} disabled={Boolean(busy)}>Sửa</button><button className="button secondary" type="button" onClick={() => void test(config.id)} disabled={Boolean(busy) || !config.credential_available}>{busy === `test:${config.id}` ? "Đang test…" : "Test"}</button><button className="button danger-quiet" type="button" onClick={() => void remove(config.id)} disabled={Boolean(busy)}>{busy === `delete:${config.id}` ? "Đang xóa…" : "Xóa"}</button></div></article>)}
+      </div>
+    </section>
+  );
+}
+
+function ApiWorkerCards({ workers, onRun, onStop }) {
+  if (!workers.length) return null;
+  return <section id="api-workers"><div className="section-head"><div><p className="eyebrow">API PLUGIN WORKERS</p><h2>Worker qua API</h2><p className="section-note">Các worker này dùng cùng ổ cắm MCP với Chrome; không có quyền repo trực tiếp.</p></div></div><div className="api-worker-card-list">{workers.map((worker) => <article className={`api-worker-card is-${worker.activity}`} key={worker.worker_id}><div className="api-worker-card-icon">API</div><div><div className="profile-title"><strong>{worker.label}</strong><span className="badge">{worker.provider}</span>{worker.activity === "working" ? <WorkingBadge /> : <span className={`badge ${worker.connected ? "connected" : "profile-missing"}`}>{worker.connected ? "ĐANG RẢNH" : "THIẾU KEY"}</span>}</div><code>{worker.worker_id}</code><div className="profile-meta"><span>{worker.model}</span><span>Policy qua MCP</span></div>{worker.current_task_title && <div className="profile-task-summary"><span>Task hiện tại</span><strong>{worker.current_task_title}</strong></div>}{worker.last_error && <div className="profile-warning">{worker.last_error}</div>}</div><div className="profile-actions">{worker.activity === "working" ? <button className="button danger-quiet" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button> : <button className="button primary" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}>Chạy job</button>}</div></article>)}</div></section>;
+}
+
+function apiJobId() {
+  const bytes = new Uint8Array(12);
+  window.crypto.getRandomValues(bytes);
+  return `cpt_${[...bytes].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function ApiWorkerJobModal({ worker, projects, onClose, onStarted, onError }) {
+  const [title, setTitle] = useState("");
+  const [kind, setKind] = useState("general");
+  const [root, setRoot] = useState(projects[0]?.root || "");
+  const [request, setRequest] = useState("");
+  const [sending, setSending] = useState(false);
+  if (!worker) return null;
+  const titleWords = title.trim().split(/\s+/).filter(Boolean).length;
+  const valid = titleWords >= 2 && titleWords <= 6 && request.trim() && (kind !== "code" || root);
+  const submit = async () => {
+    setSending(true);
+    try {
+      await api.sendWorkerRequest({
+        workerId: worker.worker_id,
+        task_id: apiJobId(),
+        task_title: title.trim(),
+        task_kind: kind,
+        scope: kind === "code" ? "workspace" : "all_allowed",
+        ...(kind === "code" ? { root } : {}),
+        text: request.trim()
+      });
+      onStarted();
+    } catch (error) { onError(error); }
+    finally { setSending(false); }
+  };
+  return <div className="api-job-overlay" role="dialog" aria-modal="true" aria-label="Chạy API worker"><div className="api-job-modal"><div className="settings-panel-head"><div><p className="eyebrow">{worker.provider} · {worker.model}</p><h2>Chạy job bằng {worker.label}</h2><p className="section-note">CodexPro sẽ bootstrap policy qua MCP trước khi gọi model.</p></div><button type="button" className="button ghost" onClick={onClose} disabled={sending}>Đóng</button></div><div className="api-worker-form"><label><span>Job title (2–6 từ)</span><input value={title} placeholder="Phân tích luồng worker" onChange={(event) => setTitle(event.target.value)} /></label><label><span>Loại job</span><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="general">General · không mở repo</option><option value="code">Code · rules + AGENTS + CodexGraph</option></select></label>{kind === "code" && <label className="api-worker-wide"><span>Repo bắt buộc</span><select value={root} onChange={(event) => setRoot(event.target.value)}><option value="">Chọn repo</option>{projects.map((project) => <option key={project.root} value={project.root}>{project.name} · {project.root}</option>)}</select></label>}<label className="api-worker-wide"><span>Yêu cầu</span><textarea value={request} rows={8} placeholder="Mô tả công việc cho API worker…" onChange={(event) => setRequest(event.target.value)} /></label></div><div className="api-worker-form-actions"><span className="section-note">Mọi tool call sẽ được kiểm tra và chạy qua MCP.</span><button className="button primary" type="button" disabled={!valid || sending} onClick={() => void submit()}>{sending ? "Đang bootstrap MCP…" : "Bắt đầu job"}</button></div></div></div>;
+}
+
 function App() {
   const [activePage, setActivePage] = useState("overview");
   const [diagnosticLogs, setDiagnosticLogs] = useState({ summary: { total: 0, info: 0, warn: 0, error: 0 }, entries: [], sources: [], categories: [], queried_hours: 24, checked_at: "" });
@@ -763,6 +868,7 @@ function App() {
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
   const [workerUpdateConfirmOpen, setWorkerUpdateConfirmOpen] = useState(false);
+  const [apiJobWorker, setApiJobWorker] = useState(null);
   const [inspection, setInspection] = useState(null);
   const [checkingProfiles, setCheckingProfiles] = useState([]);
   const requestDraftsRef = useRef({});
@@ -894,6 +1000,7 @@ function App() {
     setToast(message);
     window.setTimeout(() => setToast(""), 2600);
   }, []);
+  const reportApiWorkerError = useCallback((workerError) => setError(workerError?.message || String(workerError)), []);
 
   const loadDiagnosticLogs = useCallback(async (showBusy = true) => {
     if (typeof api.getDiagnosticLogs !== "function") return;
@@ -3446,6 +3553,15 @@ function App() {
           </div>
         </section>
 
+        <ApiWorkerCards
+          workers={(status?.workers || []).filter((worker) => worker.worker_type === "api")}
+          onRun={setApiJobWorker}
+          onStop={async (workerId) => {
+            try { await api.stopWorkerTask({ workerId }); await refresh(false); notify("Đã dừng API worker"); }
+            catch (workerError) { reportApiWorkerError(workerError); }
+          }}
+        />
+
         <section id="profiles">
           <div className="section-head">
             <div>
@@ -3675,6 +3791,8 @@ function App() {
               <button className="text-button" onClick={() => api.openExternal("https://chatgpt.com/plugins?q=CodexPro")}>Mở Plugins ChatGPT ↗</button>
             </div>
           </section>
+
+          <ApiWorkerSettings onChanged={() => refresh(false)} notify={notify} onError={reportApiWorkerError} />
 
           <section className="settings-panel global-rules-panel">
             <div className="settings-panel-head global-rules-head">
@@ -4064,6 +4182,7 @@ function App() {
             <button type="button" className="button danger-quiet" onClick={() => void restoreManagerSettings()} disabled={Boolean(settingsBusy)}>{settingsBusy === "reset" ? "Đang khôi phục…" : "Khôi phục tất cả mặc định"}</button>
           </div>
         </div>
+        <ApiWorkerJobModal worker={apiJobWorker} projects={projects} onClose={() => setApiJobWorker(null)} onError={reportApiWorkerError} onStarted={() => { setApiJobWorker(null); void refresh(false); notify("API worker đã nhận job"); }} />
 
       </main>
 
