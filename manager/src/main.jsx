@@ -1799,10 +1799,23 @@ function App() {
         return applyConversationTitleOverrides({ ...current, checkedAt: payload?.checked_at || new Date().toISOString(), browserProfiles }, conversationTitleOverridesRef.current);
       });
     });
+    const unsubscribeWorkers = api.onWorkerUpdate?.((payload) => {
+      const workerId = String(payload?.worker_id || "");
+      if (!workerId) return;
+      setStatus((current) => {
+        if (!current || !Array.isArray(current.workers)) return current;
+        const index = current.workers.findIndex((worker) => worker.worker_id === workerId);
+        if (index < 0) return current;
+        const workers = current.workers.slice();
+        workers[index] = { ...workers[index], ...payload };
+        return { ...current, workers };
+      });
+    });
     const statusTimer = window.setInterval(() => void refreshStatus(), REALTIME_WATCHDOG_MS);
     const projectsTimer = window.setInterval(() => void refreshProjects(), PROJECT_REFRESH_MS);
     return () => {
       unsubscribe?.();
+      unsubscribeWorkers?.();
       window.clearInterval(statusTimer);
       window.clearInterval(projectsTimer);
     };

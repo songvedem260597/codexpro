@@ -164,7 +164,8 @@ export async function runMcpAgentJob(input = {}) {
         tools: bootstrapTools,
         toolChoice: "auto",
         signal: input.signal,
-        onDelta: input.onDelta
+        // The title bootstrap is control-plane work. Never expose its text as the
+        // user-visible answer stream.
       }, (retry) => emit("provider_retry", { phase: "title_bootstrap", ...retry }));
       providerState = completion?.providerState || providerState;
       for (const key of ["prompt_tokens", "completion_tokens", "total_tokens", "cost"]) {
@@ -248,6 +249,7 @@ export async function runMcpAgentJob(input = {}) {
     }
 
     input.onTaskTitle?.(title, bootstrap);
+    input.onPhase?.("agent", { title });
     const mcpTools = allMcpTools
       .filter((tool) => !LIFECYCLE_TOOLS.has(String(tool?.name || "")));
     const runnableMcpTools = mcpTools.filter((tool) => String(tool?.name || "") !== BEGIN_TASK_TOOL);
@@ -261,12 +263,13 @@ export async function runMcpAgentJob(input = {}) {
     for (let turn = 1; turn <= limits.maxTurns; turn += 1) {
       if (input.signal?.aborted) throw input.signal.reason || new Error("Worker job cancelled.");
       emit("provider_turn", { turn, tool_call_count: toolCallCount });
+      input.onVisibleTurnStart?.({ turn });
       const completion = await completeProviderWithRetry(input.provider, {
         messages,
         tools: providerTools,
         toolChoice: kind === "code" && turn === 1 ? "auto" : "auto",
         signal: input.signal,
-        onDelta: input.onDelta
+        onDelta: input.onVisibleDelta
       }, (retry) => emit("provider_retry", { phase: "agent_turn", turn, ...retry }));
       providerState = completion?.providerState || providerState;
       for (const key of ["prompt_tokens", "completion_tokens", "total_tokens", "cost"]) {
@@ -299,6 +302,7 @@ export async function runMcpAgentJob(input = {}) {
         emit("completed", { turn, tool_call_count: toolCallCount });
         return { job_id: jobId, worker_id: workerId, task_title: title, text: finalText, usage, provider_state: providerState, bootstrap, finalized };
       }
+      input.onPhase?.("tool", { names: toolCalls.map((call) => call.name) });
       if (toolCallCount + toolCalls.length > limits.maxToolCalls) throw new Error("Provider exceeded the configured MCP tool-call limit.");
       for (const call of toolCalls) {
         if (!allowedTools.has(call.name)) throw new Error(`Provider requested MCP tool ${call.name}, which is not allowed for this job.`);
