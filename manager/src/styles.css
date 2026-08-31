@@ -1014,13 +1014,15 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
 .api-worker-card > div:nth-child(2) { min-width: 0; display: grid; gap: 7px; }
 .api-worker-card code, .api-worker-config code { color: #8fa7cc; overflow-wrap: anywhere; }
 .api-worker-settings { grid-column: 1 / -1; }
-.api-worker-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.api-worker-form label { min-width: 0; display: grid; gap: 6px; color: #9ba8ba; font-size: var(--font-description); }
-.api-worker-form input, .api-worker-form select, .api-worker-form textarea { width: 100%; min-height: 42px; padding: 9px 11px; color: #e4e9f1; border: 1px solid #303b4c; border-radius: var(--radius-control); background: #0c1118; font: inherit; }
-.api-worker-form textarea { resize: vertical; line-height: 1.5; }
-.api-worker-form input:focus, .api-worker-form select:focus, .api-worker-form textarea:focus { outline: 2px solid #4669ae; outline-offset: 1px; }
+.api-worker-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; row-gap: 14px; }
+.api-worker-form label { min-width: 0; display: grid; gap: 7px; color: #9ba8ba; }
+.api-worker-form label > span { font-size: var(--font-description); line-height: 1.4; font-weight: var(--weight-medium); }
+.api-worker-form input, .api-worker-form select, .api-worker-form textarea { min-height: 42px; }
+.api-worker-form textarea { resize: vertical; line-height: var(--leading-body); }
 .api-worker-wide { grid-column: 1 / -1; }
 .api-worker-form-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.api-worker-settings > .api-worker-form-actions { margin: 14px 0 16px; }
+.api-worker-settings > .api-worker-form-actions .button { width: 128px; min-height: 42px; white-space: nowrap; }
 .api-worker-config { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid #283241; border-radius: var(--radius-control); background: #0e131a; }
 .api-worker-config > div:first-child { min-width: 0; display: grid; gap: 3px; }
 .api-worker-config > div:last-child { display: flex; gap: 7px; }
