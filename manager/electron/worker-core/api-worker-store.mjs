@@ -3,7 +3,7 @@ import path from "node:path";
 import { normalizeProviderBaseUrl } from "../provider-core/openai-compatible-provider.mjs";
 
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,94}$/;
-const PROVIDERS = new Set(["openrouter", "openai-compatible"]);
+const PROVIDERS = new Set(["9router", "openrouter", "openai-compatible"]);
 
 function clean(value, maxLength) {
   return String(value ?? "").trim().slice(0, maxLength);
@@ -26,8 +26,13 @@ function normalizeConfig(value) {
   const id = clean(source.id, 95);
   if (!ID_PATTERN.test(id)) throw new Error("API worker id must use 1-95 letters, numbers, dot, underscore, or dash.");
   const provider = clean(source.provider, 40).toLowerCase();
-  if (!PROVIDERS.has(provider)) throw new Error("API worker provider must be openrouter or openai-compatible.");
-  const baseUrl = normalizeProviderBaseUrl(source.base_url || source.baseUrl || (provider === "openrouter" ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1")).toString().replace(/\/$/, "");
+  if (!PROVIDERS.has(provider)) throw new Error("API worker provider must be 9router, openrouter, or openai-compatible.");
+  const defaultBaseUrl = provider === "9router"
+    ? "http://localhost:20128/v1"
+    : provider === "openrouter"
+      ? "https://openrouter.ai/api/v1"
+      : "https://api.openai.com/v1";
+  const baseUrl = normalizeProviderBaseUrl(source.base_url || source.baseUrl || defaultBaseUrl).toString().replace(/\/$/, "");
   const model = clean(source.model, 240);
   if (!model) throw new Error("API worker model is required.");
   return {
