@@ -17,6 +17,7 @@
     "test:api-worker-models": "node scripts/api-worker-model-discovery-smoke.mjs",
     "test:connected-workers": "node scripts/connected-worker-overview-smoke.mjs",
     "test:api-worker-job-modal": "node scripts/api-worker-job-modal-smoke.mjs",
+    "test:api-worker-streaming": "node scripts/api-worker-streaming-smoke.mjs",
     "test:dropdowns": "node scripts/app-dropdown-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",

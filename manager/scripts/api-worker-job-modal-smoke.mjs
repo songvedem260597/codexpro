@@ -16,6 +16,7 @@ assert.doesNotMatch(modal, /includeAllAllowed=\{false\}/, "API workers must offe
 assert.doesNotMatch(modal, /Job title|api-job-title|task_title:|titleWords|Loại job|Đoạn chat|ChatDropdown/, "the user must not choose the title, job kind, or conversation");
 assert.match(modal, /const allAllowedScope = root === ALL_ALLOWED_WORKSPACES[\s\S]*?task_kind: "code"[\s\S]*?scope: allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?root: allAllowedScope \? "" : root[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "API requests must support either a selected repository or all allowed workspaces");
 assert.match(modal, /Tin nhắn gần nhất[\s\S]*?chat-response is-inline[\s\S]*?Nhắn tiếp/, "the API popup must keep the Chat latest-message and continue-message sections");
+assert.match(modal, /<LatestMessagePanel[\s\S]*?worker\.stream_text[\s\S]*?worker\.last_result/, "API workers must render live stream text through the shared latest-message surface before falling back to the settled result");
 assert.match(modal, /request-files[\s\S]*?request-file-image[\s\S]*?attach-button/, "the API popup must keep Chat file/image attachment controls");
 assert.match(modal, /AI tự đặt title 2–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP/, "API job composer must explain the AI-owned MCP title bootstrap");
 
@@ -29,5 +30,6 @@ assert.doesNotMatch(source, /Kết quả job gần nhất/, "API cards must keep
 assert.doesNotMatch(source, />Chạy job<\/button>/, "the legacy API worker action label must be removed");
 assert.doesNotMatch(source, /<code>api:\{worker\.worker_id\}/, "registry worker ids already contain the api: prefix and must not be duplicated");
 assert.match(source, /label: "9Router"/, "new 9Router workers must use the concise display label");
+assert.match(source, /onWorkerUpdate/, "Manager must subscribe to push worker updates instead of waiting for the 30-second status watchdog");
 
 console.log("✓ API worker Chat-style job modal smoke test passed");
