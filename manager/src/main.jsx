@@ -445,7 +445,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.89";
+const WORKER_EXTENSION_VERSION = "0.5.90";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
