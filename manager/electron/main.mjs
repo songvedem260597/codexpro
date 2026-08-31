@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
+import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
 import { createRuntimeRestartGuard } from "./runtime-restart-guard.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
@@ -244,6 +245,45 @@ let scheduledTaskCache = null;
 let scheduledTaskPromise = null;
 const runtimeHealthDiagnosticTracker = createRuntimeHealthDiagnosticTracker();
 const runtimeRestartGuard = createRuntimeRestartGuard({ sendCooldownMs: 30_000 });
+const responseQueue = createMcpResponseQueue({
+  maxConcurrent: 2,
+  maxBackgroundConcurrent: 1,
+  maxQueued: 64,
+  onEvent: (event) => {
+    if (event.type === "started" && Number(event.queue_wait_ms) >= 1_000) {
+      diagnostic("warn", "manager", "queue", `MCP response đợi queue ${event.queue_wait_ms} ms`, {
+        action: "response-queue-wait",
+        response_queue_key: event.key,
+        priority: event.priority,
+        queue_wait_ms: event.queue_wait_ms,
+        queue_active: event.active,
+        queue_background_active: event.backgroundActive,
+        queue_pending: event.queued,
+        queue_coalesced: event.coalesced
+      });
+    } else if (event.type === "coalesced" && diagnosticAllowed(`response-queue-coalesced:${event.key}`, 10_000)) {
+      diagnostic("info", "manager", "queue", "Đã gộp request polling phản hồi trùng nhau", {
+        action: "response-queue-coalesced",
+        response_queue_key: event.key,
+        priority: event.priority,
+        queue_active: event.active,
+        queue_background_active: event.backgroundActive,
+        queue_pending: event.queued,
+        queue_coalesced: event.coalesced
+      });
+    } else if (event.type === "rejected") {
+      diagnostic("error", "manager", "queue", "MCP response queue đã đầy", {
+        action: "response-queue-full",
+        response_queue_key: event.key,
+        priority: event.priority,
+        queue_active: event.active,
+        queue_background_active: event.backgroundActive,
+        queue_pending: event.queued,
+        error_code: event.error_code
+      });
+    }
+  }
+});
 let repoScanCache = null;
 let repoScanPromise = null;
 const gitSummaryCache = new Map();
@@ -3300,44 +3340,56 @@ async function renameProfileChat(payload) {
 }
 
 async function getProfileResponse(payload) {
-  const managerStartedAt = Date.now();
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
-  const runtimeBaseStartedAt = Date.now();
-  const base = await readyRuntimeBaseStatus();
-  const runtimeBaseMs = Date.now() - runtimeBaseStartedAt;
-  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-  const localMcpStartedAt = Date.now();
-  const result = await localMcpTool(base.config, base.token, "browser_control", {
-    action: "get_chat_response",
-    profile_id: profileId,
-    conversation_id: conversationId,
-    // Keep canonical recovery compatible with an already-running pre-canonical_only server.
-    // New workers return before touching DOM when canonical_only is present; old servers strip
-    // the unknown flag but still perform the existing canonical + DOM response read.
-    read_dom: payload?.canonicalOnly === true || payload?.readDom !== false,
-    canonical_only: payload?.canonicalOnly === true,
-    recover_stale_dom: payload?.recoverStaleDom === true
-  }, 80000);
-  const responseProfileId = String(result?.profile_id || "").trim();
-  const responseConversationId = String(result?.conversation_id || "").trim()
-    || String(result?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1]
-    || "";
-  if (responseProfileId !== profileId || responseConversationId !== conversationId) {
-    throw new Error(`RESPONSE_OWNERSHIP_MISMATCH: expected ${profileId}:${conversationId}, received ${responseProfileId || "(missing-profile)"}:${responseConversationId || "(missing-conversation)"}.`);
-  }
-  return {
-    ...result,
-    response_profile_id: responseProfileId,
-    response_conversation_id: responseConversationId,
-    manager_phase_timings: {
-      runtime_base_ms: Math.max(0, runtimeBaseMs),
-      local_mcp_ms: Math.max(0, Date.now() - localMcpStartedAt),
-      manager_total_ms: Math.max(0, Date.now() - managerStartedAt)
+  const managerStartedAt = Date.now();
+  const canonicalOnly = payload?.canonicalOnly === true;
+  const readDom = canonicalOnly || payload?.readDom !== false;
+  const recoverStaleDom = payload?.recoverStaleDom === true;
+  const priority = payload?.priority === "interactive" ? "interactive" : "background";
+  const responseQueueKey = `${profileId}:${conversationId}:${canonicalOnly ? "canonical" : readDom ? recoverStaleDom ? "dom-recovery" : "dom" : "network"}`;
+  return responseQueue.run(responseQueueKey, async (queueContext) => {
+    const runtimeBaseStartedAt = Date.now();
+    const base = await readyRuntimeBaseStatus();
+    const runtimeBaseMs = Date.now() - runtimeBaseStartedAt;
+    if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+    const localMcpStartedAt = Date.now();
+    const result = await localMcpTool(base.config, base.token, "browser_control", {
+      action: "get_chat_response",
+      profile_id: profileId,
+      conversation_id: conversationId,
+      // Keep canonical recovery compatible with an already-running pre-canonical_only server.
+      // New workers return before touching DOM when canonical_only is present; old servers strip
+      // the unknown flag but still perform the existing canonical + DOM response read.
+      read_dom: payload?.canonicalOnly === true || payload?.readDom !== false,
+      canonical_only: payload?.canonicalOnly === true,
+      recover_stale_dom: payload?.recoverStaleDom === true
+    }, 80000);
+    const responseProfileId = String(result?.profile_id || "").trim();
+    const responseConversationId = String(result?.conversation_id || "").trim()
+      || String(result?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1]
+      || "";
+    if (responseProfileId !== profileId || responseConversationId !== conversationId) {
+      throw new Error(`RESPONSE_OWNERSHIP_MISMATCH: expected ${profileId}:${conversationId}, received ${responseProfileId || "(missing-profile)"}:${responseConversationId || "(missing-conversation)"}.`);
     }
-  };
+    return {
+      ...result,
+      response_profile_id: responseProfileId,
+      response_conversation_id: responseConversationId,
+      manager_phase_timings: {
+        queue_wait_ms: Math.max(0, Number(queueContext.queueWaitMs) || 0),
+        queue_active_at_enqueue: Math.max(0, Number(queueContext.activeAtEnqueue) || 0),
+        queue_queued_at_enqueue: Math.max(0, Number(queueContext.queuedAtEnqueue) || 0),
+        queue_coalesced: Math.max(0, Number(queueContext.coalesced) || 0),
+        queue_priority: queueContext.priority,
+        runtime_base_ms: Math.max(0, runtimeBaseMs),
+        local_mcp_ms: Math.max(0, Date.now() - localMcpStartedAt),
+        manager_total_ms: Math.max(0, Date.now() - managerStartedAt)
+      }
+    };
+  }, { priority });
 }
 
 async function inspectThroughMcp(root) {
