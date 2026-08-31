@@ -11,7 +11,7 @@
     "build": "vite build",
     "test:markdown": "node scripts/markdown-response-smoke.mjs",
     "test:worker-packs": "node scripts/worker-pack-assets-smoke.mjs",
-    "test:diagnostic": "node scripts/diagnostic-log-smoke.mjs && node scripts/runtime-health-diagnostic-smoke.mjs",
+    "test:diagnostic": "node scripts/diagnostic-log-smoke.mjs && node scripts/runtime-health-diagnostic-smoke.mjs && node scripts/operations-metrics-smoke.mjs",
     "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:extension-sync": "node scripts/extension-sync-smoke.mjs",

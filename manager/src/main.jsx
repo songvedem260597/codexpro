@@ -3719,6 +3719,7 @@ function App() {
             settings={managerSettings}
             managerVersion={managerPackage.version}
             workerVersion={WORKER_EXTENSION_VERSION}
+            platform={platform}
             profileSummary={profileSummary}
             busy={busy}
             onOpenChat={setChatProfileId}

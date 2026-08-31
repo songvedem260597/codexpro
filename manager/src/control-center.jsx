@@ -95,6 +95,7 @@ export function ControlCenter({
   settings,
   managerVersion,
   workerVersion,
+  platform = "hệ thống",
   profileSummary,
   busy,
   onOpenChat,
@@ -144,7 +145,7 @@ export function ControlCenter({
   const mcpProcesses = runtimeProcesses.filter((item) => mcpPids.has(Number(item.pid)));
   const mcpRam = mcpProcesses.reduce((total, item) => total + Number(item.memoryBytes || 0), 0);
   const mcpCpu = mcpProcesses.reduce((total, item) => total + Number(item.cpuPercent || 0), 0);
-  const chromeProcesses = runtimeProcesses.filter((item) => String(item.name || "").toLowerCase() === "chrome");
+  const chromeProcesses = runtimeProcesses.filter((item) => String(item.name || "").toLowerCase().includes("chrome"));
   const chromeRam = chromeProcesses.reduce((total, item) => total + Number(item.memoryBytes || 0), 0);
   const chromeCpu = chromeProcesses.reduce((total, item) => total + Number(item.cpuPercent || 0), 0);
   const slowRequests = diagnosticEntries.filter((entry) => Number(entry?.duration_ms || entry?.details?.duration_ms || 0) >= 2000 || /phản hồi chậm|slow/i.test(String(entry?.message || "")));
@@ -218,7 +219,7 @@ export function ControlCenter({
           <div className="control-toggle-list">
             <Toggle checked={settings?.autoRecovery === true} onChange={(value) => onToggleSetting("autoRecovery", value)} title="Tự khôi phục profile treo" hint="Chỉ chạy khi phát hiện renderer/network bất thường rõ ràng." />
             <Toggle checked={settings?.autoUpdateWorkers === true} onChange={(value) => onToggleSetting("autoUpdateWorkers", value)} title="Update worker khi rảnh" hint="Bỏ qua task đang chạy và tự update sau khi worker rảnh." />
-            <Toggle checked={settings?.taskNotifications !== false} onChange={(value) => onToggleSetting("taskNotifications", value)} title="Thông báo Windows" hint="Báo khi task hoàn tất, lỗi hoặc profile bị treo." />
+            <Toggle checked={settings?.taskNotifications !== false} onChange={(value) => onToggleSetting("taskNotifications", value)} title={`Thông báo ${platform}`} hint="Báo khi task hoàn tất, lỗi hoặc profile bị treo." />
           </div>
         </section>
       </div>
