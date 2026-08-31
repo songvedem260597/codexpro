@@ -2870,6 +2870,7 @@ async function checkConnectorInstalled() {
 
 async function pollLoop() {
   if(polling)return;polling=true;
+  const heartbeat=setInterval(()=>{void profileInfo().then(profile=>profile.enabled?fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile})}):null).catch(()=>{});},10000);
   try{
     while(true){
       try{
@@ -2892,7 +2893,7 @@ async function pollLoop() {
         }
       }catch{await new Promise(resolve=>setTimeout(resolve,2000));}
     }
-  }finally{polling=false;}
+  }finally{clearInterval(heartbeat);polling=false;}
 }
 
 function ensureBridgeAlarm(){

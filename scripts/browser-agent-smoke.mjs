@@ -415,6 +415,7 @@ assert.match(worker, /scheduleDomActivityRefresh/, "DOM settling must refresh un
 assert.match(worker, /async function recentConversationList[\s\S]*?promiseWithTimeout\([\s\S]*?fetchRecentConversationsPage[\s\S]*?DOM_ACTION_TIMEOUT_MS/, "a hung active renderer must not block the extension poll loop and heartbeat");
 assert.match(worker, /if\(action==='recover_chat_tab'\)[\s\S]*?WORKER_BUSY:[\s\S]*?replaceUnresponsiveChatTab/, "manual tab recovery must refuse active generations and replace only an idle renderer");
 assert.match(worker, /function stopChatGenerationPage[\s\S]*?testId==='stop-button'[\s\S]*?stopControl\.click\(\)/, "task stop must click only ChatGPT's visible stop-generation control");
+assert.match(worker, /const heartbeat=setInterval\(\(\)=>\{void profileInfo\(\)[\s\S]*?\/register[\s\S]*?10000\);[\s\S]*?finally\{clearInterval\(heartbeat\);polling=false;\}/, "profile heartbeat must continue independently while tab and DOM probes are slow");
 assert.match(worker, /if\(action==='stop_chat_generation'\)[\s\S]*?stopChatGenerationPage[\s\S]*?stopped:Boolean\(result\.stopped\)/, "worker must expose a bounded stop-generation command");
 assert.match(server, /"stop_chat_generation"/, "browser_control schema must expose stop_chat_generation");
 assert.match(worker, /async function replaceUnresponsiveChatTab[\s\S]*?chrome\.tabs\.create[\s\S]*?waitForTab[\s\S]*?chrome\.tabs\.remove\(replacedTabId\)/, "renderer recovery must load a replacement before closing the exact stuck tab");
@@ -664,7 +665,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.91");
+assert.equal(manifest.version, "0.5.92");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
