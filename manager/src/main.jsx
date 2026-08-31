@@ -3340,7 +3340,14 @@ function App() {
         : current);
     }
     try {
-      const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId, readDom, recoverStaleDom, canonicalOnly });
+      const result = await api.getProfileResponse({
+        profileId: profile.profile_id,
+        conversationId,
+        readDom,
+        recoverStaleDom,
+        canonicalOnly,
+        priority: profile.profile_id === chatProfileId ? "interactive" : "background"
+      });
       const responseProfileId = String(result?.response_profile_id || result?.profile_id || "").trim();
       const responseConversationId = String(result?.response_conversation_id || result?.conversation_id || "").trim()
         || String(result?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1]
