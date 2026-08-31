@@ -211,7 +211,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     }
     await general.close();
     clients.splice(clients.indexOf(general), 1);
-    const direct = await createClient('repo-task-direct-api-worker', 'api:direct-smoke');
+    const direct = await createClient('repo-direct-api-worker', 'api:direct-smoke');
     const directBegan = await callTool(direct, 'begin_repo_task', { task_title: 'Inspect direct request', task_kind: 'code' });
     if (!directBegan.structuredContent.verified || !/^cpt_[a-f0-9]{24}$/.test(String(directBegan.structuredContent.task_id || ''))) {
       throw new Error(`direct profile task did not receive a server-generated id: ${JSON.stringify(directBegan.structuredContent)}`);
@@ -427,7 +427,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     await gated.close();
     clients.splice(clients.indexOf(gated), 1);
 
-    const gatedAgain = await createClient('repo-task-gate-new-session', 'gate-smoke');
+    const gatedAgain = await createClient('repo-gate-new-session', 'gate-smoke');
     const resumedRead = await callTool(gatedAgain, 'read', { path: 'gate.txt' });
     if (!resumedRead.structuredContent.text.includes('gate changed')) throw new Error('new MCP session did not adopt the active profile task');
     await gatedAgain.close();
