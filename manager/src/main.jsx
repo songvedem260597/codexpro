@@ -3502,7 +3502,7 @@ function App() {
                       ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
                       : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
                 >
-                  {busy === "reload-profiles" ? "Đang update worker…" : "Update worker extension"}
+                  {busy === "reload-profiles" ? "Đang update extension…" : "Update extension"}
                 </button>
                 <div className="runtime-action-group">
                   <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>
