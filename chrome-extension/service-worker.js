@@ -2182,8 +2182,13 @@ if(action==='rename_chat'){
     return {action,...injected.result};
   }
   if(action==='get_chat_response'){
+    const responseTimingStartedAt=Date.now();
+    const responsePhaseTimings={command_queue_ms:Math.max(0,responseTimingStartedAt-(Number(command?.created_at_ms)||responseTimingStartedAt))};
+    const addResponsePhaseTiming=(name,startedAt)=>{responsePhaseTimings[name]=Math.max(0,Number(responsePhaseTimings[name]||0)+(Date.now()-startedAt));};
+    const responseTimingPayload=()=>({response_phase_timings:{...responsePhaseTimings,extension_total_ms:Math.max(0,Date.now()-responseTimingStartedAt)}});
     const conversationId=String(args.conversation_id||'').trim();
     if(!/^[A-Za-z0-9-]{8,160}$/.test(conversationId))throw new Error('Conversation id không hợp lệ.');
+    const findTabStartedAt=Date.now();
     const tabs=await chrome.tabs.query({});
     const conversations=tabs.filter(candidate=>candidate.id&&String(candidate.url||'').startsWith('https://chatgpt.com/c/'));
     let tab=conversations.find(candidate=>{try{return new URL(candidate.url).pathname===`/c/${conversationId}`;}catch{return false;}});
@@ -2193,7 +2198,10 @@ if(action==='rename_chat'){
       tab=await chrome.tabs.create({url:`https://chatgpt.com/c/${conversationId}`,active:false});await waitForTab(tab.id,45000);tab=await chrome.tabs.get(tab.id);
     }
     if(!tab?.id)throw new Error('Không mở được đoạn chat cần đọc phản hồi.');
+    addResponsePhaseTiming('find_tab_ms',findTabStartedAt);
+    const networkStateStartedAt=Date.now();
     let networkState=await chatRequestState(tab.id,conversationId);
+    addResponsePhaseTiming('network_state_ms',networkStateStartedAt);
     const networkPayloadOf=(state)=>({
       network_state:state.network_state,
       network_source:state.network_source,
@@ -2205,11 +2213,15 @@ if(action==='rename_chat'){
       network_duration_ms:state.network_duration_ms
     });
     let networkPayload=networkPayloadOf(networkState);
+    const networkStreamStartedAt=Date.now();
     const networkStream=await chatNetworkStreamCapture(tab.id,conversationId);
+    addResponsePhaseTiming('network_stream_ms',networkStreamStartedAt);
     if(networkState.busy&&networkStream.completed&&!networkStream.error){
+      const networkReconcileStartedAt=Date.now();
       await reconcileChatNetworkCompletion(tab.id,conversationId,'network_stream');
       networkState=await chatRequestState(tab.id,conversationId);
       networkPayload=networkPayloadOf(networkState);
+      addResponsePhaseTiming('network_reconcile_ms',networkReconcileStartedAt);
     }else if(networkState.busy&&!networkStream.available){
       const startedAt=Date.parse(networkState.network_last_started_at||'');
       if(Number.isFinite(startedAt)&&Date.now()-startedAt>=CANONICAL_COMPLETION_PROBE_AFTER_MS&&await probeCanonicalCompletion(tab.id,conversationId,false)){
@@ -2238,9 +2250,10 @@ if(action==='rename_chat'){
       network_stream_updated_at:String(networkStream.updated_at||'')
     };
     if(args.read_dom===false&&args.canonical_only!==true){
-      return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:visibleNetworkStreamText,text_length:visibleNetworkStreamText.length,truncated:false,incomplete:effectiveNetworkBusy,incomplete_reason:effectiveNetworkBusy?(visibleNetworkStreamText?'network_stream_in_progress':visibleNetworkStreamActivityText?'tool_activity_in_progress':'generation_in_progress'):'',conversation_limit_reached:false,conversation_limit_message:'',message_count:visibleNetworkStreamMessages.length,total_message_count:visibleNetworkStreamMessages.length,messages:visibleNetworkStreamMessages,busy:effectiveNetworkBusy,dom_available:false,dom_skipped:true,dom_error:'',response_ready:false,response_source:visibleNetworkStreamText?'network_stream':visibleNetworkStreamActivityText?'network_tool_activity':'network_state',updated_at:networkStream.updated_at||new Date().toISOString(),...networkStreamPayload,...networkPayload},{networkStream});
+      return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:visibleNetworkStreamText,text_length:visibleNetworkStreamText.length,truncated:false,incomplete:effectiveNetworkBusy,incomplete_reason:effectiveNetworkBusy?(visibleNetworkStreamText?'network_stream_in_progress':visibleNetworkStreamActivityText?'tool_activity_in_progress':'generation_in_progress'):'',conversation_limit_reached:false,conversation_limit_message:'',message_count:visibleNetworkStreamMessages.length,total_message_count:visibleNetworkStreamMessages.length,messages:visibleNetworkStreamMessages,busy:effectiveNetworkBusy,dom_available:false,dom_skipped:true,dom_error:'',response_ready:false,response_source:visibleNetworkStreamText?'network_stream':visibleNetworkStreamActivityText?'network_tool_activity':'network_state',updated_at:networkStream.updated_at||new Date().toISOString(),...networkStreamPayload,...networkPayload,...responseTimingPayload()},{networkStream});
     }
     let canonical={ok:false,error:''};
+    const canonicalReadStartedAt=Date.now();
     try{
       const [canonicalInjection]=await promiseWithTimeout(
         chrome.scripting.executeScript({target:{tabId:tab.id},world:'MAIN',func:readCanonicalConversationPage,args:[conversationId]}),
@@ -2249,6 +2262,7 @@ if(action==='rename_chat'){
       );
       canonical=canonicalInjection?.result||canonical;
     }catch(error){canonical={ok:false,error:String(error?.message||error).slice(0,500)};}
+    addResponsePhaseTiming('canonical_read_ms',canonicalReadStartedAt);
     const canonicalGenerationMatches=canonicalMatchesCurrentGeneration(canonicalActivityState(tab.id,conversationId),canonical);
     const rememberedCanonicalActivity=rememberCanonicalActivity(tab.id,conversationId,canonical);
     const currentCanonical=canonical.ok&&!canonicalGenerationMatches
@@ -2256,23 +2270,27 @@ if(action==='rename_chat'){
       : canonical;
     let canonicalActivityPayload={canonical_busy:Boolean(rememberedCanonicalActivity.busy),canonical_response_ready:Boolean(rememberedCanonicalActivity.response_ready&&!rememberedCanonicalActivity.busy),canonical_observed:Boolean(canonical.ok)};
     if(currentCanonical.ok&&currentCanonical.response_ready&&!currentCanonical.busy){
+      const canonicalReconcileStartedAt=Date.now();
       await reconcileChatNetworkCompletion(tab.id,conversationId,'canonical_api');
       networkState=await chatRequestState(tab.id,conversationId);
       networkPayload=networkPayloadOf(networkState);
+      addResponsePhaseTiming('canonical_reconcile_ms',canonicalReconcileStartedAt);
     }
     if(args.canonical_only===true){
       if(currentCanonical.ok){
         const latestAssistant=[...(currentCanonical.messages||[])].reverse().find(message=>message.role==='assistant');
-        return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(currentCanonical.text||''),text_length:String(currentCanonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(currentCanonical.busy||networkStreamInProgress),incomplete_reason:currentCanonical.busy?'canonical_generation_in_progress':networkStreamInProgress?'tool_activity_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(currentCanonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(currentCanonical.messages||[]).length,messages:currentCanonical.messages||[],busy:Boolean(effectiveNetworkBusy||currentCanonical.busy),dom_available:false,dom_skipped:true,dom_error:'',canonical_available:true,canonical_error:'',canonical_generation_matches:canonicalGenerationMatches,response_ready:Boolean(currentCanonical.response_ready&&!networkStreamInProgress),response_source:'canonical_api',updated_at:new Date().toISOString(),...canonicalActivityPayload,...networkStreamPayload,...networkPayload},{canonical,networkStream});
+        return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(currentCanonical.text||''),text_length:String(currentCanonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(currentCanonical.busy||networkStreamInProgress),incomplete_reason:currentCanonical.busy?'canonical_generation_in_progress':networkStreamInProgress?'tool_activity_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(currentCanonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(currentCanonical.messages||[]).length,messages:currentCanonical.messages||[],busy:Boolean(effectiveNetworkBusy||currentCanonical.busy),dom_available:false,dom_skipped:true,dom_error:'',canonical_available:true,canonical_error:'',canonical_generation_matches:canonicalGenerationMatches,response_ready:Boolean(currentCanonical.response_ready&&!networkStreamInProgress),response_source:'canonical_api',updated_at:new Date().toISOString(),...canonicalActivityPayload,...networkStreamPayload,...networkPayload,...responseTimingPayload()},{canonical,networkStream});
       }
-      return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:visibleNetworkStreamText,text_length:visibleNetworkStreamText.length,truncated:false,incomplete:effectiveNetworkBusy,incomplete_reason:effectiveNetworkBusy?'generation_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:visibleNetworkStreamMessages.length,total_message_count:visibleNetworkStreamMessages.length,messages:visibleNetworkStreamMessages,busy:effectiveNetworkBusy,dom_available:false,dom_skipped:true,dom_error:'',canonical_available:false,canonical_error:String(canonical.error||''),response_ready:false,response_source:visibleNetworkStreamText?'network_stream':'network_state',updated_at:networkStream.updated_at||new Date().toISOString(),...canonicalActivityPayload,...networkStreamPayload,...networkPayload},{canonical,networkStream});
+      return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:visibleNetworkStreamText,text_length:visibleNetworkStreamText.length,truncated:false,incomplete:effectiveNetworkBusy,incomplete_reason:effectiveNetworkBusy?'generation_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:visibleNetworkStreamMessages.length,total_message_count:visibleNetworkStreamMessages.length,messages:visibleNetworkStreamMessages,busy:effectiveNetworkBusy,dom_available:false,dom_skipped:true,dom_error:'',canonical_available:false,canonical_error:String(canonical.error||''),response_ready:false,response_source:visibleNetworkStreamText?'network_stream':'network_state',updated_at:networkStream.updated_at||new Date().toISOString(),...canonicalActivityPayload,...networkStreamPayload,...networkPayload,...responseTimingPayload()},{canonical,networkStream});
     }
+    const domReadStartedAt=Date.now();
     try{
       const [injected]=await promiseWithTimeout(
         chrome.scripting.executeScript({target:{tabId:tab.id},func:readChatResponsePage}),
         DOM_READ_TIMEOUT_MS,
         'Chrome renderer không phản hồi khi đọc DOM.'
       );
+      addResponsePhaseTiming('dom_read_ms',domReadStartedAt);
       if(!injected?.result?.ok)throw new Error(injected?.result?.error||'Không đọc được phản hồi ChatGPT.');
       let observedDomResult=injected.result;
       let domResult=injected.result;
@@ -2300,6 +2318,7 @@ if(action==='rename_chat'){
       const recovery={dom_recovery_checked:false,dom_recovered:false,dom_reloaded:false,dom_replaced:false,dom_reload_deferred:false,dom_reload_decision:'',response_checkpoint_applied:false,replaced_tab_id:0,recovery_tab_id:0,dom_recovery_source:'',dom_recovery_error:'',resume_mode:'merge_only'};
       const connectionInterrupted=Boolean(injected.result.connection_interrupted);
       const messageDeliveryTimedOut=Boolean(injected.result.message_delivery_timed_out);
+      const domRecoveryStartedAt=Date.now();
       if(args.recover_stale_dom===true&&(connectionInterrupted||messageDeliveryTimedOut||currentCanonical.ok&&currentCanonical.response_ready&&!currentCanonical.busy)){
         recovery.dom_recovery_checked=true;
         try{
@@ -2355,6 +2374,7 @@ if(action==='rename_chat'){
           recovery.dom_recovery_error=String(error?.message||error).slice(0,500);
         }
       }
+      if(args.recover_stale_dom===true)addResponsePhaseTiming('dom_recovery_ms',domRecoveryStartedAt);
       if(recovery.dom_reloaded||recovery.dom_replaced){
         domResult=mergeChatRecoveryResponse(recoveryCheckpoint,domResult);
         recovery.response_checkpoint_applied=Boolean(domResult.response_checkpoint_applied);
@@ -2362,11 +2382,12 @@ if(action==='rename_chat'){
       }
       const domResponseReady=Boolean(domResult.response_ready&&!domResult.busy&&!unverifiedShortDom);
       const imageResponseReady=Boolean(domResponseReady&&domResult.image_response_ready);
-      return withResponseAudit({action,target_id:tab.id,...domResult,busy:Boolean(!domResponseReady&&(effectiveNetworkBusy||currentCanonical.busy||domResult.busy)),incomplete:domResponseReady?false:Boolean(domResult.incomplete),incomplete_reason:domResponseReady?'':String(domResult.incomplete_reason||''),dom_available:true,dom_busy:Boolean(domResult.busy),canonical_available:Boolean(canonical.ok),canonical_error:String(canonical.error||''),canonical_generation_matches:canonicalGenerationMatches,short_dom_response_unverified:unverifiedShortDom,...canonicalActivityPayload,...networkStreamPayload,...recovery,...networkPayload,message_delivery_timed_out:messageDeliveryTimedOut,...(domResponseReady?{canonical_busy:false,canonical_response_ready:true,network_stream_in_progress:false,response_ready:true,response_kind:imageResponseReady?'image':String(domResult.response_kind||'text')}:{})},{dom:observedDomResult,canonical,networkStream});
+      return withResponseAudit({action,target_id:tab.id,...domResult,busy:Boolean(!domResponseReady&&(effectiveNetworkBusy||currentCanonical.busy||domResult.busy)),incomplete:domResponseReady?false:Boolean(domResult.incomplete),incomplete_reason:domResponseReady?'':String(domResult.incomplete_reason||''),dom_available:true,dom_busy:Boolean(domResult.busy),canonical_available:Boolean(canonical.ok),canonical_error:String(canonical.error||''),canonical_generation_matches:canonicalGenerationMatches,short_dom_response_unverified:unverifiedShortDom,...canonicalActivityPayload,...networkStreamPayload,...recovery,...networkPayload,message_delivery_timed_out:messageDeliveryTimedOut,...responseTimingPayload(),...(domResponseReady?{canonical_busy:false,canonical_response_ready:true,network_stream_in_progress:false,response_ready:true,response_kind:imageResponseReady?'image':String(domResult.response_kind||'text')}:{})},{dom:observedDomResult,canonical,networkStream});
     }catch(error){
+      if(responsePhaseTimings.dom_read_ms==null)addResponsePhaseTiming('dom_read_ms',domReadStartedAt);
       if(currentCanonical.ok){
         const latestAssistant=[...(currentCanonical.messages||[])].reverse().find(message=>message.role==='assistant');
-        return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(currentCanonical.text||''),text_length:String(currentCanonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(currentCanonical.busy||networkStreamInProgress),incomplete_reason:currentCanonical.busy?'canonical_generation_in_progress':networkStreamInProgress?'tool_activity_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(currentCanonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(currentCanonical.messages||[]).length,messages:currentCanonical.messages||[],busy:Boolean(effectiveNetworkBusy||currentCanonical.busy),dom_available:false,dom_error:String(error?.message||error).slice(0,500),canonical_available:true,canonical_generation_matches:canonicalGenerationMatches,response_ready:Boolean(currentCanonical.response_ready&&!networkStreamInProgress),response_source:'canonical_api',updated_at:new Date().toISOString(),...canonicalActivityPayload,...networkStreamPayload,...networkPayload},{dom:{ok:false,error:String(error?.message||error)},canonical,networkStream});
+        return withResponseAudit({action,target_id:tab.id,ok:true,title:String(tab.title||''),url:String(tab.url||''),text:String(currentCanonical.text||''),text_length:String(currentCanonical.text||'').length,truncated:Boolean(latestAssistant?.truncated),incomplete:Boolean(currentCanonical.busy||networkStreamInProgress),incomplete_reason:currentCanonical.busy?'canonical_generation_in_progress':networkStreamInProgress?'tool_activity_in_progress':'',conversation_limit_reached:false,conversation_limit_message:'',message_count:(currentCanonical.messages||[]).filter(message=>message.role==='assistant').length,total_message_count:(currentCanonical.messages||[]).length,messages:currentCanonical.messages||[],busy:Boolean(effectiveNetworkBusy||currentCanonical.busy),dom_available:false,dom_error:String(error?.message||error).slice(0,500),canonical_available:true,canonical_generation_matches:canonicalGenerationMatches,response_ready:Boolean(currentCanonical.response_ready&&!networkStreamInProgress),response_source:'canonical_api',updated_at:new Date().toISOString(),...canonicalActivityPayload,...networkStreamPayload,...networkPayload,...responseTimingPayload()},{dom:{ok:false,error:String(error?.message||error)},canonical,networkStream});
       }
       return withResponseAudit({
         action,
@@ -2389,7 +2410,8 @@ if(action==='rename_chat'){
         dom_error:String(error?.message||error).slice(0,500),
         updated_at:new Date().toISOString(),
         ...networkStreamPayload,
-        ...networkPayload
+        ...networkPayload,
+        ...responseTimingPayload()
       },{dom:{ok:false,error:String(error?.message||error)},canonical,networkStream});
     }
   }

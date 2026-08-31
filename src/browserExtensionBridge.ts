@@ -132,6 +132,7 @@ interface PendingResult {
   timer?: NodeJS.Timeout;
   timeoutMs: number;
   waitingForReconnect: boolean;
+  dispatchedAtMs: number;
 }
 
 interface BridgeState {
@@ -459,7 +460,9 @@ function armPendingCommandTimeout(
 
 function markCommandDispatched(state: BridgeState, profile: ExtensionProfile, command: BridgeCommand): void {
   const pending = state.pending.get(command.id);
-  if (!pending?.waitingForReconnect) return;
+  if (!pending) return;
+  if (!pending.dispatchedAtMs) pending.dispatchedAtMs = Date.now();
+  if (!pending.waitingForReconnect) return;
   pending.waitingForReconnect = false;
   armPendingCommandTimeout(
     state,
@@ -938,8 +941,10 @@ async function runBrowserExtensionCommandCore(
       + (waitingForReconnect ? PROFILE_RECONNECT_WAIT_MS : 0)
       + Math.max(1_000, timeoutMs - COMMAND_EXPIRY_HEADROOM_MS)
   };
+  let pendingRecord: PendingResult;
   const result = new Promise<Record<string, any>>((resolve, reject) => {
-    state.pending.set(command.id, { resolve, reject, timeoutMs, waitingForReconnect });
+    pendingRecord = { resolve, reject, timeoutMs, waitingForReconnect, dispatchedAtMs: 0 };
+    state.pending.set(command.id, pendingRecord);
     armPendingCommandTimeout(
       state,
       profile,
@@ -951,7 +956,17 @@ async function runBrowserExtensionCommandCore(
     );
   });
   if (!deliver(state, profile, command)) profile.queued.push(command);
-  return await result;
+  const resolved = await result;
+  const completedAtMs = Date.now();
+  const dispatchedAtMs = pendingRecord!.dispatchedAtMs || completedAtMs;
+  return {
+    ...resolved,
+    bridge_phase_timings: {
+      queue_wait_ms: Math.max(0, dispatchedAtMs - createdAtMs),
+      extension_roundtrip_ms: Math.max(0, completedAtMs - dispatchedAtMs),
+      bridge_total_ms: Math.max(0, completedAtMs - createdAtMs)
+    }
+  };
 }
 
 export async function runBrowserExtensionCommand(
