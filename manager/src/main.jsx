@@ -1455,7 +1455,7 @@ function App() {
   }, [managerSettings.autoRecovery, status?.browserProfiles]);
 
   useEffect(() => {
-    if (!managerSettings.autoUpdateWorkers || busy) return;
+    if (!managerSettings.autoUpdateWorkers || busy || !status?.local?.ok || status?.workerSnapshotStale) return;
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
     const hasSafeOutdatedWorker = profiles.some((profile) => {
       if (!profile?.connected || versionAtLeast(profile.extension_version)) return false;
@@ -1466,7 +1466,7 @@ function App() {
     if (!hasSafeOutdatedWorker || Date.now() - operationsAutoUpdateAt.current < 60_000) return;
     operationsAutoUpdateAt.current = Date.now();
     void reloadProfiles();
-  }, [busy, managerSettings.autoUpdateWorkers, status?.browserProfiles]);
+  }, [busy, managerSettings.autoUpdateWorkers, status?.browserProfiles, status?.local?.ok, status?.workerSnapshotStale]);
 
   useEffect(() => {
     setChatWidthInput(String(managerSettings.chatWidth));
@@ -2854,6 +2854,8 @@ function App() {
         notify(`Đã update thành công ${result.count} worker lên ${result.version}${result.deferred ? ` · bỏ qua ${result.deferred} worker đang làm việc` : ""}`);
       } else if (result.deferred) {
         notify(`${result.deferred} worker đang làm việc · chưa update để tránh gián đoạn`);
+      } else if (result.mode === "runtime_unavailable") {
+        notify("MCP tạm thời không phản hồi · sẽ tự update worker khi kết nối phục hồi");
       } else {
         notify(`Worker extension đã ở bản ${WORKER_EXTENSION_VERSION}`);
       }
