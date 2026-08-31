@@ -1,22 +1,40 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import managerPackage from "../package.json";
 import "./styles.css";
+import "./control-center.css";
+import "@fontsource/be-vietnam-pro/400.css";
+import "@fontsource/be-vietnam-pro/500.css";
+import "@fontsource/be-vietnam-pro/600.css";
+import "@fontsource/be-vietnam-pro/700.css";
+import "@fontsource/manrope/400.css";
+import "@fontsource/manrope/500.css";
+import "@fontsource/manrope/600.css";
+import "@fontsource/manrope/700.css";
+import "@fontsource/jetbrains-mono/400.css";
+import "@fontsource/jetbrains-mono/500.css";
+import "@fontsource/jetbrains-mono/600.css";
+import "@fontsource/jetbrains-mono/700.css";
 import workerHung from "./assets/worker-packs/y-ta-dam-dang-pixel/hung.gif";
 import workerIdle from "./assets/worker-packs/y-ta-dam-dang-pixel/idle.gif";
 import workerWorking from "./assets/worker-packs/y-ta-dam-dang-pixel/working.gif";
-import { canAcceptNextChatMessage, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
-import { handleResponseWheel, installResponseAutoPin, recordResponseScroll } from "./chat-scroll.js";
+import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
+import { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, recordResponseScroll, responseScrollMetrics, scheduleResponseAutoResume, scrollResponseToTurnAnchor as applyResponseTurnAnchor } from "./chat-scroll.js";
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
+import { mergeBrowserProfilePayload, sameProjectList } from "./ui-performance.js";
 import { CodeGraphView } from "./code-graph-view.jsx";
+import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
+import { ControlCenter } from "./control-center.jsx";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
 const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
 const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
+const RESPONSE_MANUAL_SCROLL_RESUME_MS = 5000;
 const REALTIME_WATCHDOG_MS = 30000;
 const PROJECT_REFRESH_MS = 5 * 60 * 1000;
 const NEW_CHAT_TARGET = "__codexpro_new_chat__";
@@ -26,6 +44,7 @@ const REPO_TASK_VERIFICATION_RETRY_MS = 1500;
 const LATEST_RESPONSE_RECOVERY_POLL_MS = 3000;
 const PROJECTS_PER_PAGE = 8;
 const PROFILE_TASK_LABELS_STORAGE_KEY = "codexpro.profileTaskLabels.v2";
+const DEEP_UI_DIAGNOSTICS_ENABLED = new URLSearchParams(window.location.search).get("debugUi") === "1";
 
 function loadProfileTaskLabels() {
   try {
@@ -62,6 +81,9 @@ const workerIcons = {
 
 const FONT_OPTIONS = [
   { value: "system", label: "System / mặc định", css: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif' },
+  { value: "be-vietnam-pro", label: "Be Vietnam Pro", hint: "Text dài · tiếng Việt rõ và dễ đọc", css: '"Be Vietnam Pro", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif' },
+  { value: "manrope", label: "Manrope", hint: "Tiêu đề · giao diện hiện đại, gọn", css: 'Manrope, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif' },
+  { value: "jetbrains-mono", label: "JetBrains Mono", hint: "Code · ID · log kỹ thuật", css: '"JetBrains Mono", "SFMono-Regular", "Cascadia Code", Consolas, monospace' },
   { value: "arial", label: "Arial", css: 'Arial, sans-serif' },
   { value: "tahoma", label: "Tahoma", css: 'Tahoma, sans-serif' },
   { value: "verdana", label: "Verdana", css: 'Verdana, sans-serif' },
@@ -69,6 +91,18 @@ const FONT_OPTIONS = [
   { value: "georgia", label: "Georgia", css: 'Georgia, serif' },
   { value: "cascadia", label: "Cascadia Code", css: '"Cascadia Code", Consolas, monospace' }
 ];
+
+const FONT_ROLE_OPTIONS = [
+  { value: "inherit", label: "Theo font nội dung", hint: "Dùng cùng font với nội dung & control" },
+  ...FONT_OPTIONS
+];
+
+const FONT_WEIGHT_LABELS = {
+  400: "Regular",
+  500: "Medium",
+  600: "Semibold",
+  700: "Bold"
+};
 
 const GLOBAL_RULES_TEMPLATE = `# CodexPro Global Rules
 
@@ -83,9 +117,15 @@ const DEFAULT_MANAGER_SETTINGS = {
   chatWidth: 940,
   chatHeight: 330,
   fontFamily: "system",
+  headingFontFamily: "inherit",
+  monoFontFamily: "inherit",
   fontSize: 14,
+  fontWeight: 400,
   profileLayout: "rows",
   maxSubagents: 1,
+  autoRecovery: false,
+  autoUpdateWorkers: false,
+  taskNotifications: true,
   globalRules: GLOBAL_RULES_TEMPLATE,
   repoSelections: {},
   selectedWorkerPackId: "default",
@@ -387,7 +427,7 @@ function toolActivityFromText(text) {
   const target = String(args.path || args.cwd || args.root || "").trim();
   const shortTarget = target ? target.replace(/\\+/g, "/").split("/").slice(-3).join("/") : "";
   const labels = {
-    begin_repo_task: "Đang xác minh repo",
+    begin_repo_task: "Đang ghi nhận task",
     open_workspace: "Đang mở repo",
     open_current_workspace: "Đang mở workspace",
     search: shortTarget ? `Đang tìm trong ${shortTarget}` : "Đang tìm trong repo",
@@ -419,7 +459,7 @@ function compactToolActivityMessages(messages) {
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.73";
+const WORKER_EXTENSION_VERSION = "0.5.83";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -545,19 +585,38 @@ function extensionReady(version) {
   return true;
 }
 
+function repoTaskEvidenceSummary(proof) {
+  if (!proof) return "";
+  const title = String(proof.task_title || "").trim() || "Task chưa có tên";
+  if (proof.task_kind !== "code") return `${title} · GENERAL · không tải Rules/CodexGraph`;
+  const rulesHash = String(proof.global_rules_sha256 || "").slice(0, 8);
+  const coverage = proof.codexgraph?.coverage || {};
+  const symbols = Number(coverage.symbolCount) || 0;
+  const relationships = Number(coverage.relationshipCount) || 0;
+  return `${title} · CODE · Rules ${rulesHash || "thiếu hash"} ✓ · CodexGraph ${symbols} symbols / ${relationships} edges ✓`;
+}
+
 function profileSafeForWorkerUpdate(profile) {
   const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
   const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
   return profile?.activity === "idle" && Number(profile?.busy_request_count || 0) === 0 && !hasBusyTab;
 }
 
-function profileRequestChats(profile) {
+function conversationIdFromTab(tab) {
+  return String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+}
+
+function profileRequestChats(profile, preferredId = "") {
   const recent = Array.isArray(profile?.recent_conversations) ? profile.recent_conversations : [];
-  if (recent.length) return recent.slice(0, 3);
-  return (profile?.conversation_tabs || []).map((tab) => {
-    const match = String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/);
-    return match ? { id: match[1], title: tab.title, url: tab.url, open: true, active: tab.active } : null;
-  }).filter(Boolean).slice(0, 3);
+  const tabs = (profile?.conversation_tabs || []).map((tab) => {
+    const id = conversationIdFromTab(tab);
+    return id ? { id, title: tab.title, url: tab.url, open: true, active: tab.active, busy: tab.busy, settling: tab.settling, network_state: tab.network_state } : null;
+  }).filter(Boolean);
+  const tabById = new Map(tabs.map((chat) => [chat.id, chat]));
+  const conversations = [...recent.map((chat) => ({ ...chat, ...(tabById.get(String(chat.id)) || {}) })), ...tabs]
+    .filter((chat, index, all) => chat.id && all.findIndex((candidate) => String(candidate.id) === String(chat.id)) === index);
+  const preferred = conversations.find((chat) => String(chat.id) === String(preferredId));
+  return preferred ? [preferred, ...conversations.filter((chat) => chat !== preferred)].slice(0, 3) : conversations.slice(0, 3);
 }
 
 function applyConversationTitleOverrides(status, overrides) {
@@ -624,8 +683,122 @@ function buildConversationRolloverPrompt(result) {
   return `${prefix}\n\n${context}\n\nTiếp tục từ đúng việc còn dang dở. Nếu cần chờ người dùng đưa yêu cầu tiếp theo thì chỉ báo ngắn gọn rằng chat mới đã sẵn sàng để tiếp tục dự án.`.slice(0, 11800);
 }
 
+function ChatRequestComposer({
+  profileId,
+  initialDraft,
+  draftResetVersion,
+  attachments,
+  placeholder,
+  disabled,
+  attachmentDisabled,
+  canSendBase,
+  sending,
+  rolloverCreating,
+  selectedBusy,
+  selectedSettling,
+  isNewChat,
+  sendError,
+  sendEvidence,
+  canOpenChrome,
+  onPaste,
+  onChooseAttachments,
+  onOpenAttachmentPreview,
+  onRemoveAttachment,
+  onClearSendError,
+  onDraftSnapshot,
+  onClose,
+  onOpenChrome,
+  onSend
+}) {
+  const [draft, setDraft] = useState(() => String(initialDraft || ""));
+  const sendingRef = useRef(false);
+
+  const updateDraft = useCallback((nextDraft) => {
+    const normalized = String(nextDraft || "");
+    setDraft(normalized);
+    onDraftSnapshot(normalized);
+  }, [onDraftSnapshot]);
+
+  useEffect(() => {
+    updateDraft(initialDraft);
+  }, [profileId, draftResetVersion]);
+
+  const canSend = canSendBase && Boolean(draft.trim() || attachments.length);
+
+  const submit = useCallback(async () => {
+    if (!canSend || sendingRef.current) return;
+    sendingRef.current = true;
+    try {
+      const submitted = await onSend(draft);
+      if (submitted) updateDraft("");
+    } finally {
+      sendingRef.current = false;
+    }
+  }, [canSend, draft, onSend, updateDraft]);
+
+  return (
+    <>
+      <label className="request-label" htmlFor={`request-${profileId}`}>Nhắn tiếp</label>
+      <div className="request-composer">
+        <textarea
+          id={`request-${profileId}`}
+          value={draft}
+          maxLength={12000}
+          placeholder={placeholder}
+          onPaste={onPaste}
+          onChange={(event) => {
+            updateDraft(event.target.value);
+            if (sendError) onClearSendError();
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.nativeEvent?.isComposing || event.repeat) return;
+            if (!canSend) return;
+            event.preventDefault();
+            void submit();
+          }}
+          disabled={disabled}
+        />
+        {attachments.length > 0 && (
+          <div className="request-files">
+            {attachments.map((file) => (
+              <div className="request-file" key={file.path} title={file.path} role="button" tabIndex={0} aria-label={`Xem trước ${file.name}`} onClick={() => void onOpenAttachmentPreview(file)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void onOpenAttachmentPreview(file); } }}>
+                {file.previewDataUrl
+                  ? <img className="request-file-image" src={file.previewDataUrl} alt="" />
+                  : <span className="request-file-icon">▤</span>}
+                <span className="request-file-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span>
+                <button type="button" aria-label={`Bỏ ${file.name}`} onClick={(event) => { event.stopPropagation(); onRemoveAttachment(file.path); }} disabled={sending}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="request-composer-toolbar">
+          <button type="button" className="attach-button" onClick={onChooseAttachments} disabled={attachmentDisabled || attachments.length >= 4}><span>＋</span> Thêm file</button>
+          <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${draft.length.toLocaleString("vi-VN")}/12.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
+        </div>
+      </div>
+      {sendError && <div className="request-send-error">{sendError}</div>}
+      <SendDebugEvidence evidence={sendEvidence} />
+      <div className="request-card-foot">
+        {selectedBusy && <span>Đang nhận phản hồi</span>}
+        <div className="request-card-actions">
+          <button type="button" className="button secondary" onClick={onClose}>Đóng</button>
+          <button type="button" className="button secondary" onClick={onOpenChrome} disabled={!canOpenChrome}>Mở Chrome</button>
+          <button type="button" className="button primary" onClick={() => void submit()} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : selectedSettling ? "Chat đang hoàn tất" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function App() {
   const [activePage, setActivePage] = useState("overview");
+  const [diagnosticLogs, setDiagnosticLogs] = useState({ summary: { total: 0, info: 0, warn: 0, error: 0 }, entries: [], sources: [], categories: [], queried_hours: 24, checked_at: "" });
+  const [diagnosticFilters, setDiagnosticFilters] = useState({ level: "all", source: "all", category: "all", hours: 24, query: "" });
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
+  const [selectedDiagnostic, setSelectedDiagnostic] = useState(null);
+  const [operationsPerformance, setOperationsPerformance] = useState(null);
+  const [operationsLogs, setOperationsLogs] = useState([]);
+  const [uiPerformance, setUiPerformance] = useState({ fps: 60, longTasks: 0, maxLongTaskMs: 0 });
   const [managerSettings, setManagerSettings] = useState(DEFAULT_MANAGER_SETTINGS);
   const [chatWidthInput, setChatWidthInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatWidth));
   const [chatHeightInput, setChatHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatHeight));
@@ -655,7 +828,8 @@ function App() {
   const [workerUpdateConfirmOpen, setWorkerUpdateConfirmOpen] = useState(false);
   const [inspection, setInspection] = useState(null);
   const [checkingProfiles, setCheckingProfiles] = useState([]);
-  const [requestDrafts, setRequestDrafts] = useState({});
+  const requestDraftsRef = useRef({});
+  const [requestDraftResetVersions, setRequestDraftResetVersions] = useState({});
   const [requestTargets, setRequestTargets] = useState({});
   const [requestProjectRoots, setRequestProjectRoots] = useState({});
   const [requestFiles, setRequestFiles] = useState({});
@@ -682,19 +856,27 @@ function App() {
   const conversationRollovers = useRef(new Map());
   const profilesRef = useRef([]);
   const requestTargetsRef = useRef({});
+  const requestTargetReasons = useRef(new Map());
+  const requestTargetDiagnostics = useRef(new Map());
   const responseBodyRefs = useRef(new Map());
   const chatModalRef = useRef(null);
   const chatResponseRef = useRef(null);
   const responseScrollLocked = useRef(new Map());
+  const responseScrollResumeTimers = useRef(new Map());
   const responseScrollPositions = useRef(new Map());
+  const responseScrollDiagnostics = useRef(new Map());
+  const responseTurnAnchors = useRef(new Map());
   const responseAuditSignatures = useRef(new Map());
+  const operationsRecoveryTimes = useRef(new Map());
+  const operationsNotificationState = useRef(new Map());
+  const operationsAutoUpdateAt = useRef(0);
 
   const projectPageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE));
   const visibleProjects = useMemo(() => projects.slice(projectPage * PROJECTS_PER_PAGE, (projectPage + 1) * PROJECTS_PER_PAGE), [projects, projectPage]);
   const openChatResponse = chatProfileId ? requestResponses[chatProfileId] : null;
-  const openChatMessages = openChatResponse && chatProfileId
+  const openChatMessages = useMemo(() => openChatResponse && chatProfileId
     ? materializeTranscriptMessages(openChatResponse, String(openChatResponse.conversationId || ""))
-    : [];
+    : [], [chatProfileId, openChatResponse]);
   const openChatAwaitingAssistant = transcriptAwaitingAssistant(openChatMessages);
   const openChatLatestMessage = openChatMessages.at(-1);
   const openChatLatestMessageKey = openChatLatestMessage
@@ -721,6 +903,28 @@ function App() {
     ].join(":");
     return `${openChatResponse.conversationId || ""}:${messages.length}:${contentKey}:${turnKey}`;
   }, [busy, chatProfileId, openChatResponse, requestTargets, status?.browserProfiles]);
+  const openChatTurnActive = useMemo(() => {
+    if (!chatProfileId) return false;
+    const selectedTarget = String(requestTargets[chatProfileId] || openChatResponse?.conversationId || "");
+    const responseCurrent = Boolean(openChatResponse && openChatResponse.conversationId === selectedTarget);
+    const openProfile = (status?.browserProfiles || []).find((profile) => profile.profile_id === chatProfileId);
+    const openTab = (openProfile?.conversation_tabs || []).find((tab) => selectedTarget && String(tab.url || "").includes(`/c/${selectedTarget}`))
+      || (openProfile?.conversation_tabs || []).find((tab) => tab.active);
+    return Boolean(
+      busy === `request:${chatProfileId}`
+      || openTab?.busy
+      || openTab?.settling
+      || String(openTab?.network_state || "") === "generating"
+      || (responseCurrent && (
+        openChatResponse.busy
+        || openChatResponse.loading
+        || openChatResponse.networkStreamInProgress
+        || openChatResponse.canonicalBusy
+        || openChatResponse.incomplete
+        || openChatAwaitingAssistant
+      ))
+    );
+  }, [busy, chatProfileId, openChatAwaitingAssistant, openChatResponse, requestTargets, status?.browserProfiles]);
 
   useEffect(() => {
     setProjectPage((current) => Math.min(current, Math.max(0, Math.ceil(projects.length / PROJECTS_PER_PAGE) - 1)));
@@ -754,6 +958,130 @@ function App() {
     window.setTimeout(() => setToast(""), 2600);
   }, []);
 
+  const loadDiagnosticLogs = useCallback(async (showBusy = true) => {
+    if (typeof api.getDiagnosticLogs !== "function") return;
+    if (showBusy) setDiagnosticBusy(true);
+    try {
+      const next = await api.getDiagnosticLogs({ ...diagnosticFilters, limit: 1500 });
+      setDiagnosticLogs(next || { summary: { total: 0, info: 0, warn: 0, error: 0 }, entries: [] });
+      setSelectedDiagnostic(null);
+    } catch (err) {
+      logRendererDiagnostic(api, "error", "runtime", `Không tải được nhật ký: ${err?.message || String(err)}`, { action: "get-diagnostic-logs", error: err });
+      setError(err?.message || String(err));
+    } finally {
+      if (showBusy) setDiagnosticBusy(false);
+    }
+  }, [diagnosticFilters]);
+
+  const clearDiagnosticLogHistory = useCallback(async () => {
+    setDiagnosticBusy(true);
+    try {
+      await api.clearDiagnosticLogs?.();
+      setSelectedDiagnostic(null);
+      await loadDiagnosticLogs(false);
+      notify("Đã xóa nhật ký chẩn đoán");
+    } catch (err) {
+      logRendererDiagnostic(api, "error", "runtime", `Không xóa được nhật ký: ${err?.message || String(err)}`, { action: "clear-diagnostic-logs", error: err });
+      setError(err?.message || String(err));
+    } finally {
+      setDiagnosticBusy(false);
+    }
+  }, [loadDiagnosticLogs, notify]);
+
+  useEffect(() => {
+    if (activePage !== "logs") return undefined;
+    const timer = window.setTimeout(() => void loadDiagnosticLogs(false), 140);
+    return () => window.clearTimeout(timer);
+  }, [activePage, loadDiagnosticLogs]);
+
+
+  useEffect(() => {
+    if (activePage !== "control") return undefined;
+    let cancelled = false;
+    const loadOperations = async () => {
+      const pids = (status?.processes || []).map((item) => Number(item?.pid)).filter(Boolean);
+      try {
+        const [nextPerformance, nextLogs] = await Promise.all([
+          api.getOperationsPerformance?.(pids),
+          api.getDiagnosticLogs?.({ level: "all", source: "all", category: "all", hours: 24, query: "", limit: 80 })
+        ]);
+        if (cancelled) return;
+        if (nextPerformance) setOperationsPerformance(nextPerformance);
+        if (Array.isArray(nextLogs?.entries)) setOperationsLogs(nextLogs.entries);
+      } catch (err) {
+        if (!cancelled) logRendererDiagnostic(api, "warn", "performance", `Không tải được Control Center: ${err?.message || String(err)}`, { action: "control-center-refresh", error: err });
+      }
+    };
+    void loadOperations();
+    const timer = window.setInterval(() => void loadOperations(), 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [activePage, status?.processes]);
+
+  useEffect(() => {
+    if (activePage !== "control") return undefined;
+    let frameCount = 0;
+    let lastSampleAt = window.performance.now();
+    let rafId = 0;
+    const longTasks = [];
+    const tick = () => {
+      if (!document.hidden) frameCount += 1;
+      rafId = window.requestAnimationFrame(tick);
+    };
+    rafId = window.requestAnimationFrame(tick);
+    let observer = null;
+    if (typeof PerformanceObserver !== "undefined") {
+      try {
+        observer = new PerformanceObserver((list) => {
+          const now = window.performance.now();
+          for (const entry of list.getEntries()) longTasks.push({ at: now, duration: Number(entry.duration) || 0 });
+        });
+        observer.observe({ type: "longtask", buffered: false });
+      } catch {
+        observer = null;
+      }
+    }
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      frameCount = 0;
+      lastSampleAt = window.performance.now();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      const now = window.performance.now();
+      const elapsed = Math.max(1, now - lastSampleAt);
+      const fps = Math.min(120, frameCount * 1000 / elapsed);
+      frameCount = 0;
+      lastSampleAt = now;
+      while (longTasks.length && now - longTasks[0].at > 10_000) longTasks.shift();
+      setUiPerformance({
+        fps: Number(fps.toFixed(1)),
+        longTasks: longTasks.length,
+        maxLongTaskMs: longTasks.reduce((max, item) => Math.max(max, item.duration), 0)
+      });
+    }, 1000);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      observer?.disconnect();
+    };
+  }, [activePage]);
+
+  useEffect(() => {
+    const onError = (event) => logRendererDiagnostic(api, "error", "runtime", event?.message || "Renderer error", { action: "window.error", filename: event?.filename, lineno: event?.lineno, colno: event?.colno, error: event?.error });
+    const onRejection = (event) => logRendererDiagnostic(api, "error", "runtime", event?.reason?.message || String(event?.reason || "Unhandled promise rejection"), { action: "unhandledrejection", reason: event?.reason });
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+  }, []);
+
   const applyManagerSettings = useCallback((next) => {
     setManagerSettings({
       ...DEFAULT_MANAGER_SETTINGS,
@@ -769,7 +1097,12 @@ function App() {
     let cancelled = false;
     api.getManagerSettings()
       .then((next) => { if (!cancelled) applyManagerSettings(next); })
-      .catch((err) => { if (!cancelled) setError(err?.message || String(err)); });
+      .catch((err) => {
+        if (!cancelled) {
+          logRendererDiagnostic(api, "error", "settings", `Không tải được cài đặt: ${err?.message || String(err)}`, { action: "get-manager-settings", error: err });
+          setError(err?.message || String(err));
+        }
+      });
     return () => { cancelled = true; };
   }, [applyManagerSettings]);
 
@@ -827,6 +1160,71 @@ function App() {
       setSettingsBusy("");
     }
   }, [applyManagerSettings, notify]);
+
+
+  useEffect(() => {
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    for (const profile of profiles) {
+      const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+      const tab = tabs.find((item) => item.busy || item.settling || String(item?.network_state || "") === "generating") || tabs.find((item) => item.active) || tabs[0];
+      const taskId = String(profile?.current_task_id || "");
+      const title = String(profile?.current_task_title || tab?.title || profile?.active_chat_title || "Task CodexPro");
+      const working = Boolean(tab?.busy || tab?.settling || profile?.activity === "working" || Number(profile?.busy_request_count || 0) > 0);
+      const failed = Boolean(tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error);
+      const previous = operationsNotificationState.current.get(profile.profile_id);
+      if (managerSettings.taskNotifications !== false && previous) {
+        if (previous.working && !working && previous.taskId) {
+          void api.showNotification?.({ title: "CodexPro · Task hoàn tất", body: `${previous.title} · ${profile.label || profile.profile_id.slice(0, 8)}` });
+        } else if (!previous.failed && failed) {
+          void api.showNotification?.({ title: "CodexPro · Cần chú ý", body: `${title} gặp lỗi hoặc profile bị treo.` });
+        }
+      }
+      operationsNotificationState.current.set(profile.profile_id, { working, failed, taskId, title });
+    }
+  }, [managerSettings.taskNotifications, status?.browserProfiles]);
+
+  useEffect(() => {
+    if (!managerSettings.autoRecovery) return;
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    for (const profile of profiles) {
+      if (!profile?.connected) continue;
+      const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+      const targetTab = tabs.find((tab) => tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error);
+      if (!targetTab?.id) continue;
+      const conversationId = String(targetTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+      if (!conversationId) continue;
+      const key = `${profile.profile_id}:${conversationId}`;
+      const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
+      if (Date.now() - previous < 120_000) continue;
+      operationsRecoveryTimes.current.set(key, Date.now());
+      void api.recoverProfileChat?.({
+        profileId: profile.profile_id,
+        conversationId,
+        targetId: targetTab.id,
+        title: targetTab.title || profile.active_chat_title || "",
+        silent: true
+      }).then(() => {
+        logRendererDiagnostic(api, "info", "profile", "Auto Recovery đã thay tab ChatGPT bất thường", { action: "auto-recovery", profile_id: profile.profile_id, conversation_id: conversationId });
+        window.setTimeout(() => void refresh(false), 1200);
+      }).catch((err) => {
+        logRendererDiagnostic(api, "error", "profile", `Auto Recovery thất bại: ${err?.message || String(err)}`, { action: "auto-recovery-failed", profile_id: profile.profile_id, conversation_id: conversationId, error: err });
+      });
+    }
+  }, [managerSettings.autoRecovery, status?.browserProfiles]);
+
+  useEffect(() => {
+    if (!managerSettings.autoUpdateWorkers || busy) return;
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    const hasSafeOutdatedWorker = profiles.some((profile) => {
+      if (!profile?.connected || versionAtLeast(profile.extension_version)) return false;
+      const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
+      const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
+      return profile.activity === "idle" && Number(profile.busy_request_count || 0) === 0 && !hasBusyTab;
+    });
+    if (!hasSafeOutdatedWorker || Date.now() - operationsAutoUpdateAt.current < 60_000) return;
+    operationsAutoUpdateAt.current = Date.now();
+    void reloadProfiles();
+  }, [busy, managerSettings.autoUpdateWorkers, status?.browserProfiles]);
 
   useEffect(() => {
     setChatWidthInput(String(managerSettings.chatWidth));
@@ -941,29 +1339,155 @@ function App() {
     }
   }, [applyManagerSettings, notify]);
 
-  const scrollResponseToBottom = useCallback((profileId) => {
-    const container = responseBodyRefs.current.get(profileId);
-    if (!container) return;
-    container.scrollTop = container.scrollHeight;
-    responseScrollPositions.current.set(profileId, container.scrollTop);
+  const logResponseScrollAdjustment = useCallback((profileId, container, before, after, cause, mode, extra = {}) => {
+    if (!before || !after) return;
+    const previous = responseScrollDiagnostics.current.get(profileId) || null;
+    const delta = {
+      scrollTop: after.scrollTop - before.scrollTop,
+      scrollHeight: previous ? before.scrollHeight - previous.scrollHeight : 0,
+      clientHeight: previous ? before.clientHeight - previous.clientHeight : 0,
+      distanceFromBottom: after.distanceFromBottom - before.distanceFromBottom
+    };
+    const signature = `${mode}:${cause}:${before.scrollTop}:${before.scrollHeight}:${before.clientHeight}:${after.scrollTop}:${after.scrollHeight}:${after.clientHeight}:${extra.anchorId || ""}`;
+    const shouldLog = Math.abs(delta.scrollTop) >= 2 || Math.abs(delta.scrollHeight) >= 2 || Math.abs(delta.clientHeight) >= 2;
+    responseScrollDiagnostics.current.set(profileId, { ...after, signature });
+    if (!shouldLog || previous?.signature === signature || typeof api.logChatLayout !== "function") return;
+    const panel = chatResponseRef.current;
+    api.logChatLayout({
+      at: new Date().toISOString(),
+      type: "scroll-jump",
+      profileId,
+      conversationId: String(requestTargetsRef.current[profileId] || panel?.dataset.layoutConversationId || ""),
+      cause,
+      mode,
+      locked: Boolean(responseScrollLocked.current.get(profileId)),
+      before,
+      after,
+      delta,
+      ...extra,
+      panel: panel ? {
+        height: Math.round(panel.getBoundingClientRect().height),
+        scrollHeight: Math.round(panel.scrollHeight),
+        clientHeight: Math.round(panel.clientHeight)
+      } : null,
+      messages: [...container.children].slice(-8).map((node) => ({
+        id: String(node.dataset.messageId || "").slice(0, 180),
+        role: String(node.dataset.auditRole || ""),
+        height: Math.round(node.getBoundingClientRect().height),
+        textLength: String(node.textContent || "").length
+      }))
+    });
   }, []);
 
-  const scrollOpenChatToBottom = useCallback((profileId) => {
-    scrollResponseToBottom(profileId);
+  const scrollResponseToBottom = useCallback((profileId, cause = "unspecified") => {
+    const container = responseBodyRefs.current.get(profileId);
+    if (!container) return;
+    container.classList.remove("has-turn-anchor");
+    container.style.removeProperty("--chat-turn-anchor-space");
+    const before = responseScrollMetrics(container);
+    container.scrollTop = container.scrollHeight;
+    const after = responseScrollMetrics(container);
+    responseScrollPositions.current.set(profileId, container.scrollTop);
+    logResponseScrollAdjustment(profileId, container, before, after, cause, "bottom");
+  }, [logResponseScrollAdjustment]);
+
+  const scrollResponseToTurnAnchor = useCallback((profileId, cause = "unspecified") => {
+    const container = responseBodyRefs.current.get(profileId);
+    const anchorState = responseTurnAnchors.current.get(profileId);
+    if (!container || !anchorState) return false;
+    const activeConversationId = String(requestTargetsRef.current[profileId] || chatResponseRef.current?.dataset.layoutConversationId || "");
+    if (anchorState.conversationId && activeConversationId && anchorState.conversationId !== activeConversationId) {
+      responseTurnAnchors.current.delete(profileId);
+      return false;
+    }
+    const userMessages = [...container.querySelectorAll('.chat-transcript-message.is-user[data-audit-fingerprint]')];
+    const anchor = anchorState.fingerprint
+      ? userMessages.findLast((node) => node.dataset.auditFingerprint === anchorState.fingerprint)
+      : userMessages.at(-1);
+    if (!anchor) return false;
+    container.classList.add("has-turn-anchor");
+    container.style.setProperty("--chat-turn-anchor-space", `${Math.max(240, Math.round(container.clientHeight * 0.58))}px`);
+    const before = responseScrollMetrics(container);
+    const beforeAnchorTop = Math.round(anchor.getBoundingClientRect().top - container.getBoundingClientRect().top);
+    const after = applyResponseTurnAnchor(container, anchor, 0.42);
+    const afterAnchorTop = Math.round(anchor.getBoundingClientRect().top - container.getBoundingClientRect().top);
+    responseScrollPositions.current.set(profileId, container.scrollTop);
+    logResponseScrollAdjustment(profileId, container, before, after, cause, "turn-anchor", {
+      anchorId: String(anchor.dataset.messageId || "").slice(0, 180),
+      anchorFingerprint: String(anchor.dataset.auditFingerprint || ""),
+      anchorViewportTopBefore: beforeAnchorTop,
+      anchorViewportTopAfter: afterAnchorTop,
+      anchorViewportDelta: afterAnchorTop - beforeAnchorTop
+    });
+    return true;
+  }, [logResponseScrollAdjustment]);
+
+  const maintainResponsePosition = useCallback((profileId, cause = "unspecified") => {
+    if (responseScrollLocked.current.get(profileId)) return;
+    if (scrollResponseToTurnAnchor(profileId, cause)) return;
+    scrollResponseToBottom(profileId, cause);
+  }, [scrollResponseToBottom, scrollResponseToTurnAnchor]);
+
+  const restoreOpenResponseTurnAnchor = useCallback((profileId) => {
+    if (responseTurnAnchors.current.has(profileId)) return true;
+    const container = responseBodyRefs.current.get(profileId);
+    const anchor = [...(container?.querySelectorAll('.chat-transcript-message.is-user[data-audit-fingerprint]') || [])].at(-1);
+    if (!anchor) return false;
+    responseTurnAnchors.current.set(profileId, {
+      conversationId: String(requestTargetsRef.current[profileId] || chatResponseRef.current?.dataset.layoutConversationId || ""),
+      fingerprint: String(anchor.dataset.auditFingerprint || ""),
+      messageId: String(anchor.dataset.messageId || ""),
+      restoredAt: Date.now()
+    });
+    return true;
+  }, []);
+
+  const positionOpenChatViewport = useCallback((profileId, cause = "open-chat") => {
+    if (responseScrollLocked.current.get(profileId)) return;
+    maintainResponsePosition(profileId, cause);
     const modal = chatModalRef.current;
     if (!modal) return;
     const previousBehavior = modal.style.scrollBehavior;
     modal.style.scrollBehavior = 'auto';
     modal.scrollTop = modal.scrollHeight;
     modal.style.scrollBehavior = previousBehavior;
-  }, [scrollResponseToBottom]);
+  }, [maintainResponsePosition]);
+
+  const scheduleOpenChatAutoResume = useCallback((profileId) => {
+    scheduleResponseAutoResume({
+      profileId,
+      lockedProfiles: responseScrollLocked.current,
+      timers: responseScrollResumeTimers.current,
+      delay: RESPONSE_MANUAL_SCROLL_RESUME_MS,
+      resume: (resumedProfileId) => {
+        window.requestAnimationFrame(() => positionOpenChatViewport(resumedProfileId, "manual-scroll-idle"));
+      }
+    });
+  }, [positionOpenChatViewport]);
+
+  const holdOpenChatAutoScroll = useCallback((profileId, deltaY = 0) => {
+    if (deltaY < 0) responseScrollLocked.current.set(profileId, true);
+    if (responseScrollLocked.current.get(profileId)) scheduleOpenChatAutoResume(profileId);
+  }, [scheduleOpenChatAutoResume]);
 
   const holdResponseAutoScroll = useCallback((profileId, container, deltaY = 0) => {
+    if (responseTurnAnchors.current.has(profileId) && deltaY) {
+      responseTurnAnchors.current.delete(profileId);
+      container.classList.remove("has-turn-anchor");
+      container.style.removeProperty("--chat-turn-anchor-space");
+      responseScrollLocked.current.set(profileId, true);
+      responseScrollPositions.current.set(profileId, container.scrollTop);
+      scheduleOpenChatAutoResume(profileId);
+      return;
+    }
     handleResponseWheel(profileId, container, deltaY, responseScrollLocked.current, RESPONSE_BOTTOM_THRESHOLD_PX);
-  }, []);
+    if (responseScrollLocked.current.get(profileId)) scheduleOpenChatAutoResume(profileId);
+    else cancelResponseAutoResume(profileId, responseScrollResumeTimers.current);
+  }, [scheduleOpenChatAutoResume]);
 
   const pauseResponseAutoScroll = useCallback((profileId, container) => {
     recordResponseScroll(profileId, container, responseScrollLocked.current, responseScrollPositions.current, RESPONSE_BOTTOM_THRESHOLD_PX);
+    if (!responseScrollLocked.current.get(profileId)) cancelResponseAutoResume(profileId, responseScrollResumeTimers.current);
   }, []);
 
   const captureResponseSelection = useCallback((key, container) => {
@@ -987,10 +1511,14 @@ function App() {
     if (foreground) setBusy("refresh");
     setError("");
     try {
-      const [nextStatus, nextProjects] = await Promise.all([api.getStatus(), api.listProjects()]);
+      const nextStatus = await api.getStatus();
       setStatus(applyConversationTitleOverrides(nextStatus, conversationTitleOverridesRef.current));
-      setProjects(nextProjects);
+      if (foreground) {
+        const nextProjects = await api.listProjects();
+        setProjects((current) => sameProjectList(current, nextProjects) ? current : nextProjects);
+      }
     } catch (err) {
+      logRendererDiagnostic(api, "error", "status", `Không làm mới Manager: ${err?.message || String(err)}`, { action: "refresh", error: err });
       setError(err?.message || String(err));
     } finally {
       refreshInFlight.current = false;
@@ -1003,7 +1531,8 @@ function App() {
     statusRefreshInFlight.current = true;
     try {
       setStatus(applyConversationTitleOverrides(await api.getStatus(), conversationTitleOverridesRef.current));
-    } catch {
+    } catch (err) {
+      logRendererDiagnostic(api, "warn", "status", `Background status refresh lỗi: ${err?.message || String(err)}`, { action: "refresh-status", error: err });
       // Background realtime refresh should not flash a global error for a transient miss.
     } finally {
       statusRefreshInFlight.current = false;
@@ -1014,8 +1543,10 @@ function App() {
     if (projectRefreshInFlight.current || refreshInFlight.current) return;
     projectRefreshInFlight.current = true;
     try {
-      setProjects(await api.listProjects());
-    } catch {
+      const nextProjects = await api.listProjects();
+      setProjects((current) => sameProjectList(current, nextProjects) ? current : nextProjects);
+    } catch (err) {
+      logRendererDiagnostic(api, "warn", "projects", `Background project refresh lỗi: ${err?.message || String(err)}`, { action: "refresh-projects", error: err });
       // Keep the last good project list when a background discovery refresh transiently fails.
     } finally {
       projectRefreshInFlight.current = false;
@@ -1028,8 +1559,8 @@ function App() {
       const profiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
       setStatus((current) => {
         if (!current) return current;
-        const previousById = new Map((current.browserProfiles || []).map((profile) => [profile.profile_id, profile]));
-        const browserProfiles = profiles.map((profile) => ({ ...previousById.get(profile.profile_id), ...profile }));
+        const browserProfiles = mergeBrowserProfilePayload(current.browserProfiles, profiles);
+        if (browserProfiles === current.browserProfiles) return current;
         return applyConversationTitleOverrides({ ...current, checkedAt: payload?.checked_at || new Date().toISOString(), browserProfiles }, conversationTitleOverridesRef.current);
       });
     });
@@ -1054,7 +1585,10 @@ function App() {
       profileCheckTimes.current.set(profile.profile_id, Date.now());
       setCheckingProfiles((current) => [...new Set([...current, profile.profile_id])]);
       void api.checkProfile(profile.profile_id)
-        .catch(() => null)
+        .catch((err) => {
+          logRendererDiagnostic(api, "warn", "profile", `Kiểm tra profile ${profile.profile_id} lỗi: ${err?.message || String(err)}`, { action: "check-profile", profile_id: profile.profile_id, error: err });
+          return null;
+        })
         .finally(() => {
           setCheckingProfiles((current) => current.filter((id) => id !== profile.profile_id));
           window.setTimeout(() => void refresh(false), 1200);
@@ -1089,7 +1623,9 @@ function App() {
         if (!conversationId) continue;
         const selectedTarget = String(requestTargetsRef.current[profile.profile_id] || "");
         const currentResponse = requestResponses[profile.profile_id];
-        const relevant = selectedTarget === conversationId || currentResponse?.conversationId === conversationId || (chatProfileId === profile.profile_id && tab.active);
+        const relevant = selectedTarget
+          ? selectedTarget === conversationId || currentResponse?.conversationId === conversationId
+          : currentResponse?.conversationId === conversationId || (chatProfileId === profile.profile_id && tab.active);
         if (!relevant) continue;
         const networkState = String(tab.network_state || (tab.busy ? "generating" : "idle"));
         const networkCompletedAt = String(tab.network_last_completed_at || "");
@@ -1140,24 +1676,47 @@ function App() {
           }
           continue;
         }
-        if (networkState === "generating" || tab.settling) {
+        if (networkState === "generating" || tab.busy || tab.settling) {
           const streamKey = `${profile.profile_id}:${conversationId}`;
           const lastStreamRead = Number(networkStreamReads.current.get(streamKey) || 0);
-          if (Date.now() - lastStreamRead >= 850) {
+          const activityPollMs = networkState === "generating" ? 850 : LATEST_RESPONSE_RECOVERY_POLL_MS;
+          if (Date.now() - lastStreamRead >= activityPollMs) {
             networkStreamReads.current.set(streamKey, Date.now());
-            void loadResponse(profile, conversationId, true, false);
+            void loadResponse(profile, conversationId, true, false, false, networkState !== "generating");
           }
-          if (networkState === "generating") continue;
+          continue;
         }
         if (networkState !== "completed" || !networkCompletedAt) continue;
         const completionKey = `${profile.profile_id}:${conversationId}`;
         const contentAlreadyRead = networkCompletionReads.current.get(completionKey) === networkCompletedAt;
         if (!contentAlreadyRead) {
           networkCompletionReads.current.set(completionKey, networkCompletedAt);
-          void loadResponse(profile, conversationId, true, false);
+          void (async () => {
+            const canonical = await loadResponse(profile, conversationId, true, false, false, true);
+            if (!canonical) {
+              if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) networkCompletionReads.current.delete(completionKey);
+              return;
+            }
+            if (completedResponseNeedsDomFallback(canonical)) {
+              const dom = await loadResponse(profile, conversationId, true, true);
+              if (!dom && networkCompletionReads.current.get(completionKey) === networkCompletedAt) networkCompletionReads.current.delete(completionKey);
+            }
+          })();
           if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
         }
-        if (!tab.busy && !tab.settling && currentResponse?.repoTaskId) {
+        if (currentResponse?.repoTaskId && canVerifyRepoTaskUse({
+          responseCurrent: currentResponse.conversationId === conversationId,
+          responseReady: currentResponse.responseReady,
+          responseBusy: currentResponse.busy,
+          responseIncomplete: currentResponse.incomplete,
+          awaitingAssistant: currentResponse.awaitingAssistant,
+          tabBusy: tab.busy,
+          tabSettling: tab.settling,
+          canonicalBusy: currentResponse.canonicalBusy,
+          streamBusy: currentResponse.networkStreamInProgress,
+          networkCompletedAt,
+          repoTaskDispatchedAt: currentResponse.repoTaskDispatchedAt
+        })) {
           void verifyRepoTaskUse(profile, conversationId, currentResponse, networkCompletedAt);
         }
       }
@@ -1171,10 +1730,50 @@ function App() {
   useEffect(() => {
     if (!chatProfileId) return;
     const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
+    const target = String(requestTargetsRef.current[chatProfileId] || requestTargets[chatProfileId] || "");
+    if (!profile || !target) return;
+    const response = requestResponses[chatProfileId];
+    const selectedTab = (profile.conversation_tabs || []).find((tab) => conversationIdFromTab(tab) === target);
+    const composerLockReason = !profile.connected
+      ? "profile_disconnected"
+      : busy === `request:${chatProfileId}`
+        ? "request_sending"
+        : selectedTab?.busy || String(selectedTab?.network_state || "") === "generating"
+          ? "selected_tab_busy"
+          : selectedTab?.settling
+            ? "selected_tab_settling"
+            : response?.conversationId === target && response?.rolloverStatus === "creating"
+              ? "conversation_rollover"
+              : response?.conversationId === target && (response?.busy || response?.loading || response?.networkStreamInProgress || response?.canonicalBusy)
+                ? "selected_response_busy"
+                : "";
+    const previous = requestTargetDiagnostics.current.get(chatProfileId);
+    const reason = requestTargetReasons.current.get(chatProfileId) || (previous?.target && previous.target !== target ? "state_update" : "status_refresh");
+    const signature = JSON.stringify([target, composerLockReason, (profile.conversation_tabs || []).map((tab) => [tab.id, conversationIdFromTab(tab), tab.active, tab.busy, tab.settling, tab.network_state])]);
+    if (previous?.signature === signature) return;
+    logRendererDiagnostic(api, "info", "chat", `Mục tiêu composer ${chatProfileId}: ${previous?.target || "(chưa chọn)"} -> ${target}`, {
+      action: "composer-target-state",
+      profile_id: chatProfileId,
+      from_conversation_id: previous?.target || "",
+      to_conversation_id: target,
+      selection_reason: reason,
+      composer_locked: Boolean(composerLockReason),
+      composer_lock_reason: composerLockReason,
+      tab_candidates: (profile.conversation_tabs || []).slice(0, 20).map((tab) => ({ id: String(tab?.id || ""), conversation_id: conversationIdFromTab(tab), active: Boolean(tab?.active), busy: Boolean(tab?.busy), settling: Boolean(tab?.settling), network_state: String(tab?.network_state || ""), title: String(tab?.title || "").slice(0, 160) }))
+    });
+    requestTargetReasons.current.delete(chatProfileId);
+    requestTargetDiagnostics.current.set(chatProfileId, { target, signature });
+  }, [busy, chatProfileId, requestResponses, requestTargets, status?.browserProfiles]);
+
+  useEffect(() => {
+    if (!chatProfileId) return;
+    const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
     if (!profile) return;
     const conversations = profileRequestChats(profile);
     const initialTarget = requestTargetsRef.current[chatProfileId] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET;
     if (!requestTargetsRef.current[chatProfileId]) {
+      requestTargetsRef.current = { ...requestTargetsRef.current, [chatProfileId]: initialTarget };
+      requestTargetReasons.current.set(chatProfileId, "initial_open");
       setRequestTargets((current) => ({ ...current, [chatProfileId]: initialTarget }));
     }
     const response = requestResponses[chatProfileId];
@@ -1206,8 +1805,10 @@ function App() {
 
   useEffect(() => {
     if (!chatProfileId) return;
+    cancelResponseAutoResume(chatProfileId, responseScrollResumeTimers.current);
     responseScrollLocked.current.delete(chatProfileId);
     responseScrollPositions.current.delete(chatProfileId);
+    return () => cancelResponseAutoResume(chatProfileId, responseScrollResumeTimers.current);
   }, [chatProfileId, requestTargets[chatProfileId]]);
 
   useEffect(() => {
@@ -1261,9 +1862,9 @@ function App() {
 
   useLayoutEffect(() => {
     if (!chatProfileId || !openChatScrollKey) return;
-    if (responseScrollLocked.current.get(chatProfileId)) return;
-    scrollResponseToBottom(chatProfileId);
-  }, [chatProfileId, openChatScrollKey, scrollResponseToBottom]);
+    if (openChatTurnActive) restoreOpenResponseTurnAnchor(chatProfileId);
+    maintainResponsePosition(chatProfileId, "layout-effect:open-chat-scroll-key");
+  }, [chatProfileId, openChatScrollKey, openChatTurnActive, maintainResponsePosition, restoreOpenResponseTurnAnchor]);
 
   useEffect(() => {
     if (!chatProfileId) return undefined;
@@ -1271,12 +1872,12 @@ function App() {
       panel: chatResponseRef.current,
       getContainer: () => responseBodyRefs.current.get(chatProfileId),
       isLocked: () => Boolean(responseScrollLocked.current.get(chatProfileId)),
-      scrollToBottom: () => scrollResponseToBottom(chatProfileId)
+      scrollToBottom: (cause) => maintainResponsePosition(chatProfileId, `observer:${cause}`)
     });
-  }, [chatProfileId, requestTargets[chatProfileId], scrollResponseToBottom]);
+  }, [chatProfileId, requestTargets[chatProfileId], maintainResponsePosition]);
 
   useEffect(() => {
-    if (!chatProfileId || typeof api.logChatLayout !== "function") return undefined;
+    if (!DEEP_UI_DIAGNOSTICS_ENABLED || !chatProfileId || typeof api.logChatLayout !== "function") return undefined;
     const panel = chatResponseRef.current;
     if (!panel) return undefined;
     let animationFrame = 0;
@@ -1388,14 +1989,20 @@ function App() {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const closeOnEscape = (event) => {
-      if (event.key === "Escape") setChatProfileId("");
+      if (event.key !== "Escape") return;
+      if (attachmentPreview) {
+        event.preventDefault();
+        setAttachmentPreview(null);
+        return;
+      }
+      setChatProfileId("");
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", closeOnEscape);
     };
-  }, [chatProfileId]);
+  }, [chatProfileId, attachmentPreview]);
 
   const profileSummary = useMemo(() => {
     const allProfiles = status?.browserProfiles || [];
@@ -1529,7 +2136,7 @@ function App() {
     setError("");
     try {
       const result = await api.setupProfile(profile.profile_id);
-      notify(result.message || "CodexPro READY · kết nối thành công");
+      notify(result.message || "CodexPro READY");
       await refresh(false);
     } catch (err) {
       setError(err?.message || String(err));
@@ -1665,18 +2272,25 @@ function App() {
 
   function openChat(profile) {
     const conversations = profileRequestChats(profile);
-    const conversationId = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
-    if (conversationId) setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
+    const pinnedConversationId = String(requestTargetsRef.current[profile.profile_id] || "");
+    const conversationId = String(pinnedConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
+    if (conversationId) {
+      requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: conversationId };
+      requestTargetReasons.current.set(profile.profile_id, pinnedConversationId ? "reopen_pinned_selection" : "initial_open");
+      setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
+    }
     const projectRoot = projectRootForProfile(profile);
     const rememberedRoot = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
     if (projectRoot && projectRoot.toLowerCase() !== rememberedRoot.toLowerCase()) selectProjectForProfile(profile.profile_id, projectRoot);
     else if (projectRoot) setRequestProjectRoots((current) => ({ ...current, [profile.profile_id]: projectRoot }));
+    cancelResponseAutoResume(profile.profile_id, responseScrollResumeTimers.current);
     responseScrollLocked.current.delete(profile.profile_id);
     responseScrollPositions.current.delete(profile.profile_id);
+    responseTurnAnchors.current.delete(profile.profile_id);
     setChatProfileId(profile.profile_id);
     window.requestAnimationFrame(() => {
-      scrollOpenChatToBottom(profile.profile_id);
-      window.setTimeout(() => scrollOpenChatToBottom(profile.profile_id), 180);
+      positionOpenChatViewport(profile.profile_id, "open-chat:initial");
+      window.setTimeout(() => positionOpenChatViewport(profile.profile_id, "open-chat:initial-settle"), 180);
     });
     if (profile.connected && conversationId && conversationId !== NEW_CHAT_TARGET) {
       setRequestResponses((current) => {
@@ -1686,8 +2300,8 @@ function App() {
       });
       void hydrateCachedResponse(profile, conversationId).finally(() => {
         window.requestAnimationFrame(() => {
-          scrollOpenChatToBottom(profile.profile_id);
-          window.setTimeout(() => scrollOpenChatToBottom(profile.profile_id), 180);
+          positionOpenChatViewport(profile.profile_id, "open-chat:hydrated");
+          window.setTimeout(() => positionOpenChatViewport(profile.profile_id, "open-chat:hydrated-settle"), 180);
         });
       });
     }
@@ -1695,11 +2309,28 @@ function App() {
 
   function startNewChat(profile) {
     setRenameChat(null);
+    responseTurnAnchors.current.delete(profile.profile_id);
+    requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: NEW_CHAT_TARGET };
+    requestTargetReasons.current.set(profile.profile_id, "user_new_chat");
     setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
-    setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
+    requestDraftsRef.current[profile.profile_id] = "";
+    setRequestDraftResetVersions((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || 0) + 1 }));
     setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
     setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: false, error: "", conversationId: NEW_CHAT_TARGET, text: "", busy: false } }));
+  }
+
+  function selectRequestConversation(profile, conversationId) {
+    const profileId = profile.profile_id;
+    const previousTarget = String(requestTargetsRef.current[profileId] || "");
+    const nextTarget = String(conversationId || "");
+    if (!nextTarget || nextTarget === previousTarget) return;
+    setRenameChat(null);
+    requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: nextTarget };
+    requestTargetReasons.current.set(profileId, "user_selected_conversation");
+    setRequestTargets((current) => ({ ...current, [profileId]: nextTarget }));
+    setRequestResponses((current) => ({ ...current, [profileId]: { visible: true, loading: true, error: "", conversationId: nextTarget, text: "", messages: [] } }));
+    void hydrateCachedResponse(profile, nextTarget);
   }
 
   function beginRenameSelectedChat(profile, conversationId, currentTitle) {
@@ -1747,23 +2378,47 @@ function App() {
     const activeConversationId = conversationOf(activeTab);
     const conversations = profileRequestChats(profile);
     const defaultTarget = activeConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "";
-    const conversationId = options.focusOnly ? activeConversationId : String(requestTargets[profile.profile_id] || defaultTarget);
+    const requestedConversationId = String(requestTargets[profile.profile_id] || "");
+    const conversationId = options.focusOnly ? activeConversationId : String(requestedConversationId || defaultTarget);
     const selectedTab = tabs.find((tab) => conversationOf(tab) === conversationId);
     const targetTab = selectedTab || activeTab;
     const selectedConversation = conversations.find((chat) => String(chat.id) === conversationId);
+    const selectionReason = options.focusOnly ? "focus_only_active_tab" : selectedTab ? "selected_conversation_tab" : activeTab ? "active_tab_fallback" : "missing_target_tab";
+    const selectionDiagnostic = {
+      action: "profile-tab-open-selection",
+      profile_id: profile.profile_id,
+      focus_only: Boolean(options.focusOnly),
+      selection_reason: selectionReason,
+      requested_conversation_id: requestedConversationId,
+      default_conversation_id: String(defaultTarget || ""),
+      selected_conversation_id: String(conversationId || ""),
+      active_target_id: String(activeTab?.id || ""),
+      active_conversation_id: activeConversationId,
+      selected_target_id: String(selectedTab?.id || ""),
+      target_id: String(targetTab?.id || ""),
+      target_conversation_id: conversationOf(targetTab),
+      target_title: String(selectedConversation?.title || targetTab?.title || profile.active_chat_title || ""),
+      tab_candidates: tabs.slice(0, 20).map((tab) => ({ id: String(tab?.id || ""), conversation_id: conversationOf(tab), active: Boolean(tab?.active), window_id: String(tab?.windowId ?? tab?.window_id ?? ""), title: String(tab?.title || "").slice(0, 160), url: String(tab?.url || "").slice(0, 300) }))
+    };
+    logRendererDiagnostic(api, "info", "profile", `Manager chọn tab ${selectionDiagnostic.target_id || "không xác định"} để mở profile ${profile.profile_id}`, selectionDiagnostic);
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
     setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: null }));
     setBusy(`open-profile:${profile.profile_id}`);
     setError("");
     try {
-      await api.openProfileChat({
+      const result = await api.openProfileChat({
         profileId: profile.profile_id,
         conversationId,
         targetId: targetTab?.id,
         targetConversationId: conversationOf(targetTab),
-        title: selectedConversation?.title || targetTab?.title || profile.active_chat_title || ""
+        title: selectedConversation?.title || targetTab?.title || profile.active_chat_title || "",
+        selectionReason,
+        activeTargetId: activeTab?.id,
+        activeConversationId
       });
+      logRendererDiagnostic(api, "info", "profile", `Chrome xác nhận mở tab ${String(result?.activation?.target_id || result?.target_id || "không xác định")}`, { ...selectionDiagnostic, action: "profile-tab-open-result", result_profile_id: String(result?.profile_id || ""), result_conversation_id: String(result?.conversation_id || ""), result_target_id: String(result?.target_id || ""), activation_target_id: String(result?.activation?.target_id || ""), activation_window_id: String(result?.activation?.window_id || ""), activation_window_focused: Boolean(result?.activation?.window_focused), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed), navigation_target_id: String(result?.navigation?.target_id || ""), navigation_url: String(result?.navigation?.url || ""), window_focus: result?.window_focus || null });
     } catch (err) {
+      logRendererDiagnostic(api, "error", "profile", `Mở tab profile thất bại: ${err?.message || String(err)}`, { ...selectionDiagnostic, action: "profile-tab-open-error", error: err });
       setError(err?.message || String(err));
     } finally {
       setBusy("");
@@ -1796,6 +2451,27 @@ function App() {
     }
   }
 
+  async function stopControlTask(task) {
+    const profile = task?.profile;
+    const tab = task?.tab;
+    if (!profile?.profile_id || !tab?.id) return;
+    const conversationId = String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+    setBusy(`stop-task:${profile.profile_id}`);
+    setError("");
+    try {
+      const result = await api.stopProfileTask({
+        profileId: profile.profile_id,
+        conversationId,
+        targetId: tab.id
+      });
+      notify(result?.stopped ? "Đã dừng task ChatGPT" : "Task đã ngừng trước khi nhận lệnh dừng");
+      window.setTimeout(() => void refresh(false), 700);
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setBusy("");
+    }
+  }
   async function reloadProfiles() {
     if (!profileSummary.reload) return;
     setWorkerUpdateConfirmOpen(false);
@@ -1818,17 +2494,18 @@ function App() {
     }
   }
 
-  async function sendRequest(profile) {
+  async function sendRequest(profile, draftOverride = null) {
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const conversationId = String(requestTargets[profile.profile_id] ?? defaultTarget ?? NEW_CHAT_TARGET);
     const newChat = conversationId === NEW_CHAT_TARGET;
-    const text = String(requestDrafts[profile.profile_id] || "").trim();
+    const text = String(draftOverride !== null ? draftOverride : (requestDraftsRef.current[profile.profile_id] || "")).trim();
     const attachments = requestFiles[profile.profile_id] || [];
     const projectRoot = projectRootForProfile(profile);
+    if (!text && !attachments.length) return false;
     if (!projectRoot) {
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có workspace nào được chọn." }));
-      return;
+      return false;
     }
     if (!newChat) {
       const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${conversationId}`));
@@ -1846,14 +2523,27 @@ function App() {
         tabSettling: selectedTab?.settling,
         responseCurrent: currentResponse?.conversationId === conversationId,
         responseBusy: currentResponse?.busy,
-        responseIncomplete: currentResponse?.incomplete
+        responseReady: currentResponse?.responseReady,
+        responseLoading: currentResponse?.loading,
+        responseIncomplete: currentResponse?.incomplete,
+        canonicalBusy: currentResponse?.canonicalBusy,
+        streamBusy: currentResponse?.networkStreamInProgress
       });
       if (!turnReady) {
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước. Chờ trạng thái về ĐANG RẢNH rồi gửi để tin nhắn không bị nhập vào turn cũ." }));
-        return;
+        return false;
       }
     }
     responseScrollLocked.current.delete(profile.profile_id);
+    if (text) {
+      responseTurnAnchors.current.set(profile.profile_id, {
+        conversationId,
+        fingerprint: responseAuditTextFingerprint(text),
+        createdAt: Date.now()
+      });
+    } else {
+      responseTurnAnchors.current.delete(profile.profile_id);
+    }
     setBusy(`request:${profile.profile_id}`);
     setError("");
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
@@ -1890,23 +2580,20 @@ function App() {
     }
     try {
       const restoreSubmittedInputs = () => {
-        setRequestDrafts((current) => {
-          if (!text || String(current[profile.profile_id] || "").trim()) return current;
-          return { ...current, [profile.profile_id]: text };
-        });
         setRequestFiles((current) => {
           if (!attachments.length || (current[profile.profile_id] || []).length) return current;
           return { ...current, [profile.profile_id]: attachments };
         });
       };
-      setRequestDrafts((current) => ({ ...current, [profile.profile_id]: "" }));
       setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
       const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
-      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, text, attachments });
+      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence(result) }));
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
       const resolvedConversationId = String(result?.conversation_id || conversationId);
+      const activeTurnAnchor = responseTurnAnchors.current.get(profile.profile_id);
+      if (activeTurnAnchor) responseTurnAnchors.current.set(profile.profile_id, { ...activeTurnAnchor, conversationId: resolvedConversationId });
       if (submissionState === "failed") {
         throw new Error(String(result?.error || "ChatGPT không chuẩn bị được tin nhắn để gửi."));
       }
@@ -1935,13 +2622,16 @@ function App() {
         const submitPath = String(result?.submitted_by || result?.submit_path || "pre-submit");
         const generationEndpoint = String(result?.network_generation_endpoint || "");
         const uncertainMessage = `Chưa xác định được tin nhắn đã gửi hay chưa. Path: ${submitPath}.${generationEndpoint ? ` Endpoint: ${generationEndpoint}.` : ""} ${technicalReason}`;
+        logRendererDiagnostic(api, "warn", "network", uncertainMessage, { action: "send-uncertain", profile_id: profile.profile_id, conversation_id: conversationId, submission_state: submissionState, submitted_by: submitPath, generation_endpoint: generationEndpoint });
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: uncertainMessage }));
         restoreSubmittedInputs();
         notify("Trạng thái gửi chưa chắc chắn · CodexPro không tự gửi lại");
         window.setTimeout(() => void refresh(false), 500);
-        return;
+        return false;
       }
       if (newChat && resolvedConversationId && resolvedConversationId !== NEW_CHAT_TARGET) {
+        requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: resolvedConversationId };
+        requestTargetReasons.current.set(profile.profile_id, "new_chat_created");
         setRequestTargets((current) => ({ ...current, [profile.profile_id]: resolvedConversationId }));
       }
       setRequestResponses((current) => {
@@ -1969,6 +2659,7 @@ function App() {
             networkError: String(result?.network_error || previous.networkError || ""),
             networkStatusCode: Number(result?.network_status_code) || Number(previous.networkStatusCode) || 0,
             repoTaskId: String(result?.repo_task_id || ""),
+            repoTaskDispatchedAt: String(result?.repo_task_dispatched_at || ""),
             repoTaskScope: String(result?.repo_task_scope || (allAllowedScope ? "all_allowed" : "workspace")),
             repoTaskRetryCount: Number(result?.repo_task_retry_count) || 0,
             repoTaskRolloverCount: Number(result?.repo_task_rollover_count) || 0,
@@ -1979,14 +2670,17 @@ function App() {
         };
       });
       if (generationState === "failed") {
+        logRendererDiagnostic(api, "error", "network", `AI gặp lỗi network${result?.network_error ? `: ${result.network_error}` : ""}`, { action: "generation-failed", profile_id: profile.profile_id, conversation_id: resolvedConversationId, network_status_code: result?.network_status_code, network_error: result?.network_error });
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Tin nhắn đã gửi nhưng AI gặp lỗi network${result?.network_error ? `: ${result.network_error}` : ""}.` }));
         notify("Tin nhắn đã gửi · AI gặp lỗi network");
       } else {
         notify(newChat ? "Đã tạo chat mới và gửi tin nhắn đầu tiên" : `Đã gửi${result.attachment_count ? ` ${result.attachment_count} file` : ""} vào ${result.title || profile.active_chat_title || profile.label}`);
       }
       window.setTimeout(() => void refresh(false), 500);
+      return true;
     } catch (err) {
       const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "chat", `Gửi yêu cầu thất bại: ${message}`, { action: "send-request", profile_id: profile.profile_id, conversation_id: conversationId, project_root: projectRoot, error: err });
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence({}, err) }));
       const conversationLimitReached = !newChat && message.includes("CONVERSATION_LIMIT_REACHED:");
       if (conversationLimitReached) {
@@ -2003,13 +2697,10 @@ function App() {
           rollover_attachments: attachments
         });
         if (newConversationId) {
-          return;
+          return true;
         }
       }
-      setRequestDrafts((current) => {
-        if (!text || String(current[profile.profile_id] || "").trim()) return current;
-        return { ...current, [profile.profile_id]: text };
-      });
+      responseTurnAnchors.current.delete(profile.profile_id);
       setRequestFiles((current) => {
         if (!attachments.length || (current[profile.profile_id] || []).length) return current;
         return { ...current, [profile.profile_id]: attachments };
@@ -2025,6 +2716,7 @@ function App() {
       if (/heartbeat|offline|did not reconnect|không còn được CodexPro nhận diện/i.test(message)) {
         window.setTimeout(() => void refreshStatus(), 0);
       }
+      return false;
     } finally {
       setBusy("");
     }
@@ -2055,11 +2747,15 @@ function App() {
 
     try {
       const handoffText = buildConversationRolloverPrompt(result);
+      const rolloverProjectRoot = result?.projectRoot || projectRootForProfile(profile);
+      const rolloverAllAllowed = result?.repo_task_scope === "all_allowed" || result?.repoTaskScope === "all_allowed" || rolloverProjectRoot === ALL_ALLOWED_WORKSPACES;
       const created = await api.sendProfileRequest({
         profileId,
         conversationId: "",
         newChat: true,
-        projectRoot: result?.projectRoot || projectRootForProfile(profile),
+        scope: rolloverAllAllowed ? "all_allowed" : "workspace",
+        projectRoot: rolloverAllAllowed ? "" : rolloverProjectRoot,
+        workspaceCandidates: rolloverAllAllowed ? projects.map((project) => project.root) : [],
         text: handoffText,
         attachments: Array.isArray(result?.rollover_attachments) ? result.rollover_attachments : []
       });
@@ -2093,6 +2789,7 @@ function App() {
       return newConversationId;
     } catch (err) {
       const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "chat", `Không tạo được chat tiếp nối: ${message}`, { action: "conversation-rollover", profile_id: profileId, conversation_id: conversationId, error: err });
       conversationRollovers.current.set(key, { status: "failed", at: Date.now() });
       setRequestResponses((current) => {
         const previous = current[profileId] || {};
@@ -2116,7 +2813,8 @@ function App() {
   async function verifyRepoTaskUse(profile, conversationId, response, networkCompletedAt) {
     const taskId = String(response?.repoTaskId || "");
     if (!taskId || response?.conversationId !== conversationId) return;
-    const verificationKey = `${taskId}:${networkCompletedAt}`;
+    const taskDispatchedAt = String(response?.repoTaskDispatchedAt || "");
+    const verificationKey = `${taskId}:${taskDispatchedAt}:${networkCompletedAt}`;
     const verificationState = repoTaskVerificationReads.current.get(verificationKey);
     if (verificationState === "running" || verificationState === "done" || Number(verificationState) > Date.now()) return;
     repoTaskVerificationReads.current.set(verificationKey, "running");
@@ -2125,7 +2823,7 @@ function App() {
       return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "checking" } } : current;
     });
     try {
-      const proof = await api.getRepoTaskStatus({ taskId });
+      const proof = await api.getRepoTaskStatus({ taskId, profileId: profile.profile_id, conversationId });
       if (proof?.verified) {
         repoTaskVerificationReads.current.set(verificationKey, "done");
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
@@ -2145,13 +2843,14 @@ function App() {
             const previous = current[profile.profile_id] || {};
             return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "rolling-over", loading: true } } : current;
           });
-          notify("Chat cũ né CodexPro 2 lần · đang tạo chat mới");
+          notify("Chat cũ thiếu task title 2 lần · đang tạo chat mới");
           const created = await api.sendProfileRequest({
             profileId: profile.profile_id,
             conversationId: "",
             newChat: true,
             scope: originalScope,
             projectRoot: originalScope === "all_allowed" ? "" : original.projectRoot,
+            workspaceCandidates: originalScope === "all_allowed" ? projects.map((project) => project.root) : [],
             text: original.text,
             attachments: Array.isArray(original.attachments) ? original.attachments : [],
             toolRetry: false,
@@ -2159,6 +2858,7 @@ function App() {
             previousTaskId: taskId
           });
           if (String(created?.submission_state || "") === "uncertain") throw new Error("Chat mới có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
+          if (String(created?.repo_task_id || "") !== taskId) throw new Error("Manager đã đổi Task ID khi tạo chat mới; đã dừng để tránh REPO_TASK_MISMATCH.");
           const newConversationId = String(created?.conversation_id || "").trim();
           if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT chưa trả conversation id cho chat mới bắt buộc dùng CodexPro.");
           requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: newConversationId };
@@ -2176,6 +2876,7 @@ function App() {
               sendUncertain: false,
               networkState: String(created?.generation_state || created?.network_state || "generating"),
               repoTaskId: String(created?.repo_task_id || ""),
+              repoTaskDispatchedAt: String(created?.repo_task_dispatched_at || ""),
               repoTaskScope: String(created?.repo_task_scope || originalScope),
               repoTaskRetryCount: 0,
               repoTaskRolloverCount: rolloverCount + 1,
@@ -2185,18 +2886,20 @@ function App() {
             }
           }));
           repoTaskVerificationReads.current.set(verificationKey, "done");
+          logRendererDiagnostic(api, "warn", "tool", "ChatGPT thiếu task title; Manager đã tạo chat mới và giữ nguyên Task ID", { action: "repo-task-title-rollover", profile_id: profile.profile_id, previous_conversation_id: conversationId, conversation_id: newConversationId, previous_task_id: taskId, rollover_task_id: String(created?.repo_task_id || ""), task_id_reused: created?.repo_task_id_reused === true, repo_task_dispatched_at: String(created?.repo_task_dispatched_at || "") });
           notify("Đã tạo chat mới · @CodexPro được gọi lại đúng một lần");
           window.setTimeout(() => void refresh(false), 500);
           return;
         }
-        const message = "ChatGPT đã trả lời nhưng không gọi CodexPro sau 2 lần. Phản hồi này không được coi là đã thực hiện công việc.";
+        const message = "ChatGPT đã trả lời nhưng không trả task title qua CodexPro sau 2 lần. Phản hồi này không được công nhận.";
+        logRendererDiagnostic(api, "error", "tool", message, { action: "repo-task-title-missing", profile_id: profile.profile_id, conversation_id: conversationId, task_id: taskId, retry_count: retryCount, rollover_count: rolloverCount, proof });
         setRequestResponses((current) => {
           const previous = current[profile.profile_id] || {};
           return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "failed", repoTaskVerified: false } } : current;
         });
         repoTaskVerificationReads.current.set(verificationKey, "done");
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: message }));
-        notify("ChatGPT né gọi CodexPro · đã chặn phản hồi");
+        notify("ChatGPT thiếu task title · đã chặn phản hồi");
         return;
       }
       setRequestResponses((current) => {
@@ -2209,6 +2912,7 @@ function App() {
         newChat: false,
         scope: originalScope,
         projectRoot: originalScope === "all_allowed" ? "" : original.projectRoot,
+        workspaceCandidates: originalScope === "all_allowed" ? projects.map((project) => project.root) : [],
         text: original.text,
         attachments: Array.isArray(original.attachments) ? original.attachments : [],
         toolRetry: true,
@@ -2216,6 +2920,7 @@ function App() {
         previousTaskId: taskId
       });
       if (String(retried?.submission_state || "") === "uncertain") throw new Error("Lần bắt buộc gọi CodexPro có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
+      if (String(retried?.repo_task_id || "") !== taskId) throw new Error("Manager đã đổi Task ID khi gửi lại; đã dừng để tránh REPO_TASK_MISMATCH.");
       repoTaskVerificationReads.current.set(verificationKey, "done");
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
       setRequestResponses((current) => {
@@ -2225,6 +2930,7 @@ function App() {
           [profile.profile_id]: {
             ...previous,
             repoTaskId: String(retried?.repo_task_id || ""),
+            repoTaskDispatchedAt: String(retried?.repo_task_dispatched_at || ""),
             repoTaskScope: String(retried?.repo_task_scope || originalScope),
             repoTaskRetryCount: 1,
             repoTaskRolloverCount: rolloverCount,
@@ -2235,7 +2941,8 @@ function App() {
           }
         } : current;
       });
-      notify("ChatGPT chưa gọi CodexPro · đang tự gửi lại bắt buộc");
+      notify("ChatGPT chưa trả task title · đang tự gửi lại bắt buộc");
+      logRendererDiagnostic(api, "warn", "tool", "ChatGPT thiếu task title; Manager đã gửi lại một lần và giữ nguyên Task ID", { action: "repo-task-title-retry", profile_id: profile.profile_id, conversation_id: conversationId, previous_task_id: taskId, retry_task_id: String(retried?.repo_task_id || ""), task_id_reused: retried?.repo_task_id_reused === true, repo_task_dispatched_at: String(retried?.repo_task_dispatched_at || "") });
       window.setTimeout(() => void refresh(false), 500);
     } catch (err) {
       const message = err?.message || String(err);
@@ -2250,12 +2957,14 @@ function App() {
         return;
       }
       repoTaskVerificationReads.current.set(verificationKey, "done");
+      logRendererDiagnostic(api, "error", "tool", `Không xác minh được tool call CodexPro: ${message}`, { action: "repo-task-verification", profile_id: profile.profile_id, conversation_id: conversationId, task_id: taskId, error: err });
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Không xác minh được tool call CodexPro: ${message}` }));
     }
   }
 
   async function loadResponse(profile, explicitConversationId, silent = false, readDom = false, recoverStaleDom = false, canonicalOnly = false) {
-    const conversations = profileRequestChats(profile);
+    const pinnedTarget = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
+    const conversations = profileRequestChats(profile, pinnedTarget);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const conversationId = String(explicitConversationId || requestTargets[profile.profile_id] || defaultTarget || "");
     if (!conversationId || conversationId === NEW_CHAT_TARGET || responseFetches.current.has(profile.profile_id)) return null;
@@ -2283,15 +2992,21 @@ function App() {
         const networkTerminal = isTerminalChatNetworkState(nextNetworkState);
         const networkStreamInProgress = Boolean(networkStreamCurrentGeneration && result.network_stream_in_progress);
         const networkStreamAvailable = Boolean(networkStreamCurrentGeneration && (!networkTerminal || networkStreamInProgress));
+        const domResponseVerified = Boolean(result.response_ready === true && domAvailable && result.dom_busy !== true && result.network_stream_in_progress !== true);
+        const canonicalBusyFromSource = Object.prototype.hasOwnProperty.call(result, "canonical_busy")
+          ? Boolean(result.canonical_busy)
+          : Boolean(sameConversation && previous.canonicalBusy);
+        const canonicalBusy = domResponseVerified ? false : canonicalBusyFromSource;
         const incomingMessages = Array.isArray(result.messages)
           ? trimRecentTranscriptMessages(result.messages.map((message, index) => ({
               id: String(message?.id || `${message?.role || "message"}-${index}`),
               role: message?.role === "user" ? "user" : "assistant",
               text: message?.role === "user" ? visibleUserMessageText(message?.text) : String(message?.text || ""),
+              images: message?.role === "assistant" && Array.isArray(message?.images) ? message.images.slice(0, 4).map((image, imageIndex) => ({ id: String(image?.id || `${message?.id || "assistant"}-image-${imageIndex}`), name: String(image?.name || "Ảnh tạo bởi ChatGPT"), alt: String(image?.alt || "Ảnh tạo bởi ChatGPT"), mimeType: String(image?.mime_type || image?.mimeType || "image/jpeg"), width: Number(image?.width) || 0, height: Number(image?.height) || 0, sourceWidth: Number(image?.source_width) || Number(image?.sourceWidth) || 0, sourceHeight: Number(image?.source_height) || Number(image?.sourceHeight) || 0, size: Number(image?.size) || 0, dataUrl: String(image?.data_url || image?.dataUrl || "") })).filter((image) => image.dataUrl.startsWith("data:image/")) : [],
               truncated: Boolean(message?.truncated),
               provisional: message?.role === "assistant" && (message?.provisional === true || message?.end_turn === false),
               endTurn: message?.role === "assistant" ? (message?.end_turn === true ? true : message?.end_turn === false ? false : null) : null
-            })).filter((message) => message.text))
+            })).filter((message) => message.text || message.images?.length))
           : [];
         let nextMessages = sameConversation ? materializeTranscriptMessages(previous, conversationId) : [];
         if (contentAvailable) nextMessages = replaceCanonicalTranscript(nextMessages, incomingMessages);
@@ -2300,7 +3015,7 @@ function App() {
           text: result.text,
             truncated: result.truncated
         });
-        const terminalAwaitingFinal = Boolean(networkTerminal && !networkStreamInProgress && result.response_ready !== true);
+        const terminalAwaitingFinal = Boolean(networkTerminal && !networkStreamInProgress && !canonicalBusy && result.response_ready !== true);
         if (terminalAwaitingFinal) {
           nextMessages = discardProvisionalAssistantAfterLatestUser(nextMessages, { includeUnverified: true });
         }
@@ -2319,10 +3034,11 @@ function App() {
                 ? nextAssistantText || mergeProgressiveResponseText(sameConversation ? previous.text : "", result.text)
                 : (sameConversation ? previous.text || "" : ""),
             messages: nextMessages,
-            busy: networkTerminal && !networkStreamInProgress ? false : Boolean(result.busy || networkStreamInProgress),
+            busy: Boolean(canonicalBusy || networkStreamInProgress || (!networkTerminal && result.busy)),
+            canonicalBusy,
             truncated: contentAvailable || networkStreamAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
-            incomplete: networkTerminal ? false : contentAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
-            incompleteReason: networkTerminal ? "" : contentAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
+            incomplete: canonicalBusy ? true : networkTerminal ? false : contentAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
+            incompleteReason: canonicalBusy ? "canonical_generation_in_progress" : networkTerminal ? "" : contentAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
             conversationLimitReached: Boolean(previous.conversationLimitReached),
             conversationLimitMessage: previous.conversationLimitMessage || "",
             domAvailable,
@@ -2350,7 +3066,7 @@ function App() {
             networkStatusCode: Number(result.network_status_code) || Number(previous.networkStatusCode) || 0,
             networkError: String(result.network_error || previous.networkError || ""),
             networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
-            responseReady: Boolean(result.response_ready && !networkStreamInProgress),
+            responseReady: Boolean(!canonicalBusy && result.response_ready && !networkStreamInProgress),
             responseSource: terminalAwaitingFinal ? "network_state" : String(result.response_source || previous.responseSource || ''),
             responseAudit,
             responseAuditFetchMode,
@@ -2364,6 +3080,7 @@ function App() {
       return result;
     } catch (err) {
       const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "chat", `Đọc phản hồi thất bại: ${message}`, { action: "load-response", profile_id: profile.profile_id, conversation_id: conversationId, read_dom: readDom, recover_stale_dom: recoverStaleDom, canonical_only: canonicalOnly, silent, error: err });
       setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: false, error: message, conversationId } }));
       if (!silent) setError(message);
       return null;
@@ -2388,7 +3105,9 @@ function App() {
       if (!selected.length) return;
       addRequestAttachments(profileId, selected);
     } catch (err) {
-      setError(err?.message || String(err));
+      const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "chat", `Xử lý file đính kèm thất bại: ${message}`, { action: "choose-request-attachments", profile_id: profileId, error: err });
+      setError(message);
     }
   }
 
@@ -2398,6 +3117,7 @@ function App() {
       const preview = await api.getRequestFilePreview(file.path);
       setAttachmentPreview({ ...preview, loading: false, path: file.path });
     } catch (err) {
+      logRendererDiagnostic(api, "error", "chat", `Đọc preview file thất bại: ${err?.message || String(err)}`, { action: "open-attachment-preview", file_name: file.name, file_size: file.size, mime_type: file.mimeType, error: err });
       setAttachmentPreview({
         loading: false,
         name: file.name,
@@ -2423,6 +3143,7 @@ function App() {
       notify("Đã dán ảnh từ clipboard");
     } catch (err) {
       const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "chat", `Dán ảnh clipboard thất bại: ${message}`, { action: "paste-request-image", profile_id: profileId, error: err });
       setRequestSendErrors((current) => ({ ...current, [profileId]: message }));
     }
   }
@@ -2432,10 +3153,14 @@ function App() {
     setBusy(`continue:${profile.profile_id}`);
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
     try {
+      const continueProjectRoot = projectRootForProfile(profile);
+      const continueAllAllowed = continueProjectRoot === ALL_ALLOWED_WORKSPACES;
       await api.sendProfileRequest({
         profileId: profile.profile_id,
         conversationId,
-        projectRoot: projectRootForProfile(profile),
+        scope: continueAllAllowed ? "all_allowed" : "workspace",
+        projectRoot: continueAllAllowed ? "" : continueProjectRoot,
+        workspaceCandidates: continueAllAllowed ? projects.map((project) => project.root) : [],
         text: "Tiếp tục từ đúng chỗ phản hồi vừa bị ngắt. Không lặp lại phần trước; hoàn thành câu trả lời còn dang dở.",
         attachments: []
       });
@@ -2452,13 +3177,16 @@ function App() {
   function renderChatModal() {
     const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
     if (!profile) return null;
-    const conversations = profileRequestChats(profile);
+    const pinnedTarget = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
+    const conversations = profileRequestChats(profile, pinnedTarget);
     const workspaceProjects = projects;
     const selectedProjectRoot = projectRootForProfile(profile);
     const selectedTarget = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
+    const selectedConversation = conversations.find((chat) => String(chat.id) === selectedTarget);
+    const renameOpen = renameChat?.profileId === profile.profile_id && renameChat?.conversationId === selectedTarget;
     const isNewChat = selectedTarget === NEW_CHAT_TARGET;
     const sending = busy === `request:${profile.profile_id}`;
-    const draft = requestDrafts[profile.profile_id] || "";
+    const initialDraft = requestDraftsRef.current[profile.profile_id] || "";
     const attachments = requestFiles[profile.profile_id] || [];
     const response = requestResponses[profile.profile_id];
     const sendError = requestSendErrors[profile.profile_id] || "";
@@ -2497,7 +3225,10 @@ function App() {
       tabBusy: selectedTab?.busy,
       responseCurrent,
       responseBusy: response?.busy,
-      streamBusy: responseCurrent && response?.networkStreamInProgress
+      responseReady: responseVerifiedComplete,
+      responseLoading: response?.loading,
+      streamBusy: responseCurrent && response?.networkStreamInProgress,
+      canonicalBusy: responseCurrent && response?.canonicalBusy
     });
     const selectedSettling = !(responseCurrent && response?.networkStreamInProgress) && shouldShowChatSettling({
       networkState: selectedNetworkState,
@@ -2505,20 +3236,26 @@ function App() {
       responseCurrent,
       responseIncomplete: response?.incomplete
     });
-    const responseTurnActive = selectedRecoveringNetworkAbort || (!isTerminalChatNetworkState(selectedNetworkState) && Boolean(sending || selectedBusy || selectedSettling || response?.busy || response?.loading));
+    const responseTurnActive = selectedRecoveringNetworkAbort || Boolean(sending || selectedBusy || selectedSettling || (responseCurrent && (response?.busy || response?.loading)));
     const turnReady = !selectedRecoveringNetworkAbort && canAcceptNextChatMessage({
       networkState: selectedNetworkState,
       tabBusy: selectedTab?.busy,
       tabSettling: selectedTab?.settling,
       responseCurrent,
       responseBusy: response?.busy,
-      responseIncomplete: response?.incomplete
+      responseReady: responseVerifiedComplete,
+      responseLoading: response?.loading,
+      responseIncomplete: response?.incomplete,
+      canonicalBusy: responseCurrent && response?.canonicalBusy,
+      streamBusy: responseCurrent && response?.networkStreamInProgress
     });
     const domUnavailable = Boolean(responseCurrent && response?.domAvailable === false && !response?.domSkipped);
     const contentNeedsRefresh = Boolean(responseCurrent && response?.contentNeedsRefresh);
     const rolloverCreating = Boolean(responseCurrent && response?.rolloverStatus === "creating");
-    const canSend = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0) && Boolean(draft.trim() || attachments.length);
-    const working = profile.connected && (profile.activity === "working" || selectedBusy || selectedSettling || rolloverCreating);
+    const otherBusyTab = (profile.conversation_tabs || []).some((tab) => (!selectedTab || tab.id !== selectedTab.id) && (tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating"));
+    const selectedResponseClearsProfileBusy = Boolean(responseVerifiedComplete && !selectedBusy && !selectedSettling && !otherBusyTab);
+    const canSendBase = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0);
+    const working = profile.connected && ((profile.activity === "working" && !selectedResponseClearsProfileBusy) || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
     const responseHeadline = responseCleared
       ? "Chat đã được dọn"
@@ -2527,7 +3264,7 @@ function App() {
       : selectedRecoveringNetworkAbort
         ? "AI vẫn đang xử lý · đang xác minh sau khi transport bị hủy"
         : selectedBusy || selectedSettling
-        ? selectedActivityText || (selectedBusy ? "AI đang xử lý · theo dõi bằng network" : "AI đang hoàn tất tác vụ")
+        ? "CodexPro đang xử lý…"
         : selectedNetworkFailed && responseVerifiedComplete
           ? "AI đã phản hồi xong · canonical xác nhận"
           : selectedNetworkFailed
@@ -2544,7 +3281,7 @@ function App() {
 
     return (
       <div className="modal-backdrop chat-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setChatProfileId("")}>
-        <div className="modal chat-modal" ref={chatModalRef}>
+        <div className="modal chat-modal" ref={chatModalRef} onWheelCapture={(event) => holdOpenChatAutoScroll(profile.profile_id, event.deltaY)} onTouchMoveCapture={() => holdOpenChatAutoScroll(profile.profile_id, -1)}>
           <div className="modal-head chat-modal-head">
             <div className="chat-modal-profile">
               <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
@@ -2561,6 +3298,21 @@ function App() {
             <label className="request-label">Chọn repo và đường dẫn</label>
             <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => changeProjectForProfile(profile, root)} disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating} />
             {!workspaceProjects.length && selectedProjectRoot !== ALL_ALLOWED_WORKSPACES && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
+            <div className="request-label-row">
+              <label className="request-label">Đoạn chat <small>giữ nguyên lựa chọn khi làm mới</small></label>
+              <div className="chat-manage-actions">
+                <button type="button" onClick={() => beginRenameSelectedChat(profile, selectedTarget, selectedConversation?.title || "")} disabled={!profile.connected || isNewChat || !selectedConversation || Boolean(busy)}>Đổi tên</button>
+                <button type="button" onClick={() => startNewChat(profile)} disabled={!profile.connected || Boolean(busy)}>+ Chat mới</button>
+              </div>
+            </div>
+            {renameOpen && (
+              <div className="chat-rename-editor">
+                <input className="chat-rename-input" type="text" value={renameChat.title} maxLength={120} autoFocus aria-label="Tên đoạn chat mới" onChange={(event) => setRenameChat((current) => current ? { ...current, title: event.target.value } : current)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveRenamedChat(profile); } if (event.key === "Escape") { event.preventDefault(); setRenameChat(null); } }} disabled={Boolean(busy)} />
+                <button type="button" className="chat-rename-cancel" onClick={() => setRenameChat(null)} disabled={Boolean(busy)}>Hủy</button>
+                <button type="button" className="chat-rename-save" onClick={() => void saveRenamedChat(profile)} disabled={Boolean(busy) || !String(renameChat.title || "").trim()}>Lưu</button>
+              </div>
+            )}
+            <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => selectRequestConversation(profile, id)} disabled={!profile.connected || !conversations.length || sending} />
             <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${sending || selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
               <div className="chat-response-head">
@@ -2579,13 +3331,13 @@ function App() {
                   <span>{response.rolloverNotice}</span>
                 </div>
               )}
-              {responseCurrent && !responseCleared && response?.repoTaskId && (
+              {responseCurrent && !responseCleared && response?.repoTaskId && (response.repoTaskStatus === "verified" || response.repoTaskStatus === "failed") && (
                 <div className={`network-response-notice is-${response.repoTaskStatus === "verified" ? "completed" : response.repoTaskStatus === "failed" ? "failed" : "generating"}`}>
-                  <strong>{response.repoTaskStatus === "verified" ? "CodexPro: đã xác minh tool call" : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT né tool · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ bằng chứng tool call"}</strong>
-                  <span>{response.repoTaskStatus === "verified" ? (response.repoTaskScope === "all_allowed" ? `Đã xác minh phạm vi toàn bộ vùng được cấp quyền · task ${response.repoTaskId}` : `Workspace đã được mở thật · task ${response.repoTaskId}`) : response.repoTaskStatus === "failed" ? "ChatGPT không gọi CodexPro nên Manager không công nhận phản hồi này." : "Manager chỉ công nhận công việc sau khi server nhận begin_repo_task."}</span>
+                  <strong>{response.repoTaskStatus === "verified" ? (response.repoTaskProof?.task_kind === "code" ? "CodexPro: Rules + CodexGraph đã xác minh" : "CodexPro: đã ghi nhận task title") : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT thiếu title · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ task title"}</strong>
+                  <span>{response.repoTaskStatus === "verified" ? repoTaskEvidenceSummary(response.repoTaskProof) : response.repoTaskStatus === "failed" ? "ChatGPT không trả task title qua CodexPro nên Manager không công nhận phản hồi này." : "Mọi task phải có title; chỉ task CODE mới tải Rules và CodexGraph."}</span>
                 </div>
               )}
-              {responseCurrent && !responseCleared && !isNewChat && selectedNetworkState !== "idle" && !selectedNetworkCompleted && !responseVerifiedComplete && (
+              {responseCurrent && !responseCleared && !isNewChat && !responseVerifiedComplete && (selectedNetworkFailed || selectedRecoveringNetworkAbort) && (
                 <div className={`network-response-notice is-${selectedNetworkState}`}>
                   <strong>{selectedRecoveringNetworkAbort ? "Network: transport cũ bị hủy · đang xác minh" : selectedBusy ? "Network: AI đang xử lý" : "Network: request thất bại"}</strong>
                   <span>{selectedRecoveringNetworkAbort ? "Chrome đã hủy transport cũ nhưng ChatGPT có thể vẫn tiếp tục ở backend. CodexPro đang kiểm tra transcript canonical trước khi kết luận lỗi." : selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
@@ -2598,15 +3350,16 @@ function App() {
                     const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
                     const responseSpaceClass = !isLastAssistant ? "" : responseTurnActive && !(response.networkStreamAvailable && hasResponseContent) ? "is-response-cage" : "is-response-runway";
                     if (message.toolActivity) {
-                      return <div className="chat-transcript-message is-tool-activity" key={message.id}><div className="tool-activity-live"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{message.text}</span></div></div>;
+                      return <div className="chat-transcript-message is-tool-activity" key={message.id} data-message-id={message.id}><div className="tool-activity-live"><span className="tool-activity-text">{message.text}</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></div></div>;
                     }
                     return (
-                      <div className={`chat-transcript-message is-${message.role} ${responseSpaceClass}`} key={message.id} data-audit-role={message.role} data-audit-fingerprint={responseAuditTextFingerprint(message.text)} data-audit-length={String(message.text || "").length}>
+                      <div className={`chat-transcript-message is-${message.role} ${responseSpaceClass}`} key={message.id} data-message-id={message.id} data-audit-role={message.role} data-audit-fingerprint={responseAuditTextFingerprint(message.text)} data-audit-length={String(message.text || "").length}>
                         <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
                         <div className="latest-response-content" onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
                           <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
                           {message.role === "assistant" ? <>
-                            <React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>
+                            {message.text && <React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>}
+                            {Boolean(message.images?.length) && <div className={`chat-message-images ${message.images.length === 1 ? "is-single" : "is-grid"}`}>{message.images.map((image, imageIndex) => <button type="button" className="chat-generated-image" key={image.id || `${message.id}-image-${imageIndex}`} title="Mở ảnh" aria-label={`Mở ${image.alt || image.name || "ảnh tạo bởi ChatGPT"}`} onClick={() => setAttachmentPreview({ loading: false, name: image.name || "Ảnh tạo bởi ChatGPT", size: Number(image.size) || 0, mimeType: image.mimeType || "image/jpeg", kind: "image", dataUrl: image.dataUrl, generated: true })}><img src={image.dataUrl} alt={image.alt || image.name || "Ảnh tạo bởi ChatGPT"} /></button>)}</div>}
                             {responseTurnActive && response.networkStreamAvailable && isLastAssistant && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}
                             {message.text && turnReady && (
                               <div className="chat-message-actions">
@@ -2625,51 +3378,33 @@ function App() {
               ) : <div className="response-empty">Đoạn chat này chưa có tin nhắn.</div>}
             </div>
 
-            <label className="request-label" htmlFor={`request-${profile.profile_id}`}>Nhắn tiếp</label>
-            <div className="request-composer">
-              <textarea
-                id={`request-${profile.profile_id}`}
-                value={draft}
-                maxLength={12000}
-                placeholder={rolloverCreating ? "Chat cũ đã đầy · đang tạo chat mới để tiếp tục dự án…" : "Nhập file hoặc tin nhắn"}
-                onPaste={(event) => void pasteRequestImage(profile.profile_id, event)}
-                onChange={(event) => { setRequestDrafts((current) => ({ ...current, [profile.profile_id]: event.target.value })); if (sendError) setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" })); }}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.nativeEvent?.isComposing || event.repeat) return;
-                  if (!canSend) return;
-                  event.preventDefault();
-                  void sendRequest(profile);
-                }}
-                disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating}
-              />
-              {attachments.length > 0 && (
-                <div className="request-files">
-                  {attachments.map((file) => (
-                    <div className="request-file" key={file.path} title={file.path} role="button" tabIndex={0} aria-label={`Xem trước ${file.name}`} onClick={() => void openAttachmentPreview(file)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openAttachmentPreview(file); } }}>
-                      {file.previewDataUrl
-                        ? <img className="request-file-image" src={file.previewDataUrl} alt="" />
-                        : <span className="request-file-icon">▤</span>}
-                      <span className="request-file-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span>
-                      <button type="button" aria-label={`Bỏ ${file.name}`} onClick={(event) => { event.stopPropagation(); setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== file.path) })); }} disabled={sending}>×</button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="request-composer-toolbar">
-                <button type="button" className="attach-button" onClick={() => chooseRequestAttachments(profile.profile_id)} disabled={!profile.connected || sending || rolloverCreating || attachments.length >= 4}><span>＋</span> Thêm file</button>
-                <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${draft.length.toLocaleString("vi-VN")}/12.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
-              </div>
-            </div>
-            {sendError && <div className="request-send-error">{sendError}</div>}
-            <SendDebugEvidence evidence={sendEvidence} />
-            <div className="request-card-foot">
-              {selectedBusy && <span>Đang nhận phản hồi</span>}
-              <div className="request-card-actions">
-                <button type="button" className="button secondary" onClick={() => setChatProfileId("")}>Đóng</button>
-                <button type="button" className="button secondary" onClick={() => openProfile(profile)} disabled={Boolean(busy) || !profile.connected || isNewChat || !(profile.conversation_tabs?.length)}>Mở Chrome</button>
-                <button type="button" className="button primary" onClick={() => sendRequest(profile)} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : selectedSettling ? "Chat đang hoàn tất" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
-              </div>
-            </div>
+            <ChatRequestComposer
+              profileId={profile.profile_id}
+              initialDraft={initialDraft}
+              draftResetVersion={requestDraftResetVersions[profile.profile_id] || 0}
+              attachments={attachments}
+              placeholder={rolloverCreating ? "Chat cũ đã đầy · đang tạo chat mới để tiếp tục dự án…" : "Nhập file hoặc tin nhắn"}
+              disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating}
+              attachmentDisabled={!profile.connected || sending || rolloverCreating}
+              canSendBase={canSendBase}
+              sending={sending}
+              rolloverCreating={rolloverCreating}
+              selectedBusy={selectedBusy}
+              selectedSettling={selectedSettling}
+              isNewChat={isNewChat}
+              sendError={sendError}
+              sendEvidence={sendEvidence}
+              canOpenChrome={!busy && profile.connected && !isNewChat && Boolean(profile.conversation_tabs?.length)}
+              onPaste={(event) => void pasteRequestImage(profile.profile_id, event)}
+              onChooseAttachments={() => void chooseRequestAttachments(profile.profile_id)}
+              onOpenAttachmentPreview={(file) => openAttachmentPreview(file)}
+              onRemoveAttachment={(filePath) => setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== filePath) }))}
+              onClearSendError={() => setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }))}
+              onDraftSnapshot={(nextDraft) => { requestDraftsRef.current[profile.profile_id] = nextDraft; }}
+              onClose={() => setChatProfileId("")}
+              onOpenChrome={() => openProfile(profile)}
+              onSend={(nextDraft) => sendRequest(profile, nextDraft)}
+            />
           </article>
         </div>
       </div>
@@ -2677,16 +3412,33 @@ function App() {
   }
 
   const selectedFont = FONT_OPTIONS.find((option) => option.value === managerSettings.fontFamily) || FONT_OPTIONS[0];
+  const selectedHeadingFont = FONT_OPTIONS.find((option) => option.value === managerSettings.headingFontFamily);
+  const selectedMonoFont = FONT_OPTIONS.find((option) => option.value === managerSettings.monoFontFamily);
   const appStyle = {
     "--chat-modal-width": `${managerSettings.chatWidth}px`,
     "--chat-response-height": `${managerSettings.chatHeight}px`,
     "--chat-response-runway-height": `${Math.max(108, Math.round((managerSettings.chatHeight - 45) / 2))}px`,
     "--app-font-family": selectedFont.css,
-    "--font-xs": `${Math.max(10, managerSettings.fontSize - 2)}px`,
+    "--heading-font-family": selectedHeadingFont?.css || selectedFont.css,
+    "--mono-font-family": selectedMonoFont?.css || selectedFont.css,
+    "--font-micro": `${Math.max(10, managerSettings.fontSize - 4)}px`,
+    "--font-description": `${Math.max(11, managerSettings.fontSize - 2)}px`,
+    "--font-body": `${managerSettings.fontSize}px`,
+    "--font-control": `${managerSettings.fontSize}px`,
+    "--font-title": `${managerSettings.fontSize + 3}px`,
+    "--font-xs": `${Math.max(11, managerSettings.fontSize - 2)}px`,
     "--font-base": `${managerSettings.fontSize}px`,
-    "--font-brand": `${managerSettings.fontSize + 2}px`,
+    "--font-brand": `${managerSettings.fontSize + 3}px`,
     "--font-section": `${managerSettings.fontSize + 6}px`,
-    "--font-page": `${managerSettings.fontSize + 14}px`
+    "--font-page": `${managerSettings.fontSize + 14}px`,
+    "--weight-regular": managerSettings.fontWeight,
+    "--weight-description": managerSettings.fontWeight,
+    "--weight-body": managerSettings.fontWeight,
+    "--weight-medium": Math.max(managerSettings.fontWeight, 500),
+    "--weight-control": Math.max(managerSettings.fontWeight, 600),
+    "--weight-title": Math.max(managerSettings.fontWeight, 600),
+    "--weight-semibold": Math.max(managerSettings.fontWeight, 600),
+    "--weight-bold": Math.max(managerSettings.fontWeight, 700)
   };
   const workerSettingItems = [
     { state: "idle", title: "Đang rảnh", description: "Hiện khi profile online và đang chờ việc." },
@@ -2712,29 +3464,55 @@ function App() {
         </div>
         <nav>
           <button type="button" className={activePage === "overview" ? "active" : ""} onClick={() => setActivePage("overview")}><Icon>⌁</Icon>Tổng quan</button>
+          <button type="button" className={activePage === "control" ? "active" : ""} onClick={() => setActivePage("control")}><Icon>◫</Icon>Điều phối</button>
+          <button type="button" className={activePage === "logs" ? "active" : ""} onClick={() => setActivePage("logs")}><Icon>≡</Icon>Nhật ký</button>
           <button type="button" className={activePage === "settings" ? "active" : ""} onClick={() => setActivePage("settings")}><Icon>⚙</Icon>Cài đặt</button>
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? `Tự chạy cùng ${platform}` : "Autostart chưa bật"}</span>
-          <small>CodexPro Manager 0.2.79</small>
+          <small>CodexPro Manager {managerPackage.version}</small>
         </div>
       </aside>
 
-      <main className={activePage === "settings" ? "page-settings" : "page-overview"}>
+      <main className={activePage === "settings" ? "page-settings" : activePage === "logs" ? "page-logs" : activePage === "control" ? "page-control" : "page-overview"}>
         <header>
           <div>
-            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : `${platform.toUpperCase()} CONTROL CENTER`}</p>
-            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : "CodexPro của bạn"}</h1>
-            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ toàn app." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
+            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : activePage === "control" ? "AGENT OPERATIONS" : `${platform.toUpperCase()} CONTROL CENTER`}</p>
+            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "control" ? "Trung tâm điều phối" : "CodexPro của bạn"}</h1>
+            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : activePage === "control" ? "Theo dõi task, hiệu suất, tự phục hồi, phiên bản và an toàn repo trong một màn hình." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
-              <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>
-                {busy === "start" ? "Đang khởi động..." : "Khởi động"}
-              </button>
-              <button className="button secondary" onClick={() => control("restart")} disabled={Boolean(busy)}>
-                {busy === "restart" ? "Đang restart..." : "Restart server"}
-              </button>
+              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} rảnh, ${profileSummary.hung} mất kết nối, ${profileSummary.missing} chưa cài`}>
+                <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
+                <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
+                <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
+                <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
+                {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
+                {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
+              </div>
+              <div className="header-action-row">
+                <button
+                  className={`button ${profileSummary.reload ? "worker-update-action" : "secondary"} reload-all`}
+                  onClick={() => setWorkerUpdateConfirmOpen(true)}
+                  disabled={Boolean(busy) || profileSummary.reload === 0}
+                  title={profileSummary.reload
+                    ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${WORKER_EXTENSION_VERSION}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
+                    : profileSummary.deferredUpdate
+                      ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
+                      : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
+                >
+                  {busy === "reload-profiles" ? "Đang update extension…" : "Update extension"}
+                </button>
+                <div className="runtime-action-group">
+                  <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>
+                    {busy === "start" ? "Đang khởi động..." : "Khởi động"}
+                  </button>
+                  <button className="button secondary" onClick={() => control("restart")} disabled={Boolean(busy)}>
+                    {busy === "restart" ? "Đang restart..." : "Restart server"}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
         </header>
@@ -2758,28 +3536,6 @@ function App() {
               <p className="eyebrow">CHROME PROFILE BRIDGE</p>
               <h2>Profile đã kết nối</h2>
               <p className="section-note">Mỗi profile có extension CodexPro sẽ tự xuất hiện tại đây. Chọn đúng profile để app tự thêm và test MCP.</p>
-            </div>
-            <div className="profile-head-actions">
-              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} rảnh, ${profileSummary.hung} mất kết nối, ${profileSummary.missing} chưa cài`}>
-                <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
-                <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
-                <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
-                <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
-                {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
-                {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
-              </div>
-              <button
-                className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}
-                onClick={() => setWorkerUpdateConfirmOpen(true)}
-                disabled={Boolean(busy) || profileSummary.reload === 0}
-                title={profileSummary.reload
-                  ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${WORKER_EXTENSION_VERSION}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
-                  : profileSummary.deferredUpdate
-                    ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
-                    : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
-              >
-                {busy === "reload-profiles" ? "Đang update worker…" : "Update worker extension"}
-              </button>
             </div>
           </div>
           <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout`}>
@@ -2812,11 +3568,9 @@ function App() {
               const liveTab = profileTabs.find((tab) => tab.active) || profileTabs.find((tab) => tab.busy || tab.settling) || profileTabs[0];
               const rendererUnresponsive = Boolean(profile.connected && liveTab?.renderer_unresponsive);
               const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
-              const connectorObservedLive = Boolean((working || settling) && /^CodexPro đang\b/i.test(liveActivityText));
-              const connectorInstalled = Boolean(profile.connector_installed || connectorObservedLive);
-              const connectorMessage = connectorInstalled && !profile.connector_installed && connectorObservedLive
-                ? "CodexPro đang hoạt động trong ChatGPT."
-                : profile.connector_message;
+              const connectorInstalled = Boolean(profile.connector_installed && profile.connector_profile_bound !== false);
+              const connectorUpdateRequired = Boolean(profile.connector_update_required);
+              const connectorMessage = connectorInstalled ? "CodexPro READY" : profile.connector_message;
               const idle = profile.connected && profile.activity === "idle" && (connectorInstalled || !ready);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
               const profileBorderState = profileCardBorderState({
@@ -2848,7 +3602,8 @@ function App() {
                       {settling && <span className="badge profile-settling">ĐANG HOÀN TẤT</span>}
                       {working && <WorkingBadge />}
                       {idle && <span className="badge connected">ĐANG RẢNH</span>}
-                      {!connectorInstalled && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
+                      {connectorUpdateRequired && <span className="badge profile-missing">CẦN CẬP NHẬT CONNECTOR</span>}
+                      {!connectorInstalled && !connectorUpdateRequired && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
                       <span
                         className={`active-repo-chip ${repoLabel ? "" : "is-empty"}`}
                         title={repoTitle}
@@ -2869,7 +3624,7 @@ function App() {
                         <strong>{profileTaskLabel}</strong>
                       </div>
                     )}
-                    {(working || settling) && <div className="profile-live-activity" role="status" aria-live="polite"><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span><span>{liveActivityText || (settling ? "ChatGPT đang hoàn tất tác vụ" : "ChatGPT đang xử lý")}</span></div>}
+                    {(working || settling) && <div className="profile-live-activity" role="status" aria-live="polite"><span className="profile-live-activity-text">{liveActivityText || (settling ? "ChatGPT đang hoàn tất tác vụ" : "ChatGPT đang xử lý")}</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></div>}
                   </div>
                   <div className="profile-actions">
                     {!ready && <span className="update-needed">Có worker {WORKER_EXTENSION_VERSION} mới</span>}
@@ -2899,7 +3654,7 @@ function App() {
                         onClick={() => setupProfile(profile)}
                         disabled={Boolean(busy) || profileChecking || !profile.connected || !ready}
                       >
-                        {profileBusy ? "Đang thêm + test…" : "Thêm CodexPro"}
+                        {profileBusy ? (connectorUpdateRequired ? "Đang cập nhật + test…" : "Đang thêm + test…") : (connectorUpdateRequired ? "Cập nhật CodexPro" : "Thêm CodexPro")}
                       </button>
                     )}
                   </div>
@@ -2952,6 +3707,46 @@ function App() {
             </nav>
           )}
         </section>
+        </div>
+
+        <div className="control-page" hidden={activePage !== "control"}>
+          <ControlCenter
+            status={status}
+            projects={projects}
+            performance={operationsPerformance}
+            uiPerformance={uiPerformance}
+            diagnosticEntries={operationsLogs}
+            settings={managerSettings}
+            managerVersion={managerPackage.version}
+            workerVersion={WORKER_EXTENSION_VERSION}
+            profileSummary={profileSummary}
+            busy={busy}
+            onOpenChat={setChatProfileId}
+            onOpenChrome={(profile) => void openProfile(profile, { focusOnly: true })}
+            onRecover={(profile) => void recoverProfileTab(profile)}
+            onStop={(task) => void stopControlTask(task)}
+            onOpenRepo={(root) => void api.openFolder(root)}
+            onToggleSetting={(key, value) => void saveManagerSetting({ [key]: value }, value ? "Đã bật tự động hóa" : "Đã tắt tự động hóa")}
+            onUpdateWorkers={() => void reloadProfiles()}
+            onRestartServer={() => void control("restart")}
+          />
+        </div>
+
+        <div className="diagnostic-page" hidden={activePage !== "logs"}>
+          <DiagnosticLogView
+            data={diagnosticLogs}
+            filters={diagnosticFilters}
+            busy={diagnosticBusy}
+            selected={selectedDiagnostic}
+            onFilters={(patch) => setDiagnosticFilters((current) => ({ ...current, ...patch }))}
+            onRefresh={() => void loadDiagnosticLogs(true)}
+            onClear={() => void clearDiagnosticLogHistory()}
+            onSelect={setSelectedDiagnostic}
+            onCopy={(entry) => {
+              void api.copyText(JSON.stringify(entry, null, 2));
+              notify("Đã copy chi tiết log");
+            }}
+          />
         </div>
 
         <div className="settings-view" hidden={activePage !== "settings"}>
@@ -3268,22 +4063,47 @@ function App() {
             <div className="settings-panel-head">
               <div>
                 <p className="eyebrow">TYPOGRAPHY</p>
-                <h2>Font chữ toàn app</h2>
-                <p className="section-note">Áp dụng ngay cho sidebar, popup chat, nội dung phản hồi và các control.</p>
+                <h2>Font chữ theo thành phần</h2>
+                <p className="section-note">Chọn font riêng cho nội dung, tiêu đề và phần kỹ thuật. Có thể để các nhóm dùng chung một font.</p>
               </div>
             </div>
-            <div className="font-setting-row">
-              <label>Font đang dùng</label>
-              <SettingsDropdown
-                value={managerSettings.fontFamily}
-                options={FONT_OPTIONS}
-                disabled={settingsBusy === "save"}
-                onChange={(value) => void saveManagerSetting({ fontFamily: value }, "Đã đổi font toàn app")}
-              />
-              <div className="font-preview" style={{ fontFamily: selectedFont.css, fontSize: `${managerSettings.fontSize}px` }}>Aa Bb Cc · CodexPro đang làm việc · 0123456789</div>
+            <div className="font-role-grid">
+              <div className="font-setting-row">
+                <label>Nội dung & control</label>
+                <SettingsDropdown
+                  value={managerSettings.fontFamily}
+                  options={FONT_OPTIONS}
+                  disabled={settingsBusy === "save"}
+                  ariaLabel="Chọn font nội dung và control"
+                  onChange={(value) => void saveManagerSetting({ fontFamily: value }, "Đã đổi font nội dung")}
+                />
+                <div className="font-preview" style={{ fontFamily: selectedFont.css, fontSize: `${managerSettings.fontSize}px` }}>Aa Bb Cc · Nội dung tiếng Việt: Đặng, Nguyễn, Trường · 0123456789</div>
+              </div>
+              <div className="font-setting-row">
+                <label>Tiêu đề</label>
+                <SettingsDropdown
+                  value={managerSettings.headingFontFamily}
+                  options={FONT_ROLE_OPTIONS}
+                  disabled={settingsBusy === "save"}
+                  ariaLabel="Chọn font tiêu đề"
+                  onChange={(value) => void saveManagerSetting({ headingFontFamily: value }, value === "inherit" ? "Tiêu đề dùng font nội dung" : "Đã đổi font tiêu đề")}
+                />
+                <div className="font-preview is-title" style={{ fontFamily: selectedHeadingFont?.css || selectedFont.css }}>CodexPro · Tiêu đề giao diện</div>
+              </div>
+              <div className="font-setting-row">
+                <label>Code · ID · log</label>
+                <SettingsDropdown
+                  value={managerSettings.monoFontFamily}
+                  options={FONT_ROLE_OPTIONS}
+                  disabled={settingsBusy === "save"}
+                  ariaLabel="Chọn font code ID và log"
+                  onChange={(value) => void saveManagerSetting({ monoFontFamily: value }, value === "inherit" ? "Code và log dùng font nội dung" : "Đã đổi font code và log")}
+                />
+                <div className="font-preview is-mono" style={{ fontFamily: selectedMonoFont?.css || selectedFont.css }}>cpt_task_id · 127.0.0.1:8793 · npm run build</div>
+              </div>
             </div>
             <div className="font-size-setting-row">
-              <label>Cỡ chữ</label>
+              <label>Cỡ chữ chung</label>
               <div className="width-control">
                 <button
                   type="button"
@@ -3312,6 +4132,38 @@ function App() {
                 >＋</button>
               </div>
               <div className="font-size-value"><strong>{managerSettings.fontSize}</strong><span>px · cỡ chữ cơ bản</span></div>
+            </div>
+            <div className="font-size-setting-row font-weight-setting-row">
+              <label>Độ đậm chữ chung</label>
+              <div className="width-control">
+                <button
+                  type="button"
+                  className="setting-step-button"
+                  aria-label="Giảm độ đậm chữ"
+                  disabled={settingsBusy === "save" || managerSettings.fontWeight <= 400}
+                  onClick={() => void saveManagerSetting({ fontWeight: Math.max(400, managerSettings.fontWeight - 100) }, "Đã giảm độ đậm chữ")}
+                >−</button>
+                <input
+                  className="settings-range font-weight-range"
+                  type="range"
+                  min="400"
+                  max="700"
+                  step="100"
+                  aria-label="Độ đậm chữ chung"
+                  value={managerSettings.fontWeight}
+                  onChange={(event) => setManagerSettings((current) => ({ ...current, fontWeight: Number(event.target.value) }))}
+                  onPointerUp={(event) => void saveManagerSetting({ fontWeight: Number(event.currentTarget.value) }, "Đã lưu độ đậm chữ")}
+                  onKeyUp={(event) => void saveManagerSetting({ fontWeight: Number(event.currentTarget.value) }, "Đã lưu độ đậm chữ")}
+                />
+                <button
+                  type="button"
+                  className="setting-step-button"
+                  aria-label="Tăng độ đậm chữ"
+                  disabled={settingsBusy === "save" || managerSettings.fontWeight >= 700}
+                  onClick={() => void saveManagerSetting({ fontWeight: Math.min(700, managerSettings.fontWeight + 100) }, "Đã tăng độ đậm chữ")}
+                >＋</button>
+              </div>
+              <div className="font-size-value"><strong>{managerSettings.fontWeight}</strong><span>{FONT_WEIGHT_LABELS[managerSettings.fontWeight] || "Custom"} · độ đậm cơ bản</span></div>
             </div>
           </section>
 
@@ -3392,7 +4244,7 @@ function App() {
       {renderChatModal()}
 
       {attachmentPreview && (
-        <div className="modal-backdrop attachment-lightbox-backdrop" tabIndex={-1} autoFocus onKeyDown={(event) => { if (event.key === "Escape") setAttachmentPreview(null); }} onMouseDown={(event) => event.target === event.currentTarget && setAttachmentPreview(null)}>
+        <div className="modal-backdrop attachment-lightbox-backdrop" tabIndex={-1} autoFocus onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setAttachmentPreview(null); } }} onMouseDown={(event) => event.target === event.currentTarget && setAttachmentPreview(null)}>
           <div className="attachment-lightbox" role="dialog" aria-modal="true" aria-label={`Xem trước ${attachmentPreview.name || "file"}`}>
             <div className="attachment-lightbox-head">
               <div>

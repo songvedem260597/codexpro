@@ -2,13 +2,17 @@ const TRANSCRIPT_EXCHANGE_LIMIT = 3;
 const TRANSCRIPT_MESSAGE_HARD_LIMIT = 12;
 const OPTIMISTIC_SUBMISSION_TTL_MS = 10 * 60 * 1000;
 
+function messageHasContent(message) {
+  return Boolean(String(message?.text || "").trim() || (Array.isArray(message?.images) && message.images.length));
+}
+
 function usableMessages(response, conversationId) {
   if (!response || response.conversationId !== conversationId || !Array.isArray(response.messages)) return [];
-  return response.messages.filter((message) => String(message?.text || "").trim());
+  return response.messages.filter(messageHasContent);
 }
 
 export function trimRecentTranscriptMessages(messages) {
-  const usable = Array.isArray(messages) ? messages.filter((message) => String(message?.text || "").trim()) : [];
+  const usable = Array.isArray(messages) ? messages.filter(messageHasContent) : [];
   if (!usable.length) return [];
   const exchanges = [];
   let current = null;
@@ -56,7 +60,10 @@ export function cacheableTranscriptMessages(messages) {
     if (message?.pending || optimisticSubmissionState(message) === "pending") return false;
     if (/^(?:optimistic|rollover)-user-/.test(String(message?.id || "")) && !optimisticSubmissionState(message) && !message?.uncertain) return false;
     return true;
-  });
+  }).map((message) => {
+    const { images: _images, ...cacheMessage } = message || {};
+    return cacheMessage;
+  }).filter((message) => String(message?.text || "").trim());
 }
 
 export function materializeTranscriptMessages(response, conversationId) {
@@ -76,7 +83,7 @@ export function materializeTranscriptMessages(response, conversationId) {
 }
 
 export function transcriptAwaitingAssistant(messages) {
-  const usable = Array.isArray(messages) ? messages.filter((message) => String(message?.text || "").trim()) : [];
+  const usable = Array.isArray(messages) ? messages.filter(messageHasContent) : [];
   const latestUserIndex = usable.findLastIndex((message) => message?.role === "user");
   return latestUserIndex >= 0 && !usable.slice(latestUserIndex + 1).some((message) => message?.role === "assistant" && message?.provisional !== true && message?.endTurn !== false);
 }
@@ -92,10 +99,18 @@ export function discardProvisionalAssistantAfterLatestUser(messages, { includeUn
 }
 
 export function completedResponseNeedsDomFallback(response) {
-  if (!response || response.response_ready === true) return false;
-  if (response.busy === true || response.network_stream_in_progress === true || response.network_state === "generating") return false;
+  if (!response) return false;
   const messages = Array.isArray(response?.messages) ? response.messages : [];
-  return response.canonical_available === false || messages.length === 0 || transcriptAwaitingAssistant(messages);
+  const latestUserIndex = messages.findLastIndex((message) => message?.role === "user");
+  const assistant = latestUserIndex >= 0
+    ? messages.slice(latestUserIndex + 1).findLast((message) => message?.role === "assistant")
+    : messages.findLast((message) => message?.role === "assistant");
+  const suspiciousShortFinal = response.response_ready === true
+    && response.canonical_available !== true
+    && String(assistant?.text || response.text || "").trim().length <= 2;
+  if (response.response_ready === true && !suspiciousShortFinal) return false;
+  if (response.busy === true || response.network_stream_in_progress === true || response.network_state === "generating") return false;
+  return suspiciousShortFinal || response.canonical_available === false || messages.length === 0 || transcriptAwaitingAssistant(messages);
 }
 
 export function mergeProgressiveResponseText(previousValue, incomingValue) {
@@ -148,6 +163,22 @@ function preserveProgressiveAssistantMessages(previousMessages, incomingMessages
       truncated: Boolean(previousAssistant.truncated && message.truncated)
     };
   });
+}
+
+function preserveProgressiveMessageIdentities(previousMessages, incomingMessages, comparableText) {
+  const previous = Array.isArray(previousMessages) ? previousMessages : [];
+  const incoming = Array.isArray(incomingMessages) ? incomingMessages : [];
+  const usersWithStableIds = incoming.map((message, incomingIndex) => {
+    if (message?.role !== "user") return message;
+    const text = comparableText(message?.text);
+    if (!text) return message;
+    const occurrenceFromEnd = incoming.slice(incomingIndex + 1)
+      .filter((candidate) => candidate?.role === "user" && comparableText(candidate?.text) === text).length;
+    const previousMatches = previous.filter((candidate) => candidate?.role === "user" && comparableText(candidate?.text) === text);
+    const previousUser = previousMatches.at(-(occurrenceFromEnd + 1));
+    return previousUser?.id ? { ...message, id: previousUser.id } : message;
+  });
+  return preserveProgressiveAssistantMessages(previous, usersWithStableIds, comparableText);
 }
 
 export function mergeNetworkStreamTranscript(previousMessages, { conversationId, text, truncated = false }) {
@@ -212,7 +243,7 @@ export function replaceCanonicalTranscript(previousMessages, incomingMessages, {
         const text = comparableText(message?.text);
         return text && !canonicalUserTexts.has(text);
       });
-    const progressiveIncoming = preserveProgressiveAssistantMessages(previous, incoming, comparableText);
+    const progressiveIncoming = preserveProgressiveMessageIdentities(previous, incoming, comparableText);
     return trimRecentTranscriptMessages([...progressiveIncoming, ...unmaterializedOptimisticUsers]);
   }
   return trimRecentTranscriptMessages(previousMessages);

@@ -34,10 +34,22 @@ import {
   runVerifiedGeminiScout,
   runVerifiedOpenCodeInvestigation
 } from './opencode-subagent-runner.mjs';
+import { createRuntimeLifecycleLogger } from './runtime-lifecycle-log.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UNTRACKED_FILE_HASH_BYTES = 64 * 1024;
 const UNTRACKED_SYMLINK_TARGET_BYTES = 512;
+let runtimeLifecycleLogger = null;
+
+function logRuntimeLifecycle(action, message, details = {}, level = 'info') {
+  if (!runtimeLifecycleLogger) return null;
+  try {
+    return runtimeLifecycleLogger.append(action, message, details, level);
+  } catch (error) {
+    console.error(`[codexpro-lifecycle-log] ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
 
 function packageVersion() {
   return JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8')).version;
@@ -1163,6 +1175,7 @@ function spawnLogged(name, command, args, options = {}) {
     ...(process.platform === 'win32' ? { windowsHide: true } : {})
   });
   child.codexproKillTree = Boolean(invocation.killTree);
+  child.codexproExpectedExit = false;
   const logLines = [];
   const record = (stream, chunk) => {
     const text = redactForLog(String(chunk));
@@ -1172,10 +1185,33 @@ function spawnLogged(name, command, args, options = {}) {
   };
   child.codexproLogTail = () => logLines.join('\n');
   spawnedChildren.add(child);
+  logRuntimeLifecycle('child-spawn', `${name} process started`, {
+    child_name: name,
+    child_pid: child.pid ?? null,
+    executable: path.basename(String(command || '')),
+    cwd: spawnOptions.cwd || '',
+    expected_exit: false
+  });
   child.stdout.on('data', (chunk) => record(process.stdout, chunk));
   child.stderr.on('data', (chunk) => record(process.stderr, chunk));
+  child.on('error', (error) => {
+    logRuntimeLifecycle('child-error', `${name} process emitted an error`, {
+      child_name: name,
+      child_pid: child.pid ?? null,
+      error,
+      output_tail: child.codexproLogTail()
+    }, 'error');
+  });
   child.on('exit', (code, signal) => {
     spawnedChildren.delete(child);
+    logRuntimeLifecycle('child-exit', `${name} process exited`, {
+      child_name: name,
+      child_pid: child.pid ?? null,
+      exit_code: code,
+      signal: signal || '',
+      expected_exit: child.codexproExpectedExit === true,
+      output_tail: child.codexproLogTail()
+    }, child.codexproExpectedExit ? 'info' : 'error');
     if (verbose) console.error(`[${name}] exited code=${code} signal=${signal}`);
   });
   return child;
@@ -1298,6 +1334,7 @@ function writeQuickTunnelCredentials(tunnel) {
 
 function killProcess(child) {
   if (!child || child.killed) return;
+  child.codexproExpectedExit = true;
   if (child.codexproKillTree && child.pid) {
     const result = spawnSync('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
       stdio: 'ignore',
@@ -1429,7 +1466,15 @@ async function waitForPublicHealth(publicBase, token, tunnelChild, tunnelLabel =
   const exit = waitForProcessExit(tunnelChild).then(({ code, signal }) => {
     throw new Error(`${tunnelLabel} exited before ${publicBase}/healthz was reachable, code=${code} signal=${signal}`);
   });
-  return Promise.race([health, exit]);
+  const result = await Promise.race([health, exit]);
+  logRuntimeLifecycle('tunnel-ready', `${tunnelLabel} health probe succeeded`, {
+    tunnel_name: tunnelLabel,
+    tunnel_pid: tunnelChild?.pid ?? null,
+    public_origin: (() => {
+      try { return new URL(publicBase).origin; } catch { return ''; }
+    })()
+  });
+  return result;
 }
 
 function isSubpath(child, parent) {
@@ -4325,6 +4370,18 @@ async function main() {
     throw new Error('--no-auth is only allowed with --tunnel none on a loopback host.');
   }
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], '8787'));
+  runtimeLifecycleLogger = createRuntimeLifecycleLogger({ home: codexProHome() });
+  logRuntimeLifecycle('launcher-start', 'CodexPro launcher started', {
+    parent_pid: process.ppid,
+    root,
+    port,
+    tunnel,
+    hidden_launcher: process.env.CODEXPRO_HIDDEN_LAUNCHER === '1',
+    version: packageVersion()
+  });
+  process.once('exit', (exitCode) => {
+    logRuntimeLifecycle('launcher-exit', 'CodexPro launcher exited', { exit_code: exitCode }, exitCode === 0 ? 'info' : 'error');
+  });
   const bash = optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], 'safe');
   const bashTranscript = bashTranscriptOption(args, profile);
   const codexSessions = codexSessionsOption(args, profile);
@@ -4420,15 +4477,32 @@ async function main() {
   let cloudflared;
   let cleanupTunnelCredentials = () => {};
   const cleanup = () => {
+    logRuntimeLifecycle('cleanup-requested', 'CodexPro launcher is cleaning up child processes', {
+      server_pid: server.pid ?? null,
+      tunnel_pid: cloudflared?.pid ?? null
+    });
     cleanupTunnelCredentials();
     cleanupChildren();
     clearRuntimeConnection(root);
   };
-  process.on('SIGINT', () => { cleanup(); process.exit(130); });
-  process.on('SIGTERM', () => { cleanup(); process.exit(143); });
+  process.on('SIGINT', () => {
+    logRuntimeLifecycle('launcher-signal', 'CodexPro launcher received SIGINT', { signal: 'SIGINT' }, 'warn');
+    cleanup();
+    process.exit(130);
+  });
+  process.on('SIGTERM', () => {
+    logRuntimeLifecycle('launcher-signal', 'CodexPro launcher received SIGTERM', { signal: 'SIGTERM' }, 'warn');
+    cleanup();
+    process.exit(143);
+  });
 
   const localBase = `http://${host}:${port}`;
   await waitForHealth(`${localBase}/healthz`, token);
+  logRuntimeLifecycle('local-ready', 'Local MCP health probe succeeded', {
+    server_pid: server.pid ?? null,
+    host,
+    port
+  });
   statusLine('ok', `Local MCP ready at ${localBase}/mcp`);
   const runtimeOptions = {
     localBase,
@@ -4709,6 +4783,7 @@ async function main() {
 }
 
 main().catch((error) => {
+  logRuntimeLifecycle('launcher-error', 'CodexPro launcher stopped after an error', { error }, 'error');
   cleanupChildren();
   const message = error instanceof Error ? error.message : String(error);
   console.error(`Error: ${message}`);

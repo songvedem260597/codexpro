@@ -11,11 +11,18 @@ function safeMarkdownHref(value) {
   return /^(?:https?:\/\/|mailto:)/i.test(href) ? href : "";
 }
 
+function openExternalLink(event, href) {
+  const openExternal = globalThis.window?.codexpro?.openExternal;
+  if (typeof openExternal !== "function") return;
+  event.preventDefault();
+  Promise.resolve(openExternal(href)).catch(() => undefined);
+}
+
 const components = {
   a: ({ href, children, ...props }) => {
     const safeHref = safeMarkdownHref(href);
     return safeHref
-      ? <a {...props} href={safeHref} target="_blank" rel="noreferrer">{children}</a>
+      ? <a {...props} href={safeHref} target="_blank" rel="noreferrer" onClick={(event) => openExternalLink(event, safeHref)}>{children}</a>
       : <span className="response-unsafe-link">{children}</span>;
   },
   h1: ({ children, ...props }) => <h1 {...props} className="response-heading">{children}</h1>,
@@ -45,12 +52,12 @@ const components = {
   img: ({ src, alt }) => {
     const safeHref = safeMarkdownHref(src);
     return safeHref
-      ? <a className="response-image-link" href={safeHref} target="_blank" rel="noreferrer">Ảnh: {alt || safeHref}</a>
+      ? <a className="response-image-link" href={safeHref} target="_blank" rel="noreferrer" onClick={(event) => openExternalLink(event, safeHref)}>Ảnh: {alt || safeHref}</a>
       : <span className="response-image-link">Ảnh: {alt || "không có mô tả"}</span>;
   }
 };
 
-export function ResponseText({ text, truncated }) {
+export const ResponseText = React.memo(function ResponseText({ text, truncated }) {
   const cleanText = String(text || "")
     .replace(/[^\r\n]*/g, "")
     .replace(/[ \t]+\n/g, "\n");
@@ -68,4 +75,4 @@ export function ResponseText({ text, truncated }) {
       </ReactMarkdown>
     </div>
   );
-}
+});

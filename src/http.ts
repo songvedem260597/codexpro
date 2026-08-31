@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import cors from "cors";
 import { z } from "zod";
@@ -20,9 +22,12 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
-import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, subscribeBrowserExtensionProfiles } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionProfilePendingTask, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles } from "./browserExtensionBridge.js";
 
 const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
+const RUNTIME_STARTED_AT = new Date().toISOString();
+const RUNTIME_ENTRY_STAT = fs.statSync(fileURLToPath(import.meta.url));
+const RUNTIME_BUILD_ID = `${Math.floor(RUNTIME_ENTRY_STAT.mtimeMs)}:${RUNTIME_ENTRY_STAT.size}`;
 
 function browserProfileWorkerId(profileId: string): string {
   const safe = String(profileId || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64);
@@ -1814,6 +1819,7 @@ async function main(): Promise<void> {
         workers: [...workspace.workers].sort()
       })).sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
     };
+  }
 
   function releaseTransport(sessionId: string | undefined): void {
     if (!sessionId) return;
@@ -1839,6 +1845,8 @@ async function main(): Promise<void> {
     res.json({
       ok: true,
       name: "CodexPro",
+      runtimeStartedAt: RUNTIME_STARTED_AT,
+      runtimeBuildId: RUNTIME_BUILD_ID,
       defaultRoot: config.defaultRoot,
       allowedRoots: config.allowedRoots,
       bashMode: config.bashMode,
@@ -1975,6 +1983,15 @@ async function main(): Promise<void> {
         const browserProfileId = typeof req.query.codexpro_profile === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(req.query.codexpro_profile)
           ? req.query.codexpro_profile
           : "";
+        const pendingTask = browserProfileId ? getBrowserExtensionProfilePendingTask(browserProfileId) : undefined;
+        recordBrowserProfileTaskEvent("mcp_session_initialized", {
+          profile_id: browserProfileId,
+          profile_bound: Boolean(browserProfileId),
+          client_name: String(req.body?.params?.clientInfo?.name || ""),
+          pending_task_id: pendingTask?.task_id,
+          pending_task_scope: pendingTask?.scope,
+          pending_task_age_ms: pendingTask?.age_ms
+        });
         const server = createCodexProServer(config, {
           workerId,
           browserProfileId,

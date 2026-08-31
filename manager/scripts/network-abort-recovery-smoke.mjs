@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { isRecoverableAbortedChatNetworkFailure } from "../src/chat-status.js";
+import { isRecoverableAbortedChatNetworkFailure, shouldShowChatBusy } from "../src/chat-status.js";
 
 const completedAt = "2026-08-29T14:36:32.673Z";
 const completedAtMs = Date.parse(completedAt);
@@ -36,4 +36,37 @@ assert.equal(isRecoverableAbortedChatNetworkFailure({
   nowMs: completedAtMs + 121_000
 }), false, "ERR_ABORTED recovery must expire instead of waiting forever");
 
-console.log("✓ ChatGPT ERR_ABORTED canonical-recovery smoke test passed");
+assert.equal(shouldShowChatBusy({
+  networkState: "idle",
+  tabBusy: true,
+  responseCurrent: true,
+  responseBusy: false,
+  responseReady: true,
+  responseLoading: false,
+  canonicalBusy: false,
+  streamBusy: false
+}), false, "verified DOM completion must override a stale tab busy flag");
+
+assert.equal(shouldShowChatBusy({
+  networkState: "generating",
+  tabBusy: true,
+  responseCurrent: true,
+  responseBusy: false,
+  responseReady: true,
+  responseLoading: false,
+  canonicalBusy: false,
+  streamBusy: false
+}), true, "an actively generating network turn must not be hidden by an older ready response");
+
+assert.equal(shouldShowChatBusy({
+  networkState: "idle",
+  tabBusy: true,
+  responseCurrent: true,
+  responseBusy: false,
+  responseReady: true,
+  responseLoading: true,
+  canonicalBusy: false,
+  streamBusy: false
+}), true, "a locally loading next turn must keep the chat busy even if the previous response was ready");
+
+console.log("✓ ChatGPT ERR_ABORTED and stale-busy recovery smoke test passed");

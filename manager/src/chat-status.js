@@ -10,8 +10,18 @@ export function isRecoverableAbortedChatNetworkFailure({ networkState, networkEr
   return Math.max(0, Number(nowMs) - completedAtMs) < Math.max(1000, Number(graceMs) || 120000);
 }
 
-export function shouldShowChatBusy({ networkState, tabBusy, responseCurrent, responseBusy, streamBusy }) {
-  if (tabBusy || streamBusy) return true;
+export function shouldShowChatBusy({ networkState, tabBusy, responseCurrent, responseBusy, responseReady = false, responseLoading = false, streamBusy, canonicalBusy }) {
+  const verifiedComplete = Boolean(
+    responseCurrent
+    && responseReady
+    && !responseLoading
+    && !responseBusy
+    && !streamBusy
+    && !canonicalBusy
+    && networkState !== "generating"
+  );
+  if (verifiedComplete) return false;
+  if (tabBusy || streamBusy || canonicalBusy) return true;
   if (isTerminalChatNetworkState(networkState)) return false;
   return networkState === "generating" || Boolean(responseCurrent && responseBusy);
 }
@@ -24,6 +34,28 @@ export function shouldShowChatSettling({ networkState, tabSettling, responseCurr
 
 export function canAcceptNextChatMessage(status) {
   return !shouldShowChatBusy(status) && !shouldShowChatSettling(status);
+}
+
+export function isRepoTaskCompletionCurrent({ networkCompletedAt, repoTaskDispatchedAt }) {
+  const dispatchedAtMs = Date.parse(String(repoTaskDispatchedAt || ""));
+  if (!Number.isFinite(dispatchedAtMs)) return true;
+  const completedAtMs = Date.parse(String(networkCompletedAt || ""));
+  return Number.isFinite(completedAtMs) && completedAtMs >= dispatchedAtMs;
+}
+
+export function canVerifyRepoTaskUse({ responseCurrent, responseReady, responseBusy, responseIncomplete, awaitingAssistant, tabBusy, tabSettling, canonicalBusy, streamBusy, networkCompletedAt, repoTaskDispatchedAt }) {
+  return Boolean(
+    responseCurrent
+    && isRepoTaskCompletionCurrent({ networkCompletedAt, repoTaskDispatchedAt })
+    && responseReady
+    && !responseBusy
+    && !responseIncomplete
+    && !awaitingAssistant
+    && !tabBusy
+    && !tabSettling
+    && !canonicalBusy
+    && !streamBusy
+  );
 }
 
 export function isRetryableChatTurnBusyError(error) {
