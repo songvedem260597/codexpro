@@ -772,7 +772,11 @@ function ChatRequestComposer({
           </div>
         )}
         <div className="request-composer-toolbar">
-          <button type="button" className="attach-button" onClick={onChooseAttachments} disabled={attachmentDisabled || attachments.length >= 4}><span>＋</span> Thêm file</button>
+          <button type="button" className="attach-button" aria-label="Thêm file" title="Thêm file" onClick={onChooseAttachments} disabled={attachmentDisabled || attachments.length >= 4}>
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M20.5 11.5 11 21a6 6 0 0 1-8.5-8.5l10-10a4 4 0 0 1 5.7 5.6l-10 10a2 2 0 1 1-2.9-2.8l9.6-9.6" />
+            </svg>
+          </button>
           <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${draft.length.toLocaleString("vi-VN")}/12.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
         </div>
       </div>

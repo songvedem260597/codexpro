@@ -351,9 +351,9 @@ section { margin-bottom: 38px; }
 .request-file > button:hover { color: #fff; background: #2b3341; }
 .request-composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-top: 1px solid #242a35; background: #0b0e13; }
 .request-composer-toolbar > span { color: #687489; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.attach-button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; color: #c8d0de; border: 1px solid #313a49; border-radius: var(--radius-control); background: #171c24; font-size: 12px; font-weight: 700; }
+.attach-button { width: 32px; height: 32px; flex: 0 0 32px; display: inline-grid; place-items: center; padding: 0; color: #9babff; border: 1px solid #313a49; border-radius: var(--radius-control); background: #171c24; }
 .attach-button:hover { color: #fff; border-color: #52617a; background: #1d2430; }
-.attach-button span { color: #8da4ff; font-size: 16px; line-height: 1; }
+.attach-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .request-send-error { margin-top: 8px; padding: 9px 11px; color: #ffadb7; border: 1px solid #6a3540; border-radius: var(--radius-control); background: #2a1117; font-size: 12px; line-height: 1.45; }
 .send-debug-evidence { margin-top: 8px; border: 1px solid #2b3950; border-radius: 8px; background: #0b111a; color: #b8c4d8; font-size: 12px; }
 .send-debug-evidence summary { cursor: pointer; display: flex; align-items: baseline; gap: 8px; padding: 9px 11px; color: #d8e4f6; font-weight: 700; user-select: none; }
