@@ -16,6 +16,7 @@
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:extension-sync": "node scripts/extension-sync-smoke.mjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
+    "test:icon": "node scripts/icon-asset-smoke.mjs",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "dist:mac": "npm run build && electron-builder --mac dmg zip",

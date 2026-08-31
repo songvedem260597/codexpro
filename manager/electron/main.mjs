@@ -942,6 +942,11 @@ function profileDiagnosticSnapshot(profile) {
   return {
     connected: Boolean(profile?.connected),
     extension_version: String(profile?.extension_version || ""),
+    connector_installed: Boolean(profile?.connector_installed),
+    connector_profile_bound: profile?.connector_profile_bound !== false,
+    connector_update_required: Boolean(profile?.connector_update_required),
+    connector_message: String(profile?.connector_message || "").slice(0, 500),
+    connector_checked_at: String(profile?.connector_checked_at || "").slice(0, 64),
     renderer_unresponsive: Boolean(profile?.renderer_unresponsive || tabs.some((tab) => tab?.renderer_unresponsive)),
     connection_interrupted: tabs.some((tab) => tab?.connection_interrupted),
     message_delivery_timed_out: tabs.some((tab) => tab?.message_delivery_timed_out),
@@ -967,7 +972,19 @@ function recordBrowserProfileTransitions(profiles, checkedAt) {
     nextIds.add(profileId);
     const current = profileDiagnosticSnapshot(profile);
     const previous = browserProfileDiagnosticState.get(profileId);
-    const details = { action: "profile-state-transition", profile_id: profileId, checked_at: String(checkedAt || ""), ...current };
+    const details = {
+      action: "profile-state-transition",
+      profile_id: profileId,
+      checked_at: String(checkedAt || ""),
+      ...current,
+      ...(previous ? {
+        previous_connector_installed: previous.connector_installed,
+        previous_connector_profile_bound: previous.connector_profile_bound,
+        previous_connector_update_required: previous.connector_update_required,
+        previous_connector_message: previous.connector_message,
+        previous_connector_checked_at: previous.connector_checked_at
+      } : {})
+    };
     if (previous) {
       if (previous.connected && !current.connected) {
         diagnostic("warn", "browser", "profile", "Chrome profile mất heartbeat", details);
@@ -996,6 +1013,21 @@ function recordBrowserProfileTransitions(profiles, checkedAt) {
       }
       if (previous.extension_version && current.extension_version && previous.extension_version !== current.extension_version) {
         diagnostic("info", "browser", "profile", `Worker extension đổi từ ${previous.extension_version} sang ${current.extension_version}`, details);
+      }
+      if (previous.connector_installed && !current.connector_installed) {
+        diagnostic("warn", "browser", "profile", "CodexPro connector bị hạ xuống chưa xác minh", details);
+      } else if (!previous.connector_installed && current.connector_installed) {
+        diagnostic("info", "browser", "profile", "CodexPro connector đã được xác minh", details);
+      }
+      if (previous.connector_profile_bound && !current.connector_profile_bound) {
+        diagnostic("warn", "browser", "profile", "CodexPro connector không còn khớp profile", details);
+      } else if (!previous.connector_profile_bound && current.connector_profile_bound) {
+        diagnostic("info", "browser", "profile", "CodexPro connector đã khớp lại profile", details);
+      }
+      if (!previous.connector_update_required && current.connector_update_required) {
+        diagnostic("warn", "browser", "profile", "CodexPro connector cần cập nhật endpoint", details);
+      } else if (previous.connector_update_required && !current.connector_update_required) {
+        diagnostic("info", "browser", "profile", "CodexPro connector đã cập nhật endpoint", details);
       }
       if (current.task_title && current.task_title !== previous.task_title) {
         diagnostic("info", "browser", "task", "Profile đã nhận task title", details);
@@ -3962,14 +3994,17 @@ diagnosticIpcHandle("codexpro:check-profile", {
   details: (profileId) => ({ profile_id: String(profileId || "") }),
   resultDetails: (result) => ({
     connected: result?.connected,
-    connector_installed: result?.connector_installed,
+    connector_installed: result?.installed ?? result?.connector_installed,
     connector_profile_bound: result?.connector_profile_bound,
     connector_update_required: result?.connector_update_required,
+    connector_message: String(result?.message || result?.connector_message || ""),
+    connector_checked_at: String(result?.checked_at || result?.connector_checked_at || ""),
+    connector_check_diagnostic: result?.diagnostic && typeof result.diagnostic === "object" ? result.diagnostic : {},
     renderer_unresponsive: result?.renderer_unresponsive,
     extension_version: String(result?.extension_version || ""),
     tab_count: Number(result?.tab_count) || (Array.isArray(result?.conversation_tabs) ? result.conversation_tabs.length : 0)
   }),
-  resultDiagnostic: (result) => result?.connected === false || result?.connector_installed === false || result?.connector_profile_bound === false || result?.connector_update_required || result?.renderer_unresponsive
+  resultDiagnostic: (result) => result?.connected === false || (result?.installed ?? result?.connector_installed) === false || result?.connector_profile_bound === false || result?.connector_update_required || result?.renderer_unresponsive
     ? { level: result?.renderer_unresponsive ? "error" : "warn", message: "Kiểm tra profile phát hiện trạng thái bất thường" }
     : null
 }, (_event, profileId) => checkChatGptProfile(profileId));

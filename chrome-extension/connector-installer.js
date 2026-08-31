@@ -1,5 +1,5 @@
 (() => {
-  const INSTALLER_REVISION = '2026-08-31-26';
+  const INSTALLER_REVISION = '2026-08-31-27';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
   document.querySelector('#codexpro-setup-status')?.remove();
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
@@ -163,16 +163,45 @@
     return null;
   }
 
+  function connectorActionLabelMatches(aria, value, interactive) {
+    if (aria === 'actions for codexpro' || aria === 'hanh dong cho codexpro' ||
+      aria === 'thao tac voi codexpro' || aria === 'thao tac voi plugin') return true;
+    if (!interactive) return false;
+    return value === 'codexpro' || value.startsWith('codexpro ');
+  }
+
   function installedConnectorAction() {
-    return candidates().find(element => {
-      const aria = normalize(element.getAttribute?.('aria-label') || '');
-      return aria === 'actions for codexpro' || aria === 'hanh dong cho codexpro' ||
-        aria === 'thao tac voi codexpro' || aria === 'thao tac voi plugin';
-    }) || null;
+    return candidates().find(element => connectorActionLabelMatches(
+      normalize(element.getAttribute?.('aria-label') || ''),
+      text(element),
+      element.matches('button,[role="button"],[role="menuitem"],[role="option"]')
+    )) || null;
   }
 
   function connectorAlreadyListed() {
     return Boolean(installedConnectorAction());
+  }
+
+  function connectorCheckEvidence(match = installedConnectorAction()) {
+    const allCandidates = candidates();
+    const codexProCandidates = allCandidates.filter(element => {
+      const value = `${text(element)} ${normalize(element.getAttribute?.('aria-label') || '')}`.trim();
+      return value === 'codexpro' || value.startsWith('codexpro ') || value.includes(' actions for codexpro') || value.includes(' hanh dong cho codexpro');
+    });
+    return {
+      revision: INSTALLER_REVISION,
+      url: location.href,
+      hash: location.hash,
+      language: String(document.documentElement.lang || ''),
+      plugin_search_present: Boolean(document.querySelector('#plugin-search')),
+      candidate_count: allCandidates.length,
+      codexpro_candidate_count: codexProCandidates.length,
+      matched: Boolean(match),
+      match_tag: String(match?.tagName || '').toLowerCase(),
+      match_role: String(match?.getAttribute?.('role') || ''),
+      match_text: text(match).slice(0, 240),
+      match_aria: normalize(match?.getAttribute?.('aria-label') || '').slice(0, 240)
+    };
   }
 
   function installedConnectorId() {
@@ -573,11 +602,12 @@
       throw new Error('Profile Chrome này chưa đăng nhập ChatGPT.');
     }
     await preparePluginSearch();
-    if (connectorAlreadyListed()) return {ok: true, installed: true};
+    const connectorAction = installedConnectorAction();
+    if (connectorAction) return {ok: true, installed: true, diagnostic: connectorCheckEvidence(connectorAction)};
     const createLabels = ['Create', 'New plugin', 'Add plugin', 'Create app', 'Add custom connector', 'Tạo', 'Thêm plugin', 'Tạo ứng dụng'];
     const settingsReady = Boolean(document.querySelector('button[aria-label="Create app"]') || findAction(createLabels));
     if (!settingsReady) throw new Error('ChatGPT chưa tải xong danh sách Plugins hoặc profile không có quyền tạo app.');
-    return {ok: true, installed: false};
+    return {ok: true, installed: false, diagnostic: connectorCheckEvidence()};
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
