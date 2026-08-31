@@ -16,6 +16,7 @@
     "test:runtime-restart": "node scripts/runtime-restart-send-race-smoke.mjs",
     "test:api-worker-form": "node scripts/api-worker-form-smoke.mjs",
     "test:api-worker-models": "node scripts/api-worker-model-discovery-smoke.mjs",
+    "test:connected-workers": "node scripts/connected-worker-overview-smoke.mjs",
     "test:dropdowns": "node scripts/app-dropdown-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:extension-sync": "node scripts/extension-sync-smoke.mjs",

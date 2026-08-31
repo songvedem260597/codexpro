@@ -1115,12 +1115,9 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
   .header-server-actions .profile-count { width: 100%; height: auto; min-height: 42px; flex-wrap: wrap; }
 }
 
-.api-worker-card-list, .api-worker-config-list { display: grid; gap: 10px; }
-.api-worker-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 16px; border: 1px solid #293448; border-radius: var(--radius-card); background: linear-gradient(135deg, #111824, #0e1219); }
-.api-worker-card.is-working { border-color: #4867a8; box-shadow: inset 3px 0 0 #6b8cff; }
-.api-worker-card.is-failed { border-color: #6f3540; box-shadow: inset 3px 0 0 #d45b6b; }
-.api-worker-card-icon { width: 48px; height: 48px; display: grid; place-items: center; color: #b8caff; border: 1px solid #3b5488; border-radius: 12px; background: #172440; font-family: var(--font-mono); font-size: 12px; font-weight: var(--weight-bold); }
-.api-worker-card > div:nth-child(2) { min-width: 0; display: grid; gap: 7px; }
+.api-worker-config-list { display: grid; gap: 10px; }
+.api-worker-card .profile-main { display: block; }
+.api-worker-card .profile-actions .button { width: 100%; }
 .api-worker-card code, .api-worker-config code { color: #8fa7cc; overflow-wrap: anywhere; }
 .api-worker-settings { grid-column: 1 / -1; }
 .api-worker-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; row-gap: 14px; }

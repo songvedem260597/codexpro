@@ -819,9 +819,35 @@ function ApiWorkerSettings({ onChanged, notify, onError }) {
   );
 }
 
-function ApiWorkerCards({ workers, onRun, onStop }) {
+function ApiWorkerCards({ workers, customImages, onRun, onStop }) {
   if (!workers.length) return null;
-  return <section id="api-workers"><div className="section-head"><div><p className="eyebrow">API PLUGIN WORKERS</p><h2>Worker qua API</h2><p className="section-note">Các worker này dùng cùng ổ cắm MCP với Chrome; không có quyền repo trực tiếp.</p></div></div><div className="api-worker-card-list">{workers.map((worker) => <article className={`api-worker-card is-${worker.activity}`} key={worker.worker_id}><div className="api-worker-card-icon">API</div><div><div className="profile-title"><strong>{worker.label}</strong><span className="badge">{worker.provider}</span>{worker.activity === "working" ? <WorkingBadge /> : <span className={`badge ${worker.connected ? "connected" : "profile-missing"}`}>{worker.connected ? "ĐANG RẢNH" : "THIẾU KEY"}</span>}</div><code>{worker.worker_id}</code><div className="profile-meta"><span>{worker.model}</span><span>Policy qua MCP</span></div>{worker.current_task_title && <div className="profile-task-summary"><span>Task hiện tại</span><strong>{worker.current_task_title}</strong></div>}{worker.last_result && <details className="api-worker-result"><summary>Kết quả job gần nhất</summary><pre>{worker.last_result}</pre></details>}{worker.last_error && <div className="profile-warning">{worker.last_error}</div>}</div><div className="profile-actions">{worker.activity === "working" ? <button className="button danger-quiet" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button> : <button className="button primary" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}>Chạy job</button>}</div></article>)}</div></section>;
+  return workers.map((worker) => {
+    const workerState = !worker.connected || worker.activity === "failed" ? "hung" : worker.activity === "working" ? "working" : "idle";
+    const cardState = workerState === "hung" ? "error" : workerState;
+    return (
+      <article className={`browser-profile api-worker-card ${worker.connected ? "is-online" : "is-offline"} is-${cardState}`} key={worker.worker_id}>
+        <WorkerIcon state={workerState} customImages={customImages} />
+        <div className="profile-main">
+          <div className="profile-title">
+            <strong>{worker.label}</strong>
+            <span className="badge">API WORKER</span>
+            <span className="badge">{worker.provider}</span>
+            {worker.activity === "working" ? <WorkingBadge /> : <span className={`badge ${worker.connected ? "connected" : "profile-missing"}`}>{worker.connected ? "ĐANG RẢNH" : "THIẾU KEY"}</span>}
+          </div>
+          <code>api:{worker.worker_id}</code>
+          <div className="profile-meta"><span>{worker.model}</span><span>MCP-ONLY</span></div>
+          {worker.current_task_title && <div className="profile-task-summary"><span>Task hiện tại</span><strong>{worker.current_task_title}</strong></div>}
+          {worker.last_result && <details className="api-worker-result"><summary>Kết quả job gần nhất</summary><pre>{worker.last_result}</pre></details>}
+          {worker.last_error && <div className="profile-warning">{worker.last_error}</div>}
+        </div>
+        <div className="profile-actions">
+          {worker.activity === "working"
+            ? <button className="button danger-quiet" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button>
+            : <button className="button primary" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}>Chạy job</button>}
+        </div>
+      </article>
+    );
+  });
 }
 
 function apiJobId() {
@@ -913,6 +939,8 @@ function App() {
   const [renameChat, setRenameChat] = useState(null);
   const conversationTitleOverridesRef = useRef({});
   const refreshInFlight = useRef(false);
+  const refreshQueued = useRef(false);
+  const refreshForegroundQueued = useRef(false);
   const projectRefreshInFlight = useRef(false);
   const statusRefreshInFlight = useRef(false);
   const profileCheckTimes = useRef(new Map());
@@ -1588,7 +1616,11 @@ function App() {
   }, []);
 
   const refresh = useCallback(async (foreground = false) => {
-    if (refreshInFlight.current) return;
+    if (refreshInFlight.current) {
+      refreshQueued.current = true;
+      refreshForegroundQueued.current = refreshForegroundQueued.current || foreground;
+      return;
+    }
     refreshInFlight.current = true;
     if (foreground) setBusy("refresh");
     setError("");
@@ -1605,6 +1637,12 @@ function App() {
     } finally {
       refreshInFlight.current = false;
       if (foreground) setBusy("");
+      if (refreshQueued.current) {
+        const queuedForeground = refreshForegroundQueued.current;
+        refreshQueued.current = false;
+        refreshForegroundQueued.current = false;
+        void refresh(queuedForeground);
+      }
     }
   }, []);
 
@@ -2089,17 +2127,18 @@ function App() {
   const profileSummary = useMemo(() => {
     const allProfiles = status?.browserProfiles || [];
     const profiles = allProfiles.filter((profile) => profile.connected);
+    const apiWorkers = (status?.workers || []).filter((worker) => worker.worker_type === "api");
     const outdated = profiles.filter((profile) => !extensionReady(profile.extension_version));
     return {
-      working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length,
-      idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile.extension_version))).length,
-      hung: allProfiles.filter((profile) => !profile.connected).length,
+      working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length + apiWorkers.filter((worker) => worker.connected && worker.activity === "working").length,
+      idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile.extension_version))).length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
+      hung: allProfiles.filter((profile) => !profile.connected).length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
       missing: profiles.filter((profile) => profile.activity === "no_chatgpt" && !profile.connector_installed).length,
       reload: outdated.filter(profileSafeForWorkerUpdate).length,
       deferredUpdate: outdated.filter((profile) => !profileSafeForWorkerUpdate(profile)).length,
       outdated: outdated.length
     };
-  }, [status?.browserProfiles]);
+  }, [status?.browserProfiles, status?.workers]);
 
   async function copyLink() {
     if (!status?.mcpLink) return;
@@ -3676,27 +3715,27 @@ function App() {
           </div>
         </section>
 
-        <ApiWorkerCards
-          workers={(status?.workers || []).filter((worker) => worker.worker_type === "api")}
-          onRun={setApiJobWorker}
-          onStop={async (workerId) => {
-            try { await api.stopWorkerTask({ workerId }); await refresh(false); notify("Đã dừng API worker"); }
-            catch (workerError) { reportApiWorkerError(workerError); }
-          }}
-        />
-
         <section id="profiles">
           <div className="section-head">
             <div>
-              <p className="eyebrow">CHROME PROFILE BRIDGE</p>
-              <h2>Profile đã kết nối</h2>
-              <p className="section-note">Mỗi profile có extension CodexPro sẽ tự xuất hiện tại đây. Chọn đúng profile để app tự thêm và test MCP.</p>
+              <p className="eyebrow">CONNECTED WORKERS</p>
+              <h2>Worker đã kết nối</h2>
+              <p className="section-note">API worker đã lưu và các profile Chrome có extension CodexPro sẽ cùng xuất hiện tại đây.</p>
             </div>
           </div>
           <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout`}>
-            {!status?.browserProfiles?.length && (
-              <div className="empty">Chưa có Chrome profile nào kết nối. Hãy Load unpacked extension CodexPro trong profile cần dùng.</div>
+            {!(status?.workers || []).some((worker) => worker.worker_type === "api") && !status?.browserProfiles?.length && (
+              <div className="empty">Chưa có worker nào kết nối. Hãy lưu API worker hoặc Load unpacked extension CodexPro trong Chrome profile cần dùng.</div>
             )}
+            <ApiWorkerCards
+              workers={(status?.workers || []).filter((worker) => worker.worker_type === "api")}
+              customImages={managerSettings.workerImageDataUrls}
+              onRun={setApiJobWorker}
+              onStop={async (workerId) => {
+                try { await api.stopWorkerTask({ workerId }); await refresh(false); notify("Đã dừng API worker"); }
+                catch (workerError) { reportApiWorkerError(workerError); }
+              }}
+            />
             {[...(status?.browserProfiles || [])]
               .sort((left, right) => {
                 const rank = (profile) => {
