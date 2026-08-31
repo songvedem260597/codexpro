@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import { AppDropdown } from "./app-dropdown.jsx";
 import {
   ControlsContainer,
   FullScreenControl,
@@ -292,67 +293,20 @@ function GraphInteraction({ query, area, relationGroup, selectedNode, onSelectNo
 }
 
 function GraphDropdown({ label, value, options, onChange }) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef(null);
-  const selected = options.find((option) => option.value === value) || options[0];
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const handlePointerDown = (event) => {
-      if (!rootRef.current?.contains(event.target)) setOpen(false);
-    };
-    const handleKeyDown = (event) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [open]);
-
   return (
-    <div className={`codexgraph-filter${open ? " is-open" : ""}`} ref={rootRef}>
+    <div className="codexgraph-filter">
       <span className="codexgraph-filter-label">{label}</span>
-      <button
-        type="button"
-        className="codexgraph-filter-trigger"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <span className={`codexgraph-filter-dot is-${selected?.tone || "default"}`} aria-hidden="true" />
-        <span className="codexgraph-filter-value">{selected?.label || value}</span>
-        <span className="codexgraph-filter-chevron" aria-hidden="true" />
-      </button>
-      {open && (
-        <div className="codexgraph-filter-menu" role="listbox" aria-label={label}>
-          {options.map((option) => {
-            const active = option.value === value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                role="option"
-                aria-selected={active}
-                className={`codexgraph-filter-option${active ? " is-active" : ""}`}
-                onClick={() => {
-                  onChange(option.value);
-                  setOpen(false);
-                }}
-              >
-                <span className={`codexgraph-filter-dot is-${option.tone || "default"}`} aria-hidden="true" />
-                <span className="codexgraph-filter-option-copy">
-                  <strong>{option.label}</strong>
-                  {option.hint && <small>{option.hint}</small>}
-                </span>
-                <span className="codexgraph-filter-check" aria-hidden="true">✓</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
+      <AppDropdown
+        className="is-graph"
+        compact
+        value={value}
+        options={options}
+        onChange={onChange}
+        ariaLabel={label}
+        searchPlaceholder={`Tìm ${label.toLocaleLowerCase("vi-VN")}…`}
+        renderValue={(selected) => <><span className={`app-dropdown-dot is-${selected?.tone || "default"}`} aria-hidden="true" /><strong>{selected?.label || value}</strong></>}
+        renderOption={(option) => <><span className={`app-dropdown-dot is-${option.tone || "default"}`} aria-hidden="true" /><span className="app-dropdown-option-copy"><strong>{option.label}</strong>{option.hint && <small>{option.hint}</small>}</span></>}
+      />
     </div>
   );
 }

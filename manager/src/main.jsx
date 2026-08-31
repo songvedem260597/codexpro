@@ -26,6 +26,7 @@ import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./ch
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
 import { mergeBrowserProfilePayload, sameProjectList } from "./ui-performance.js";
 import { createApiWorkerDraft, normalizeApiWorkerModels, switchApiWorkerProvider, validateApiWorkerDraft } from "./api-worker-form.js";
+import { AppDropdown } from "./app-dropdown.jsx";
 import { CodeGraphView } from "./code-graph-view.jsx";
 import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
 import { ControlCenter } from "./control-center.jsx";
@@ -211,177 +212,57 @@ function WorkingBadge() {
 }
 
 function SettingsDropdown({ value, options, disabled, onChange, ariaLabel = "Chọn font chữ", selectedHint = "" }) {
-  const [open, setOpen] = useState(false);
-  const root = useRef(null);
-  const selected = options.find((option) => option.value === value) || options[0];
-
-  useEffect(() => {
-    const close = (event) => {
-      if (!root.current?.contains(event.target)) setOpen(false);
-    };
-    document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
-  }, []);
-
   return (
-    <div className={`settings-dropdown ${open ? "is-open" : ""} ${disabled ? "is-disabled" : ""}`} ref={root}>
-      <button
-        type="button"
-        className="settings-dropdown-trigger"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") setOpen(false);
-          if (["ArrowDown", "Enter", " "].includes(event.key) && !open) {
-            event.preventDefault();
-            setOpen(true);
-          }
-        }}
-      >
-        <span className="settings-dropdown-value">
-          <strong>{selected?.label || "Chọn giá trị"}</strong>
-          <small>{selectedHint || selected?.hint || (selected?.value === "system" ? "Theo giao diện hệ thống" : "Áp dụng cho toàn bộ CodexPro")}</small>
-        </span>
-        <svg className="settings-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
-      </button>
-      {open && (
-        <div className="settings-dropdown-menu" role="listbox" aria-label={ariaLabel}>
-          {options.map((option) => (
-            <button
-              type="button"
-              role="option"
-              aria-selected={option.value === value}
-              className={`settings-dropdown-option ${option.value === value ? "is-selected" : ""}`}
-              key={option.value}
-              onClick={() => { onChange(option.value); setOpen(false); }}
-              style={option.css ? { fontFamily: option.css } : undefined}
-            >
-              <span className="settings-dropdown-option-copy"><strong>{option.label}</strong>{option.hint && <small>{option.hint}</small>}</span>
-              {option.value === value && <span className="settings-dropdown-check">✓</span>}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+    <AppDropdown
+      className="is-settings"
+      value={value}
+      options={options.map((option) => ({ ...option, style: option.css ? { fontFamily: option.css } : undefined }))}
+      disabled={disabled}
+      onChange={onChange}
+      ariaLabel={ariaLabel}
+      searchPlaceholder={`Tìm ${ariaLabel.toLocaleLowerCase("vi-VN")}…`}
+      renderValue={(selected) => <span className="app-dropdown-value-copy"><strong>{selected?.label || "Chọn giá trị"}</strong><small>{selectedHint || selected?.hint || (selected?.value === "system" ? "Theo giao diện hệ thống" : "Áp dụng cho toàn bộ CodexPro")}</small></span>}
+    />
   );
 }
 
 function ChatDropdown({ value, conversations, disabled, onChange }) {
-  const [open, setOpen] = useState(false);
-  const root = useRef(null);
-  const selected = value === NEW_CHAT_TARGET ? { id: NEW_CHAT_TARGET, title: "Chat mới", open: false, draft: true } : conversations.find((chat) => chat.id === value);
-
-  useEffect(() => {
-    const close = (event) => {
-      if (!root.current?.contains(event.target)) setOpen(false);
-    };
-    document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
-  }, []);
-
+  const selectedDraft = { id: NEW_CHAT_TARGET, title: "Chat mới", open: false, draft: true };
+  const available = value === NEW_CHAT_TARGET && !conversations.some((chat) => chat.id === value) ? [selectedDraft, ...conversations] : conversations;
+  const options = available.map((chat, index) => ({ value: chat.id, label: chat.title || "Đoạn chat chưa có tiêu đề", hint: chat.draft ? "Chưa tạo trên ChatGPT" : chat.open ? "Đang mở trong Chrome" : "Chat gần đây", searchText: `${chat.title || ""} ${chat.id || ""}`, chat, position: index + 1 }));
   return (
-    <div className={`chat-dropdown ${open ? "is-open" : ""} ${disabled ? "is-disabled" : ""}`} ref={root}>
-      <button
-        type="button"
-        className="chat-dropdown-trigger"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") setOpen(false);
-          if (["ArrowDown", "Enter", " "].includes(event.key) && !open) {
-            event.preventDefault();
-            setOpen(true);
-          }
-        }}
-      >
-        <span className="chat-dropdown-value">
-          <strong>{selected?.title || "Chưa tải được các đoạn chat gần đây"}</strong>
-          {selected && <small>{selected.draft ? "Chưa tạo trên ChatGPT" : selected.open ? "Đang mở trong Chrome" : "Chat gần đây"}</small>}
-        </span>
-        <svg className="chat-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
-      </button>
-      {open && (
-        <div className="chat-dropdown-menu" role="listbox" aria-label="Chọn đoạn chat dự án">
-          {conversations.map((chat, index) => (
-            <button
-              type="button"
-              role="option"
-              aria-selected={chat.id === value}
-              data-conversation-id={chat.id}
-              className={`chat-dropdown-option ${chat.id === value ? "is-selected" : ""}`}
-              key={chat.id}
-              onClick={() => { onChange(chat.id); setOpen(false); }}
-            >
-              <span className="chat-option-index">{index + 1}</span>
-              <span className="chat-option-copy"><strong>{chat.title || "Đoạn chat chưa có tiêu đề"}</strong><small>{chat.open ? "Đang mở" : "Gần đây"}</small></span>
-              {chat.active && <span className="chat-option-active">ACTIVE</span>}
-              {chat.id === value && <span className="chat-option-check">✓</span>}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+    <AppDropdown
+      className="is-chat"
+      value={value}
+      options={options}
+      disabled={disabled}
+      onChange={onChange}
+      ariaLabel="Chọn đoạn chat dự án"
+      placeholder="Chưa tải được các đoạn chat gần đây"
+      searchPlaceholder="Tìm tiêu đề hoặc ID đoạn chat…"
+      searchThreshold={6}
+      renderValue={(selected) => <span className="app-dropdown-value-copy"><strong>{selected?.label || "Chưa tải được các đoạn chat gần đây"}</strong>{selected && <small>{selected.hint}</small>}</span>}
+      renderOption={(option) => <><span className="app-dropdown-index">{option.position}</span><span className="app-dropdown-option-copy"><strong>{option.label}</strong><small>{option.hint}</small></span>{option.chat.active && <span className="app-dropdown-meta is-active">ACTIVE</span>}</>}
+    />
   );
 }
 
 function ProjectDropdown({ value, projects, disabled, onChange }) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const root = useRef(null);
-  const selected = projects.find((project) => project.root === value);
-  const allAllowed = value === ALL_ALLOWED_WORKSPACES;
-  const normalizedQuery = query.trim().toLocaleLowerCase("vi-VN");
-  const filteredProjects = normalizedQuery
-    ? projects.filter((project) => [project.name, project.repoFullName, project.branch, project.root].some((field) => String(field || "").toLocaleLowerCase("vi-VN").includes(normalizedQuery)))
-    : projects;
-
-  useEffect(() => {
-    const close = (event) => {
-      if (!root.current?.contains(event.target)) { setOpen(false); setQuery(""); }
-    };
-    document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
-  }, []);
-
+  const options = [{ value: ALL_ALLOWED_WORKSPACES, label: "Tất cả vùng được cấp quyền", hint: "Không khóa repo/đường dẫn · tìm trên mọi workspace được phép truy cập", allAllowed: true, searchText: "tất cả đường dẫn workspace" }, ...projects.map((project) => ({ value: project.root, label: project.name, hint: `${project.repoFullName ? `${project.repoFullName} · ` : ""}${project.isGit ? (project.branch || "git") : "thư mục"} · ${project.root}`, searchText: [project.name, project.repoFullName, project.branch, project.root].join(" "), project }))];
   return (
-    <div className={`project-dropdown ${open ? "is-open" : ""} ${disabled ? "is-disabled" : ""}`} ref={root}>
-      <button type="button" className="project-dropdown-trigger" aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { setOpen((current) => !current); if (open) setQuery(""); }}>
-        <span className="project-dropdown-mark">{allAllowed ? "⌕" : "⌘"}</span>
-        <span className="project-dropdown-value">
-          <strong>{allAllowed ? "Tất cả vùng được cấp quyền" : selected?.name || "Chọn dự án hoặc đường dẫn"}</strong>
-          <small>{allAllowed ? "Không khóa repo/đường dẫn · CodexPro có thể tìm trong toàn bộ vùng đã cấp quyền" : selected ? `${selected.repoFullName ? `${selected.repoFullName} · ` : ""}${selected.isGit ? (selected.branch || "git") : "thư mục"} · ${selected.root}` : "Chọn một workspace cụ thể hoặc tìm trên toàn bộ vùng được cấp quyền"}</small>
-        </span>
-        <svg className="project-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
-      </button>
-      {open && (
-        <div className="project-dropdown-menu" role="listbox" aria-label="Chọn dự án hoặc đường dẫn cần làm">
-          <div className="project-dropdown-search">
-            <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></svg>
-            <input autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm dự án, thư mục hoặc đường dẫn…" aria-label="Tìm dự án hoặc đường dẫn" />
-            {query && <button type="button" aria-label="Xóa từ khóa" onClick={() => setQuery("")}>×</button>}
-          </div>
-          <button type="button" role="option" aria-selected={allAllowed} className={`project-dropdown-option project-dropdown-option-all ${allAllowed ? "is-selected" : ""}`} onClick={() => { onChange(ALL_ALLOWED_WORKSPACES); setOpen(false); setQuery(""); }}>
-            <span className="project-dropdown-mark">⌕</span>
-            <span className="project-dropdown-copy"><strong>Tất cả đường dẫn</strong><small>Không chọn repo/đường dẫn cụ thể · cho phép tìm trên mọi workspace được phép truy cập</small></span>
-            {allAllowed && <span className="project-dropdown-check">✓</span>}
-          </button>
-          {filteredProjects.map((project) => (
-            <button type="button" role="option" aria-selected={project.root === value} className={`project-dropdown-option ${project.root === value ? "is-selected" : ""}`} key={project.root} onClick={() => { onChange(project.root); setOpen(false); }}>
-              <span className="project-dropdown-mark">⌘</span>
-              <span className="project-dropdown-copy"><strong>{project.name}</strong><small>{project.repoFullName ? `${project.repoFullName} · ` : ""}{project.isGit ? (project.branch || "git") : "thư mục"} · {project.root}</small></span>
-              {formatRepoActivity(project) && <span className="project-dropdown-activity">{formatRepoActivity(project)}</span>}
-              {project.changes > 0 && <span className="project-dropdown-changes">{project.changes} đổi</span>}
-              {project.root === value && <span className="project-dropdown-check">✓</span>}
-            </button>
-          ))}
-          {!filteredProjects.length && <div className="project-dropdown-empty">Không tìm thấy trong danh sách đã lưu.</div>}
-        </div>
-      )}
-    </div>
+    <AppDropdown
+      className="is-project"
+      value={value}
+      options={options}
+      disabled={disabled}
+      onChange={onChange}
+      ariaLabel="Chọn dự án hoặc đường dẫn cần làm"
+      placeholder="Chọn dự án hoặc đường dẫn"
+      searchable
+      searchPlaceholder="Tìm dự án, thư mục hoặc đường dẫn…"
+      renderValue={(selected) => <><span className="app-dropdown-mark">{selected?.allAllowed ? "⌕" : "⌘"}</span><span className="app-dropdown-value-copy"><strong>{selected?.label || "Chọn dự án hoặc đường dẫn"}</strong><small>{selected?.hint || "Chọn workspace cụ thể hoặc toàn bộ vùng được cấp quyền"}</small></span></>}
+      renderOption={(option) => <><span className="app-dropdown-mark">{option.allAllowed ? "⌕" : "⌘"}</span><span className="app-dropdown-option-copy"><strong>{option.label}</strong><small>{option.hint}</small></span>{option.project && formatRepoActivity(option.project) && <span className="app-dropdown-meta is-active">{formatRepoActivity(option.project)}</span>}{option.project?.changes > 0 && <span className="app-dropdown-meta is-changed">{option.project.changes} đổi</span>}</>}
+    />
   );
 }
 
@@ -918,10 +799,10 @@ function ApiWorkerSettings({ onChanged, notify, onError }) {
       <div className="api-worker-form">
         <label><span>ID worker · bắt buộc</span><input value={draft.id} disabled={Boolean(editingId)} placeholder="9router-main" onChange={(event) => update("id", event.target.value)} /></label>
         <label><span>Tên hiển thị</span><input value={draft.label} placeholder="9Router chính" onChange={(event) => update("label", event.target.value)} /></label>
-        <label><span>Bước 1 · Chọn provider</span><select value={draft.provider} onChange={(event) => changeProvider(event.target.value)}><option value="9router">9Router</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
+        <label><span>Bước 1 · Chọn provider</span><AppDropdown className="is-form" value={draft.provider} options={[{ value: "9router", label: "9Router", hint: "OpenAI-compatible tại localhost:20128" }, { value: "openai-compatible", label: "OpenAI-compatible", hint: "Endpoint API tùy chỉnh" }]} onChange={changeProvider} ariaLabel="Chọn API provider" searchable={false} /></label>
         <label><span>Base URL · bắt buộc</span><input value={draft.base_url} placeholder="http://localhost:20128/v1" onChange={(event) => changeBaseUrl(event.target.value)} /></label>
         <label className="api-worker-wide"><span>API key · {credentialAvailable ? "để trống để giữ key hiện tại" : "bắt buộc"}</span><input type="password" autoComplete="new-password" value={draft.api_key} placeholder="Được mã hóa bằng kho bí mật của hệ điều hành" onChange={(event) => update("api_key", event.target.value)} /></label>
-        <label className="api-worker-wide"><span>Bước 2 · Chọn model · bắt buộc</span><div className="api-worker-model-picker"><select value={manualModel ? "__manual__" : modelConfirmed && models.some((item) => item.id === draft.model) ? draft.model : ""} onChange={(event) => selectModel(event.target.value)}><option value="">{models.length ? "Chọn một model từ provider" : "Tải danh sách model trước"}</option>{models.map((item) => <option key={item.id} value={item.id}>{item.name === item.id ? item.id : `${item.name} · ${item.id}`}{item.context_length ? ` · ${Math.round(item.context_length / 1000)}k context` : ""}</option>)}<option value="__manual__">Nhập model thủ công…</option></select><button className="button secondary" type="button" onClick={() => void discoverModels()} disabled={Boolean(busy) || !modelDiscoveryReady}>{busy === "models" ? "Đang tải…" : "Tải danh sách model"}</button></div>{!modelDiscoveryReady && <small>Nhập API key và kiểm tra Base URL để tải model.</small>}{manualModel && <input value={draft.model} autoFocus placeholder="Nhập model ID" onChange={(event) => { update("model", event.target.value); setModelConfirmed(Boolean(event.target.value.trim())); }} />}</label>
+        <label className="api-worker-wide"><span>Bước 2 · Chọn model · bắt buộc</span><div className="api-worker-model-picker"><AppDropdown className="is-form" value={manualModel ? "__manual__" : modelConfirmed && models.some((item) => item.id === draft.model) ? draft.model : ""} options={[...models.map((item) => ({ value: item.id, label: item.name === item.id ? item.id : item.name, hint: `${item.name === item.id ? "" : `${item.id} · `}${item.context_length ? `${Math.round(item.context_length / 1000)}k context` : "Provider model"}`, searchText: `${item.id} ${item.name}` })), { value: "__manual__", label: "Nhập model thủ công…", hint: "Dùng khi provider không hỗ trợ /models" }]} onChange={selectModel} ariaLabel="Chọn model từ provider" placeholder={models.length ? "Chọn một model từ provider" : "Tải danh sách model trước"} searchPlaceholder="Tìm model theo tên hoặc ID…" /><button className="button secondary api-worker-load-models" type="button" onClick={() => void discoverModels()} disabled={Boolean(busy) || !modelDiscoveryReady}>{busy === "models" ? "Đang tải…" : "Tải danh sách model"}</button></div>{!modelDiscoveryReady && <small>Nhập API key và kiểm tra Base URL để tải model.</small>}{manualModel && <input value={draft.model} autoFocus placeholder="Nhập model ID" onChange={(event) => { update("model", event.target.value); setModelConfirmed(Boolean(event.target.value.trim())); }} />}</label>
       </div>
       <div className="api-worker-form-actions"><span className={`api-worker-save-status ${validation.valid ? "is-ready" : "is-blocked"}`}>{validation.message}</span><button className="button ghost" type="button" onClick={createNew} disabled={Boolean(busy)}>Tạo mới</button><button className="button primary" type="button" onClick={() => void save()} disabled={Boolean(busy) || !validation.valid}>{busy === "save" ? "Đang mã hóa…" : editingId ? "Lưu thay đổi" : "Lưu worker"}</button></div>
       <div className="api-worker-config-list">
@@ -968,7 +849,7 @@ function ApiWorkerJobModal({ worker, projects, onClose, onStarted, onError }) {
     } catch (error) { onError(error); }
     finally { setSending(false); }
   };
-  return <div className="api-job-overlay" role="dialog" aria-modal="true" aria-label="Chạy API worker"><div className="api-job-modal"><div className="settings-panel-head"><div><p className="eyebrow">{worker.provider} · {worker.model}</p><h2>Chạy job bằng {worker.label}</h2><p className="section-note">CodexPro sẽ bootstrap policy qua MCP trước khi gọi model.</p></div><button type="button" className="button ghost" onClick={onClose} disabled={sending}>Đóng</button></div><div className="api-worker-form"><label><span>Job title (2–6 từ)</span><input value={title} placeholder="Phân tích luồng worker" onChange={(event) => setTitle(event.target.value)} /></label><label><span>Loại job</span><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="general">General · không mở repo</option><option value="code">Code · rules + AGENTS + CodexGraph</option></select></label>{kind === "code" && <label className="api-worker-wide"><span>Repo bắt buộc</span><select value={root} onChange={(event) => setRoot(event.target.value)}><option value="">Chọn repo</option>{projects.map((project) => <option key={project.root} value={project.root}>{project.name} · {project.root}</option>)}</select></label>}<label className="api-worker-wide"><span>Yêu cầu</span><textarea value={request} rows={8} placeholder="Mô tả công việc cho API worker…" onChange={(event) => setRequest(event.target.value)} /></label></div><div className="api-worker-form-actions"><span className="section-note">Mọi tool call sẽ được kiểm tra và chạy qua MCP.</span><button className="button primary" type="button" disabled={!valid || sending} onClick={() => void submit()}>{sending ? "Đang bootstrap MCP…" : "Bắt đầu job"}</button></div></div></div>;
+  return <div className="api-job-overlay" role="dialog" aria-modal="true" aria-label="Chạy API worker"><div className="api-job-modal"><div className="settings-panel-head"><div><p className="eyebrow">{worker.provider} · {worker.model}</p><h2>Chạy job bằng {worker.label}</h2><p className="section-note">CodexPro sẽ bootstrap policy qua MCP trước khi gọi model.</p></div><button type="button" className="button ghost" onClick={onClose} disabled={sending}>Đóng</button></div><div className="api-worker-form"><label><span>Job title (2–6 từ)</span><input value={title} placeholder="Phân tích luồng worker" onChange={(event) => setTitle(event.target.value)} /></label><label><span>Loại job</span><AppDropdown className="is-form" value={kind} options={[{ value: "general", label: "General", hint: "Không mở repo" }, { value: "code", label: "Code", hint: "Rules + AGENTS + CodexGraph" }]} onChange={setKind} ariaLabel="Chọn loại API worker job" searchable={false} /></label>{kind === "code" && <label className="api-worker-wide"><span>Repo bắt buộc</span><AppDropdown className="is-form" value={root} options={projects.map((project) => ({ value: project.root, label: project.name, hint: project.root, searchText: `${project.name} ${project.root}` }))} onChange={setRoot} ariaLabel="Chọn repo cho API worker" placeholder="Chọn repo" searchPlaceholder="Tìm repo hoặc đường dẫn…" /></label>}<label className="api-worker-wide"><span>Yêu cầu</span><textarea value={request} rows={8} placeholder="Mô tả công việc cho API worker…" onChange={(event) => setRequest(event.target.value)} /></label></div><div className="api-worker-form-actions"><span className="section-note">Mọi tool call sẽ được kiểm tra và chạy qua MCP.</span><button className="button primary" type="button" disabled={!valid || sending} onClick={() => void submit()}>{sending ? "Đang bootstrap MCP…" : "Bắt đầu job"}</button></div></div></div>;
 }
 
 function App() {
