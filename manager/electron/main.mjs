@@ -227,7 +227,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.93";
+const WORKER_EXTENSION_VERSION = "0.5.94";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;

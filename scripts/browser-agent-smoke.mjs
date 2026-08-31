@@ -409,7 +409,9 @@ assert.match(worker, /const token=endpoint\.searchParams\.get\('codexpro_token'\
 assert.match(worker, /Tool activity proves that some CodexPro definition is callable[\s\S]*?return false/, "tool activity alone must not falsely verify a profile-bound connector");
 assert.match(worker, /scheduleDomActivityRefresh/, "DOM settling must refresh until ChatGPT becomes idle");
 assert.match(worker, /async function recentConversationList[\s\S]*?promiseWithTimeout\([\s\S]*?fetchRecentConversationsPage[\s\S]*?DOM_ACTION_TIMEOUT_MS/, "a hung active renderer must not block the extension poll loop and heartbeat");
-assert.match(worker, /const heartbeat=setInterval\(\(\)=>\{void profileInfo\(\)[\s\S]*?\/register[\s\S]*?10000\);[\s\S]*?finally\{clearInterval\(heartbeat\);polling=false;\}/, "profile heartbeat must continue independently while tab and DOM probes are slow");
+assert.match(worker, /const heartbeat=setInterval\([\s\S]*?profileInfo\(\)[\s\S]*?\/register[\s\S]*?10000\);[\s\S]*?finally\{clearInterval\(heartbeat\);polling=false;\}/, "profile heartbeat must continue independently while tab and DOM probes are slow");
+assert.match(worker, /const heartbeat=setInterval\([\s\S]*?tabInventory\(\)[\s\S]*?tab_inventory[\s\S]*?\/register/, "heartbeat must reconcile lightweight tab inventory even when the full poll loop is blocked");
+assert.match(worker, /chrome\.tabs\.onRemoved\.addListener\([\s\S]*?scheduleRealtimeProfilePush\(0\)/, "closing the last ChatGPT tab must immediately clear the Manager profile snapshot");
 assert.match(worker, /if\(action==='recover_chat_tab'\)[\s\S]*?WORKER_BUSY:[\s\S]*?replaceUnresponsiveChatTab/, "manual tab recovery must refuse active generations and replace only an idle renderer");
 assert.match(worker, /function stopChatGenerationPage[\s\S]*?testId==='stop-button'[\s\S]*?stopControl\.click\(\)/, "task stop must click only ChatGPT's visible stop-generation control");
 assert.match(worker, /if\(action==='stop_chat_generation'\)[\s\S]*?stopChatGenerationPage[\s\S]*?stopped:Boolean\(result\.stopped\)/, "worker must expose a bounded stop-generation command");
@@ -456,6 +458,8 @@ assert.match(openProfileChat, /finally \{[\s\S]*?if \(session\) void closeLocalM
 assert.match(managerMain, /codexpro:open-profile-chat[\s\S]*?logSuccess: true[\s\S]*?selection_reason:[\s\S]*?activation_target_id:[\s\S]*?window_focus:/, "every successful open-profile request must persist the requested target and actual activation evidence");
 assert.match(managerUi, /action: "profile-tab-open-selection"[\s\S]*?tab_candidates:[\s\S]*?action: "profile-tab-open-result"[\s\S]*?activation_target_id:[\s\S]*?action: "profile-tab-open-error"/, "renderer diagnostics must capture tab candidates, selection reason, activation result, and failures");
 assert.match(managerUi, /className="button primary profile-chat"[\s\S]*?disabled=\{!profile\.connected \|\| !connectorInstalled\}[\s\S]*?CodexPro sẽ tự mở tab ChatGPT khi gửi/, "an online prepared profile must allow opening the composer before a ChatGPT tab exists");
+assert.match(managerUi, /const noChatGpt = profile\.connected && profile\.activity === "no_chatgpt"[\s\S]*?CHROME CHẠY NỀN[\s\S]*?CHƯA MỞ CHATGPT/, "a connected background profile without ChatGPT tabs must not be labeled idle");
+assert.match(managerUi, /profile\.chatgpt_tab_count[\s\S]*?tab ChatGPT/, "profile metadata must show ChatGPT tab count instead of every Chrome tab");
 assert.match(managerMain, /async function recoverProfileChatTab[\s\S]*?action: "recover_chat_tab"[\s\S]*?60000/, "Manager must expose the bounded replace-tab recovery command");
 assert.match(managerMain, /async function stopProfileTask[\s\S]*?action: "stop_chat_generation"[\s\S]*?15000/, "Manager must route task stop through the bounded MCP command");
 assert.match(managerMain, /codexpro:stop-profile-task[\s\S]*?stopProfileTask\(payload\)/, "Manager IPC must expose task stop to the renderer");
@@ -471,6 +475,7 @@ assert.match(server, /delta:/);
 
 assert.match(bridge, /subscribeBrowserExtensionProfiles/);
 assert.match(bridge, /const chatgptTabSummaries = chatgptTabs[\s\S]*?chatgpt_tabs: chatgptTabSummaries/, "profile summaries must retain an open ChatGPT tab even when its URL has no conversation id yet");
+assert.match(bridge, /Array\.isArray\(body\.tab_inventory\)[\s\S]*?existingTabsById[\s\S]*?profile\.tabs = body\.tab_inventory/, "lightweight heartbeat inventory must remove stale tabs while preserving enriched state for tabs that still exist");
 assert.match(bridge, /const observedCodexProToolActivity = conversationSummaries\.some/, "bridge must retain live CodexPro tool activity as diagnostics");
 assert.match(bridge, /const connectorInstalled = profile\.connectorInstalled && connectorProfileBound/, "profile summaries must require the installed connector fingerprint to match the Chrome profile");
 assert.match(bridge, /CodexPro đang gọi tool qua connector cũ chưa gắn đúng profile/, "profile summaries must explain activity from an old unbound connector");
@@ -667,7 +672,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.93");
+assert.equal(manifest.version, "0.5.94");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
