@@ -3018,7 +3018,14 @@ async function stopProfileTask(payload) {
 }
 
 async function reloadChromeProfiles() {
-  const status = await readyRuntimeStatus();
+  let status = await readyRuntimeStatus();
+  for (let attempt = 0; attempt < 2 && (!status.local.ok || status.workerSnapshotAvailable === false); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    status = await runtimeStatus({ forceRefresh: true });
+  }
+  if (!status.local.ok || status.workerSnapshotAvailable === false) {
+    return { ok: true, mode: "runtime_unavailable", count: 0, failed: 0, deferred: 0, outdated: 0, version: WORKER_EXTENSION_VERSION };
+  }
   const connectedProfiles = status.browserProfiles.filter((profile) => profile.connected);
   if (!connectedProfiles.length) throw new Error("Không có Chrome profile nào đang kết nối.");
   const outdated = connectedProfiles.filter((profile) => !versionAtLeast(profile.extension_version));
