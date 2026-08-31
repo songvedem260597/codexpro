@@ -13,7 +13,7 @@ import { collectOperationsPerformance } from "./operations-metrics.mjs";
 import { WorkerPluginRegistry } from "./worker-core/plugin-registry.mjs";
 import { createApiWorkerStore } from "./worker-core/api-worker-store.mjs";
 import { createWorkerMcpClients } from "./mcp/http-client.mjs";
-import { createOpenAICompatibleProvider, createOpenRouterProvider } from "./provider-core/openai-compatible-provider.mjs";
+import { create9RouterProvider, createOpenAICompatibleProvider, createOpenRouterProvider } from "./provider-core/openai-compatible-provider.mjs";
 import { createApiWorkerPlugin } from "./worker-plugins/api-worker-plugin.mjs";
 import { createChromeWorkerPlugin } from "./worker-plugins/chrome-worker-plugin.mjs";
 
@@ -177,9 +177,9 @@ function createProviderForApiWorker(config) {
     model: config.model,
     getApiKey: async () => apiWorkerStore.credential(config.id)
   };
-  return config.provider === "openrouter"
-    ? createOpenRouterProvider({ ...options, appName: config.app_name || "CodexPro", appUrl: config.app_url || "" })
-    : createOpenAICompatibleProvider(options);
+  if (config.provider === "9router") return create9RouterProvider(options);
+  if (config.provider === "openrouter") return createOpenRouterProvider({ ...options, appName: config.app_name || "CodexPro", appUrl: config.app_url || "" });
+  return createOpenAICompatibleProvider(options);
 }
 
 const WORKER_EXTENSION_VERSION = "0.5.88";

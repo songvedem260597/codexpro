@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { createOpenAICompatibleProvider, createOpenRouterProvider, normalizeProviderBaseUrl } from "../manager/electron/provider-core/openai-compatible-provider.mjs";
+import { create9RouterProvider, createOpenAICompatibleProvider, createOpenRouterProvider, normalizeProviderBaseUrl } from "../manager/electron/provider-core/openai-compatible-provider.mjs";
 import { runMcpAgentJob } from "../manager/electron/worker-core/mcp-agent-loop.mjs";
 import { WorkerPluginRegistry } from "../manager/electron/worker-core/plugin-registry.mjs";
 import { createApiWorkerPlugin } from "../manager/electron/worker-plugins/api-worker-plugin.mjs";
@@ -230,6 +230,15 @@ try {
   assert.deepEqual(streamDeltas, ["xin ", "chào"]);
   assert.equal(streamed.usage.total_tokens, 5);
 
+  const nineRouter = create9RouterProvider({
+    baseUrl,
+    model: "fixture/model",
+    getApiKey: async () => secret
+  });
+  assert.equal(nineRouter.manifest.kind, "9router");
+  assert.equal(nineRouter.manifest.name, "9Router");
+  assert.equal(nineRouter.manifest.capabilities.tool_calling, true);
+
   const openRouter = createOpenRouterProvider({
     baseUrl,
     model: "fixture/model",
@@ -243,7 +252,7 @@ try {
 
   const apiLifecycle = [];
   const apiPlugin = createApiWorkerPlugin({
-    configurations: [{ id: "fixture-api", label: "Fixture API", provider: "openrouter", model: "fixture/model", credential_available: true }],
+    configurations: [{ id: "fixture-api", label: "Fixture API", provider: "9router", model: "fixture/model", credential_available: true }],
     createProvider: async () => ({
       manifest: { id: "fixture-api-provider", name: "Fixture", kind: "fixture", capabilities: { tool_calling: true } },
       async complete() { return { text: "API worker hoàn tất.", toolCalls: [], usage: { total_tokens: 3 } }; }
@@ -324,7 +333,7 @@ try {
   const cancellationLifecycle = [];
   const cancellationRegistry = new WorkerPluginRegistry();
   cancellationRegistry.register(createApiWorkerPlugin({
-    configurations: [{ id: "cancel-api", provider: "openrouter", model: "fixture/model", credential_available: true }],
+    configurations: [{ id: "cancel-api", provider: "9router", model: "fixture/model", credential_available: true }],
     createProvider: async () => ({
       manifest: { id: "cancel-provider", name: "Cancel fixture", kind: "fixture", capabilities: { tool_calling: true } },
       async complete({ signal }) {

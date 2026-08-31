@@ -252,6 +252,16 @@ export function createOpenAICompatibleProvider(options = {}) {
   };
 }
 
+export function create9RouterProvider(options = {}) {
+  return createOpenAICompatibleProvider({
+    ...options,
+    id: options.id || "9router",
+    name: options.name || "9Router",
+    kind: "9router",
+    baseUrl: options.baseUrl || "http://localhost:20128/v1"
+  });
+}
+
 export function createOpenRouterProvider(options = {}) {
   return createOpenAICompatibleProvider({
     ...options,

@@ -743,7 +743,7 @@ function ChatRequestComposer({
   );
 }
 
-const EMPTY_API_WORKER = { id: "", label: "", provider: "openrouter", base_url: "https://openrouter.ai/api/v1", model: "", api_key: "", enabled: true };
+const EMPTY_API_WORKER = { id: "", label: "", provider: "9router", base_url: "http://localhost:20128/v1", model: "", api_key: "", enabled: true };
 
 function ApiWorkerSettings({ onChanged, notify, onError }) {
   const [configs, setConfigs] = useState([]);
@@ -789,15 +789,15 @@ function ApiWorkerSettings({ onChanged, notify, onError }) {
   return (
     <section className="settings-panel api-worker-settings">
       <div className="settings-panel-head">
-        <div><p className="eyebrow">API WORKER PLUGINS</p><h2>OpenRouter / API tương thích OpenAI</h2><p className="section-note">API chỉ làm inference. Rule, AGENTS, CodexGraph, workspace và mọi tool luôn đi qua phiên MCP riêng của worker.</p></div>
+        <div><p className="eyebrow">API WORKER PLUGINS</p><h2>9Router / API tương thích OpenAI</h2><p className="section-note">API chỉ làm inference. Rule, AGENTS, CodexGraph, workspace và mọi tool luôn đi qua phiên MCP riêng của worker.</p></div>
         <span className="global-rules-badge">MCP-ONLY</span>
       </div>
       <div className="api-worker-form">
-        <label><span>ID worker</span><input value={draft.id} disabled={Boolean(configs.find((item) => item.id === draft.id))} placeholder="openrouter-main" onChange={(event) => update("id", event.target.value)} /></label>
-        <label><span>Tên hiển thị</span><input value={draft.label} placeholder="OpenRouter chính" onChange={(event) => update("label", event.target.value)} /></label>
-        <label><span>Provider</span><select value={draft.provider} onChange={(event) => update("provider", event.target.value)}><option value="openrouter">OpenRouter</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
-        <label><span>Model</span><input value={draft.model} placeholder="openai/gpt-5" onChange={(event) => update("model", event.target.value)} /></label>
-        <label className="api-worker-wide"><span>Base URL</span><input value={draft.base_url} placeholder="https://openrouter.ai/api/v1" onChange={(event) => update("base_url", event.target.value)} /></label>
+        <label><span>ID worker</span><input value={draft.id} disabled={Boolean(configs.find((item) => item.id === draft.id))} placeholder="9router-main" onChange={(event) => update("id", event.target.value)} /></label>
+        <label><span>Tên hiển thị</span><input value={draft.label} placeholder="9Router chính" onChange={(event) => update("label", event.target.value)} /></label>
+        <label><span>Provider</span><select value={draft.provider} onChange={(event) => update("provider", event.target.value)}><option value="9router">9Router</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
+        <label><span>Model</span><input value={draft.model} placeholder="cc/claude-opus-4-6" onChange={(event) => update("model", event.target.value)} /></label>
+        <label className="api-worker-wide"><span>Base URL</span><input value={draft.base_url} placeholder="http://localhost:20128/v1" onChange={(event) => update("base_url", event.target.value)} /></label>
         <label className="api-worker-wide"><span>API key {configs.find((item) => item.id === draft.id)?.credential_available ? "(để trống để giữ key hiện tại)" : ""}</span><input type="password" autoComplete="new-password" value={draft.api_key} placeholder="Được mã hóa bằng kho bí mật của hệ điều hành" onChange={(event) => update("api_key", event.target.value)} /></label>
       </div>
       <div className="api-worker-form-actions"><button className="button ghost" type="button" onClick={() => setDraft(EMPTY_API_WORKER)} disabled={Boolean(busy)}>Tạo mới</button><button className="button primary" type="button" onClick={() => void save()} disabled={Boolean(busy) || !draft.id.trim() || !draft.model.trim()}>{busy === "save" ? "Đang mã hóa…" : "Lưu worker"}</button></div>
