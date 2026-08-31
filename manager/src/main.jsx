@@ -247,8 +247,9 @@ function ChatDropdown({ value, conversations, disabled, onChange }) {
   );
 }
 
-function ProjectDropdown({ value, projects, disabled, onChange }) {
-  const options = [{ value: ALL_ALLOWED_WORKSPACES, label: "Tất cả vùng được cấp quyền", hint: "Không khóa repo/đường dẫn · tìm trên mọi workspace được phép truy cập", allAllowed: true, searchText: "tất cả đường dẫn workspace" }, ...projects.map((project) => ({ value: project.root, label: project.name, hint: `${project.repoFullName ? `${project.repoFullName} · ` : ""}${project.isGit ? (project.branch || "git") : "thư mục"} · ${project.root}`, searchText: [project.name, project.repoFullName, project.branch, project.root].join(" "), project }))];
+function ProjectDropdown({ value, projects, disabled, onChange, includeAllAllowed = true }) {
+  const projectOptions = projects.map((project) => ({ value: project.root, label: project.name, hint: `${project.repoFullName ? `${project.repoFullName} · ` : ""}${project.isGit ? (project.branch || "git") : "thư mục"} · ${project.root}`, searchText: [project.name, project.repoFullName, project.branch, project.root].join(" "), project }));
+  const options = includeAllAllowed ? [{ value: ALL_ALLOWED_WORKSPACES, label: "Tất cả vùng được cấp quyền", hint: "Không khóa repo/đường dẫn · tìm trên mọi workspace được phép truy cập", allAllowed: true, searchText: "tất cả đường dẫn workspace" }, ...projectOptions] : projectOptions;
   return (
     <AppDropdown
       className="is-project"
@@ -804,7 +805,7 @@ function ApiWorkerSettings({ onChanged, notify, onError }) {
       </div>
       <div className="api-worker-form">
         <label><span>ID worker · bắt buộc</span><input value={draft.id} disabled={Boolean(editingId)} placeholder="9router-main" onChange={(event) => update("id", event.target.value)} /></label>
-        <label><span>Tên hiển thị</span><input value={draft.label} placeholder="9Router chính" onChange={(event) => update("label", event.target.value)} /></label>
+        <label><span>Tên hiển thị</span><input value={draft.label} placeholder="9Router" onChange={(event) => update("label", event.target.value)} /></label>
         <label><span>Bước 1 · Chọn provider</span><AppDropdown className="is-form" value={draft.provider} options={[{ value: "9router", label: "9Router", hint: "OpenAI-compatible tại localhost:20128" }, { value: "openai-compatible", label: "OpenAI-compatible", hint: "Endpoint API tùy chỉnh" }]} onChange={changeProvider} ariaLabel="Chọn API provider" searchable={false} /></label>
         <label><span>Base URL · bắt buộc</span><input value={draft.base_url} placeholder="http://localhost:20128/v1" onChange={(event) => changeBaseUrl(event.target.value)} /></label>
         <label className="api-worker-wide"><span>API key · {credentialAvailable ? "để trống để giữ key hiện tại" : "bắt buộc"}</span><input type="password" autoComplete="new-password" value={draft.api_key} placeholder="Được mã hóa bằng kho bí mật của hệ điều hành" onChange={(event) => update("api_key", event.target.value)} /></label>
@@ -834,9 +835,9 @@ function ApiWorkerCards({ workers, customImages, onRun, onStop }) {
             <span className="badge">{worker.provider}</span>
             {worker.activity === "working" ? <WorkingBadge /> : <span className={`badge ${worker.connected ? "connected" : "profile-missing"}`}>{worker.connected ? "ĐANG RẢNH" : "THIẾU KEY"}</span>}
           </div>
-          <code>api:{worker.worker_id}</code>
+          <code>{worker.worker_id}</code>
           <div className="profile-meta"><span>{worker.model}</span><span>MCP-ONLY</span></div>
-          {worker.current_task_title && <div className="profile-task-summary"><span>Task hiện tại</span><strong>{worker.current_task_title}</strong></div>}
+          {(worker.current_task_title || worker.last_task_title) && <div className="profile-task-summary"><span>{worker.activity === "working" ? "Task hiện tại" : "Task gần nhất"}</span><strong>{worker.current_task_title || worker.last_task_title}</strong></div>}
           {worker.last_result && <details className="api-worker-result"><summary>Kết quả job gần nhất</summary><pre>{worker.last_result}</pre></details>}
           {worker.last_error && <div className="profile-warning">{worker.last_error}</div>}
         </div>
@@ -844,6 +845,9 @@ function ApiWorkerCards({ workers, customImages, onRun, onStop }) {
           {worker.activity === "working"
             ? <button className="button danger-quiet" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button>
             : <button className="button primary" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}>Chạy job</button>}
+          {worker.connected
+            ? <span className="already-connected">✓ Đã kết nối CodexPro</span>
+            : <span className="api-worker-connection-missing">Chưa kết nối CodexPro</span>}
         </div>
       </article>
     );
@@ -856,32 +860,104 @@ function apiJobId() {
   return `cpt_${[...bytes].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function ApiWorkerJobModal({ worker, projects, onClose, onStarted, onError }) {
-  const [title, setTitle] = useState("");
-  const [kind, setKind] = useState("general");
+function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChooseAttachments, onOpenAttachmentPreview, onRemoveAttachment, onClearAttachments, onPaste, onCopyResponse, onClose, onStarted, onError }) {
   const [root, setRoot] = useState(projects[0]?.root || "");
   const [request, setRequest] = useState("");
+  const [lastRequest, setLastRequest] = useState("");
   const [sending, setSending] = useState(false);
+  useEffect(() => {
+    if (!root && projects[0]?.root) setRoot(projects[0].root);
+  }, [projects, root]);
   if (!worker) return null;
-  const titleWords = title.trim().split(/\s+/).filter(Boolean).length;
-  const valid = titleWords >= 2 && titleWords <= 6 && request.trim() && (kind !== "code" || root);
+  const working = sending || worker.activity === "working";
+  const displayedRequest = lastRequest || worker.last_request || "";
+  const valid = Boolean(root && (request.trim() || attachments.length) && worker.connected && !working);
   const submit = async () => {
+    if (!valid) return;
     setSending(true);
     try {
       await api.sendWorkerRequest({
         workerId: worker.worker_id,
         task_id: apiJobId(),
-        task_title: title.trim(),
-        task_kind: kind,
-        scope: kind === "code" ? "workspace" : "all_allowed",
-        ...(kind === "code" ? { root } : {}),
-        text: request.trim()
+        task_kind: "code",
+        scope: "workspace",
+        root,
+        text: request.trim(),
+        attachments
       });
+      setLastRequest(request.trim() || `Đã gửi ${attachments.length} file`);
+      setRequest("");
+      onClearAttachments();
       onStarted();
     } catch (error) { onError(error); }
     finally { setSending(false); }
   };
-  return <div className="api-job-overlay" role="dialog" aria-modal="true" aria-label="Chạy API worker"><div className="api-job-modal"><div className="settings-panel-head"><div><p className="eyebrow">{worker.provider} · {worker.model}</p><h2>Chạy job bằng {worker.label}</h2><p className="section-note">CodexPro sẽ bootstrap policy qua MCP trước khi gọi model.</p></div><button type="button" className="button ghost" onClick={onClose} disabled={sending}>Đóng</button></div><div className="api-worker-form"><label><span>Job title (2–6 từ)</span><input value={title} placeholder="Phân tích luồng worker" onChange={(event) => setTitle(event.target.value)} /></label><label><span>Loại job</span><AppDropdown className="is-form" value={kind} options={[{ value: "general", label: "General", hint: "Không mở repo" }, { value: "code", label: "Code", hint: "Rules + AGENTS + CodexGraph" }]} onChange={setKind} ariaLabel="Chọn loại API worker job" searchable={false} /></label>{kind === "code" && <label className="api-worker-wide"><span>Repo bắt buộc</span><AppDropdown className="is-form" value={root} options={projects.map((project) => ({ value: project.root, label: project.name, hint: project.root, searchText: `${project.name} ${project.root}` }))} onChange={setRoot} ariaLabel="Chọn repo cho API worker" placeholder="Chọn repo" searchPlaceholder="Tìm repo hoặc đường dẫn…" /></label>}<label className="api-worker-wide"><span>Yêu cầu</span><textarea value={request} rows={8} placeholder="Mô tả công việc cho API worker…" onChange={(event) => setRequest(event.target.value)} /></label></div><div className="api-worker-form-actions"><span className="section-note">Mọi tool call sẽ được kiểm tra và chạy qua MCP.</span><button className="button primary" type="button" disabled={!valid || sending} onClick={() => void submit()}>{sending ? "Đang bootstrap MCP…" : "Bắt đầu job"}</button></div></div></div>;
+  return (
+    <div className="modal-backdrop chat-modal-backdrop" role="dialog" aria-modal="true" aria-label="Chạy API worker" onMouseDown={(event) => event.target === event.currentTarget && !sending && onClose()}>
+      <div className="modal chat-modal api-job-modal">
+        <div className="modal-head chat-modal-head">
+          <div className="chat-modal-profile">
+            <WorkerIcon state={working ? "working" : worker.connected ? "idle" : "hung"} customImages={customImages} />
+            <div>
+              <p className="eyebrow">API WORKER · {worker.provider}</p>
+              <div className="profile-title"><strong>{worker.label}</strong>{working ? <WorkingBadge /> : worker.connected ? <span className="badge connected">ĐANG RẢNH</span> : <span className="badge profile-hung">MẤT KẾT NỐI</span>}</div>
+              <code>{worker.worker_id} · {worker.model}</code>
+            </div>
+          </div>
+          <button type="button" aria-label="Đóng job" onClick={onClose}><span aria-hidden="true">×</span></button>
+        </div>
+
+        <article className={`request-card chat-popup-card ${worker.connected ? "is-online" : "is-offline"}`}>
+          <label className="request-label">Chọn repo và đường dẫn</label>
+          <ProjectDropdown value={root} projects={projects} onChange={setRoot} disabled={working} includeAllAllowed={false} />
+          {!projects.length && <div className="request-send-error">Chưa có workspace đã lưu.</div>}
+
+          <label className="request-label">Tin nhắn gần nhất</label>
+          <div className={`chat-response is-inline ${working ? "is-streaming" : ""}`}>
+            <div className="chat-response-head">
+              <div><span className="response-status-dot" /><strong>{working ? "CodexPro đang xử lý…" : worker.last_error ? "Job kết thúc với lỗi" : worker.last_result ? "AI đã phản hồi xong" : "Chưa có tin nhắn"}</strong>{(worker.current_task_title || worker.last_task_title) && <small>{worker.current_task_title || worker.last_task_title}</small>}</div>
+            </div>
+            {(working || displayedRequest || worker.last_result) ? <div className="latest-response chat-transcript">
+              {displayedRequest && <div className="chat-transcript-message is-user"><div className="chat-message-avatar">B</div><div className="latest-response-content"><span className="chat-message-role">Bạn</span><div className="chat-message-text user-message-text">{displayedRequest}</div></div></div>}
+              {!working && worker.last_result && <div className="chat-transcript-message is-assistant is-response-runway"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">AI · {worker.current_task_title || worker.last_task_title || "API worker"}</span><React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{worker.last_result}</div>}><ResponseText text={worker.last_result} /></React.Suspense><div className="chat-message-actions"><button type="button" className="chat-message-copy" title="Copy response" aria-label="Copy phản hồi" onClick={() => void onCopyResponse(worker.last_result)}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg></button></div></div></div>}
+              {working && <div className="chat-transcript-message is-assistant is-typing is-response-runway"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">AI</span><span className="thinking-state latest-response-typing"><span>Đang tự đặt title qua MCP và xử lý</span><span className="typing-dots"><i /><i /><i /></span></span></div></div>}
+            </div> : worker.last_error ? <div className="response-error">{worker.last_error}</div> : <div className="response-empty">Gửi yêu cầu đầu tiên để bắt đầu job trong repo đã chọn.</div>}
+          </div>
+
+          <label className="request-label" htmlFor="api-job-request">Nhắn tiếp</label>
+          <div className="request-composer">
+            <textarea
+              id="api-job-request"
+              value={request}
+              maxLength={12000}
+              placeholder="Nhập file hoặc tin nhắn"
+              onPaste={onPaste}
+              onChange={(event) => setRequest(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.nativeEvent?.isComposing || event.repeat || !valid || sending) return;
+                event.preventDefault();
+                void submit();
+              }}
+              disabled={working}
+            />
+            {attachments.length > 0 && <div className="request-files">{attachments.map((file) => <div className="request-file" key={file.path} title={file.path} role="button" tabIndex={0} aria-label={`Xem trước ${file.name}`} onClick={() => void onOpenAttachmentPreview(file)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void onOpenAttachmentPreview(file); } }}>{file.previewDataUrl ? <img className="request-file-image" src={file.previewDataUrl} alt="" /> : <span className="request-file-icon">▤</span>}<span className="request-file-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span><button type="button" aria-label={`Bỏ ${file.name}`} onClick={(event) => { event.stopPropagation(); onRemoveAttachment(file.path); }} disabled={working}>×</button></div>)}</div>}
+            <div className="request-composer-toolbar">
+              <button type="button" className="attach-button" aria-label="Thêm file" title="Thêm file" onClick={onChooseAttachments} disabled={working || attachments.length >= 4}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20.5 11.5 11 21a6 6 0 0 1-8.5-8.5l10-10a4 4 0 0 1 5.7 5.6l-10 10a2 2 0 1 1-2.9-2.8l9.6-9.6" /></svg></button>
+              <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${request.length.toLocaleString("vi-VN")}/12.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
+            </div>
+          </div>
+
+          <div className="request-card-foot">
+            <span>AI tự đặt title 2–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP.</span>
+            <div className="request-card-actions">
+              <button type="button" className="button secondary" onClick={onClose}>Đóng</button>
+              <button type="button" className="button primary" disabled={!valid} onClick={() => void submit()}>{working ? "Đang xử lý…" : attachments.length ? "Tải file + gửi" : "Gửi yêu cầu"}</button>
+            </div>
+          </div>
+        </article>
+      </div>
+    </div>
+  );
 }
 
 function App() {
@@ -4468,7 +4544,21 @@ function App() {
             <button type="button" className="button danger-quiet" onClick={() => void restoreManagerSettings()} disabled={Boolean(settingsBusy)}>{settingsBusy === "reset" ? "Đang khôi phục…" : "Khôi phục tất cả mặc định"}</button>
           </div>
         </div>
-        <ApiWorkerJobModal worker={apiJobWorker} projects={projects} onClose={() => setApiJobWorker(null)} onError={reportApiWorkerError} onStarted={() => { setApiJobWorker(null); void refresh(false); notify("API worker đã nhận job"); }} />
+        <ApiWorkerJobModal
+          worker={(status?.workers || []).find((worker) => worker.worker_id === apiJobWorker?.worker_id) || apiJobWorker}
+          projects={projects}
+          customImages={managerSettings.workerImageDataUrls}
+          attachments={requestFiles[apiJobWorker?.worker_id] || []}
+          onChooseAttachments={() => void chooseRequestAttachments(apiJobWorker?.worker_id)}
+          onOpenAttachmentPreview={(file) => openAttachmentPreview(file)}
+          onRemoveAttachment={(filePath) => setRequestFiles((current) => ({ ...current, [apiJobWorker?.worker_id]: (current[apiJobWorker?.worker_id] || []).filter((item) => item.path !== filePath) }))}
+          onClearAttachments={() => setRequestFiles((current) => ({ ...current, [apiJobWorker?.worker_id]: [] }))}
+          onPaste={(event) => void pasteRequestImage(apiJobWorker?.worker_id, event)}
+          onCopyResponse={async (text) => { await api.copyText(text); notify("Đã copy phản hồi"); }}
+          onClose={() => setApiJobWorker(null)}
+          onError={reportApiWorkerError}
+          onStarted={() => { void refresh(false); window.setTimeout(() => void refreshStatus(), 500); notify("API worker đã nhận job"); }}
+        />
 
       </main>
 

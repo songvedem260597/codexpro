@@ -181,7 +181,8 @@ function createProviderForApiWorker(config, overrides = {}) {
     id: `provider-${String(config.id || "api").toLowerCase()}`,
     baseUrl: config.base_url,
     model: config.model,
-    getApiKey: typeof overrides.getApiKey === "function" ? overrides.getApiKey : async () => apiWorkerStore.credential(config.id)
+    getApiKey: typeof overrides.getApiKey === "function" ? overrides.getApiKey : async () => apiWorkerStore.credential(config.id),
+    maxRequestBytes: 16 * 1024 * 1024
   };
   if (config.provider === "9router") return create9RouterProvider(options);
   if (config.provider === "openrouter") return createOpenRouterProvider({ ...options, appName: config.app_name || "CodexPro", appUrl: config.app_url || "" });
@@ -471,6 +472,33 @@ async function chooseRequestFiles() {
   if (files.some((file) => file.size > MAX_REQUEST_ATTACHMENT_BYTES)) throw new Error("Mỗi file được tối đa 8 MB.");
   if (files.reduce((total, file) => total + file.size, 0) > MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES) throw new Error("Tổng file đính kèm được tối đa 10 MB.");
   return files;
+}
+
+async function materializeApiWorkerRequest(payload) {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const text = String(source.text || source.request || "").trim().slice(0, 12_000);
+  const requestedFiles = Array.isArray(source.attachments) ? source.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
+  if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
+  const files = requestedFiles.map((file) => requestFileSummary(file?.path));
+  if (files.some((file) => file.size > MAX_REQUEST_ATTACHMENT_BYTES)) throw new Error("Mỗi file được tối đa 8 MB.");
+  if (files.reduce((total, file) => total + file.size, 0) > MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES) throw new Error("Tổng file đính kèm được tối đa 10 MB.");
+
+  const content = [{ type: "text", text: text || "Hãy xử lý các file đính kèm theo yêu cầu phù hợp với nội dung của chúng." }];
+  for (const file of files) {
+    if (file.mimeType.startsWith("image/")) {
+      const bytes = await fs.promises.readFile(file.path);
+      content.push({ type: "image_url", image_url: { url: `data:${file.mimeType};base64,${bytes.toString("base64")}` } });
+      continue;
+    }
+    if (canPreviewRequestFileAsText(file.mimeType)) {
+      const bytes = await fs.promises.readFile(file.path);
+      const attachmentText = bytes.subarray(0, MAX_REQUEST_TEXT_PREVIEW_BYTES).toString("utf8");
+      content[0].text += `\n\n<attachment name="${file.name}" mime="${file.mimeType}">\n${attachmentText}${bytes.length > MAX_REQUEST_TEXT_PREVIEW_BYTES ? "\n[Đã cắt bớt nội dung file; dùng MCP để đọc tiếp.]" : ""}\n</attachment>`;
+      continue;
+    }
+    content[0].text += `\n\nFile đính kèm: ${file.name} (${file.mimeType}) tại ${file.path}. Hãy dùng MCP trong workspace đã khóa để đọc file này.`;
+  }
+  return { ...source, text, attachments: undefined, attachment_names: files.map((file) => file.name), messages: [{ role: "user", content }] };
 }
 
 const MANAGER_FONT_CHOICES = new Set(["system", "be-vietnam-pro", "manrope", "jetbrains-mono", "arial", "tahoma", "verdana", "trebuchet", "georgia", "cascadia"]);
@@ -3891,7 +3919,10 @@ diagnosticIpcHandle("codexpro:worker-send", {
   successMessage: "Worker đã nhận job",
   failureMessage: "Không gửi được job tới worker",
   details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || ""), task_id: String(payload?.task_id || payload?.taskId || ""), task_kind: String(payload?.task_kind || payload?.taskKind || "") })
-}, (_event, payload) => workerPluginRegistry.invoke("send", String(payload?.workerId || payload?.worker_id || ""), payload));
+}, async (_event, payload) => {
+  const prepared = await materializeApiWorkerRequest(payload);
+  return await workerPluginRegistry.invoke("send", String(prepared?.workerId || prepared?.worker_id || ""), prepared);
+});
 diagnosticIpcHandle("codexpro:worker-read", {
   category: "worker",
   action: "worker-read",

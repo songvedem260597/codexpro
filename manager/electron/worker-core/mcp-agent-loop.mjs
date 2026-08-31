@@ -2,11 +2,12 @@ import { assertProvider, mcpToolsToProviderTools, normalizeProviderToolCalls } f
 
 const LIFECYCLE_TOOLS = new Set([
   "prepare_repo_task",
-  "begin_repo_task",
   "repo_task_status",
   "worker_job_status",
   "finalize_worker_job"
 ]);
+
+const BEGIN_TASK_TOOL = "begin_repo_task";
 
 function clean(value, maxLength = 4000) {
   return String(value ?? "").trim().slice(0, maxLength);
@@ -44,6 +45,19 @@ function bootstrapMessage(result) {
   ].join("\n");
 }
 
+function titleWordCount(value) {
+  return clean(value, 56).split(/\s+/).filter(Boolean).length;
+}
+
+function titleBootstrapMessage({ jobId, kind, scope, root }) {
+  return [
+    "Before doing anything else, you must create the task title through CodexPro MCP.",
+    "Choose a clear task_title of 2-6 words from the user's request. The user must never be asked to provide this title.",
+    `Call ${BEGIN_TASK_TOOL} now with task_id=${jobId}, task_kind=${kind}, scope=${scope}${root ? `, root=${root}` : ""}.`,
+    `Only ${BEGIN_TASK_TOOL} is available in this bootstrap turn. Do not answer the user before that MCP call succeeds.`
+  ].join("\n");
+}
+
 export async function runMcpAgentJob(input = {}) {
   const providerManifest = assertProvider(input.provider);
   assertMcpClient(input.controlMcp, "controlMcp");
@@ -56,9 +70,6 @@ export async function runMcpAgentJob(input = {}) {
   if (!/^[a-z0-9][a-z0-9._-]{0,63}:[A-Za-z0-9][A-Za-z0-9._-]{0,94}$/.test(workerId)) {
     throw new Error("API worker id must be namespaced as <plugin>:<worker>.");
   }
-  const title = clean(job.title, 56);
-  const titleWords = title.split(/\s+/).filter(Boolean).length;
-  if (titleWords < 2 || titleWords > 6) throw new Error("API worker job title must contain 2-6 words.");
   const kind = job.kind === "code" ? "code" : "general";
   if (kind === "code" && !providerManifest.capabilities.tool_calling) {
     throw new Error(`Provider ${providerManifest.id} cannot run code jobs without tool calling.`);
@@ -79,28 +90,83 @@ export async function runMcpAgentJob(input = {}) {
     const prepareArgs = { profile_id: workerId, task_id: jobId, scope, ...(root ? { root } : {}) };
     emit("preparing", { job_id: jobId, worker_id: workerId });
     await input.controlMcp.callTool("prepare_repo_task", prepareArgs, { signal: input.signal });
-    const beginArgs = { task_id: jobId, task_title: title, task_kind: kind, scope, ...(root ? { root } : {}) };
-    emit("bootstrapping", { job_id: jobId, kind });
-    const bootstrap = await input.jobMcp.callTool("begin_repo_task", beginArgs, { signal: input.signal });
+
+    const listed = await input.jobMcp.listTools({ signal: input.signal });
+    const allMcpTools = Array.isArray(listed) ? listed : Array.isArray(listed?.tools) ? listed.tools : [];
+    const beginTaskTool = allMcpTools.find((tool) => String(tool?.name || "") === BEGIN_TASK_TOOL);
+    if (!beginTaskTool) throw new Error("CodexPro MCP did not expose begin_repo_task for AI title bootstrap.");
+
+    const messages = [
+      { role: "system", content: titleBootstrapMessage({ jobId, kind, scope, root }) },
+      ...(Array.isArray(input.messages) ? input.messages : [{ role: "user", content: clean(input.request, 200_000) }])
+    ];
+    const bootstrapTools = mcpToolsToProviderTools([beginTaskTool]);
+    let bootstrap;
+    let title = "";
+    let providerState;
+    const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost: 0 };
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      emit("title_bootstrap_turn", { job_id: jobId, attempt });
+      const completion = await input.provider.complete({
+        messages,
+        tools: bootstrapTools,
+        toolChoice: "required",
+        signal: input.signal,
+        onDelta: input.onDelta
+      });
+      providerState = completion?.providerState || providerState;
+      for (const key of ["prompt_tokens", "completion_tokens", "total_tokens", "cost"]) {
+        usage[key] += Number(completion?.usage?.[key] || 0);
+      }
+      const toolCalls = normalizeProviderToolCalls(completion?.toolCalls || [], {
+        maxCalls: 2,
+        maxArgumentsChars: 10_000
+      });
+      const call = toolCalls.length === 1 && toolCalls[0].name === BEGIN_TASK_TOOL ? toolCalls[0] : null;
+      const requestedTitle = clean(call?.arguments?.task_title, 56);
+      const assistantMessage = {
+        role: "assistant",
+        content: String(completion?.text || ""),
+        ...(toolCalls.length ? {
+          tool_calls: toolCalls.map((item) => ({
+            id: item.id,
+            type: "function",
+            function: { name: item.name, arguments: item.raw_arguments || JSON.stringify(item.arguments || {}) }
+          }))
+        } : {})
+      };
+      messages.push(assistantMessage);
+      if (!call || titleWordCount(requestedTitle) < 2 || titleWordCount(requestedTitle) > 6) {
+        if (call) messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: "task_title must contain 2-6 words chosen by the AI" }) });
+        if (attempt < 2) {
+          messages.push({ role: "system", content: `Retry: call ${BEGIN_TASK_TOOL} exactly once with a task_title containing 2-6 words.` });
+          continue;
+        }
+        throw new Error("API worker AI did not return a valid 2-6 word task title through CodexPro MCP.");
+      }
+      const beginArgs = { task_id: jobId, task_title: requestedTitle, task_kind: kind, scope, ...(root ? { root } : {}) };
+      emit("bootstrapping", { job_id: jobId, kind, title: requestedTitle });
+      bootstrap = await input.jobMcp.callTool(BEGIN_TASK_TOOL, beginArgs, { signal: input.signal });
+      messages.push({ role: "tool", tool_call_id: call.id, content: toolResultText(bootstrap, limits.maxToolResultChars) });
+      title = clean(bootstrap?.task_title || requestedTitle, 56);
+      if (titleWordCount(title) < 2 || titleWordCount(title) > 6) throw new Error("CodexPro MCP returned an invalid AI task title.");
+      break;
+    }
     if (!bootstrap?.verified) throw new Error("CodexPro MCP did not verify the worker job bootstrap.");
     if (kind === "code" && (!bootstrap.gate_active || !bootstrap.global_rules_loaded || !bootstrap.agents_loaded || !bootstrap.codexgraph_active)) {
       throw new Error("CodexPro MCP did not provide complete rules, AGENTS, and CodexGraph evidence for the code job.");
     }
 
-    const listed = await input.jobMcp.listTools({ signal: input.signal });
-    const mcpTools = (Array.isArray(listed) ? listed : Array.isArray(listed?.tools) ? listed.tools : [])
+    input.onTaskTitle?.(title, bootstrap);
+    const mcpTools = allMcpTools
       .filter((tool) => !LIFECYCLE_TOOLS.has(String(tool?.name || "")));
-    const providerTools = mcpToolsToProviderTools(mcpTools);
+    const runnableMcpTools = mcpTools.filter((tool) => String(tool?.name || "") !== BEGIN_TASK_TOOL);
+    const providerTools = mcpToolsToProviderTools(runnableMcpTools);
     if (kind === "code" && !providerTools.length) throw new Error("CodexPro MCP exposed no tools for a code job.");
-    const allowedTools = new Set(mcpTools.map((tool) => String(tool.name)));
-    const messages = [
-      { role: "system", content: bootstrapMessage(bootstrap) },
-      ...(Array.isArray(input.messages) ? input.messages : [{ role: "user", content: clean(input.request, 200_000) }])
-    ];
+    const allowedTools = new Set(runnableMcpTools.map((tool) => String(tool.name)));
+    messages.push({ role: "system", content: bootstrapMessage(bootstrap) });
     let toolCallCount = 0;
     let finalText = "";
-    const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost: 0 };
-    let providerState;
 
     for (let turn = 1; turn <= limits.maxTurns; turn += 1) {
       if (input.signal?.aborted) throw input.signal.reason || new Error("Worker job cancelled.");
@@ -141,7 +207,7 @@ export async function runMcpAgentJob(input = {}) {
           summary: clean(finalText, 4000)
         }, { signal: input.signal });
         emit("completed", { turn, tool_call_count: toolCallCount });
-        return { job_id: jobId, worker_id: workerId, text: finalText, usage, provider_state: providerState, bootstrap, finalized };
+        return { job_id: jobId, worker_id: workerId, task_title: title, text: finalText, usage, provider_state: providerState, bootstrap, finalized };
       }
       if (toolCallCount + toolCalls.length > limits.maxToolCalls) throw new Error("Provider exceeded the configured MCP tool-call limit.");
       for (const call of toolCalls) {

@@ -86,6 +86,21 @@ const server = http.createServer(async (req, res) => {
   res.setHeader("content-type", "application/json");
   if (completionTurn === 1) {
     res.end(JSON.stringify({
+      id: "completion-title",
+      choices: [{
+        finish_reason: "tool_calls",
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ id: "call-title", type: "function", function: { name: "begin_repo_task", arguments: JSON.stringify({ task_id: "ignored", task_title: "Đọc tài liệu dự án", task_kind: "code", root: "ignored" }) } }]
+        }
+      }],
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 }
+    }));
+    return;
+  }
+  if (completionTurn === 2) {
+    res.end(JSON.stringify({
       id: "completion-1",
       choices: [{
         finish_reason: "tool_calls",
@@ -155,6 +170,7 @@ try {
     async listTools() {
       calls.push({ channel: "job", name: "tools/list" });
       return [
+        { name: "begin_repo_task", description: "AI must choose and register a 2-6 word task title.", inputSchema: { type: "object", properties: { task_title: { type: "string" } }, required: ["task_title"] } },
         { name: "read", description: "Read an allowed workspace file.", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
         { name: "finalize_worker_job", description: "internal lifecycle", inputSchema: { type: "object" } }
       ];
@@ -189,7 +205,6 @@ try {
     job: {
       id: "cpt_1234567890abcdef12345678",
       workerId: "api:fixture-main",
-      title: "Đọc tài liệu dự án",
       kind: "code",
       scope: "workspace",
       root: "C:\\fixture"
@@ -199,18 +214,21 @@ try {
   });
 
   assert.equal(result.text, "Đã đọc README hoàn toàn qua MCP.");
-  assert.equal(result.usage.total_tokens, 40);
+  assert.equal(result.task_title, "Đọc tài liệu dự án");
+  assert.equal(result.usage.total_tokens, 45);
   assert.deepEqual(calls.map((call) => `${call.channel}:${call.name}`), [
     "control:prepare_repo_task",
-    "job:begin_repo_task",
     "job:tools/list",
+    "job:begin_repo_task",
     "job:read",
     "job:finalize_worker_job"
   ]);
   const completionRequests = requests.filter((request) => request.url === "/v1/chat/completions");
-  assert.equal(completionRequests[0].body.tools[0].function.name, "read");
-  assert.equal(completionRequests[0].body.tools.some((tool) => tool.function.name === "finalize_worker_job"), false, "provider must not receive MCP lifecycle tools");
-  assert.match(completionRequests[1].body.messages.find((message) => message.role === "tool")?.content || "", /MCP-only content/);
+  assert.deepEqual(completionRequests[0].body.tools.map((tool) => tool.function.name), ["begin_repo_task"], "AI title bootstrap must expose only begin_repo_task");
+  assert.equal(completionRequests[0].body.tool_choice, "required");
+  assert.equal(completionRequests[1].body.tools[0].function.name, "read");
+  assert.equal(completionRequests[1].body.tools.some((tool) => tool.function.name === "begin_repo_task" || tool.function.name === "finalize_worker_job"), false, "provider must not receive MCP lifecycle tools after bootstrap");
+  assert.match(completionRequests[2].body.messages.findLast((message) => message.role === "tool")?.content || "", /MCP-only content/);
 
   const failingProvider = createOpenAICompatibleProvider({ baseUrl, model: "fixture/error", getApiKey: async () => secret });
   await assert.rejects(
@@ -251,22 +269,31 @@ try {
   assert.equal(openRouter.manifest.capabilities.tool_calling, true);
 
   const apiLifecycle = [];
+  const apiProviderInputs = [];
   const apiPlugin = createApiWorkerPlugin({
     configurations: [{ id: "fixture-api", label: "Fixture API", provider: "9router", model: "fixture/model", credential_available: true }],
-    createProvider: async () => ({
-      manifest: { id: "fixture-api-provider", name: "Fixture", kind: "fixture", capabilities: { tool_calling: true } },
-      async complete() { return { text: "API worker hoàn tất.", toolCalls: [], usage: { total_tokens: 3 } }; }
-    }),
+    createProvider: async () => {
+      let turn = 0;
+      return {
+        manifest: { id: "fixture-api-provider", name: "Fixture", kind: "fixture", capabilities: { tool_calling: true } },
+        async complete(input) {
+          apiProviderInputs.push(input);
+          turn += 1;
+          if (turn === 1) return { text: "", toolCalls: [{ id: "api-title", name: "begin_repo_task", arguments: { task_title: "Trả lời API" } }], usage: { total_tokens: 2 } };
+          return { text: "API worker hoàn tất.", toolCalls: [], usage: { total_tokens: 3 } };
+        }
+      };
+    },
     createMcpClients: async () => ({
       controlMcp: {
         async callTool(name) { apiLifecycle.push(`control:${name}`); return { prepared: true }; },
         async close() { apiLifecycle.push("control:close"); }
       },
       jobMcp: {
-        async listTools() { apiLifecycle.push("job:tools/list"); return []; },
+        async listTools() { apiLifecycle.push("job:tools/list"); return [{ name: "begin_repo_task", description: "title", inputSchema: { type: "object", properties: { task_title: { type: "string" } }, required: ["task_title"] } }, { name: "read", description: "read", inputSchema: { type: "object" } }]; },
         async callTool(name, args) {
           apiLifecycle.push(`job:${name}`);
-          if (name === "begin_repo_task") return { verified: true, task_title: "Trả lời API", task_kind: "general", policy_version: "worker-policy-v1" };
+          if (name === "begin_repo_task") return { verified: true, gate_active: true, global_rules_loaded: true, agents_loaded: true, codexgraph_active: true, task_title: "Trả lời API", task_kind: "code", root: "C:\\fixture", policy_version: "worker-policy-v1" };
           if (name === "finalize_worker_job") return { finalized: true, job: { status: args.outcome } };
           throw new Error(`unexpected API fixture tool ${name}`);
         },
@@ -281,10 +308,10 @@ try {
   assert.equal(before.workers[0].worker_type, "api");
   const accepted = await registry.invoke("send", "api:fixture-api", {
     task_id: "cpt_abcdefabcdefabcdefabcdef",
-    task_title: "Trả lời API",
-    task_kind: "general",
-    scope: "all_allowed",
-    text: "Trả lời không cần repo."
+    task_kind: "code",
+    scope: "workspace",
+    root: "C:\\fixture",
+    text: "Trả lời trong repo."
   });
   assert.equal(accepted.accepted, true);
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -294,30 +321,47 @@ try {
   }
   const after = await registry.invoke("read", "api:fixture-api");
   assert.equal(after.activity, "idle");
+  assert.equal(after.task_title, "Trả lời API");
   assert.equal(after.result.text, "API worker hoàn tất.");
   const listedAfter = await registry.list();
   assert.equal(listedAfter.workers[0].last_result, "API worker hoàn tất.");
   assert.equal(listedAfter.workers[0].last_task_id, "cpt_abcdefabcdefabcdefabcdef");
   assert.deepEqual(apiLifecycle, [
     "control:prepare_repo_task",
-    "job:begin_repo_task",
     "job:tools/list",
+    "job:begin_repo_task",
     "job:finalize_worker_job",
     "job:close",
     "control:close"
   ]);
+  const continued = await registry.invoke("send", "api:fixture-api", {
+    task_id: "cpt_bbbbbbbbbbbbbbbbbbbbbbbb",
+    task_kind: "code",
+    scope: "workspace",
+    root: "C:\\fixture",
+    text: "Nhắn tiếp trong cùng repo."
+  });
+  assert.equal(continued.accepted, true);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if ((await registry.invoke("read", "api:fixture-api")).activity !== "working") break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(apiProviderInputs[2].messages.some((message) => message.role === "assistant" && message.content === "API worker hoàn tất."), true, "Nhắn tiếp must preserve the previous worker response in the same repo");
 
   const rejectedLifecycle = [];
+  let rejectedTurn = 0;
   await assert.rejects(() => runMcpAgentJob({
     provider: {
       manifest: { id: "malicious-fixture", name: "Malicious fixture", kind: "fixture", capabilities: { tool_calling: true } },
       async complete() {
+        rejectedTurn += 1;
+        if (rejectedTurn === 1) return { text: "", toolCalls: [{ id: "title", name: "begin_repo_task", arguments: { task_title: "Chặn tool nội bộ" } }] };
         return { text: "", toolCalls: [{ id: "bad", name: "finalize_worker_job", arguments: { outcome: "completed" } }] };
       }
     },
     controlMcp: { async callTool(name) { rejectedLifecycle.push(`control:${name}`); return { prepared: true }; } },
     jobMcp: {
-      async listTools() { return [{ name: "read", description: "read", inputSchema: { type: "object" } }]; },
+      async listTools() { return [{ name: "begin_repo_task", description: "title", inputSchema: { type: "object" } }, { name: "read", description: "read", inputSchema: { type: "object" } }]; },
       async callTool(name, args) {
         rejectedLifecycle.push(`job:${name}:${args?.outcome || ""}`);
         if (name === "begin_repo_task") return { verified: true, task_title: "Chặn tool nội bộ", task_kind: "general" };
@@ -325,18 +369,21 @@ try {
         throw new Error("lifecycle bypass reached MCP");
       }
     },
-    job: { id: "cpt_111111111111111111111111", workerId: "api:fixture-main", title: "Chặn tool nội bộ", kind: "general", scope: "all_allowed" },
+    job: { id: "cpt_111111111111111111111111", workerId: "api:fixture-main", kind: "general", scope: "all_allowed" },
     request: "Attempt lifecycle bypass"
   }), /not allowed/);
   assert.deepEqual(rejectedLifecycle, ["control:prepare_repo_task", "job:begin_repo_task:", "job:finalize_worker_job:failed"]);
 
   const cancellationLifecycle = [];
+  let cancellationTurn = 0;
   const cancellationRegistry = new WorkerPluginRegistry();
   cancellationRegistry.register(createApiWorkerPlugin({
     configurations: [{ id: "cancel-api", provider: "9router", model: "fixture/model", credential_available: true }],
     createProvider: async () => ({
       manifest: { id: "cancel-provider", name: "Cancel fixture", kind: "fixture", capabilities: { tool_calling: true } },
       async complete({ signal }) {
+        cancellationTurn += 1;
+        if (cancellationTurn === 1) return { text: "", toolCalls: [{ id: "cancel-title", name: "begin_repo_task", arguments: { task_title: "Hủy API worker" } }] };
         return await new Promise((resolve, reject) => {
           if (signal.aborted) return reject(signal.reason);
           signal.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -346,7 +393,7 @@ try {
     createMcpClients: async () => ({
       controlMcp: { async callTool(name) { cancellationLifecycle.push(`control:${name}`); return { prepared: true }; }, async close() {} },
       jobMcp: {
-        async listTools() { return []; },
+        async listTools() { return [{ name: "begin_repo_task", description: "title", inputSchema: { type: "object" } }]; },
         async callTool(name, args) {
           cancellationLifecycle.push(`job:${name}:${args?.outcome || ""}`);
           if (name === "begin_repo_task") return { verified: true, task_title: "Hủy API worker", task_kind: "general" };
@@ -357,7 +404,7 @@ try {
       }
     })
   }));
-  const cancelPayload = { task_id: "cpt_222222222222222222222222", task_title: "Hủy API worker", task_kind: "general", scope: "all_allowed", text: "Wait" };
+  const cancelPayload = { task_id: "cpt_222222222222222222222222", task_kind: "general", scope: "all_allowed", text: "Wait" };
   await cancellationRegistry.invoke("send", "api:cancel-api", cancelPayload);
   await assert.rejects(() => cancellationRegistry.invoke("send", "api:cancel-api", { ...cancelPayload, task_id: "cpt_333333333333333333333333" }), /already running/);
   assert.equal((await cancellationRegistry.invoke("stop", "api:cancel-api")).stopped, true);
