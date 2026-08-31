@@ -880,7 +880,7 @@ function ApiWorkerCards({ workers, customImages, onRun, onStop }) {
         <div className="profile-actions">
           <div className={`profile-action-buttons ${worker.activity === "working" ? "" : "is-single"}`}>
             <button className="button primary" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}>Chat</button>
-            {worker.activity === "working" && <button className="button danger-quiet" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button>}
+            {worker.activity === "working" && <button className="button profile-stop-button" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button>}
           </div>
           {worker.connected
             ? <span className="already-connected">✓ Đã kết nối CodexPro</span>

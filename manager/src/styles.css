@@ -292,6 +292,8 @@ section { margin-bottom: 38px; }
 .profile-chat { padding-left: 12px; padding-right: 12px; }
 .open-profile { border-color: #354055; background: #151b25; }
 .open-profile:hover:not(:disabled) { border-color: #55647f; background: #1a2230; }
+.profile-stop-button { color: #d7b6bc; border-color: #40343b; background: #161a22; }
+.profile-stop-button:hover:not(:disabled) { color: #f0cbd1; border-color: #5a454d; background: #1b202a; }
 .profile-setup { width: 100%; white-space: nowrap; }
 .update-needed { color: #ffbc72; font-size: 12px; font-weight: 700; }
 .checking-profile { color: #9da9bc; font-size: 12px; font-weight: 700; }
