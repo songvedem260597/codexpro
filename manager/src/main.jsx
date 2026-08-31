@@ -844,7 +844,7 @@ function ApiWorkerCards({ workers, customImages, onRun, onStop }) {
         <div className="profile-actions">
           {worker.activity === "working"
             ? <button className="button danger-quiet" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button>
-            : <button className="button primary" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}>Chạy job</button>}
+            : <button className="button primary" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}>Chat</button>}
           {worker.connected
             ? <span className="already-connected">✓ Đã kết nối CodexPro</span>
             : <span className="api-worker-connection-missing">Chưa kết nối CodexPro</span>}
@@ -3796,7 +3796,7 @@ function App() {
             <div>
               <p className="eyebrow">CONNECTED WORKERS</p>
               <h2>Worker đã kết nối</h2>
-              <p className="section-note">API worker đã lưu và các profile Chrome có extension CodexPro sẽ cùng xuất hiện tại đây.</p>
+              <p className="section-note">Hãy kết nối API worker và Chrome profile của bạn</p>
             </div>
           </div>
           <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout`}>

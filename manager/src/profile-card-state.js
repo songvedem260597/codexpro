@@ -27,7 +27,7 @@ export function profileChromeActionState({ profile, busy, rendererUnresponsive }
   return {
     target,
     disabled: Boolean(busy) || !connected,
-    label: open ? "Đi tới Chrome" : "Mở ChatGPT",
+    label: open ? "Mở Chrome" : "Mở ChatGPT",
     title: open ? "Đưa profile Chrome đang mở lên trước" : "Mở một tab ChatGPT mới trong đúng Chrome profile"
   };
 }
