@@ -286,6 +286,9 @@ try {
   const after = await registry.invoke("read", "api:fixture-api");
   assert.equal(after.activity, "idle");
   assert.equal(after.result.text, "API worker hoàn tất.");
+  const listedAfter = await registry.list();
+  assert.equal(listedAfter.workers[0].last_result, "API worker hoàn tất.");
+  assert.equal(listedAfter.workers[0].last_task_id, "cpt_abcdefabcdefabcdefabcdef");
   assert.deepEqual(apiLifecycle, [
     "control:prepare_repo_task",
     "job:begin_repo_task",
@@ -317,6 +320,39 @@ try {
     request: "Attempt lifecycle bypass"
   }), /not allowed/);
   assert.deepEqual(rejectedLifecycle, ["control:prepare_repo_task", "job:begin_repo_task:", "job:finalize_worker_job:failed"]);
+
+  const cancellationLifecycle = [];
+  const cancellationRegistry = new WorkerPluginRegistry();
+  cancellationRegistry.register(createApiWorkerPlugin({
+    configurations: [{ id: "cancel-api", provider: "openrouter", model: "fixture/model", credential_available: true }],
+    createProvider: async () => ({
+      manifest: { id: "cancel-provider", name: "Cancel fixture", kind: "fixture", capabilities: { tool_calling: true } },
+      async complete({ signal }) {
+        return await new Promise((resolve, reject) => {
+          if (signal.aborted) return reject(signal.reason);
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }
+    }),
+    createMcpClients: async () => ({
+      controlMcp: { async callTool(name) { cancellationLifecycle.push(`control:${name}`); return { prepared: true }; }, async close() {} },
+      jobMcp: {
+        async listTools() { return []; },
+        async callTool(name, args) {
+          cancellationLifecycle.push(`job:${name}:${args?.outcome || ""}`);
+          if (name === "begin_repo_task") return { verified: true, task_title: "Hủy API worker", task_kind: "general" };
+          if (name === "finalize_worker_job") return { finalized: true };
+          throw new Error(`unexpected cancellation tool ${name}`);
+        },
+        async close() {}
+      }
+    })
+  }));
+  const cancelPayload = { task_id: "cpt_222222222222222222222222", task_title: "Hủy API worker", task_kind: "general", scope: "all_allowed", text: "Wait" };
+  await cancellationRegistry.invoke("send", "api:cancel-api", cancelPayload);
+  await assert.rejects(() => cancellationRegistry.invoke("send", "api:cancel-api", { ...cancelPayload, task_id: "cpt_333333333333333333333333" }), /already running/);
+  assert.equal((await cancellationRegistry.invoke("stop", "api:cancel-api")).stopped, true);
+  assert.equal(cancellationLifecycle.includes("job:finalize_worker_job:cancelled"), true, "cancellation must finalize through MCP policy");
 
   console.log("✓ Provider plugin and MCP-only agent loop smoke test passed");
 } finally {

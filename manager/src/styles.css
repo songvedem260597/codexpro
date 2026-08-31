@@ -1017,6 +1017,9 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
 .api-worker-config > div:first-child { min-width: 0; display: grid; gap: 3px; }
 .api-worker-config > div:last-child { display: flex; gap: 7px; }
 .api-worker-config small { color: #8592a5; }
+.api-worker-result { min-width: 0; color: #aab7c9; }
+.api-worker-result summary { cursor: pointer; color: #91aef0; font-size: var(--font-description); }
+.api-worker-result pre { max-height: 220px; margin: 8px 0 0; padding: 10px; overflow: auto; color: #c4cedd; border: 1px solid #263246; border-radius: 7px; background: #090e15; white-space: pre-wrap; overflow-wrap: anywhere; }
 .api-job-overlay { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 24px; background: rgba(3, 6, 10, .78); backdrop-filter: blur(8px); }
 .api-job-modal { width: min(760px, 100%); max-height: calc(100vh - 48px); display: grid; gap: 18px; padding: 22px; overflow: auto; border: 1px solid #3a4f78; border-radius: var(--radius-card); background: #101721; box-shadow: 0 28px 90px rgba(0, 0, 0, .55); }
 .api-job-modal .api-worker-form-actions { align-items: center; justify-content: space-between; }
