@@ -63,6 +63,20 @@ export function switchApiWorkerProvider(current, provider, occupiedIds = []) {
   };
 }
 
+export function normalizeApiWorkerModels(models) {
+  const unique = new Map();
+  for (const item of Array.isArray(models) ? models : []) {
+    const id = String(item?.id || "").trim().slice(0, 240);
+    if (!id || unique.has(id)) continue;
+    unique.set(id, {
+      id,
+      name: String(item?.name || id).trim().slice(0, 240) || id,
+      context_length: Number(item?.context_length || 0) || undefined
+    });
+  }
+  return [...unique.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
 export function validateApiWorkerDraft(draft, options = {}) {
   const source = draft && typeof draft === "object" ? draft : {};
   const id = String(source.id || "").trim();
@@ -73,6 +87,7 @@ export function validateApiWorkerDraft(draft, options = {}) {
   if (!API_WORKER_ID_PATTERN.test(id)) return { valid: false, message: "ID chỉ dùng chữ, số, dấu chấm, gạch dưới hoặc gạch ngang." };
   if (!options.editingId && (options.configs || []).some((config) => config.id === id)) return { valid: false, message: "ID worker đã tồn tại. Chọn Sửa hoặc dùng ID khác." };
   if (!model) return { valid: false, message: "Nhập model mà provider hỗ trợ." };
+  if (options.requireModelSelection && !options.modelConfirmed) return { valid: false, message: "Bước 2: tải danh sách rồi chọn model, hoặc chọn nhập thủ công." };
   if (!baseUrl) return { valid: false, message: "Nhập Base URL của API." };
   if (!apiKey && !options.credentialAvailable) return { valid: false, message: "Nhập API key để lưu worker mới." };
   return { valid: true, message: options.credentialAvailable && !apiKey ? "Sẵn sàng lưu và giữ API key hiện tại." : "Sẵn sàng mã hóa API key và lưu worker." };
