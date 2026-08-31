@@ -88,11 +88,16 @@ try {
 
   const taskId = 'cpt_bbbbbbbbbbbbbbbbbbbbbbbb';
   const taskTitle = 'Runtime event integration';
+  const prepared = await client.request('tools/call', {
+    name: 'prepare_repo_task',
+    arguments: { profile_id: 'runtime-events-smoke', task_id: taskId, root, scope: 'workspace' }
+  });
+  assert.equal(prepared.isError, undefined, JSON.stringify(prepared));
   const began = await client.request('tools/call', {
     name: 'begin_repo_task',
-    arguments: { task_id: taskId, task_title: taskTitle, root }
+    arguments: { task_id: taskId, task_title: taskTitle, task_kind: 'code', root }
   });
-  assert.equal(began.isError, undefined);
+  assert.equal(began.isError, undefined, JSON.stringify(began));
   const workspaceId = began.structuredContent.workspace_id;
 
   const okRead = await client.request('tools/call', {

@@ -1618,6 +1618,7 @@ async function main(): Promise<void> {
     workspaceId: string | null;
     workspaceRoot: string | null;
     activeRequests: number;
+    initializing: boolean;
   };
 
   const transports = new Map<string, TransportRecord>();
@@ -1698,8 +1699,12 @@ async function main(): Promise<void> {
     reason: string,
     preserveSessionId?: string
   ): boolean {
+    const now = Date.now();
     const oldest = [...transports.entries()]
-      .filter(([sessionId, record]) => sessionId !== preserveSessionId && record.activeRequests === 0 && predicate(record))
+      .filter(([sessionId, record]) => sessionId !== preserveSessionId
+        && record.activeRequests === 0
+        && (!record.initializing || now - record.createdAt >= 5_000)
+        && predicate(record))
       .sort((left, right) => left[1].lastSeenAt - right[1].lastSeenAt)[0];
     if (!oldest) return false;
     transports.delete(oldest[0]);
@@ -1755,6 +1760,7 @@ async function main(): Promise<void> {
     pruneTransports(sessionId);
     const record = transports.get(sessionId);
     if (!record) return undefined;
+    record.initializing = false;
     record.lastSeenAt = Date.now();
     recordWorkerActivity(record.workerId, record.lastSeenAt);
     record.activeRequests += 1;
@@ -1951,7 +1957,8 @@ async function main(): Promise<void> {
               clientVersion: clientInfo.clientVersion ?? null,
               workspaceId: null,
               workspaceRoot: null,
-              activeRequests: 1
+              activeRequests: 1,
+              initializing: true
             });
             acquiredSessionId = newSessionId;
             recordWorkerActivity(workerId, timestamp, true);

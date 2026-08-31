@@ -441,8 +441,16 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
   } finally {
     for (const client of clients.reverse()) {
       try {
-        await client.close();
-      } catch {}
+        const transport = client.transport;
+        if (!transport) continue;
+        // The capacity fixture intentionally evicts older sessions. Closing through
+        // Client on Node 24 rejects the SDK's already-aborted SSE response handler
+        // after close() resolves, which surfaces as an unrelated unhandled rejection.
+        transport.onclose = undefined;
+        await transport.close();
+      } catch {
+        // An already-evicted transport is expected during cleanup.
+      }
     }
     child.kill('SIGTERM');
     await waitForExit(child).catch(() => {});
@@ -1036,9 +1044,15 @@ try {
         params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'worker-capacity-test', version: '1.0.0' } }
       })
     });
-    if (workerSession.status !== 200 || !workerSession.headers.get('mcp-session-id')) {
+    const workerSessionId = workerSession.headers.get('mcp-session-id');
+    if (workerSession.status !== 200 || !workerSessionId) {
       throw new Error(`worker capacity fixture failed to initialize session ${index}: HTTP ${workerSession.status}`);
     }
+    await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}&codexpro_worker_id=frontend-capacity-test`, {
+      method: 'POST',
+      headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': workerSessionId },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })
+    });
   }
   const workerBoundedHealth = await fetch(`${baseUrl}/healthz?codexpro_token=${encodeURIComponent(token)}`).then((response) => response.json());
   const capacityWorker = workerBoundedHealth.mcpSessions?.workerConnections?.find((connection) => connection.workerId === 'frontend-capacity-test');
@@ -1056,9 +1070,15 @@ try {
         params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'generic-capacity-test', version: '1.0.0' } }
       })
     });
-    if (genericSession.status !== 200 || !genericSession.headers.get('mcp-session-id')) {
+    const genericSessionId = genericSession.headers.get('mcp-session-id');
+    if (genericSession.status !== 200 || !genericSessionId) {
       throw new Error(`generic capacity fixture failed to initialize session ${index}: HTTP ${genericSession.status}`);
     }
+    await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': genericSessionId },
+      body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' })
+    });
   }
   const boundedHealth = await fetch(`${baseUrl}/healthz?codexpro_token=${encodeURIComponent(token)}`).then((response) => response.json());
   const attributedSessions = (boundedHealth.mcpSessions?.workerConnections ?? [])
