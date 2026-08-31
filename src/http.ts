@@ -28,6 +28,7 @@ const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
 const RUNTIME_STARTED_AT = new Date().toISOString();
 const RUNTIME_ENTRY_STAT = fs.statSync(fileURLToPath(import.meta.url));
 const RUNTIME_BUILD_ID = `${Math.floor(RUNTIME_ENTRY_STAT.mtimeMs)}:${RUNTIME_ENTRY_STAT.size}`;
+const WORKER_PROFILE_ID_PATTERN = /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,159}|[a-z0-9][a-z0-9._-]{0,63}:[A-Za-z0-9][A-Za-z0-9._-]{0,94})$/;
 
 function browserExtensionConnectorInfo(config: CodexProConfig, profileId = "") {
   const runtime = readRuntimeConnection(config.defaultRoot);
@@ -53,7 +54,7 @@ function browserExtensionConnectorInfo(config: CodexProConfig, profileId = "") {
   if (serverUrl.pathname !== "/mcp") throw new Error("CodexPro public endpoint must use the /mcp path.");
   if (config.authToken) serverUrl.searchParams.set("codexpro_token", config.authToken);
   const normalizedProfileId = String(profileId || "").trim();
-  if (/^[A-Za-z0-9._-]{1,160}$/.test(normalizedProfileId)) serverUrl.searchParams.set("codexpro_profile", normalizedProfileId);
+  if (WORKER_PROFILE_ID_PATTERN.test(normalizedProfileId)) serverUrl.searchParams.set("codexpro_profile", normalizedProfileId);
 
   return {
     name: "CodexPro",
@@ -1789,7 +1790,7 @@ async function main(): Promise<void> {
           if (closedSessionId) transports.delete(closedSessionId);
         };
 
-        const browserProfileId = typeof req.query.codexpro_profile === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(req.query.codexpro_profile)
+        const browserProfileId = typeof req.query.codexpro_profile === "string" && WORKER_PROFILE_ID_PATTERN.test(req.query.codexpro_profile)
           ? req.query.codexpro_profile
           : "";
         const pendingTask = browserProfileId ? getBrowserExtensionProfilePendingTask(browserProfileId) : undefined;
