@@ -27,7 +27,7 @@ import { projectCompactGraph } from "./analysis/projection.js";
 import { createRuntimeTraceContext, currentRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import { recordRuntimeEvent, type RuntimeEventType } from "./runtimeEvents.js";
 import { runBrowserControl } from "./browserOps.js";
-import { ensureBrowserExtensionBridge, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 import { bootstrapWorkerJob, finalizeWorkerJob, prepareWorkerJob, readWorkerJob, workerJobPublicRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
@@ -2126,7 +2126,28 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       let expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
       const managerPrepared = Boolean(args.task_id);
       const taskId = args.task_id || (gateProfileId ? `cpt_${randomBytes(12).toString("hex")}` : "");
-      const preparedOwner = managerPrepared && taskId ? expectedRepoTaskOwner(taskId) : undefined;
+      let preparedOwner = managerPrepared && taskId ? expectedRepoTaskOwner(taskId) : undefined;
+      if (managerPrepared && taskId && !preparedOwner) {
+        const persistedOwner = getBrowserExtensionPendingTaskOwner(taskId);
+        if (persistedOwner) {
+          const recoveredExpected = rememberExpectedRepoTask(persistedOwner.profile_id, {
+            taskId: persistedOwner.task_id,
+            root: persistedOwner.scope === "workspace" ? persistedOwner.root || undefined : undefined,
+            scope: persistedOwner.scope
+          });
+          preparedOwner = { profileId: persistedOwner.profile_id, expected: recoveredExpected };
+          if (gateProfileId === persistedOwner.profile_id) expected = recoveredExpected;
+          recordBrowserProfileTaskEvent("repo_task_prepared_rehydrated", {
+            profile_id: persistedOwner.profile_id,
+            session_profile_id: sessionProfileId,
+            task_id: taskId,
+            root: recoveredExpected.root,
+            scope: recoveredExpected.scope,
+            prepared_at: persistedOwner.prepared_at,
+            reason: "runtime_restart"
+          });
+        }
+      }
       if (preparedOwner && preparedOwner.profileId !== gateProfileId) {
         gateProfileId = preparedOwner.profileId;
         expected = preparedOwner.expected;

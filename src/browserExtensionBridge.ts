@@ -203,19 +203,41 @@ function validPersistedProfileId(value: string): boolean {
 function loadBrowserProfileTasks(): void {
   try {
     const parsed = JSON.parse(fs.readFileSync(browserProfileTaskStatePath(), "utf8")) as {
-      profiles?: Record<string, { task_id?: unknown; task_title?: unknown; updated_at?: unknown }>;
+      profiles?: Record<string, {
+        task_id?: unknown;
+        task_title?: unknown;
+        updated_at?: unknown;
+        pending_task_id?: unknown;
+        pending_root?: unknown;
+        pending_scope?: unknown;
+        pending_prepared_at?: unknown;
+      }>;
     };
     for (const [profileId, value] of Object.entries(parsed.profiles || {}).slice(-MAX_PERSISTED_PROFILE_TASKS)) {
+      if (!validPersistedProfileId(profileId)) continue;
       const taskId = String(value?.task_id || "").trim();
       const taskTitle = String(value?.task_title || "").trim();
       const updatedAt = String(value?.updated_at || "").trim();
-      if (!validPersistedProfileId(profileId) || !/^cpt_[a-f0-9]{24}$/.test(taskId)) continue;
-      if (taskTitle.length < 4 || taskTitle.length > 56) continue;
-      const wordCount = taskTitle.split(/\s+/).filter(Boolean).length;
-      if (wordCount < 2 || wordCount > 6) continue;
-      profileTaskIds.set(profileId, taskId);
-      profileTaskTitles.set(profileId, taskTitle);
-      profileTaskUpdatedAt.set(profileId, updatedAt || new Date(0).toISOString());
+      if (/^cpt_[a-f0-9]{24}$/.test(taskId) && taskTitle.length >= 4 && taskTitle.length <= 56) {
+        const wordCount = taskTitle.split(/\s+/).filter(Boolean).length;
+        if (wordCount >= 2 && wordCount <= 6) {
+          profileTaskIds.set(profileId, taskId);
+          profileTaskTitles.set(profileId, taskTitle);
+          profileTaskUpdatedAt.set(profileId, updatedAt || new Date(0).toISOString());
+        }
+      }
+      const pendingTaskId = String(value?.pending_task_id || "").trim();
+      const pendingRoot = String(value?.pending_root || "").trim();
+      const pendingScope = value?.pending_scope === "all_allowed" ? "all_allowed" : value?.pending_scope === "workspace" ? "workspace" : "";
+      const pendingPreparedAt = Date.parse(String(value?.pending_prepared_at || ""));
+      if (/^cpt_[a-f0-9]{24}$/.test(pendingTaskId) && pendingScope && Number.isFinite(pendingPreparedAt)) {
+        profilePendingTasks.set(profileId, {
+          taskId: pendingTaskId,
+          root: pendingRoot,
+          scope: pendingScope,
+          preparedAt: pendingPreparedAt
+        });
+      }
     }
   } catch {
     // Missing or malformed state must not prevent the local bridge from starting.
@@ -224,28 +246,47 @@ function loadBrowserProfileTasks(): void {
 
 function persistBrowserProfileTasks(): void {
   try {
-    const profiles = [...profileTaskTitles.keys()]
-      .map((profileId) => ({
-        profileId,
-        taskId: profileTaskIds.get(profileId) || "",
-        taskTitle: profileTaskTitles.get(profileId) || "",
-        updatedAt: profileTaskUpdatedAt.get(profileId) || new Date(0).toISOString()
-      }))
-      .filter((entry) => validPersistedProfileId(entry.profileId) && /^cpt_[a-f0-9]{24}$/.test(entry.taskId) && entry.taskTitle)
-      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+    const profileIds = [...new Set([...profileTaskTitles.keys(), ...profilePendingTasks.keys()])];
+    const profiles = profileIds
+      .map((profileId) => {
+        const pendingTask = profilePendingTasks.get(profileId);
+        return {
+          profileId,
+          taskId: profileTaskIds.get(profileId) || "",
+          taskTitle: profileTaskTitles.get(profileId) || "",
+          updatedAt: profileTaskUpdatedAt.get(profileId) || new Date(0).toISOString(),
+          pendingTaskId: pendingTask?.taskId || "",
+          pendingRoot: pendingTask?.root || "",
+          pendingScope: pendingTask?.scope || "",
+          pendingPreparedAt: pendingTask ? new Date(pendingTask.preparedAt).toISOString() : ""
+        };
+      })
+      .filter((entry) => validPersistedProfileId(entry.profileId) && (
+        (/^cpt_[a-f0-9]{24}$/.test(entry.taskId) && Boolean(entry.taskTitle))
+        || (/^cpt_[a-f0-9]{24}$/.test(entry.pendingTaskId) && Boolean(entry.pendingScope))
+      ))
+      .sort((left, right) => Math.max(Date.parse(left.updatedAt) || 0, Date.parse(left.pendingPreparedAt) || 0) - Math.max(Date.parse(right.updatedAt) || 0, Date.parse(right.pendingPreparedAt) || 0))
       .slice(-MAX_PERSISTED_PROFILE_TASKS);
     const stateFile = browserProfileTaskStatePath();
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
     fs.writeFileSync(stateFile, `${JSON.stringify({
       version: PROFILE_TASK_STATE_VERSION,
       profiles: Object.fromEntries(profiles.map((entry) => [entry.profileId, {
-        task_id: entry.taskId,
-        task_title: entry.taskTitle,
-        updated_at: entry.updatedAt
+        ...(entry.taskId && entry.taskTitle ? {
+          task_id: entry.taskId,
+          task_title: entry.taskTitle,
+          updated_at: entry.updatedAt
+        } : {}),
+        ...(entry.pendingTaskId && entry.pendingScope ? {
+          pending_task_id: entry.pendingTaskId,
+          pending_root: entry.pendingRoot,
+          pending_scope: entry.pendingScope,
+          pending_prepared_at: entry.pendingPreparedAt
+        } : {})
       }]))
     }, null, 2)}\n`, "utf8");
   } catch {
-    // The in-memory title remains usable if persistence is temporarily unavailable.
+    // The in-memory title/pending gate remains usable if persistence is temporarily unavailable.
   }
 }
 
@@ -836,9 +877,11 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
   const taskTitle = String(title || "").trim();
   if (!id) return;
   const pendingTask = profilePendingTasks.get(id);
-  if (!normalizedTaskId || pendingTask?.taskId === normalizedTaskId) profilePendingTasks.delete(id);
+  const pendingCleared = Boolean(pendingTask && (!normalizedTaskId || pendingTask.taskId === normalizedTaskId));
+  if (pendingCleared) profilePendingTasks.delete(id);
   const changed = profileTaskIds.get(id) !== normalizedTaskId || profileTaskTitles.get(id) !== taskTitle;
   if (!changed) {
+    if (pendingCleared) persistBrowserProfileTasks();
     if (singleton) scheduleProfileNotification(singleton);
     return;
   }
@@ -877,6 +920,7 @@ export function setBrowserExtensionProfilePendingTask(
     scope,
     preparedAt
   });
+  persistBrowserProfileTasks();
 }
 
 export function getBrowserExtensionProfilePendingTask(profileId: string): {
@@ -895,6 +939,39 @@ export function getBrowserExtensionProfilePendingTask(profileId: string): {
     prepared_at: new Date(pendingTask.preparedAt).toISOString(),
     age_ms: Math.max(0, Date.now() - pendingTask.preparedAt)
   };
+}
+
+export function getBrowserExtensionPendingTaskOwner(taskId: string): {
+  profile_id: string;
+  task_id: string;
+  root: string;
+  scope: "workspace" | "all_allowed";
+  prepared_at: string;
+  age_ms: number;
+} | undefined {
+  const normalizedTaskId = String(taskId || "").trim();
+  if (!/^cpt_[a-f0-9]{24}$/.test(normalizedTaskId)) return undefined;
+  let owner: {
+    profile_id: string;
+    task_id: string;
+    root: string;
+    scope: "workspace" | "all_allowed";
+    prepared_at: string;
+    age_ms: number;
+  } | undefined;
+  for (const [profileId, pendingTask] of profilePendingTasks) {
+    if (pendingTask.taskId !== normalizedTaskId) continue;
+    if (owner) return undefined;
+    owner = {
+      profile_id: profileId,
+      task_id: pendingTask.taskId,
+      root: pendingTask.root,
+      scope: pendingTask.scope,
+      prepared_at: new Date(pendingTask.preparedAt).toISOString(),
+      age_ms: Math.max(0, Date.now() - pendingTask.preparedAt)
+    };
+  }
+  return owner;
 }
 
 export function setBrowserExtensionProfileWorkspaceBinding(profileId: string, root: string): void {
