@@ -3,7 +3,7 @@ import { createApiWorkerDraft, normalizeApiWorkerModels, switchApiWorkerProvider
 
 const draft = createApiWorkerDraft();
 assert.equal(draft.id, "9router-main");
-assert.equal(draft.label, "9Router chính");
+assert.equal(draft.label, "9Router");
 assert.equal(draft.provider, "9router");
 assert.equal(draft.base_url, "http://localhost:20128/v1");
 assert.equal(draft.model, "cc/claude-opus-4-6");
@@ -14,7 +14,7 @@ assert.equal(validateApiWorkerDraft({ ...draft, api_key: "fixture-key" }, { requ
 
 const secondDraft = createApiWorkerDraft("9router", ["9router-main"]);
 assert.equal(secondDraft.id, "9router-main-2");
-assert.equal(secondDraft.label, "9Router chính 2");
+assert.equal(secondDraft.label, "9Router 2");
 assert.match(validateApiWorkerDraft(draft, { configs: [{ id: "9router-main" }] }).message, /tồn tại/);
 assert.equal(validateApiWorkerDraft(draft, { editingId: "9router-main", credentialAvailable: true }).valid, true);
 

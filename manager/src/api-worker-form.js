@@ -3,7 +3,7 @@ const API_WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,94}$/;
 const PROVIDER_TEMPLATES = Object.freeze({
   "9router": Object.freeze({
     id: "9router-main",
-    label: "9Router chính",
+    label: "9Router",
     provider: "9router",
     base_url: "http://localhost:20128/v1",
     model: "cc/claude-opus-4-6"

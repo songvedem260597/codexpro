@@ -35,9 +35,10 @@ function normalizeConfig(value) {
   const baseUrl = normalizeProviderBaseUrl(source.base_url || source.baseUrl || defaultBaseUrl).toString().replace(/\/$/, "");
   const model = clean(source.model, 240);
   if (!model) throw new Error("API worker model is required.");
+  const rawLabel = clean(source.label || id, 100);
   return {
     id,
-    label: clean(source.label || id, 100),
+    label: provider === "9router" && rawLabel === "9Router chính" ? "9Router" : rawLabel,
     provider,
     base_url: baseUrl,
     model,

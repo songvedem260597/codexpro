@@ -14,6 +14,8 @@ function publicRun(state) {
   if (!state) return undefined;
   return {
     job_id: state.jobId,
+    task_title: state.title,
+    last_request: state.request,
     activity: state.activity,
     started_at: state.startedAt,
     finished_at: state.finishedAt,
@@ -62,6 +64,7 @@ export function createApiWorkerPlugin(options = {}) {
           activity: run?.activity || "idle",
           current_task_id: run?.activity === "working" ? run.jobId : "",
           current_task_title: run?.activity === "working" ? run.title : "",
+          last_task_title: run?.title || "",
           current_workspace_root: run?.activity === "working" ? run.root : "",
           run_id: run?.jobId || "",
           last_task_id: run?.jobId || "",
@@ -83,10 +86,17 @@ export function createApiWorkerPlugin(options = {}) {
         throw new Error("API worker runtime dependencies are unavailable.");
       }
       const controller = new AbortController();
+      const root = clean(payload.root, 2048);
+      const sameWorkspace = Boolean(existing?.root && root && existing.root.toLowerCase() === root.toLowerCase());
+      const history = sameWorkspace && Array.isArray(existing?.history) ? existing.history.slice(-12) : [];
+      const attachmentNames = Array.isArray(payload.attachment_names) ? payload.attachment_names.map((name) => clean(name, 260)).filter(Boolean) : [];
+      const request = clean(payload.text || payload.request, 12_000) || `Đã gửi ${attachmentNames.length} file: ${attachmentNames.join(", ")}`;
       const state = {
         jobId: clean(payload.task_id || payload.taskId, 40),
-        title: clean(payload.task_title || payload.taskTitle, 56),
-        root: clean(payload.root, 2048),
+        title: "",
+        root,
+        request,
+        history,
         activity: "working",
         startedAt: new Date().toISOString(),
         finishedAt: "",
@@ -116,19 +126,21 @@ export function createApiWorkerPlugin(options = {}) {
         job: {
           id: state.jobId,
           workerId,
-          title: state.title,
           kind: payload.task_kind || payload.taskKind,
           scope: payload.scope,
           root: state.root
         },
         request: payload.text || payload.request,
-        messages: payload.messages,
+        messages: [...history, ...(Array.isArray(payload.messages) ? payload.messages : [])],
         limits: payload.limits,
         signal: controller.signal,
         onDelta: payload.onDelta,
+        onTaskTitle: (title) => { state.title = clean(title, 56); },
         onEvent: (event) => state.events.push(event)
       }).then((result) => {
+        state.title = clean(result?.task_title || state.title, 56);
         state.result = result;
+        state.history = [...history, { role: "user", content: request }, { role: "assistant", content: clean(result?.text, 20_000) }].slice(-12);
         state.activity = "idle";
         state.finishedAt = new Date().toISOString();
         return result;

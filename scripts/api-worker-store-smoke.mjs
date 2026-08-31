@@ -22,6 +22,7 @@ try {
     api_key: secret
   });
   assert.equal(saved.credential_available, true);
+  assert.equal(saved.label, "9Router", "legacy 9Router labels must migrate to the concise display name");
   assert.equal(saved.credential_ref, "os-secret:api-worker:9router-main");
   assert.equal(saved.api_key, undefined);
   assert.equal(saved.base_url, "http://localhost:20128/v1");
