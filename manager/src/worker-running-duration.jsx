@@ -13,5 +13,5 @@ export function WorkerRunningDuration({ startedAt, finishedAt = "" }) {
 
   const finishedAtMs = Date.parse(String(finishedAt || ""));
   const label = formatWorkerRunningDuration(startedAt, Number.isFinite(finishedAtMs) ? finishedAtMs : now);
-  return label ? <code className="profile-run-duration" title="Thời lượng task">{label}</code> : null;
+  return label ? <code className="profile-run-duration" title="Thời lượng task">Hoạt động trong {label}</code> : null;
 }
