@@ -220,7 +220,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     }
     await general.close();
     clients.splice(clients.indexOf(general), 1);
-    const direct = await createClient('repo-task-direct-chatgpt', 'direct-smoke');
+    const direct = await createClient('repo-task-direct-api-worker', 'api:direct-smoke');
     const directBegan = await callTool(direct, 'begin_repo_task', { task_title: 'Inspect direct request', task_kind: 'code' });
     if (!directBegan.structuredContent.verified || !/^cpt_[a-f0-9]{24}$/.test(String(directBegan.structuredContent.task_id || ''))) {
       throw new Error(`direct profile task did not receive a server-generated id: ${JSON.stringify(directBegan.structuredContent)}`);
@@ -361,10 +361,10 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
       throw new Error(`shared connector title was persisted under the wrong profile: ${JSON.stringify(persistedProfileTasks)}`);
     }
     const taskEvents = (await fs.readFile(path.join(codexProHome, 'profile-task-events.jsonl'), 'utf8')).trim().split(/\r?\n/).map((line) => JSON.parse(line));
-    if (!taskEvents.some((event) => event.event === 'mcp_session_initialized' && event.profile_id === 'direct-smoke' && event.profile_bound === true)) {
+    if (!taskEvents.some((event) => event.event === 'mcp_session_initialized' && event.profile_id === 'api:direct-smoke' && event.profile_bound === true)) {
       throw new Error(`profile-bound MCP session initialization was not logged: ${JSON.stringify(taskEvents)}`);
     }
-    if (!taskEvents.some((event) => event.event === 'repo_task_started' && event.profile_id === 'direct-smoke' && event.task_source === 'chatgpt_direct' && event.task_title_returned_by === 'ai')) {
+    if (!taskEvents.some((event) => event.event === 'repo_task_started' && event.profile_id === 'api:direct-smoke' && event.task_source === 'chatgpt_direct' && event.task_title_returned_by === 'ai')) {
       throw new Error(`direct AI task title was not logged: ${JSON.stringify(taskEvents)}`);
     }
     if (!taskEvents.some((event) => event.event === 'repo_task_prepared' && event.profile_id === 'task-owner-profile' && event.task_id === 'cpt_eeeeeeeeeeeeeeeeeeeeeeee')) {
