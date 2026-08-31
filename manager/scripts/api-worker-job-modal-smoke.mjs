@@ -19,6 +19,8 @@ assert.match(modal, /request-files[\s\S]*?request-file-image[\s\S]*?attach-butto
 assert.match(modal, /AI tự đặt title 2–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP/, "API job composer must explain the AI-owned MCP title bootstrap");
 
 assert.match(source, /<span className="already-connected">✓ Đã kết nối CodexPro<\/span>/, "connected API cards must show the CodexPro connection strip below Run job");
+assert.match(source, /onClick=\{\(\) => onRun\(worker\)\}>Chat<\/button>/, "API worker cards must use the same Chat action label as Chrome profiles");
+assert.doesNotMatch(source, />Chạy job<\/button>/, "the legacy API worker action label must be removed");
 assert.doesNotMatch(source, /<code>api:\{worker\.worker_id\}/, "registry worker ids already contain the api: prefix and must not be duplicated");
 assert.match(source, /label: "9Router"/, "new 9Router workers must use the concise display label");
 

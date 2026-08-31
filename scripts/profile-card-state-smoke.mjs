@@ -15,7 +15,7 @@ assert.equal(profileChromeTarget(newChatProfile)?.id, 71, "an open ChatGPT new-t
 assert.deepEqual(profileChromeActionState({ profile: newChatProfile, busy: "", rendererUnresponsive: false }), {
   target: newChatProfile.chatgpt_tabs[0],
   disabled: false,
-  label: "Đi tới Chrome",
+  label: "Mở Chrome",
   title: "Đưa profile Chrome đang mở lên trước"
 }, "an already-open profile must not be presented as unopened");
 assert.deepEqual(profileChromeActionState({ profile: { connected: true, chatgpt_tabs: [], conversation_tabs: [] }, busy: "", rendererUnresponsive: false }), {
