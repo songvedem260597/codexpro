@@ -5,6 +5,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
+import { useFrameCoalescedValue } from "./use-frame-coalesced-value.js";
 
 function safeMarkdownHref(value) {
   const href = String(value || "").trim();
@@ -109,7 +110,22 @@ const MarkdownBlock = React.memo(function MarkdownBlock({ source, blockKey, tail
 });
 
 export const ResponseText = React.memo(function ResponseText({ text, truncated, streaming = false }) {
-  const cleanText = String(text || "")
+  const incomingText = String(text || "");
+  const previousIncoming = React.useRef("");
+  const settleTimer = React.useRef(0);
+  const [appendStreaming, setAppendStreaming] = React.useState(false);
+  const appendOnlyUpdate = Boolean(previousIncoming.current && incomingText.length > previousIncoming.current.length && incomingText.startsWith(previousIncoming.current));
+  previousIncoming.current = incomingText;
+  React.useEffect(() => {
+    if (!appendOnlyUpdate) return undefined;
+    setAppendStreaming(true);
+    globalThis.clearTimeout(settleTimer.current);
+    settleTimer.current = globalThis.setTimeout(() => setAppendStreaming(false), 160);
+    return () => globalThis.clearTimeout(settleTimer.current);
+  }, [incomingText]);
+  const activelyStreaming = streaming || appendOnlyUpdate || appendStreaming;
+  const visualText = useFrameCoalescedValue(incomingText, activelyStreaming);
+  const cleanText = visualText
     .replace(/[^\r\n]*/g, "")
     .replace(/[ \t]+\n/g, "\n");
   const source = `${cleanText}${truncated ? "\n\n> [Đã rút gọn khi hiển thị]" : ""}`;
@@ -118,7 +134,7 @@ export const ResponseText = React.memo(function ResponseText({ text, truncated, 
 
   return (
     <div className="chat-message-text response-rich-text">
-      {streaming ? <>
+      {activelyStreaming ? <>
         {partition.frozen.map((block) => <MarkdownBlock key={block.key} blockKey={block.key} source={block.text} />)}
         <MarkdownBlock key={partition.tail.key} blockKey={partition.tail.key} source={partition.tail.text} tail />
       </> : <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]} rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]} components={components} skipHtml>{source}</ReactMarkdown>}
