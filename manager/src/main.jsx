@@ -1748,7 +1748,7 @@ function App() {
         const selectedTarget = String(requestTargetsRef.current[profile.profile_id] || "");
         const currentResponse = requestResponses[profile.profile_id];
         const relevant = selectedTarget
-          ? selectedTarget === conversationId || currentResponse?.conversationId === conversationId
+          ? selectedTarget === conversationId
           : currentResponse?.conversationId === conversationId || (chatProfileId === profile.profile_id && tab.active);
         if (!relevant) continue;
         const networkState = String(tab.network_state || (tab.busy ? "generating" : "idle"));
@@ -2373,6 +2373,8 @@ function App() {
           responseCacheSaveSignatures.current.delete(key);
         }
         setRequestResponses((current) => {
+          const selectedTargetNow = String(requestTargetsRef.current[profile.profile_id] || "");
+          if (selectedTargetNow && selectedTargetNow !== conversationId) return current;
           const previous = current[profile.profile_id] || {};
           const previousIsNewer = previous.conversationId === conversationId
             && Date.parse(String(previous.updatedAt || "")) > Date.parse(String(cached.updatedAt || ""));
@@ -2396,6 +2398,8 @@ function App() {
           };
         });
       }
+      const selectedTargetNow = String(requestTargetsRef.current[profile.profile_id] || "");
+      if (selectedTargetNow && selectedTargetNow !== conversationId) return;
       if (!cachedResponseIsFresh(profile, conversationId, cached)) {
         const cachedHasContent = Boolean(cached?.messages?.length || String(cached?.text || "").trim());
         const fastResult = await loadResponse(profile, conversationId, true, false);
@@ -3130,13 +3134,28 @@ function App() {
     const conversations = profileRequestChats(profile, pinnedTarget);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const conversationId = String(explicitConversationId || requestTargets[profile.profile_id] || defaultTarget || "");
-    if (!conversationId || conversationId === NEW_CHAT_TARGET || responseFetches.current.has(profile.profile_id)) return null;
-    responseFetches.current.add(profile.profile_id);
+    const fetchKey = responseCacheKey(profile.profile_id, conversationId);
+    const responseTargetStillCurrent = () => {
+      const currentTarget = String(requestTargetsRef.current[profile.profile_id] || "");
+      return !currentTarget || currentTarget === conversationId;
+    };
+    if (!conversationId || conversationId === NEW_CHAT_TARGET || responseFetches.current.has(fetchKey)) return null;
+    responseFetches.current.add(fetchKey);
     if (!silent) {
-      setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }));
+      setRequestResponses((current) => responseTargetStillCurrent()
+        ? { ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }
+        : current);
     }
     try {
       const result = await api.getProfileResponse({ profileId: profile.profile_id, conversationId, readDom, recoverStaleDom, canonicalOnly });
+      const responseProfileId = String(result?.response_profile_id || result?.profile_id || "").trim();
+      const responseConversationId = String(result?.response_conversation_id || result?.conversation_id || "").trim()
+        || String(result?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1]
+        || "";
+      if (responseProfileId !== profile.profile_id || responseConversationId !== conversationId) {
+        throw new Error(`RESPONSE_OWNERSHIP_MISMATCH: expected ${profile.profile_id}:${conversationId}, received ${responseProfileId || "(missing-profile)"}:${responseConversationId || "(missing-conversation)"}.`);
+      }
+      if (!responseTargetStillCurrent()) return null;
       const domAvailable = result.dom_available !== false;
       const canonicalAvailable = result.canonical_available === true;
       const contentAvailable = domAvailable || canonicalAvailable;
@@ -3145,6 +3164,7 @@ function App() {
       const responseAuditFetchMode = canonicalOnly ? "canonical_only" : readDom ? (recoverStaleDom ? "dom_recovery" : "dom") : "network_only";
       const responseAuditKey = responseAudit ? JSON.stringify([responseAuditFetchMode, responseAudit]) : "";
       setRequestResponses((current) => {
+        if (!responseTargetStillCurrent()) return current;
         const previous = current[profile.profile_id] || {};
         const sameConversation = previous.conversationId === conversationId;
         const networkStreamCurrentGeneration = networkStreamPayloadAvailable && isNetworkStreamCurrentGeneration({
@@ -3244,11 +3264,13 @@ function App() {
     } catch (err) {
       const message = err?.message || String(err);
       logRendererDiagnostic(api, "error", "chat", `Đọc phản hồi thất bại: ${message}`, { action: "load-response", profile_id: profile.profile_id, conversation_id: conversationId, read_dom: readDom, recover_stale_dom: recoverStaleDom, canonical_only: canonicalOnly, silent, error: err });
-      setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: false, error: message, conversationId } }));
-      if (!silent) setError(message);
+      setRequestResponses((current) => responseTargetStillCurrent()
+        ? { ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: false, error: message, conversationId } }
+        : current);
+      if (!silent && responseTargetStillCurrent()) setError(message);
       return null;
     } finally {
-      responseFetches.current.delete(profile.profile_id);
+      responseFetches.current.delete(fetchKey);
     }
   }
 

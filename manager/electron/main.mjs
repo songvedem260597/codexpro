@@ -3617,8 +3617,17 @@ async function getProfileResponse(payload) {
     canonical_only: payload?.canonicalOnly === true,
     recover_stale_dom: payload?.recoverStaleDom === true
   }, 80000);
+  const responseProfileId = String(result?.profile_id || "").trim();
+  const responseConversationId = String(result?.conversation_id || "").trim()
+    || String(result?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1]
+    || "";
+  if (responseProfileId !== profileId || responseConversationId !== conversationId) {
+    throw new Error(`RESPONSE_OWNERSHIP_MISMATCH: expected ${profileId}:${conversationId}, received ${responseProfileId || "(missing-profile)"}:${responseConversationId || "(missing-conversation)"}.`);
+  }
   return {
     ...result,
+    response_profile_id: responseProfileId,
+    response_conversation_id: responseConversationId,
     manager_phase_timings: {
       runtime_base_ms: Math.max(0, runtimeBaseMs),
       local_mcp_ms: Math.max(0, Date.now() - localMcpStartedAt),

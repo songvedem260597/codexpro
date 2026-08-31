@@ -28,6 +28,10 @@ assert.match(source, /function openChat\(profile\)[\s\S]*?activeTabReady[\s\S]*?
 assert.match(source, /selection_reason:[\s\S]*composer_lock_reason:[\s\S]*tab_candidates:/, "target diagnostics must explain selection and composer locks");
 assert.match(source, /action: "open-chat-target-selection"[\s\S]*?draft_length:[\s\S]*?tab_candidates:/, "opening the composer must log target selection and retained draft evidence");
 assert.match(modal, /profileRequestChats\(profile, pinnedTarget\)/, "refresh must keep the pinned conversation in the selector");
-assert.match(source, /const relevant = selectedTarget[\s\S]*\? selectedTarget === conversationId \|\| currentResponse\?\.conversationId === conversationId/, "an active tab must not replace an explicit target during refresh");
+assert.match(source, /const relevant = selectedTarget[\s\S]*\? selectedTarget === conversationId\s*:\s*currentResponse\?\.conversationId === conversationId/, "an explicit target must be the only auto-loaded conversation for that profile");
+assert.match(source, /const fetchKey = responseCacheKey\(profile\.profile_id, conversationId\)[\s\S]*responseFetches\.current\.has\(fetchKey\)[\s\S]*responseFetches\.current\.delete\(fetchKey\)/, "response fetch locks must be scoped by profile and conversation instead of profile only");
+assert.match(source, /hydrateCachedResponse[\s\S]*selectedTargetNow[\s\S]*selectedTargetNow !== conversationId[\s\S]*cachedResponseIsFresh/, "stale cache hydration must stop when the user switches conversations");
+assert.match(source, /const responseTargetStillCurrent = \(\) =>[\s\S]*currentTarget === conversationId[\s\S]*if \(!responseTargetStillCurrent\(\)\) return null/, "late response reads must be discarded after the selected conversation changes");
+assert.match(source, /responseProfileId !== profile\.profile_id \|\| responseConversationId !== conversationId[\s\S]*RESPONSE_OWNERSHIP_MISMATCH/, "renderer must reject responses whose profile or conversation ownership does not match the request");
 
 console.log("chat-composer-isolation-smoke: ok");
