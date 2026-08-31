@@ -24,7 +24,9 @@ assert.match(modal, /<ChatDropdown[\s\S]*selectRequestConversation\(profile, id\
 assert.doesNotMatch(modal, /value=\{draft\}/, "chat modal must not own controlled draft input state");
 
 assert.match(source, /requestTargetsRef\.current = \{ \.\.\.requestTargetsRef\.current, \[profileId\]: nextTarget \}/, "conversation selection must synchronously pin the target ref");
+assert.match(source, /function openChat\(profile\)[\s\S]*?activeTabReady[\s\S]*?open_active_idle_tab_overrode_pinned[\s\S]*?requestTargetsRef\.current/, "opening an idle Chrome tab must override a stale pinned busy conversation");
 assert.match(source, /selection_reason:[\s\S]*composer_lock_reason:[\s\S]*tab_candidates:/, "target diagnostics must explain selection and composer locks");
+assert.match(source, /action: "open-chat-target-selection"[\s\S]*?draft_length:[\s\S]*?tab_candidates:/, "opening the composer must log target selection and retained draft evidence");
 assert.match(modal, /profileRequestChats\(profile, pinnedTarget\)/, "refresh must keep the pinned conversation in the selector");
 assert.match(source, /const relevant = selectedTarget[\s\S]*\? selectedTarget === conversationId \|\| currentResponse\?\.conversationId === conversationId/, "an active tab must not replace an explicit target during refresh");
 

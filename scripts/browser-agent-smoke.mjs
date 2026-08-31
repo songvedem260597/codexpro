@@ -632,7 +632,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.84");
+assert.equal(manifest.version, "0.5.85");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
@@ -642,6 +642,14 @@ assert.match(worker, /cleanupChatGptTabs\(tabs,recentConversations\)[\s\S]*?if\(
 assert.match(worker, /current\.active\|\|current\.pinned\|\|current\.audible[\s\S]*?pendingConversationByTab\.has\(tabId\)[\s\S]*?chatAttachmentOwnershipByTab\.has\(tabId\)[\s\S]*?browserMutationTailsByTab\.has\(tabId\)[\s\S]*?networkState\.busy\|\|canonicalActivity\.busy\|\|domActivity\?\.busy/, "worker must re-check live work, attachment, automation, network, canonical, and DOM protection signals before closing a tab");
 assert.match(worker, /value==='codexpro'\|\|value\.startsWith\('codexpro '\)/, "worker must open a Settings plugin row whose accessible name includes the permission summary");
 assert.match(connectorInstaller, /value === 'codexpro' \|\| value\.startsWith\('codexpro '\)/, "connector installer must recognize ChatGPT's CodexPro Allow all row");
+assert.match(worker, /value\.includes\('settings'\)\|\|value\.includes\('cai dat'\)/, "worker setup must recognize localized Settings dialogs");
+assert.match(worker, /value\.includes\('connection'\)\|\|value\.includes\('ket noi'\)/, "worker setup must recognize localized Connection details");
+assert.match(worker, /CODEXPRO_SETUP_EVIDENCE/, "worker setup failures must preserve bounded selector evidence for Manager diagnostics");
+assert.match(connectorInstaller, /value\.includes\('settings'\) \|\| value\.includes\('cai dat'\)/, "connector installer must recognize Vietnamese Settings");
+assert.match(connectorInstaller, /hasConnectionMarker = value => value\.includes\('connection'\) \|\| value\.includes\('ket noi'\)/, "connector installer must recognize Vietnamese Connection labels");
+assert.match(connectorInstaller, /value\.includes\('them codexpro vao chatgpt'\)/, "connector installer must recognize the Vietnamese CodexPro consent heading");
+assert.match(connectorInstaller, /value\.includes\('cac quyen nay se luon duoc tuan thu'\)/, "connector installer must recognize the Vietnamese consent permission copy");
+assert.match(connectorInstaller, /CONNECT_CONSENT_NOT_FOUND[\s\S]*?CODEXPRO_SETUP_EVIDENCE/, "connector installer must preserve bounded evidence when the consent dialog is missing");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.match(managerMain, /profile\.connector_update_required \|\| profile\.connector_profile_bound === false[\s\S]*?action: "setup_chatgpt"[\s\S]*?profile\.connector_installed && profile\.connector_profile_bound/, "Manager send preflight must rebind an old connector before dispatching a task");

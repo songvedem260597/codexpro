@@ -30,7 +30,7 @@ const result = await registry.list({
     label: "Chrome A",
     connected: true,
     activity: "working",
-    extension_version: "0.5.83",
+    extension_version: "0.5.85",
     current_task_id: "cpt_test",
     current_task_title: "Worker plugin test",
     conversation_tabs: []

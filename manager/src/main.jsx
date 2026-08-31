@@ -2139,7 +2139,25 @@ function App() {
       notify(result.message || "CodexPro READY");
       await refresh(false);
     } catch (err) {
-      setError(err?.message || String(err));
+      const setupError = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "profile", `UI setup profile thất bại: ${setupError}`, {
+        action: "setup-profile-renderer-error",
+        profile_id: profile.profile_id,
+        extension_version: String(profile.extension_version || ""),
+        connector_installed: Boolean(profile.connector_installed),
+        connector_profile_bound: profile.connector_profile_bound !== false,
+        connector_message: String(profile.connector_message || ""),
+        tab_candidates: (profile.conversation_tabs || []).slice(0, 20).map((tab) => ({
+          id: String(tab?.id || ""),
+          url: String(tab?.url || "").slice(0, 300),
+          title: String(tab?.title || "").slice(0, 160),
+          active: Boolean(tab?.active),
+          busy: Boolean(tab?.busy),
+          network_state: String(tab?.network_state || "")
+        })),
+        error: err
+      });
+      setError(setupError.replace(/\s*\[CODEXPRO_SETUP_EVIDENCE\s+[\s\S]*$/, ""));
     } finally {
       setBusy("");
     }
@@ -2273,12 +2291,33 @@ function App() {
   function openChat(profile) {
     const conversations = profileRequestChats(profile);
     const pinnedConversationId = String(requestTargetsRef.current[profile.profile_id] || "");
-    const conversationId = String(pinnedConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
+    const activeTab = (profile.conversation_tabs || []).find((tab) => tab.active);
+    const activeConversationId = conversationIdFromTab(activeTab);
+    const activeTabReady = Boolean(activeConversationId && !activeTab?.busy && !activeTab?.settling && String(activeTab?.network_state || "") !== "generating");
+    const conversationId = String(activeTabReady ? activeConversationId : pinnedConversationId || activeConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
+    const selectionReason = activeTabReady
+      ? (pinnedConversationId && pinnedConversationId !== activeConversationId ? "open_active_idle_tab_overrode_pinned" : "open_active_idle_tab")
+      : pinnedConversationId ? "reopen_pinned_selection" : "initial_open";
     if (conversationId) {
       requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: conversationId };
-      requestTargetReasons.current.set(profile.profile_id, pinnedConversationId ? "reopen_pinned_selection" : "initial_open");
+      requestTargetReasons.current.set(profile.profile_id, selectionReason);
       setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
     }
+    logRendererDiagnostic(api, "info", "chat", `Mở composer ${profile.profile_id} tại ${conversationId}`, {
+      action: "open-chat-target-selection",
+      profile_id: profile.profile_id,
+      from_conversation_id: pinnedConversationId,
+      to_conversation_id: conversationId,
+      selection_reason: selectionReason,
+      active_target_id: String(activeTab?.id || ""),
+      active_conversation_id: activeConversationId,
+      active_tab_ready: activeTabReady,
+      active_tab_busy: Boolean(activeTab?.busy),
+      active_tab_settling: Boolean(activeTab?.settling),
+      active_network_state: String(activeTab?.network_state || ""),
+      draft_length: String(requestDraftsRef.current[profile.profile_id] || "").length,
+      tab_candidates: (profile.conversation_tabs || []).slice(0, 20).map((tab) => ({ id: String(tab?.id || ""), conversation_id: conversationIdFromTab(tab), active: Boolean(tab?.active), busy: Boolean(tab?.busy), settling: Boolean(tab?.settling), network_state: String(tab?.network_state || ""), title: String(tab?.title || "").slice(0, 160) }))
+    });
     const projectRoot = projectRootForProfile(profile);
     const rememberedRoot = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
     if (projectRoot && projectRoot.toLowerCase() !== rememberedRoot.toLowerCase()) selectProjectForProfile(profile.profile_id, projectRoot);
