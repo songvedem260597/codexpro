@@ -3,6 +3,7 @@ import fs from "node:fs";
 
 const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const latestMessagePanel = fs.readFileSync(new URL("../src/latest-message-panel.jsx", import.meta.url), "utf8");
 const start = source.indexOf("function ApiWorkerJobModal(");
 const end = source.indexOf("function App()", start);
 assert.ok(start >= 0 && end > start, "API worker job modal must remain isolated above App");
@@ -15,7 +16,8 @@ assert.match(modal, /request-card chat-popup-card[\s\S]*?request-composer[\s\S]*
 assert.doesNotMatch(modal, /includeAllAllowed=\{false\}/, "API workers must offer all allowed workspaces like profile Chat");
 assert.doesNotMatch(modal, /Job title|api-job-title|task_title:|titleWords|Loại job|Đoạn chat|ChatDropdown/, "the user must not choose the title, job kind, or conversation");
 assert.match(modal, /const allAllowedScope = root === ALL_ALLOWED_WORKSPACES[\s\S]*?task_kind: "code"[\s\S]*?scope: allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?root: allAllowedScope \? "" : root[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "API requests must support either a selected repository or all allowed workspaces");
-assert.match(modal, /Tin nhắn gần nhất[\s\S]*?chat-response is-inline[\s\S]*?Nhắn tiếp/, "the API popup must keep the Chat latest-message and continue-message sections");
+assert.match(modal, /Tin nhắn gần nhất[\s\S]*?<LatestMessagePanel[\s\S]*?Nhắn tiếp/, "the API popup must keep the shared latest-message and continue-message sections");
+assert.match(latestMessagePanel, /chat-response is-inline[\s\S]*?latest-response chat-transcript/, "the shared latest-message surface must preserve the fixed Chat response geometry");
 assert.match(modal, /<LatestMessagePanel[\s\S]*?worker\.stream_text[\s\S]*?worker\.last_result/, "API workers must render live stream text through the shared latest-message surface before falling back to the settled result");
 assert.match(modal, /request-files[\s\S]*?request-file-image[\s\S]*?attach-button/, "the API popup must keep Chat file/image attachment controls");
 assert.match(modal, /AI tự đặt title 2–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP/, "API job composer must explain the AI-owned MCP title bootstrap");

@@ -30,6 +30,7 @@ import { AppDropdown } from "./app-dropdown.jsx";
 import { CodeGraphView } from "./code-graph-view.jsx";
 import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
 import { ControlCenter } from "./control-center.jsx";
+import { LatestMessagePanel } from "./latest-message-panel.jsx";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -952,16 +953,20 @@ function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChoo
           {!projects.length && !allAllowedScope && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
 
           <label className="request-label">Tin nhắn gần nhất</label>
-          <div className={`chat-response is-inline ${working ? "is-streaming" : ""}`}>
-            <div className="chat-response-head">
-              <div><span className="response-status-dot" /><strong>{working ? "CodexPro đang xử lý…" : worker.last_error ? "Job kết thúc với lỗi" : worker.last_result ? "AI đã phản hồi xong" : "Chưa có tin nhắn"}</strong>{(worker.current_task_title || worker.last_task_title) && <small>{worker.current_task_title || worker.last_task_title}</small>}</div>
-            </div>
-            {(working || displayedRequest || worker.last_result) ? <div className="latest-response chat-transcript">
-              {displayedRequest && <div className="chat-transcript-message is-user"><div className="chat-message-avatar">B</div><div className="latest-response-content"><span className="chat-message-role">Bạn</span><div className="chat-message-text user-message-text">{displayedRequest}</div></div></div>}
-              {!working && worker.last_result && <div className="chat-transcript-message is-assistant is-response-runway"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">AI · {worker.current_task_title || worker.last_task_title || "API worker"}</span><React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{worker.last_result}</div>}><ResponseText text={worker.last_result} /></React.Suspense><div className="chat-message-actions"><button type="button" className="chat-message-copy" title="Copy response" aria-label="Copy phản hồi" onClick={() => void onCopyResponse(worker.last_result)}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg></button></div></div></div>}
-              {working && <div className="chat-transcript-message is-assistant is-typing is-response-runway"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">AI</span><span className="thinking-state latest-response-typing"><span>Đang tự đặt title qua MCP và xử lý</span><span className="typing-dots"><i /><i /><i /></span></span></div></div>}
-            </div> : worker.last_error ? <div className="response-error">{worker.last_error}</div> : <div className="response-empty">Gửi yêu cầu đầu tiên để bắt đầu job trong repo đã chọn.</div>}
-          </div>
+          <LatestMessagePanel
+            working={working}
+            headline={working ? "CodexPro đang xử lý…" : ""}
+            title={worker.current_task_title || worker.last_task_title || ""}
+            requestText={displayedRequest}
+            responseText={worker.stream_text || worker.last_result || ""}
+            error={worker.last_error || ""}
+            emptyText="Gửi yêu cầu đầu tiên để bắt đầu job trong repo đã chọn."
+            phase={worker.stream_phase || ""}
+            toolStatus={worker.stream_tool_status || ""}
+            turnId={worker.current_task_id || worker.last_task_id || ""}
+            revision={worker.stream_revision || 0}
+            onCopyResponse={onCopyResponse}
+          />
 
           <label className="request-label" htmlFor="api-job-request">Nhắn tiếp</label>
           <div className="request-composer">
