@@ -36,6 +36,12 @@ try {
   store.save({ ...saved, model: "cc/claude-sonnet-4-20250514" });
   assert.equal(store.credential("9router-main"), secret, "editing metadata must preserve the credential");
   assert.equal(store.list()[0].model, "cc/claude-sonnet-4-20250514");
+  const disabled = store.save({ ...store.list()[0], enabled: false });
+  assert.equal(disabled.enabled, false, "disabling a worker must persist its disabled state");
+  assert.equal(store.credential("9router-main"), secret, "disabling a worker must preserve the encrypted credential");
+  const reenabled = store.save({ ...disabled, enabled: true });
+  assert.equal(reenabled.enabled, true, "re-enabling a worker must persist its enabled state");
+  assert.equal(store.credential("9router-main"), secret, "re-enabling a worker must preserve the encrypted credential");
   assert.throws(() => store.save({ id: "unsafe", provider: "openai-compatible", base_url: "http://provider.example/v1", model: "model", api_key: "x" }), /HTTPS/);
 
   const unavailable = createApiWorkerStore({ home: path.join(home, "unavailable"), safeStorage: { isEncryptionAvailable: () => false } });

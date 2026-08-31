@@ -230,7 +230,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.88";
+const WORKER_EXTENSION_VERSION = "0.5.89";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -2446,23 +2446,31 @@ async function runtimeBaseStatus(options = {}) {
 
 async function runtimeStatus(options = {}) {
   const base = await runtimeBaseStatus(options);
-  const [browserProfilesRaw, workerJobs] = base.local.ok
+  const [browserProfileSnapshot, workerJobSnapshot] = base.local.ok
     ? await Promise.all([
-      listBrowserProfilesThroughMcp(base.config, base.token).catch((error) => {
+      listBrowserProfilesThroughMcp(base.config, base.token).then((profiles) => ({
+        available: true,
+        profiles: Array.isArray(profiles) ? profiles : []
+      })).catch((error) => {
         if (diagnosticAllowed(`runtime-list-profiles:${String(error?.message || error).slice(0, 160)}`, 30_000)) {
           diagnostic("warn", "manager", "profile", `Không đọc được danh sách profile trong runtime status: ${error?.message || String(error)}`, {
             action: "runtime-list-profiles-fallback",
             error
           });
         }
-        return [];
+        return { available: false, profiles: [] };
       }),
       localMcpTool(base.config, base.token, "worker_job_history", {
         statuses: ["completed", "failed", "cancelled", "blocked"],
         limit: 60
-      }).then((result) => Array.isArray(result?.jobs) ? result.jobs : []).catch(() => [])
+      }).then((result) => ({
+        available: true,
+        jobs: Array.isArray(result?.jobs) ? result.jobs : []
+      })).catch(() => ({ available: false, jobs: [] }))
     ])
-    : [[], []];
+    : [{ available: false, profiles: [] }, { available: false, jobs: [] }];
+  const browserProfilesRaw = browserProfileSnapshot.profiles;
+  const workerJobs = workerJobSnapshot.jobs;
   const browserProfilesVisible = browserProfilesRaw.filter((profile) => {
     const headless = profile.headless === true || String(profile.profile_id || "").startsWith("headless-");
     return profile.connected || !headless;
@@ -2484,6 +2492,8 @@ async function runtimeStatus(options = {}) {
     workers: workerStatus.workers,
     workerSources: workerStatus.sources,
     workerJobs,
+    workerSnapshotAvailable: browserProfileSnapshot.available,
+    workerJobsAvailable: workerJobSnapshot.available,
     mcpLink: base.mcpLink,
     tokenConfigured: base.tokenConfigured,
     autoStart: base.autoStart

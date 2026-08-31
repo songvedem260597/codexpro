@@ -407,6 +407,7 @@ assert.match(worker, /busy:networkBusy\|\|domImageBusy\|\|domToolBusy\|\|canonic
 assert.match(worker, /settling:!networkBusy&&!domImageBusy&&!domToolBusy&&!canonicalBusy&&domActivity\.busy/, "only non-image, non-tool, non-canonical DOM activity may use the finalizing state");
 assert.match(worker, /activity_text:streamBusy\?/, "active ChatGPT work must expose one concise network-or-DOM activity line");
 assert.match(worker, /connector_server_fingerprint:String\(stored\.connectorServerFingerprint\|\|''\)/, "worker heartbeats must report the connector URL fingerprint");
+assert.match(worker, /const token=endpoint\.searchParams\.get\('codexpro_token'\)[\s\S]*?headers\.authorization=`Bearer \$\{token\}`/, "connector verification must preserve token auth even when an intermediary drops the MCP query token");
 assert.match(worker, /Tool activity proves that some CodexPro definition is callable[\s\S]*?return false/, "tool activity alone must not falsely verify a profile-bound connector");
 assert.match(worker, /scheduleDomActivityRefresh/, "DOM settling must refresh until ChatGPT becomes idle");
 assert.match(worker, /async function recentConversationList[\s\S]*?promiseWithTimeout\([\s\S]*?fetchRecentConversationsPage[\s\S]*?DOM_ACTION_TIMEOUT_MS/, "a hung active renderer must not block the extension poll loop and heartbeat");
@@ -661,7 +662,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.88");
+assert.equal(manifest.version, "0.5.89");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
