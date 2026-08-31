@@ -181,7 +181,7 @@ function createProviderForApiWorker(config) {
     : createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.85";
+const WORKER_EXTENSION_VERSION = "0.5.88";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -3157,13 +3157,17 @@ async function renameProfileChat(payload) {
 }
 
 async function getProfileResponse(payload) {
+  const managerStartedAt = Date.now();
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
+  const runtimeBaseStartedAt = Date.now();
   const base = await readyRuntimeBaseStatus();
+  const runtimeBaseMs = Date.now() - runtimeBaseStartedAt;
   if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-  return await localMcpTool(base.config, base.token, "browser_control", {
+  const localMcpStartedAt = Date.now();
+  const result = await localMcpTool(base.config, base.token, "browser_control", {
     action: "get_chat_response",
     profile_id: profileId,
     conversation_id: conversationId,
@@ -3174,6 +3178,14 @@ async function getProfileResponse(payload) {
     canonical_only: payload?.canonicalOnly === true,
     recover_stale_dom: payload?.recoverStaleDom === true
   }, 80000);
+  return {
+    ...result,
+    manager_phase_timings: {
+      runtime_base_ms: Math.max(0, runtimeBaseMs),
+      local_mcp_ms: Math.max(0, Date.now() - localMcpStartedAt),
+      manager_total_ms: Math.max(0, Date.now() - managerStartedAt)
+    }
+  };
 }
 
 async function inspectThroughMcp(root) {
@@ -3636,7 +3648,7 @@ diagnosticIpcHandle("codexpro:rename-profile-chat", {
 diagnosticIpcHandle("codexpro:get-profile-response", {
   category: "chat",
   action: "get-profile-response",
-  slowMs: 8_000,
+  slowMs: 2_000,
   failureMessage: "Đọc phản hồi ChatGPT thất bại",
   details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || ""), read_dom: payload?.readDom !== false, recover_stale_dom: Boolean(payload?.recoverStaleDom), canonical_only: Boolean(payload?.canonicalOnly) }),
   resultDetails: (result) => ({
@@ -3656,7 +3668,10 @@ diagnosticIpcHandle("codexpro:get-profile-response", {
     canonical_generation_matches: result?.canonical_generation_matches !== false,
     short_dom_response_unverified: Boolean(result?.short_dom_response_unverified),
     network_stream_available: Boolean(result?.network_stream_available),
-    network_stream_in_progress: Boolean(result?.network_stream_in_progress)
+    network_stream_in_progress: Boolean(result?.network_stream_in_progress),
+    response_phase_timings: result?.response_phase_timings && typeof result.response_phase_timings === "object" ? result.response_phase_timings : {},
+    bridge_phase_timings: result?.bridge_phase_timings && typeof result.bridge_phase_timings === "object" ? result.bridge_phase_timings : {},
+    manager_phase_timings: result?.manager_phase_timings && typeof result.manager_phase_timings === "object" ? result.manager_phase_timings : {}
   }),
   resultDiagnostic: (result, payload) => {
     const networkState = String(result?.network_state || "").toLowerCase();

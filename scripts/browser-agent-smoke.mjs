@@ -624,12 +624,17 @@ const canonicalReaderSource = worker.slice(worker.indexOf("function readCanonica
 assert.match(canonicalReaderSource, /message\.role==='user'\|\|message\.end_turn===true/, "canonical transcript reads must exclude internal assistant progress fragments");
 assert.doesNotMatch(canonicalReaderSource, /status==='finished_successfully'/, "finished_successfully progress nodes must not be mistaken for an end-turn response");
 const responseReaderSource = worker.slice(worker.indexOf("if(action==='get_chat_response')"), worker.indexOf("if(action==='open_tab')"));
+assert.match(responseReaderSource, /response_phase_timings[\s\S]*?extension_total_ms/, "response reads must return extension phase timings for slow-load investigations");
+assert.match(responseReaderSource, /find_tab_ms[\s\S]*?network_state_ms[\s\S]*?network_stream_ms[\s\S]*?canonical_read_ms[\s\S]*?dom_read_ms/, "response timing telemetry must separate tab lookup, network, canonical, and DOM phases");
+assert.match(bridge, /bridge_phase_timings[\s\S]*?queue_wait_ms[\s\S]*?extension_roundtrip_ms[\s\S]*?bridge_total_ms/, "browser bridge results must expose queue and extension round-trip timings");
+assert.match(managerMain, /manager_phase_timings[\s\S]*?runtime_base_ms[\s\S]*?local_mcp_ms[\s\S]*?manager_total_ms/, "Manager response reads must expose runtime and local-MCP timings");
+assert.match(managerMain, /codexpro:get-profile-response[\s\S]*?slowMs:\s*2_000[\s\S]*?response_phase_timings[\s\S]*?bridge_phase_timings[\s\S]*?manager_phase_timings/, "slow response diagnostics must record all phase timing groups from two seconds onward");
 assert.match(responseReaderSource, /const networkStreamLive=Boolean\(effectiveNetworkBusy&&networkStream\.available\)/, "closed network streams must be hidden after the request becomes terminal");
 assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'/, "DOM fallback must explicitly mark only settled latest-assistant content as ready");
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.85");
+assert.equal(manifest.version, "0.5.88");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
