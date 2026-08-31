@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   readWorkerResponse: (payload) => invoke("codexpro:worker-read", payload),
   stopWorkerTask: (payload) => invoke("codexpro:worker-stop", payload),
   listApiWorkers: () => invoke("codexpro:api-worker-configs"),
+  listApiWorkerModels: (payload) => invoke("codexpro:list-api-worker-models", payload),
   saveApiWorker: (payload) => invoke("codexpro:save-api-worker", payload),
   deleteApiWorker: (id) => invoke("codexpro:delete-api-worker", id),
   testApiWorker: (id) => invoke("codexpro:test-api-worker", id),

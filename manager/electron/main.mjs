@@ -12,6 +12,7 @@ import { createRuntimeRestartGuard } from "./runtime-restart-guard.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
 import { WorkerPluginRegistry } from "./worker-core/plugin-registry.mjs";
 import { createApiWorkerStore } from "./worker-core/api-worker-store.mjs";
+import { discoverApiWorkerModels } from "./worker-core/api-worker-model-discovery.mjs";
 import { createWorkerMcpClients } from "./mcp/http-client.mjs";
 import { create9RouterProvider, createOpenAICompatibleProvider, createOpenRouterProvider } from "./provider-core/openai-compatible-provider.mjs";
 import { createApiWorkerPlugin } from "./worker-plugins/api-worker-plugin.mjs";
@@ -170,12 +171,12 @@ const DEFAULT_GLOBAL_RULES = `# CodexPro Global Rules
 - Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
 `;
 
-function createProviderForApiWorker(config) {
+function createProviderForApiWorker(config, overrides = {}) {
   const options = {
     id: `provider-${String(config.id || "api").toLowerCase()}`,
     baseUrl: config.base_url,
     model: config.model,
-    getApiKey: async () => apiWorkerStore.credential(config.id)
+    getApiKey: typeof overrides.getApiKey === "function" ? overrides.getApiKey : async () => apiWorkerStore.credential(config.id)
   };
   if (config.provider === "9router") return create9RouterProvider(options);
   if (config.provider === "openrouter") return createOpenRouterProvider({ ...options, appName: config.app_name || "CodexPro", appUrl: config.app_url || "" });
@@ -3468,6 +3469,19 @@ diagnosticIpcHandle("codexpro:worker-stop", {
   details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || "") })
 }, (_event, payload) => workerPluginRegistry.invoke("stop", String(payload?.workerId || payload?.worker_id || ""), payload));
 diagnosticIpcHandle("codexpro:api-worker-configs", { category: "settings", action: "list-api-workers" }, () => apiWorkerStore.list());
+diagnosticIpcHandle("codexpro:list-api-worker-models", {
+  category: "settings",
+  action: "list-api-worker-models",
+  slowMs: 15_000,
+  logSuccess: true,
+  successMessage: "Đã tải danh sách model cho API worker",
+  failureMessage: "Không tải được danh sách model",
+  details: (payload) => ({ id: String(payload?.id || ""), provider: String(payload?.provider || ""), credential_supplied: Boolean(payload?.api_key || payload?.apiKey) }),
+  resultDetails: (result) => ({ model_count: Array.isArray(result?.models) ? result.models.length : 0 })
+}, (_event, payload) => discoverApiWorkerModels(payload, {
+  getStoredCredential: async (id) => apiWorkerStore.credential(id),
+  createProvider: async (config, getApiKey) => createProviderForApiWorker(config, { getApiKey })
+}));
 diagnosticIpcHandle("codexpro:save-api-worker", {
   category: "settings",
   action: "save-api-worker",

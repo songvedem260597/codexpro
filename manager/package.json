@@ -1,6 +1,6 @@
 {
   "name": "codexpro-manager",
-  "version": "0.2.104",
+  "version": "0.2.105",
   "private": true,
   "description": "Windows desktop manager for a local CodexPro MCP server.",
   "author": "CodexPro contributors",
@@ -14,6 +14,7 @@
     "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs",
     "test:runtime-restart": "node scripts/runtime-restart-send-race-smoke.mjs",
     "test:api-worker-form": "node scripts/api-worker-form-smoke.mjs",
+    "test:api-worker-models": "node scripts/api-worker-model-discovery-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
     "test:icon": "node scripts/icon-asset-smoke.mjs",
