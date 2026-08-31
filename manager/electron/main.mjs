@@ -2983,7 +2983,7 @@ async function sendProfileRequestUnlocked(payload) {
   const conversationId = String(payload?.conversationId || "").trim();
   const newChat = Boolean(payload?.newChat);
   const text = String(payload?.text || "").trim();
-  const requestScope = payload?.scope === "all_allowed" ? "all_allowed" : "workspace";
+  const requestedScope = payload?.scope === "all_allowed" ? "all_allowed" : "workspace";
   const requestedProjectRoot = String(payload?.projectRoot || "").trim();
   const requestedWorkspaceCandidates = Array.isArray(payload?.workspaceCandidates) ? payload.workspaceCandidates.slice(0, 80) : [];
   const requestedFiles = Array.isArray(payload?.attachments) ? payload.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
@@ -2996,7 +2996,7 @@ async function sendProfileRequestUnlocked(payload) {
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
-  if (requestScope === "workspace" && !requestedProjectRoot) throw new Error("Hãy chọn thư mục hoặc dự án cần làm trước khi gửi yêu cầu.");
+  if (requestedScope === "workspace" && !requestedProjectRoot) throw new Error("Hãy chọn thư mục hoặc dự án cần làm trước khi gửi yêu cầu.");
   if (text.length > 12000) throw new Error("Yêu cầu dài quá 12.000 ký tự.");
   const sendStartedAt = Date.now();
   const files = requestedFiles.map((file) => requestFileSummary(file?.path));
@@ -3013,6 +3013,13 @@ async function sendProfileRequestUnlocked(payload) {
   if (!base.token) throw new Error("CodexPro chưa có token local MCP.");
   let allowedRoots = allowedWorkspaceRoots(base.config);
   if (!allowedRoots.length) throw new Error("CodexPro chưa có vùng workspace nào được cấp quyền.");
+  const isCodexProWorkspaceRequest = (config) => {
+    if (requestedScope !== "workspace" || !requestedProjectRoot) return false;
+    const runtimeRoot = String(config?.root || "").trim();
+    return Boolean(runtimeRoot && path.resolve(requestedProjectRoot).toLowerCase() === path.resolve(runtimeRoot).toLowerCase());
+  };
+  let codexProWorkspaceExpanded = isCodexProWorkspaceRequest(base.config);
+  let requestScope = codexProWorkspaceExpanded ? "all_allowed" : requestedScope;
   const resolveWorkspaceCandidates = () => [...new Set(requestedWorkspaceCandidates
     .map((root) => String(root || "").trim())
     .filter(Boolean)
@@ -3021,7 +3028,7 @@ async function sendProfileRequestUnlocked(payload) {
   let workspaceCandidates = resolveWorkspaceCandidates();
   let selectedProject = null;
   let initialWorkspaceRoot = "";
-  if (requestScope === "workspace") {
+  if (requestedScope === "workspace") {
     const resolvedProjectRoot = path.resolve(requestedProjectRoot);
     if (!fs.existsSync(resolvedProjectRoot) || !fs.statSync(resolvedProjectRoot).isDirectory()) throw new Error("Thư mục đã chọn không còn tồn tại.");
     if (!allowedRoots.some((root) => pathInside(resolvedProjectRoot, root))) throw new Error("Thư mục đã chọn nằm ngoài vùng workspace được CodexPro cấp quyền.");
@@ -3038,8 +3045,10 @@ async function sendProfileRequestUnlocked(payload) {
     base = { config: refreshed.config, token: refreshed.token, source: "health-fallback" };
     allowedRoots = allowedWorkspaceRoots(base.config);
     if (!allowedRoots.length) throw new Error("CodexPro chưa có vùng workspace nào được cấp quyền.");
+    codexProWorkspaceExpanded = isCodexProWorkspaceRequest(base.config);
+    requestScope = codexProWorkspaceExpanded ? "all_allowed" : requestedScope;
     workspaceCandidates = resolveWorkspaceCandidates();
-    if (requestScope === "workspace") {
+    if (requestedScope === "workspace") {
       const resolvedProjectRoot = path.resolve(requestedProjectRoot);
       if (!allowedRoots.some((root) => pathInside(resolvedProjectRoot, root))) throw new Error("Thư mục đã chọn nằm ngoài vùng workspace được CodexPro cấp quyền.");
       selectedProject = { root: resolvedProjectRoot };
@@ -3114,7 +3123,7 @@ async function sendProfileRequestUnlocked(payload) {
   }
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
   const currentWorkspaceRoot = String(profile.current_workspace_root || "").trim();
-  const workspaceSelectSkipped = requestScope === "all_allowed" || Boolean(currentWorkspaceRoot && initialWorkspaceRoot && path.resolve(currentWorkspaceRoot).toLowerCase() === path.resolve(initialWorkspaceRoot).toLowerCase());
+  const workspaceSelectSkipped = (!codexProWorkspaceExpanded && requestScope === "all_allowed") || Boolean(currentWorkspaceRoot && initialWorkspaceRoot && path.resolve(currentWorkspaceRoot).toLowerCase() === path.resolve(initialWorkspaceRoot).toLowerCase());
   if (!workspaceSelectSkipped) {
     await localMcpToolInSession(session, "browser_control", {
       action: "select_workspace",
@@ -3131,7 +3140,20 @@ async function sendProfileRequestUnlocked(payload) {
   if (preparedTask?.prepared !== true || String(preparedTask?.task_id || "") !== taskId) {
     throw new Error("CodexPro server không xác nhận task gate trước khi gửi request.");
   }
-  const taskScopeLines = requestScope === "all_allowed"
+  const taskScopeLines = codexProWorkspaceExpanded
+    ? [
+        `Workspace chính đã được CodexPro Manager chọn cho yêu cầu này: ${selectedProject.root}`,
+        "Vì workspace chính là CodexPro, Manager tự kèm quyền truy cập TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN để có thể đọc/đối chiếu source tham chiếu bên ngoài repo chính khi cần.",
+        `Các vùng CodexPro hiện được phép truy cập: ${allowedRoots.join(" ; ")}`,
+        `Task ID bắt buộc: ${taskId}`,
+        "BẮT BUỘC tự đặt task_title ngắn gọn 2-6 từ, mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
+        "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
+        `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","task_kind":"general","scope":"all_allowed"}.`,
+        `Nếu task_kind=code: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","task_kind":"code","root":"${selectedProject.root.replace(/\\/g, "\\\\")}","scope":"all_allowed"} trước mọi câu trả lời. Workspace CodexPro vẫn là workspace chính để sửa/build/test.`,
+        "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
+        "Sau khi begin_repo_task với task_kind=code thành công, bạn ĐƯỢC PHÉP dùng open_workspace để chuyển sang bất kỳ repo/thư mục nào nằm trong các vùng đã cấp quyền ở trên nhằm ĐỌC và đối chiếu source tham chiếu (ví dụ DeepSeek Harness), rồi quay lại workspace CodexPro để sửa/build/test. Không được truy cập đường dẫn ngoài các vùng đó và không sửa source tham chiếu ngoài workspace chính trừ khi người dùng yêu cầu rõ."
+      ]
+    : requestScope === "all_allowed"
     ? [
         "CodexPro Manager đang ở chế độ TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN. Không có repo hoặc đường dẫn cụ thể bị khóa cho yêu cầu này.",
         `Các vùng CodexPro hiện được phép truy cập: ${allowedRoots.join(" ; ")}`,
@@ -3171,7 +3193,7 @@ async function sendProfileRequestUnlocked(payload) {
     attachments
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
-  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id) };
+  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, codexpro_workspace_expanded_scope: codexProWorkspaceExpanded, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id) };
   } finally {
     await closeLocalMcpSession(session);
   }
