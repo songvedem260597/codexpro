@@ -2647,9 +2647,9 @@ async function navigateInstallerTab(tabId,url) {
 async function openConnectorDetailPage() {
   const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const visible=element=>{if(!(element instanceof Element))return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
-  const normalized=element=>String(element?.innerText||element?.textContent||'').replace(/\s+/g,' ').trim().toLowerCase();
-  const settingsRoot=()=>[...document.querySelectorAll('[role="dialog"],dialog')].filter(visible).find(dialog=>{const value=normalized(dialog);return value.includes('settings')&&value.includes('plugins');})||null;
-  const detailReady=()=>{const root=settingsRoot();if(!root)return null;const value=normalized(root);return location.hash.toLowerCase().includes('/plugin_')||(value.includes('codexpro')&&value.includes('connection'))?root:null;};
+  const normalized=element=>String(element?.innerText||element?.textContent||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[đĐ]/g,'d').replace(/\s+/g,' ').trim().toLowerCase();
+  const settingsRoot=()=>[...document.querySelectorAll('[role="dialog"],dialog')].filter(visible).find(dialog=>{const value=normalized(dialog);return (value.includes('settings')||value.includes('cai dat'))&&(value.includes('plugins')||value.includes('plugin'));})||null;
+  const detailReady=()=>{const root=settingsRoot();if(!root)return null;const value=normalized(root);return location.hash.toLowerCase().includes('/plugin_')||(value.includes('codexpro')&&(value.includes('connection')||value.includes('ket noi')))?root:null;};
   if(detailReady())return {ok:true,already_open:true,url:location.href};
   const deadline=Date.now()+20000;
   while(Date.now()<deadline){

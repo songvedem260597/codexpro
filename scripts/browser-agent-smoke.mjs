@@ -386,6 +386,10 @@ assert.match(worker, /if\(!Number\.isInteger\(tabId\)\)return \{available:false,
 assert.doesNotMatch(worker, /if\(!Number\.isInteger\(tabId\)\|\|!conversationId\)/, "a new/root ChatGPT tab must not be forced idle just because it has no conversation id yet");
 assert.match(worker, /const shouldProbeDom=Boolean\(conversationId&&\(tab\.active\|\|networkState\.busy\|\|canonicalActivity\.busy\|\|cachedDomActivity\?\.busy/, "idle background ChatGPT tabs must not receive unconditional DOM probes");
 assert.match(worker, /for\(const tabId of chatDomActivityByTab\.keys\(\)\)if\(!liveTabIds\.has\(tabId\)\)chatDomActivityByTab\.delete\(tabId\)/, "closed tabs must be pruned from the DOM activity cache");
+assert.match(worker, /value\.includes\('settings'\)\|\|value\.includes\('cai dat'\)/, "connector setup must recognize Vietnamese Settings");
+assert.match(worker, /value\.includes\('connection'\)\|\|value\.includes\('ket noi'\)/, "connector setup must recognize Vietnamese Connection");
+assert.match(connectorInstaller, /aria === 'thao tac voi plugin'/, "connector migration must recognize the Vietnamese plugin-actions label");
+assert.match(connectorInstaller, /pageText\.includes\('connected'\)\s*\|\|\s*pageText\.includes\('da ket noi'\)/, "connector setup must recognize an already-connected Vietnamese plugin detail page");
 assert.match(worker, /testId==='stop-button'/, "DOM activity probe must recognize ChatGPT's stop control");
 assert.match(worker, /const domToolBusy=Boolean\(domActivity\.busy&&domActivity\.source==='dom_tool'\)/, "DOM tool calls must remain working after the initial network request completes");
 assert.match(worker, /busy:networkBusy\|\|domImageBusy\|\|domToolBusy\|\|canonicalBusy/, "profile status must treat image generation, canonical generation, and active DOM tool calls as working");
@@ -628,7 +632,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.83");
+assert.equal(manifest.version, "0.5.84");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");

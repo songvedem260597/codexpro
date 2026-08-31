@@ -1,5 +1,5 @@
 (() => {
-  const INSTALLER_REVISION = '2026-08-30-24';
+  const INSTALLER_REVISION = '2026-08-31-25';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
   document.querySelector('#codexpro-setup-status')?.remove();
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
@@ -166,7 +166,8 @@
   function installedConnectorAction() {
     return candidates().find(element => {
       const aria = normalize(element.getAttribute?.('aria-label') || '');
-      return aria === 'actions for codexpro' || aria === 'hanh dong cho codexpro';
+      return aria === 'actions for codexpro' || aria === 'hanh dong cho codexpro' ||
+        aria === 'thao tac voi codexpro' || aria === 'thao tac voi plugin';
     }) || null;
   }
 
@@ -372,8 +373,17 @@
       .filter(visible)
       .find(dialog => {
         const value = text(dialog);
-        return value.includes('settings') && value.includes('plugins');
+        const settingsLabel = value.includes('settings') || value.includes('cai dat');
+        const pluginsLabel = value.includes('plugins') || value.includes('plugin');
+        return settingsLabel && pluginsLabel;
       }) || null;
+  }
+
+  function connectorDetailVisible(root) {
+    if (!root) return false;
+    const value = text(root);
+    return location.hash.toLowerCase().includes('/plugin_') ||
+      (value.includes('codexpro') && (value.includes('connection') || value.includes('ket noi')));
   }
 
   function settingsCodexProButton(root) {
@@ -392,7 +402,7 @@
   async function deleteConnectorDefinition() {
     await waitFor(() => document.body, 10000);
     const root = await waitFor(settingsDialog, 20000, 150);
-    if (!root) throw new Error('ChatGPT chưa mở được Settings > Plugins để cập nhật CodexPro.');
+    if (!root) throw new Error('ChatGPT chưa mở được Cài đặt > Plugin để cập nhật CodexPro.');
 
     const pluginButton = settingsCodexProButton(root);
     if (!pluginButton) return {ok: true, deleted: false, absent: true};
@@ -403,7 +413,8 @@
       if (!current) return null;
       return [...current.querySelectorAll('button')].filter(visible).find(button => {
         const aria = normalize(button.getAttribute('aria-label') || '');
-        return aria === 'plugin actions' || aria === 'hanh dong plugin';
+        return aria === 'plugin actions' || aria === 'hanh dong plugin' ||
+          aria === 'thao tac voi plugin' || aria === 'thao tac plugin';
       }) || null;
     }, 12000, 120);
     if (!actionButton) throw new Error('Không tìm thấy menu Plugin actions của CodexPro.');
@@ -434,17 +445,15 @@
   async function connectConnectorDefinition() {
     await waitFor(() => document.body, 10000);
     let root = await waitFor(settingsDialog, 20000, 150);
-    if (!root) throw new Error('ChatGPT chưa mở được Settings > Plugins để kết nối CodexPro.');
+    if (!root) throw new Error('ChatGPT chưa mở được Cài đặt > Plugin để kết nối CodexPro.');
 
-    const initialValue = text(root);
-    const detailAlreadyOpen = location.hash.toLowerCase().includes('/plugin_') || (initialValue.includes('codexpro') && initialValue.includes('connection'));
+    const detailAlreadyOpen = connectorDetailVisible(root);
     const pluginButton = detailAlreadyOpen ? null : settingsCodexProButton(root);
     if (pluginButton) {
       const detailView = () => {
         const current = settingsDialog();
         if (!current) return null;
-        const value = text(current);
-        return location.hash.toLowerCase().includes('/plugin_') || (value.includes('codexpro') && value.includes('connection')) ? current : null;
+        return connectorDetailVisible(current) ? current : null;
       };
       // This row is an ordinary React navigation control, not a protected
       // submit/consent action. Native click is more reliable than CDP here
@@ -461,8 +470,7 @@
     root = await waitFor(() => {
       const current = settingsDialog();
       if (!current) return null;
-      const value = text(current);
-      return value.includes('codexpro') && value.includes('connection') ? current : null;
+      return connectorDetailVisible(current) ? current : null;
     }, 18000, 150);
     if (!root) throw new Error('Không mở được trang chi tiết CodexPro trong Settings.');
 
@@ -470,11 +478,12 @@
       .filter(visible)
       .find(button => {
         const value = text(button);
-        return value.includes('connection') && (value.includes('connect') || value.includes('connected') || value.includes('ket noi'));
+        const connectionLabel = value.includes('connection') || value.includes('ket noi');
+        return connectionLabel && (value.includes('connect') || value.includes('connected') || value.includes('ket noi'));
       }) || null, 5000, 100);
     if (!connection) {
       const pageText = text(root);
-      if (pageText.includes('connection') && pageText.includes('codexpro')) {
+      if (pageText.includes('codexpro') && (pageText.includes('connected') || pageText.includes('da ket noi'))) {
         return {ok: true, connected: true, alreadyConnected: true};
       }
       throw new Error('Không tìm thấy mục Connection của CodexPro.');
@@ -495,7 +504,10 @@
       }) || null, 15000, 120);
     if (!consent) {
       const current = settingsDialog();
-      const currentConnection = current ? [...current.querySelectorAll('button')].filter(visible).find(button => text(button).includes('connection')) : null;
+      const currentConnection = current ? [...current.querySelectorAll('button')].filter(visible).find(button => {
+        const value = text(button);
+        return value.includes('connection') || value.includes('ket noi');
+      }) : null;
       if (currentConnection && (text(currentConnection).includes('connected') || text(currentConnection).includes('da ket noi'))) {
         return {ok: true, connected: true, alreadyConnected: true};
       }
