@@ -1,4 +1,5 @@
 import React from "react";
+import { useFrameCoalescedValue } from "./use-frame-coalesced-value.js";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 
@@ -20,7 +21,8 @@ export function LatestMessagePanel({
   revision = 0,
   onCopyResponse
 }) {
-  const hasContent = Boolean(requestText || responseText || working);
+  const visualResponseText = useFrameCoalescedValue(responseText, working, turnId);
+  const hasContent = Boolean(requestText || visualResponseText || working);
   const status = headline || (working ? "CodexPro đang xử lý…" : error ? "Job kết thúc với lỗi" : responseText ? "AI đã phản hồi xong" : "Chưa có tin nhắn");
   const waitingText = phase === "tool" && toolStatus
     ? `Đang dùng MCP: ${toolStatus}`
@@ -35,12 +37,12 @@ export function LatestMessagePanel({
       </div>
       {hasContent ? <div className="latest-response chat-transcript">
         {requestText && <div className="chat-transcript-message is-user"><div className="chat-message-avatar">B</div><div className="latest-response-content"><span className="chat-message-role">Bạn</span><div className="chat-message-text user-message-text">{requestText}</div></div></div>}
-        {(responseText || working) && <div className="chat-transcript-message is-assistant is-response-runway">
+        {(visualResponseText || working) && <div className="chat-transcript-message is-assistant is-response-runway">
           <div className="chat-message-avatar">✦</div>
           <div className="latest-response-content">
             <span className="chat-message-role">AI{title ? ` · ${title}` : ""}</span>
-            {responseText
-              ? <><React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{responseText}</div>}><ResponseText text={responseText} /></React.Suspense>{working && <span className="live-stream-tail" aria-label="AI đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}</>
+            {visualResponseText
+              ? <><React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{visualResponseText}</div>}><ResponseText text={visualResponseText} streaming={working} /></React.Suspense>{working && <span className="live-stream-tail" aria-label="AI đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}</>
               : <span className="thinking-state latest-response-typing"><span>{waitingText}</span><span className="typing-dots"><i /><i /><i /></span></span>}
             {!working && responseText && onCopyResponse && <div className="chat-message-actions"><button type="button" className="chat-message-copy" title="Copy response" aria-label="Copy phản hồi" onClick={() => void onCopyResponse(responseText)}><CopyIcon /></button></div>}
           </div>

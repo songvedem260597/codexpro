@@ -57,22 +57,71 @@ const components = {
   }
 };
 
-export const ResponseText = React.memo(function ResponseText({ text, truncated }) {
+function markdownBlockRanges(source) {
+  if (!source) return [];
+  const ranges = [];
+  let start = 0;
+  let offset = 0;
+  let fence = "";
+  const lines = source.match(/.*(?:\r?\n|$)/g)?.filter(Boolean) || [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const marker = line.match(/^\s{0,3}(`{3,}|~{3,})/)?.[1] || "";
+    if (marker) {
+      if (!fence) fence = marker[0];
+      else if (marker[0] === fence) fence = "";
+    }
+    offset += line.length;
+    const next = lines[index + 1] || "";
+    if (!fence && /^\s*$/.test(line) && next && !/^\s*$/.test(next)) {
+      ranges.push({ start, end: offset });
+      start = offset;
+    }
+  }
+  if (start < source.length) ranges.push({ start, end: source.length });
+  return ranges.filter((range) => source.slice(range.start, range.end).trim());
+}
+
+export function partitionStreamingMarkdown(value, options = {}) {
+  const source = String(value || "");
+  const mutableBlocks = Math.max(1, Number(options.mutableBlocks) || 2);
+  const ranges = markdownBlockRanges(source);
+  const frozenCount = Math.max(0, ranges.length - mutableBlocks);
+  const frozen = ranges.slice(0, frozenCount).map((range) => ({
+    ...range,
+    key: `markdown:${range.start}:${range.end}`,
+    text: source.slice(range.start, range.end)
+  }));
+  const tailStart = ranges[frozenCount]?.start ?? 0;
+  return {
+    frozen,
+    tail: {
+      start: tailStart,
+      end: source.length,
+      key: `markdown-tail:${tailStart}`,
+      text: source.slice(tailStart)
+    }
+  };
+}
+
+const MarkdownBlock = React.memo(function MarkdownBlock({ source, blockKey, tail = false }) {
+  return <div className={tail ? "response-markdown-tail" : "response-markdown-frozen"} data-markdown-block={blockKey}><ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]} rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]} components={components} skipHtml>{source}</ReactMarkdown></div>;
+});
+
+export const ResponseText = React.memo(function ResponseText({ text, truncated, streaming = false }) {
   const cleanText = String(text || "")
     .replace(/[^\r\n]*/g, "")
     .replace(/[ \t]+\n/g, "\n");
   const source = `${cleanText}${truncated ? "\n\n> [Đã rút gọn khi hiển thị]" : ""}`;
 
+  const partition = React.useMemo(() => partitionStreamingMarkdown(source, { mutableBlocks: 2 }), [source]);
+
   return (
     <div className="chat-message-text response-rich-text">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
-        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
-        components={components}
-        skipHtml
-      >
-        {source}
-      </ReactMarkdown>
+      {streaming ? <>
+        {partition.frozen.map((block) => <MarkdownBlock key={block.key} blockKey={block.key} source={block.text} />)}
+        <MarkdownBlock key={partition.tail.key} blockKey={partition.tail.key} source={partition.tail.text} tail />
+      </> : <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]} rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]} components={components} skipHtml>{source}</ReactMarkdown>}
     </div>
   );
 });
