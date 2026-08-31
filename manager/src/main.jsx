@@ -445,7 +445,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.90";
+const WORKER_EXTENSION_VERSION = "0.5.91";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -1328,6 +1328,7 @@ function App() {
       if (!targetTab?.id) continue;
       const conversationId = String(targetTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
       if (!conversationId) continue;
+      const newChat = Boolean(targetTab.renderer_unresponsive || targetTab.message_delivery_timed_out || String(targetTab.network_state || "").toLowerCase() === "failed" || targetTab.network_error);
       const key = `${profile.profile_id}:${conversationId}`;
       const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
       if (Date.now() - previous < 120_000) continue;
@@ -1337,9 +1338,13 @@ function App() {
         conversationId,
         targetId: targetTab.id,
         title: targetTab.title || profile.active_chat_title || "",
-        silent: true
+        silent: true,
+        newChat
       }).then(() => {
-        logRendererDiagnostic(api, "info", "profile", "Auto Recovery đã thay tab ChatGPT bất thường", { action: "auto-recovery", profile_id: profile.profile_id, conversation_id: conversationId });
+        if (newChat) {
+          setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
+        }
+        logRendererDiagnostic(api, "info", "profile", newChat ? "Auto Recovery đã tạo chat mới sau khi renderer treo" : "Auto Recovery đã thay tab ChatGPT bất thường", { action: "auto-recovery", profile_id: profile.profile_id, conversation_id: conversationId, new_chat: newChat });
         window.setTimeout(() => void refresh(false), 1200);
       }).catch((err) => {
         logRendererDiagnostic(api, "error", "profile", `Auto Recovery thất bại: ${err?.message || String(err)}`, { action: "auto-recovery-failed", profile_id: profile.profile_id, conversation_id: conversationId, error: err });
@@ -2676,13 +2681,20 @@ function App() {
     setBusy(`recover-profile:${profile.profile_id}`);
     setError("");
     try {
-      await api.recoverProfileChat({
+      const result = await api.recoverProfileChat({
         profileId: profile.profile_id,
         conversationId,
         targetId: targetTab?.id,
-        title: selectedConversation?.title || targetTab?.title || profile.active_chat_title || ""
+        title: selectedConversation?.title || targetTab?.title || profile.active_chat_title || "",
+        newChat: true
       });
-      notify("Đã thay tab ChatGPT bị treo bằng tab mới");
+      setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
+      setRequestResponses((current) => ({
+        ...current,
+        [profile.profile_id]: { visible: false, loading: false, error: "", conversationId: "", text: "", messages: [] }
+      }));
+      logRendererDiagnostic(api, "info", "profile", "Đã bỏ tab treo và tạo chat ChatGPT mới", { action: "recover-profile-new-chat", profile_id: profile.profile_id, abandoned_conversation_id: conversationId, result_target_id: String(result?.target_id || "") });
+      notify("Đã bỏ tab bị treo và tạo chat mới");
       window.setTimeout(() => void refresh(false), 1200);
     } catch (err) {
       setError(err?.message || String(err));
@@ -3847,7 +3859,7 @@ function App() {
               const working = profile.connected && profile.activity === "working";
               const profileTabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
               const liveTab = profileTabs.find((tab) => tab.active) || profileTabs.find((tab) => tab.busy || tab.settling) || profileTabs[0];
-              const rendererUnresponsive = Boolean(profile.connected && liveTab?.renderer_unresponsive);
+              const rendererUnresponsive = Boolean(profile.connected && (liveTab?.renderer_unresponsive || liveTab?.message_delivery_timed_out || String(liveTab?.network_state || "").toLowerCase() === "failed" || liveTab?.network_error));
               const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
               const connectorInstalled = Boolean(profile.connector_installed && profile.connector_profile_bound !== false);
               const connectorUpdateRequired = Boolean(profile.connector_update_required);

@@ -1785,22 +1785,38 @@ async function execute(command) {
     return {action,ok:Boolean(result.ok),stopped:Boolean(result.stopped),reason:String(result.reason||''),target_id:tab.id,conversation_id:conversationId||conversationIdFromUrl(tab.url)};
   }
   if(action==='recover_chat_tab'){
+    const newChat=Boolean(args.new_chat);
     const conversationId=String(args.conversation_id||'').trim();
     const requestedId=Number(args.target_id);
-    if(!/^[A-Za-z0-9-]{8,160}$/.test(conversationId))throw new Error('Conversation id cần khôi phục không hợp lệ.');
+    if(!newChat&&!/^[A-Za-z0-9-]{8,160}$/.test(conversationId))throw new Error('Conversation id cần khôi phục không hợp lệ.');
     const tabs=await chrome.tabs.query({});
     const tab=tabs.find(candidate=>candidate.id===requestedId)||tabs.find(candidate=>{try{return new URL(String(candidate.url||'')).pathname===`/c/${conversationId}`;}catch{return false;}});
-    if(!tab?.id)throw new Error('Không còn tab ChatGPT cũ để khôi phục.');
-    const networkState=await chatRequestState(tab.id,conversationId);
-    if(networkState.busy)throw new Error('WORKER_BUSY: ChatGPT vẫn đang generation; không thay tab để tránh gián đoạn hoặc gửi trùng.');
-    const replaced=await replaceUnresponsiveChatTab(tab,`https://chatgpt.com/c/${conversationId}`);
+    if(!tab?.id&&!newChat)throw new Error('Không còn tab ChatGPT cũ để khôi phục.');
+    let replaced;
+    if(newChat){
+      if(tab?.id){
+        await releaseChatDebuggerForRecovery(tab.id);
+        replaced=await replaceUnresponsiveChatTab(tab,'https://chatgpt.com/',45000,{carryState:false});
+      }else{
+        if(Number.isInteger(requestedId))await releaseChatDebuggerForRecovery(requestedId);
+        let replacement=await chrome.tabs.create({url:'https://chatgpt.com/',active:true});
+        await waitForTab(replacement.id,45000);
+        replacement=await chrome.tabs.get(replacement.id);
+        await ensureChatNetworkStreamCapture(replacement.id);
+        replaced={tab:replacement,replaced_tab_id:Number.isInteger(requestedId)?requestedId:null,recovery_tab_id:replacement.id,recovery_url:'https://chatgpt.com/'};
+      }
+    }else{
+      const networkState=await chatRequestState(tab.id,conversationId);
+      if(networkState.busy)throw new Error('WORKER_BUSY: ChatGPT vẫn đang generation; không thay tab để tránh gián đoạn hoặc gửi trùng.');
+      replaced=await replaceUnresponsiveChatTab(tab,`https://chatgpt.com/c/${conversationId}`);
+    }
     let windowInfo=null;
     if(Number.isInteger(replaced.tab.windowId)){
       try{await chrome.tabs.update(replaced.tab.id,{active:true});}catch{}
       try{await chrome.windows.update(replaced.tab.windowId,{state:'maximized'});}catch{}
       try{windowInfo=await chrome.windows.update(replaced.tab.windowId,{focused:true});}catch{}
     }
-    return {action,ok:true,conversation_id:conversationId,target_id:replaced.tab.id,renderer_replaced:true,replaced_tab_id:replaced.replaced_tab_id,recovery_tab_id:replaced.recovery_tab_id,recovery_url:replaced.recovery_url,window_id:replaced.tab.windowId,window_state:String(windowInfo?.state||''),window_focused:Boolean(windowInfo?.focused)};
+    return {action,ok:true,conversation_id:newChat?'':conversationId,abandoned_conversation_id:newChat?conversationId:'',target_id:replaced.tab.id,new_chat:newChat,renderer_replaced:true,replaced_tab_id:replaced.replaced_tab_id,recovery_tab_id:replaced.recovery_tab_id,recovery_url:replaced.recovery_url,window_id:replaced.tab.windowId,window_state:String(windowInfo?.state||''),window_focused:Boolean(windowInfo?.focused)};
   }
   if(action==='send_chat_request'){
     const commandDeadlineAt=commandExpiresAt||Date.now()+175000;
@@ -2461,8 +2477,9 @@ async function waitForTab(tabId, timeoutMs=30000) {
   });
 }
 
-async function replaceUnresponsiveChatTab(tab,recoveryUrl,timeoutMs=45000) {
+async function replaceUnresponsiveChatTab(tab,recoveryUrl,timeoutMs=45000,options) {
   if(!tab?.id)throw new Error('Không tìm thấy tab ChatGPT cần khôi phục.');
+  const carryState=options?.carryState!==false;
   let safeUrl='';
   try{
     const parsed=new URL(String(recoveryUrl||tab.url||''));
@@ -2485,9 +2502,9 @@ async function replaceUnresponsiveChatTab(tab,recoveryUrl,timeoutMs=45000) {
   const previousState=chatNetworkStateByTab.get(replacedTabId);
   const previousPosts=chatNetworkPostLogByTab.get(replacedTabId);
   const previousVersion=chatNetworkPostVersionByTab.get(replacedTabId);
-  if(previousState)chatNetworkStateByTab.set(replacement.id,{...previousState});
-  if(previousPosts)chatNetworkPostLogByTab.set(replacement.id,[...previousPosts]);
-  if(previousVersion)chatNetworkPostVersionByTab.set(replacement.id,previousVersion);
+  if(carryState&&previousState)chatNetworkStateByTab.set(replacement.id,{...previousState});
+  if(carryState&&previousPosts)chatNetworkPostLogByTab.set(replacement.id,[...previousPosts]);
+  if(carryState&&previousVersion)chatNetworkPostVersionByTab.set(replacement.id,previousVersion);
   pendingConversationByTab.delete(replacedTabId);
   await chrome.tabs.remove(replacedTabId);
   await persistChatNetworkState();
@@ -2787,6 +2804,19 @@ function releaseDebuggerTab(tabId) {
     debuggerSessionsByTab.delete(tabId);
     void chrome.debugger.detach(current.target).catch(()=>{});
   },DEBUGGER_SESSION_IDLE_MS);
+}
+
+async function releaseChatDebuggerForRecovery(tabId) {
+  if(!Number.isInteger(tabId))return false;
+  const tracker=cdpNetworkTrackersByTab.get(tabId);
+  if(tracker){try{await tracker.cleanup();}catch{}}
+  const session=debuggerSessionsByTab.get(tabId);
+  if(!session)return Boolean(tracker);
+  if(session.detachTimer)clearTimeout(session.detachTimer);
+  debuggerSessionsByTab.delete(tabId);
+  debuggerEventSubscribersByTab.delete(tabId);
+  try{await chrome.debugger.detach(session.target);}catch{}
+  return true;
 }
 
 async function withDebuggerTab(tabId,callback) {
