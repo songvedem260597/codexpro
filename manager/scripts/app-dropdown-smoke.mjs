@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { dropdownSearchEnabled, filterDropdownOptions } from "../src/dropdown-options.js";
+import { dropdownSearchEnabled, filterDropdownOptions, resolveDropdownEnterOption } from "../src/dropdown-options.js";
 
 const many = Array.from({ length: 10 }, (_, index) => ({ value: `model-${index}`, label: `Model ${index}` }));
 assert.equal(dropdownSearchEnabled(many), true);
@@ -11,6 +11,11 @@ assert.deepEqual(filterDropdownOptions([
   { value: "du-an", label: "Dự án chính", hint: "Workspace" },
   { value: "worker", label: "API Worker" }
 ], "du an").map((item) => item.value), ["du-an"]);
+
+const discoveredModels = [{ value: "cc/claude-opus-4-6", label: "Claude Opus 4.6" }];
+const customModel = { value: "ag/gemini-3-flash", customModel: "ag/gemini-3-flash" };
+assert.equal(resolveDropdownEnterOption(discoveredModels, "cc/claude-opus-4-6", customModel)?.value, "cc/claude-opus-4-6");
+assert.equal(resolveDropdownEnterOption([], "ag/gemini-3-flash", customModel)?.customModel, "ag/gemini-3-flash");
 
 const sourceRoot = path.resolve(import.meta.dirname, "../src");
 const jsxFiles = fs.readdirSync(sourceRoot).filter((name) => name.endsWith(".jsx"));
