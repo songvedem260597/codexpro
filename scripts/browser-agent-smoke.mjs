@@ -206,7 +206,7 @@ const matchingResponseAudit = buildChatResponseAuditRecord({
   ]
 });
 assert.equal(matchingResponseAudit.comparison, "match", "audit must confirm the ChatGPT DOM response reaches the Manager UI unchanged");
-const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, managerDiagnosticView, managerChatScroll, manifestText, connectorInstaller] = await Promise.all([
+const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "src", "server.ts"), "utf8"),
@@ -217,6 +217,7 @@ const [browserOps, worker, server, httpSource, bridge, managerMain, managerPrelo
   readFile(join(root, "manager", "src", "main.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "styles.css"), "utf8"),
   readFile(join(root, "manager", "src", "diagnostic-log-view.jsx"), "utf8"),
+  readFile(join(root, "manager", "src", "app-dropdown.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "chat-scroll.js"), "utf8"),
   readFile(join(root, "chrome-extension", "manifest.json"), "utf8"),
   readFile(join(root, "chrome-extension", "connector-installer.js"), "utf8")
@@ -320,7 +321,8 @@ assert.ok(managerUi.includes('working || settling ? "Task hi\\u1ec7n t\\u1ea1i" 
 assert.match(managerMain, /const MANAGER_VERSION = app\.getVersion\(\)/, "MCP client metadata must use the packaged Manager version");
 assert.match(managerUi, /CodexPro Manager \{managerPackage\.version\}/, "Manager footer must use package.json instead of a stale hard-coded version");
 assert.doesNotMatch(managerUi, /CodexPro Manager 0\.2\.\d+/, "Manager UI must not hard-code a release version");
-assert.match(managerDiagnosticView, /function DiagnosticDropdown[\s\S]*?aria-haspopup="listbox"[\s\S]*?diagnostic-filter-menu/, "Diagnostic filters must use the custom accessible dropdown instead of clipped native selects");
+assert.match(managerDiagnosticView, /function DiagnosticDropdown[\s\S]*?<AppDropdown[\s\S]*?ariaLabel=\{ariaLabel\}/, "Diagnostic filters must use the shared custom dropdown instead of clipped native selects");
+assert.match(managerAppDropdown, /aria-haspopup="listbox"[\s\S]*?role="listbox"[\s\S]*?role="option"/, "The shared dropdown must expose accessible listbox semantics");
 assert.doesNotMatch(managerDiagnosticView, /<select\b/, "Diagnostic toolbar must not regress to native select controls");
 assert.match(managerStyles, /\.diagnostic-toolbar \{[^}]*grid-template-columns: minmax\(240px, 1fr\) auto[\s\S]*?\.diagnostic-filter-row \{[^}]*repeat\(4, minmax\(0, 1fr\)\)/, "Diagnostic toolbar must reserve a full row for four unclipped filters");
 assert.match(managerMain, /function diagnosticIpcHandle[\s\S]*?envelopeError[\s\S]*?durationMs >= Number\(options\.slowMs\)[\s\S]*?catch \(error\)/, "Manager IPC diagnostics must capture envelope failures, slow operations, and thrown errors centrally");

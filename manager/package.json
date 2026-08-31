@@ -1,6 +1,6 @@
 {
   "name": "codexpro-manager",
-  "version": "0.2.105",
+  "version": "0.2.106",
   "private": true,
   "description": "Windows desktop manager for a local CodexPro MCP server.",
   "author": "CodexPro contributors",
@@ -15,6 +15,7 @@
     "test:runtime-restart": "node scripts/runtime-restart-send-race-smoke.mjs",
     "test:api-worker-form": "node scripts/api-worker-form-smoke.mjs",
     "test:api-worker-models": "node scripts/api-worker-model-discovery-smoke.mjs",
+    "test:dropdowns": "node scripts/app-dropdown-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
     "test:icon": "node scripts/icon-asset-smoke.mjs",

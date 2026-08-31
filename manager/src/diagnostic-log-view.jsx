@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
+import { AppDropdown } from "./app-dropdown.jsx";
 
 const LEVEL_LABELS = { info: "INFO", warn: "CẢNH BÁO", error: "LỖI" };
 const SOURCE_LABELS = { manager: "Manager", renderer: "Giao diện", mcp: "MCP", worker: "Worker", electron: "Electron" };
@@ -18,66 +19,18 @@ const CATEGORY_LABELS = {
 };
 
 function DiagnosticDropdown({ value, options, onChange, ariaLabel }) {
-  const [open, setOpen] = useState(false);
-  const root = useRef(null);
-  const selected = options.find((option) => option.value === value) || options[0];
-
-  useEffect(() => {
-    const close = (event) => {
-      if (!root.current?.contains(event.target)) setOpen(false);
-    };
-    document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
-  }, []);
-
   return (
-    <div className={`diagnostic-filter ${open ? "is-open" : ""}`} ref={root}>
-      <button
-        type="button"
-        className="diagnostic-filter-trigger"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-label={ariaLabel}
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") setOpen(false);
-          if (["ArrowDown", "Enter", " "].includes(event.key) && !open) {
-            event.preventDefault();
-            setOpen(true);
-          }
-        }}
-      >
-        <span className={`diagnostic-filter-dot is-${selected?.tone || "neutral"}`} aria-hidden="true" />
-        <span className="diagnostic-filter-label">{selected?.label || "Chọn bộ lọc"}</span>
-        {Number.isFinite(Number(selected?.count)) && <span className="diagnostic-filter-count">{Number(selected.count)}</span>}
-        <svg className="diagnostic-filter-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
-      </button>
-      {open && (
-        <div className="diagnostic-filter-menu" role="listbox" aria-label={ariaLabel}>
-          {options.map((option) => (
-            <button
-              type="button"
-              role="option"
-              aria-selected={option.value === value}
-              className={`diagnostic-filter-option ${option.value === value ? "is-selected" : ""}`}
-              key={option.value}
-              onClick={() => {
-                onChange(option.value);
-                setOpen(false);
-              }}
-            >
-              <span className={`diagnostic-filter-dot is-${option.tone || "neutral"}`} aria-hidden="true" />
-              <span className="diagnostic-filter-option-copy">
-                <strong>{option.label}</strong>
-                {option.hint && <small>{option.hint}</small>}
-              </span>
-              {Number.isFinite(Number(option.count)) && <span className="diagnostic-filter-option-count">{Number(option.count)}</span>}
-              {option.value === value && <span className="diagnostic-filter-check">✓</span>}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+    <AppDropdown
+      className="is-diagnostic"
+      compact
+      value={value}
+      options={options}
+      onChange={onChange}
+      ariaLabel={ariaLabel}
+      searchPlaceholder={`Tìm ${ariaLabel.toLocaleLowerCase("vi-VN")}…`}
+      renderValue={(selected) => <><span className={`app-dropdown-dot is-${selected?.tone || "neutral"}`} aria-hidden="true" /><strong>{selected?.label || "Chọn bộ lọc"}</strong>{Number.isFinite(Number(selected?.count)) && <span className="app-dropdown-count">{Number(selected.count)}</span>}</>}
+      renderOption={(option) => <><span className={`app-dropdown-dot is-${option.tone || "neutral"}`} aria-hidden="true" /><span className="app-dropdown-option-copy"><strong>{option.label}</strong>{option.hint && <small>{option.hint}</small>}</span>{Number.isFinite(Number(option.count)) && <span className="app-dropdown-count">{Number(option.count)}</span>}</>}
+    />
   );
 }
 
