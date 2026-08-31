@@ -47,14 +47,11 @@ export function scheduleResponseAutoResume({ profileId, lockedProfiles, timers, 
   lockedProfiles.set(profileId, true);
   const previousTimer = timers.get(profileId);
   if (previousTimer) windowObject.clearTimeout(previousTimer);
-  const timer = windowObject.setTimeout(() => {
-    if (timers.get(profileId) !== timer) return;
-    timers.delete(profileId);
-    lockedProfiles.delete(profileId);
-    if (typeof resume === "function") resume(profileId);
-  }, Math.max(0, Number(delay) || 0));
-  timers.set(profileId, timer);
-  return timer;
+  timers.delete(profileId);
+  // Scroll ownership belongs to the reader. It is released only when
+  // recordResponseScroll observes the bottom threshold again or the reader
+  // explicitly chooses to return to the latest message.
+  return 0;
 }
 
 export function cancelResponseAutoResume(profileId, timers, windowObject = window) {
