@@ -153,13 +153,21 @@ section { margin-bottom: 38px; }
 .profile-summary-icon { width: 14px; height: 14px; flex: 0 0 14px; display: grid; place-items: center; color: currentColor; }
 .profile-summary-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .profile-summary-update { padding: 4px 7px; color: #ffbc72; white-space: nowrap; }
+@property --profile-border-shine-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
 .profile-list { display: grid; gap: 10px; }
-.browser-profile { display: flex; align-items: center; gap: 14px; padding: 17px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: linear-gradient(145deg, #12161e, #0f1218); contain: layout paint; }
+.browser-profile { position: relative; display: flex; align-items: center; gap: 14px; padding: 17px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: linear-gradient(145deg, #12161e, #0f1218); contain: layout paint; }
 .browser-profile.is-online { border-color: #28503a; box-shadow: inset 3px 0 0 #53e58e; }
 .browser-profile.is-offline { opacity: .72; }
 .browser-profile.is-idle { border-color: #53e58e; box-shadow: inset 3px 0 0 #53e58e; }
 .browser-profile.is-working { border-color: #f4a340; box-shadow: inset 3px 0 0 #f4a340; }
+.browser-profile.is-working::before { content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none; background: conic-gradient(from var(--profile-border-shine-angle), transparent 0deg 250deg, #f4a340 278deg, #ffd39a 302deg, #fff0d2 316deg, #ffb45f 330deg, transparent 352deg 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0) border-box; mask-composite: exclude; filter: drop-shadow(0 0 4px #f4a34080); animation: profile-border-shine 3s linear infinite; }
 .browser-profile.is-error { border-color: var(--red); box-shadow: inset 3px 0 0 var(--red); opacity: 1; }
+@keyframes profile-border-shine { to { --profile-border-shine-angle: 360deg; } }
+@media (prefers-reduced-motion: reduce) { .browser-profile.is-working::before { animation: none; --profile-border-shine-angle: 24deg; } }
 .profile-worker { position: relative; width: 78px; height: 78px; flex: 0 0 auto; display: grid; place-items: center; border-radius: var(--radius-panel); background: radial-gradient(circle at 50% 54%, #26344d 0, #111925 62%, #090d14 100%); border: 1px solid #35435a; box-shadow: 0 9px 26px #0009, inset 0 1px 0 #ffffff0a; }
 .profile-worker img { width: 74px; height: 74px; display: block; object-fit: contain; image-rendering: pixelated; }
 .profile-worker-dot { position: absolute; right: 5px; bottom: 5px; width: 11px; height: 11px; border: 2px solid #111720; border-radius: 50%; color: #e5484d; background: currentColor; box-shadow: 0 0 10px #e5484db3; isolation: isolate; }
@@ -855,17 +863,18 @@ h6.response-heading { font-size: var(--font-body); font-weight: var(--weight-tit
 .font-preview { min-width: 0; min-height: 54px; display: flex; align-items: center; padding: 11px 15px; color: #cbd4e3; border: 1px solid #303b4f; border-radius: 8px; background: #0b1017; box-shadow: inset 0 1px 0 #ffffff04; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .font-preview.is-title { font-size: var(--font-title); font-weight: var(--weight-semibold); }
 .font-preview.is-mono { font-size: var(--font-description); }
-.profile-layout-setting-head { align-items: end; }
-.profile-layout-controls { width: min(760px, 58vw); display: grid; grid-template-columns: minmax(300px, 1fr) minmax(250px, 300px); align-items: end; gap: 12px; }
+.profile-layout-setting-head { align-items: flex-start; }
+.profile-layout-controls { width: min(760px, 58vw); display: grid; grid-template-columns: minmax(320px, 1fr) minmax(292px, 320px); align-items: start; column-gap: 24px; }
 .profile-card-height-control { min-width: 0; }
-.profile-card-height-control > label { display: block; margin-bottom: 7px; color: #9da9bb; font-size: 11px; font-weight: 700; }
-.profile-card-height-field { min-height: 54px; display: grid; grid-template-columns: 42px minmax(118px, 1fr) 42px; align-items: stretch; gap: 7px; }
-.profile-card-height-field .setting-step-button { min-width: 42px; height: 54px; }
-.profile-card-height-number { min-width: 0; height: 54px; }
+.profile-card-height-control > label,
+.profile-layout-select > label { display: block; min-height: 14px; margin-bottom: 7px; color: #9da9bb; font-size: 11px; font-weight: 700; line-height: 14px; }
+.profile-card-height-field { width: 100%; min-height: 54px; display: grid; grid-template-columns: 54px minmax(0, 1fr) 54px; align-items: stretch; gap: 8px; }
+.profile-card-height-field .setting-step-button { width: 54px; min-width: 54px; height: 54px; }
+.profile-card-height-number { width: 100%; min-width: 0; height: 54px; }
 .profile-card-height-number input { width: 100%; min-width: 0; }
-.profile-card-height-control > small { display: block; margin-top: 6px; color: #65738a; font-size: 10px; }
-.profile-layout-select { width: min(430px, 42vw); }
-.profile-layout-select > label { display: block; margin-bottom: 7px; color: #9da9bb; font-size: 11px; font-weight: 700; }
+.profile-card-height-control > small { display: block; margin-top: 6px; color: #65738a; font-size: 10px; line-height: 14px; }
+.profile-layout-select { width: 100%; min-width: 0; }
+
 .profile-layout-preview { min-height: 118px; display: grid; gap: 10px; padding: 13px; border: 1px solid #29364a; border-radius: 9px; background: #0a0f16; }
 .profile-layout-preview.is-row { grid-template-columns: 1fr; }
 .profile-layout-preview.is-card { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -1055,9 +1064,10 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
   .settings-view > .settings-panel:has(input[aria-label="Độ rộng popup chat"]),
   .settings-view > .settings-panel:has(input[aria-label="Chiều cao khung chat bên trong"]) { grid-column: 1 / -1; }
   .profile-list.is-card-layout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .profile-layout-setting-head { align-items: stretch; }
-  .profile-layout-controls { width: 100%; grid-template-columns: 1fr; }
+  .profile-layout-setting-head { flex-direction: column; align-items: stretch; gap: 18px; }
+  .profile-layout-controls { width: 100%; grid-template-columns: 1fr; row-gap: 16px; }
   .profile-layout-select { width: 100%; }
+  .profile-card-height-control { width: min(100%, 320px); }
   .api-worker-form { grid-template-columns: 1fr; }
   .api-worker-wide { grid-column: auto; }
   .api-worker-config, .api-worker-card { grid-template-columns: 1fr; align-items: stretch; }
