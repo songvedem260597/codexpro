@@ -248,22 +248,59 @@ function ChatDropdown({ value, conversations, disabled, onChange }) {
 }
 
 function ProjectDropdown({ value, projects, disabled, onChange, includeAllAllowed = true }) {
-  const projectOptions = projects.map((project) => ({ value: project.root, label: project.name, hint: `${project.repoFullName ? `${project.repoFullName} · ` : ""}${project.isGit ? (project.branch || "git") : "thư mục"} · ${project.root}`, searchText: [project.name, project.repoFullName, project.branch, project.root].join(" "), project }));
-  const options = includeAllAllowed ? [{ value: ALL_ALLOWED_WORKSPACES, label: "Tất cả vùng được cấp quyền", hint: "Không khóa repo/đường dẫn · tìm trên mọi workspace được phép truy cập", allAllowed: true, searchText: "tất cả đường dẫn workspace" }, ...projectOptions] : projectOptions;
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const root = useRef(null);
+  const selected = projects.find((project) => project.root === value);
+  const allAllowed = includeAllAllowed && value === ALL_ALLOWED_WORKSPACES;
+  const normalizedQuery = query.trim().toLocaleLowerCase("vi-VN");
+  const filteredProjects = normalizedQuery
+    ? projects.filter((project) => [project.name, project.repoFullName, project.branch, project.root].some((field) => String(field || "").toLocaleLowerCase("vi-VN").includes(normalizedQuery)))
+    : projects;
+
+  useEffect(() => {
+    const close = (event) => {
+      if (!root.current?.contains(event.target)) { setOpen(false); setQuery(""); }
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, []);
+
   return (
-    <AppDropdown
-      className="is-project"
-      value={value}
-      options={options}
-      disabled={disabled}
-      onChange={onChange}
-      ariaLabel="Chọn dự án hoặc đường dẫn cần làm"
-      placeholder="Chọn dự án hoặc đường dẫn"
-      searchable
-      searchPlaceholder="Tìm dự án, thư mục hoặc đường dẫn…"
-      renderValue={(selected) => <><span className="app-dropdown-mark">{selected?.allAllowed ? "⌕" : "⌘"}</span><span className="app-dropdown-value-copy"><strong>{selected?.label || "Chọn dự án hoặc đường dẫn"}</strong><small>{selected?.hint || "Chọn workspace cụ thể hoặc toàn bộ vùng được cấp quyền"}</small></span></>}
-      renderOption={(option) => <><span className="app-dropdown-mark">{option.allAllowed ? "⌕" : "⌘"}</span><span className="app-dropdown-option-copy"><strong>{option.label}</strong><small>{option.hint}</small></span>{option.project && formatRepoActivity(option.project) && <span className="app-dropdown-meta is-active">{formatRepoActivity(option.project)}</span>}{option.project?.changes > 0 && <span className="app-dropdown-meta is-changed">{option.project.changes} đổi</span>}</>}
-    />
+    <div className={`project-dropdown ${open ? "is-open" : ""} ${disabled ? "is-disabled" : ""}`} ref={root}>
+      <button type="button" className="project-dropdown-trigger" aria-haspopup="listbox" aria-expanded={open} disabled={disabled} onClick={() => { setOpen((current) => !current); if (open) setQuery(""); }}>
+        <span className="project-dropdown-mark">{allAllowed ? "⌕" : "⌘"}</span>
+        <span className="project-dropdown-value">
+          <strong>{allAllowed ? "Tất cả vùng được cấp quyền" : selected?.name || "Chọn dự án hoặc đường dẫn"}</strong>
+          <small>{allAllowed ? "Không khóa repo/đường dẫn · CodexPro có thể tìm trong toàn bộ vùng đã cấp quyền" : selected ? `${selected.repoFullName ? `${selected.repoFullName} · ` : ""}${selected.isGit ? (selected.branch || "git") : "thư mục"} · ${selected.root}` : includeAllAllowed ? "Chọn một workspace cụ thể hoặc tìm trên toàn bộ vùng được cấp quyền" : "Chọn một workspace cụ thể"}</small>
+        </span>
+        <svg className="project-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+      </button>
+      {open && (
+        <div className="project-dropdown-menu" role="listbox" aria-label="Chọn dự án hoặc đường dẫn cần làm">
+          <div className="project-dropdown-search">
+            <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></svg>
+            <input autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm dự án, thư mục hoặc đường dẫn…" aria-label="Tìm dự án hoặc đường dẫn" />
+            {query && <button type="button" aria-label="Xóa từ khóa" onClick={() => setQuery("")}>×</button>}
+          </div>
+          {includeAllAllowed && <button type="button" role="option" aria-selected={allAllowed} className={`project-dropdown-option project-dropdown-option-all ${allAllowed ? "is-selected" : ""}`} onClick={() => { onChange(ALL_ALLOWED_WORKSPACES); setOpen(false); setQuery(""); }}>
+            <span className="project-dropdown-mark">⌕</span>
+            <span className="project-dropdown-copy"><strong>Tất cả vùng được cấp quyền</strong><small>Không khóa repo/đường dẫn · tìm trên mọi workspace được phép truy cập</small></span>
+            {allAllowed && <span className="project-dropdown-check">✓</span>}
+          </button>}
+          {filteredProjects.map((project) => (
+            <button type="button" role="option" aria-selected={project.root === value} className={`project-dropdown-option ${project.root === value ? "is-selected" : ""}`} key={project.root} onClick={() => { onChange(project.root); setOpen(false); setQuery(""); }}>
+              <span className="project-dropdown-mark">⌘</span>
+              <span className="project-dropdown-copy"><strong>{project.name}</strong><small>{project.repoFullName ? `${project.repoFullName} · ` : ""}{project.isGit ? (project.branch || "git") : "thư mục"} · {project.root}</small></span>
+              {formatRepoActivity(project) && <span className="project-dropdown-activity">{formatRepoActivity(project)}</span>}
+              {project.changes > 0 && <span className="project-dropdown-changes">{project.changes} đổi</span>}
+              {project.root === value && <span className="project-dropdown-check">✓</span>}
+            </button>
+          ))}
+          {!filteredProjects.length && <div className="project-dropdown-empty">Không tìm thấy trong danh sách đã lưu.</div>}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -836,15 +873,15 @@ function ApiWorkerCards({ workers, customImages, onRun, onStop }) {
             {worker.activity === "working" ? <WorkingBadge /> : <span className={`badge ${worker.connected ? "connected" : "profile-missing"}`}>{worker.connected ? "ĐANG RẢNH" : "THIẾU KEY"}</span>}
           </div>
           <code>{worker.worker_id}</code>
-          <div className="profile-meta"><span>{worker.model}</span><span>MCP-ONLY</span></div>
+          <div className="profile-meta"><span><Dot ok={worker.connected} />{worker.model}</span><span>MCP-ONLY</span></div>
           {(worker.current_task_title || worker.last_task_title) && <div className="profile-task-summary"><span>{worker.activity === "working" ? "Task hiện tại" : "Task gần nhất"}</span><strong>{worker.current_task_title || worker.last_task_title}</strong></div>}
-          {worker.last_result && <details className="api-worker-result"><summary>Kết quả job gần nhất</summary><pre>{worker.last_result}</pre></details>}
           {worker.last_error && <div className="profile-warning">{worker.last_error}</div>}
         </div>
         <div className="profile-actions">
-          {worker.activity === "working"
-            ? <button className="button danger-quiet" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button>
-            : <button className="button primary" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}>Chat</button>}
+          <div className={`profile-action-buttons ${worker.activity === "working" ? "" : "is-single"}`}>
+            <button className="button primary" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}>Chat</button>
+            {worker.activity === "working" && <button className="button danger-quiet" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button>}
+          </div>
           {worker.connected
             ? <span className="already-connected">✓ Đã kết nối CodexPro</span>
             : <span className="api-worker-connection-missing">Chưa kết nối CodexPro</span>}
@@ -870,6 +907,7 @@ function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChoo
   }, [projects, root]);
   if (!worker) return null;
   const working = sending || worker.activity === "working";
+  const allAllowedScope = root === ALL_ALLOWED_WORKSPACES;
   const displayedRequest = lastRequest || worker.last_request || "";
   const valid = Boolean(root && (request.trim() || attachments.length) && worker.connected && !working);
   const submit = async () => {
@@ -880,8 +918,9 @@ function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChoo
         workerId: worker.worker_id,
         task_id: apiJobId(),
         task_kind: "code",
-        scope: "workspace",
-        root,
+        scope: allAllowedScope ? "all_allowed" : "workspace",
+        root: allAllowedScope ? "" : root,
+        workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [],
         text: request.trim(),
         attachments
       });
@@ -909,8 +948,8 @@ function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChoo
 
         <article className={`request-card chat-popup-card ${worker.connected ? "is-online" : "is-offline"}`}>
           <label className="request-label">Chọn repo và đường dẫn</label>
-          <ProjectDropdown value={root} projects={projects} onChange={setRoot} disabled={working} includeAllAllowed={false} />
-          {!projects.length && <div className="request-send-error">Chưa có workspace đã lưu.</div>}
+          <ProjectDropdown value={root} projects={projects} onChange={setRoot} disabled={working} />
+          {!projects.length && !allAllowedScope && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
 
           <label className="request-label">Tin nhắn gần nhất</label>
           <div className={`chat-response is-inline ${working ? "is-streaming" : ""}`}>

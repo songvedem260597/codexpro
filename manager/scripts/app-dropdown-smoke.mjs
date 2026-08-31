@@ -28,7 +28,6 @@ assert.deepEqual(nativeSelects, [], `native selects remain: ${nativeSelects.join
 const legacyDropdownTriggers = [
   "settings-dropdown-trigger",
   "chat-dropdown-trigger",
-  "project-dropdown-trigger",
   "diagnostic-filter-trigger",
   "codexgraph-filter-trigger"
 ];
@@ -37,5 +36,9 @@ const legacyDropdowns = jsxFiles.flatMap((name) => {
   return legacyDropdownTriggers.filter((token) => text.includes(token)).map((token) => `${name}:${token}`);
 });
 assert.deepEqual(legacyDropdowns, [], `legacy dropdowns remain: ${legacyDropdowns.join(", ")}`);
+
+const mainSource = fs.readFileSync(path.join(sourceRoot, "main.jsx"), "utf8");
+assert.match(mainSource, /function ProjectDropdown[\s\S]*?className="project-dropdown-trigger"[\s\S]*?className="project-dropdown-search"/, "the repo picker must retain its dedicated searchable green UI");
+assert.doesNotMatch(mainSource, /function ProjectDropdown[\s\S]{0,1200}?<AppDropdown/, "the repo picker must not inherit the blue shared dropdown theme");
 
 console.log("✓ Unified searchable app dropdown smoke test passed");
