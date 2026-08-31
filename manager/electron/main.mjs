@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
+import { createRuntimeRestartGuard } from "./runtime-restart-guard.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
 import { WorkerPluginRegistry } from "./worker-core/plugin-registry.mjs";
 import { createApiWorkerStore } from "./worker-core/api-worker-store.mjs";
@@ -199,6 +200,7 @@ let runtimeFreshnessRetryTimer = null;
 let scheduledTaskCache = null;
 let scheduledTaskPromise = null;
 const runtimeHealthDiagnosticTracker = createRuntimeHealthDiagnosticTracker();
+const runtimeRestartGuard = createRuntimeRestartGuard({ sendCooldownMs: 30_000 });
 let repoScanCache = null;
 let repoScanPromise = null;
 const gitSummaryCache = new Map();
@@ -3149,7 +3151,7 @@ async function sendProfileRequestUnlocked(payload) {
 async function sendProfileRequest(payload) {
   const profileId = String(payload?.profileId || "").trim();
   if(profileSendOperations.has(profileId))throw new Error("Profile này đang gửi một yêu cầu khác. Hãy chờ network ACK trước khi gửi tiếp.");
-  const operation=sendProfileRequestUnlocked(payload);
+  const operation=runtimeRestartGuard.runSend(()=>sendProfileRequestUnlocked(payload));
   profileSendOperations.set(profileId,operation);
   try{return await operation;}
   finally{if(profileSendOperations.get(profileId)===operation)profileSendOperations.delete(profileId);}
@@ -3392,14 +3394,31 @@ function ensureFreshRuntimeAfterManagerStart() {
       scheduleRuntimeFreshnessRetry();
       return { checked: true, restarted: false, reason: "active-profiles", activeProfileCount: activeProfiles.length };
     }
+    const restartDecision = runtimeRestartGuard.startRestart(async () => {
+      const restartAttempt = await controlServer("restart");
+      return await waitForRuntimeBuild(expectedBuildId, restartAttempt);
+    });
+    if (!restartDecision.started) {
+      const guardState = runtimeRestartGuard.snapshot();
+      diagnostic("warn", "manager", "runtime", "Runtime CodexPro cần cập nhật nhưng đang trong cửa sổ gửi tin; Manager hoãn restart", {
+        action: "runtime-build-refresh-send-guard",
+        active_build_id: activeBuildId,
+        expected_build_id: expectedBuildId,
+        guard_reason: restartDecision.reason,
+        active_send_count: guardState.activeSendCount,
+        restart_in_progress: guardState.restartInProgress,
+        retry_after_ms: restartDecision.retryAfterMs
+      });
+      scheduleRuntimeFreshnessRetry(Math.max(1_000, restartDecision.retryAfterMs || 5_000));
+      return { checked: true, restarted: false, reason: restartDecision.reason };
+    }
     diagnostic("warn", "manager", "runtime", "Runtime CodexPro đang chạy bản cũ và mọi profile đã rảnh; Manager sẽ restart server", {
       action: "runtime-build-mismatch",
       active_build_id: activeBuildId,
       expected_build_id: expectedBuildId,
       runtime_started_at: String(base.local.data?.runtimeStartedAt || "")
     });
-    const restartAttempt = await controlServer("restart");
-    const restarted = await waitForRuntimeBuild(expectedBuildId, restartAttempt);
+    const restarted = await restartDecision.promise;
     const restartedBuildId = String(restarted?.local?.data?.runtimeBuildId || "").trim();
     if (!restarted?.local?.ok || restartedBuildId !== expectedBuildId) {
       throw new Error(`Runtime restart không nạp đúng build ${expectedBuildId}; đang chạy ${restartedBuildId || "unknown"}.`);
