@@ -158,7 +158,8 @@ function diagnosticIpcHandle(channel, options, handler) {
         action,
         duration_ms: Date.now() - startedAt,
         ...context,
-        error
+        error,
+        error_details: error?.details && typeof error.details === "object" ? error.details : {}
       });
       throw error;
     }
@@ -226,7 +227,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.92";
+const WORKER_EXTENSION_VERSION = "0.5.93";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -2619,19 +2620,27 @@ async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
 
 async function openLocalMcpSession(config, token) {
   const url = `http://127.0.0.1:${config.port}/mcp`;
+  const startedAt = Date.now();
+  const phaseTimings = {};
+  let phaseStartedAt = Date.now();
   const initialized = await mcpRequest(url, token, {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
     params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: MANAGER_VERSION } }
   });
-  const session = { url, token, sessionId: initialized.sessionId, nextId: 2 };
+  phaseTimings.initialize_ms = Date.now() - phaseStartedAt;
+  const session = { url, token, sessionId: initialized.sessionId, nextId: 2, phaseTimings };
+  phaseStartedAt = Date.now();
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, session.sessionId);
+  phaseTimings.initialized_notification_ms = Date.now() - phaseStartedAt;
+  phaseTimings.open_total_ms = Date.now() - startedAt;
   return session;
 }
 
 async function closeLocalMcpSession(session) {
   if (!session?.url || !session?.sessionId) return;
+  const startedAt = Date.now();
   try {
     await fetch(session.url, {
       method: "DELETE",
@@ -2643,6 +2652,13 @@ async function closeLocalMcpSession(session) {
       },
       signal: AbortSignal.timeout(3000)
     });
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= 1000 && diagnosticAllowed("mcp-close-session-slow", 30_000)) {
+      diagnostic("warn", "mcp", "transport", `Đóng MCP session chậm (${durationMs} ms)`, {
+        action: "close-mcp-session-slow",
+        duration_ms: durationMs
+      });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1") {
@@ -2658,12 +2674,21 @@ async function closeLocalMcpSession(session) {
 }
 
 async function localMcpToolInSession(session, toolName, args, timeoutMs = 15000) {
-  const called = await mcpRequest(session.url, session.token, {
-    jsonrpc: "2.0",
-    id: session.nextId++,
-    method: "tools/call",
-    params: { name: toolName, arguments: args }
-  }, session.sessionId, timeoutMs);
+  const startedAt = Date.now();
+  let called;
+  try {
+    called = await mcpRequest(session.url, session.token, {
+      jsonrpc: "2.0",
+      id: session.nextId++,
+      method: "tools/call",
+      params: { name: toolName, arguments: args }
+    }, session.sessionId, timeoutMs);
+  } finally {
+    if (session?.phaseTimings) {
+      session.phaseTimings.tool_call_ms = Math.max(0, Number(session.phaseTimings.tool_call_ms) || 0) + (Date.now() - startedAt);
+      session.phaseTimings.tool_call_count = Math.max(0, Number(session.phaseTimings.tool_call_count) || 0) + 1;
+    }
+  }
   const result = called.payload.result;
   if (result?.isError) {
     const message = result.content?.find((item) => item.type === "text")?.text || "CodexPro MCP trả về lỗi.";
@@ -2679,43 +2704,29 @@ async function localMcpToolInSession(session, toolName, args, timeoutMs = 15000)
 }
 
 async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
-  const url = `http://127.0.0.1:${config.port}/mcp`;
   const debug = process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1";
-  if (debug) console.error(`[manager-mcp] ${toolName}: initialize`);
-  const initialized = await mcpRequest(url, token, {
-    jsonrpc: "2.0",
-    id: 1,
-    method: "initialize",
-    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: MANAGER_VERSION } }
-  });
-  const sessionId = initialized.sessionId;
+  const startedAt = Date.now();
+  const toolAction = String(args?.action || "");
+  const toolActionName = toolAction ? `${toolName}:${toolAction}` : toolName;
+  let session = null;
   try {
-  if (debug) console.error(`[manager-mcp] ${toolName}: initialized notification`);
-  await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, sessionId);
-  if (debug) console.error(`[manager-mcp] ${toolName}: tools/call`);
-  const called = await mcpRequest(url, token, {
-    jsonrpc: "2.0",
-    id: 2,
-    method: "tools/call",
-    params: { name: toolName, arguments: args }
-  }, sessionId, timeoutMs);
-  if (debug) console.error(`[manager-mcp] ${toolName}: tools/call complete`);
-  const result = called.payload.result;
-  if (result?.isError) {
-    const message = result.content?.find((item) => item.type === "text")?.text || "CodexPro MCP trả về lỗi.";
-    const structured = result.structuredContent?.error;
-    const envelope = structured && typeof structured === "object" && !Array.isArray(structured)
-      ? structured
-      : { name: "CodexProMcpError", message };
-    const error = new Error(String(envelope.message || message));
-    error.name = String(envelope.name || "CodexProMcpError");
-    error.code = String(envelope.code || "MCP_TOOL_ERROR");
-    error.details = envelope.details && typeof envelope.details === "object" ? envelope.details : envelope;
-    throw error;
-  }
-  return result?.structuredContent || {};
+    if (debug) console.error(`[manager-mcp] ${toolActionName}: open session`);
+    session = await openLocalMcpSession(config, token);
+    if (debug) console.error(`[manager-mcp] ${toolActionName}: tools/call`);
+    const result = await localMcpToolInSession(session, toolName, args, timeoutMs);
+    const totalMs = Date.now() - startedAt;
+    if (totalMs >= 2000 || Number(session.phaseTimings?.initialize_ms) >= 1000) {
+      diagnostic("warn", "mcp", "transport", `MCP session ${toolActionName} phản hồi chậm (${totalMs} ms)`, {
+        action: "mcp-session-breakdown",
+        tool_action: toolActionName,
+        duration_ms: totalMs,
+        mcp_session_phase_timings: { ...session.phaseTimings, total_ms: totalMs }
+      });
+    }
+    if (debug) console.error(`[manager-mcp] ${toolActionName}: tools/call complete`);
+    return result;
   } finally {
-    await closeLocalMcpSession({ url, token, sessionId });
+    if (session) void closeLocalMcpSession(session);
   }
 }
 
@@ -2861,6 +2872,16 @@ function isMissingChromeTabError(error) {
 }
 
 async function openProfileChat(payload) {
+  const openStartedAt = Date.now();
+  const openPhaseTimings = {};
+  const timedOpenPhase = async (name, work) => {
+    const startedAt = Date.now();
+    try {
+      return await work();
+    } finally {
+      openPhaseTimings[name] = Math.max(0, Number(openPhaseTimings[name]) || 0) + (Date.now() - startedAt);
+    }
+  };
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
   const targetId = String(payload?.targetId ?? "").trim();
@@ -2873,107 +2894,143 @@ async function openProfileChat(payload) {
   if (conversationId && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (targetId && !/^\d+$/.test(targetId)) throw new Error("Tab Chrome đích không hợp lệ.");
 
-  const base = await readyRuntimeBaseStatus();
-  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-  const token = base.token;
-
   let resolvedTargetId = targetId;
   let createdTab = null;
   let staleTargetRecovered = false;
-  const openFreshChat = async () => {
-    createdTab = await localMcpTool(base.config, token, "browser_control", {
-      action: "open_tab",
-      profile_id: profileId,
-      url: "https://chatgpt.com/"
-    }, 30000);
-    resolvedTargetId = String(createdTab?.target_id ?? "").trim();
-    if (!/^\d+$/.test(resolvedTargetId)) throw new Error("Đã yêu cầu tạo chat mới nhưng extension không trả về tab mới.");
-    staleTargetRecovered = true;
-    return createdTab;
-  };
-  if (!resolvedTargetId) {
-    createdTab = await localMcpTool(base.config, token, "browser_control", {
-      action: "open_tab",
-      profile_id: profileId,
-      url: conversationId ? `https://chatgpt.com/c/${conversationId}` : "https://chatgpt.com/"
-    }, 30000);
-    resolvedTargetId = String(createdTab?.target_id ?? "").trim();
-    if (!/^\d+$/.test(resolvedTargetId)) throw new Error("Đã yêu cầu mở ChatGPT nhưng extension không trả về tab mới.");
-  }
-
-  let navigation = null;
-  if (!createdTab && conversationId && targetConversationId !== conversationId) {
-    try {
-      navigation = await localMcpTool(base.config, token, "browser_control", {
-        action: "navigate",
-        profile_id: profileId,
-        target_id: resolvedTargetId,
-        url: `https://chatgpt.com/c/${conversationId}`
-      }, 30000);
-    } catch (error) {
-      if (!isMissingChromeTabError(error)) throw error;
-      await openFreshChat();
-    }
-  }
-
-  let activation = null;
-  let activationError = null;
+  let staleRecoveryReason = "";
+  let session = null;
   try {
-    activation = await localMcpTool(base.config, token, "browser_control", {
-      action: "activate_tab",
-      profile_id: profileId,
-      target_id: resolvedTargetId
-    }, 32000);
-  } catch (error) {
-    if (!createdTab && isMissingChromeTabError(error)) {
-      await openFreshChat();
-      activation = await localMcpTool(base.config, token, "browser_control", {
+    const base = await timedOpenPhase("runtime_connection_ms", () => runtimeConnectionForSend());
+    if (!base?.config?.port || !base?.token) throw new Error("Local MCP chưa sẵn sàng.");
+    session = await timedOpenPhase("mcp_session_open_ms", () => openLocalMcpSession(base.config, base.token));
+    const callBrowserControl = (args, timeoutMs) => localMcpToolInSession(session, "browser_control", args, timeoutMs);
+    const openFreshChat = async () => {
+      if (!staleRecoveryReason) staleRecoveryReason = "missing_tab";
+      createdTab = await timedOpenPhase("stale_recovery_open_tab_ms", () => callBrowserControl({
+        action: "open_tab",
+        profile_id: profileId,
+        url: "https://chatgpt.com/"
+      }, 30000));
+      resolvedTargetId = String(createdTab?.target_id ?? "").trim();
+      if (!/^\d+$/.test(resolvedTargetId)) throw new Error("Đã yêu cầu tạo chat mới nhưng extension không trả về tab mới.");
+      staleTargetRecovered = true;
+      return createdTab;
+    };
+
+    if (!resolvedTargetId) {
+      createdTab = await timedOpenPhase("open_tab_ms", () => callBrowserControl({
+        action: "open_tab",
+        profile_id: profileId,
+        url: conversationId ? `https://chatgpt.com/c/${conversationId}` : "https://chatgpt.com/"
+      }, 30000));
+      resolvedTargetId = String(createdTab?.target_id ?? "").trim();
+      if (!/^\d+$/.test(resolvedTargetId)) throw new Error("Đã yêu cầu mở ChatGPT nhưng extension không trả về tab mới.");
+    }
+
+    let navigation = null;
+    if (!createdTab && conversationId && targetConversationId !== conversationId) {
+      try {
+        navigation = await timedOpenPhase("navigate_ms", () => callBrowserControl({
+          action: "navigate",
+          profile_id: profileId,
+          target_id: resolvedTargetId,
+          url: `https://chatgpt.com/c/${conversationId}`
+        }, 30000));
+      } catch (error) {
+        if (!isMissingChromeTabError(error)) throw error;
+        staleRecoveryReason = "navigate_missing_tab";
+        await openFreshChat();
+      }
+    }
+
+    let activation = null;
+    let activationError = null;
+    try {
+      activation = await timedOpenPhase("activate_tab_ms", () => callBrowserControl({
         action: "activate_tab",
         profile_id: profileId,
         target_id: resolvedTargetId
-      }, 32000);
+      }, 32000));
+    } catch (error) {
+      if (!createdTab && isMissingChromeTabError(error)) {
+        staleRecoveryReason = "activate_missing_tab";
+        await openFreshChat();
+        activation = await timedOpenPhase("stale_recovery_activate_ms", () => callBrowserControl({
+          action: "activate_tab",
+          profile_id: profileId,
+          target_id: resolvedTargetId
+        }, 32000));
+      } else {
+        activationError = error;
+      }
+    }
+
+    let windowFocus = null;
+    if (activation?.window_state === "maximized" && activation?.window_focused) {
+      windowFocus = {
+        ok: true,
+        activated: true,
+        maximized: true,
+        foreground_match: true,
+        source: "chrome.windows",
+        window_id: activation.window_id
+      };
+      openPhaseTimings.window_focus_ms = 0;
     } else {
-      activationError = error;
+      windowFocus = await timedOpenPhase("window_focus_ms", () => focusChromeWindow(title || createdTab?.title || "ChatGPT"));
     }
-  }
+    if (!windowFocus?.ok) {
+      if (activationError) {
+        const reason = activationError instanceof Error ? activationError.message : String(activationError);
+        throw new Error(`Không mở được profile Chrome vì extension chưa phản hồi lệnh activate tab: ${reason}`);
+      }
+      throw new Error("Đã chọn đúng tab nhưng Windows chưa đưa Chrome lên trước. Hãy thử lại một lần.");
+    }
 
-  let windowFocus = await focusChromeWindow(title || createdTab?.title || "ChatGPT");
-  if (!windowFocus?.ok && activation?.window_state === "maximized" && activation?.window_focused) {
-    windowFocus = {
+    return {
       ok: true,
-      activated: true,
-      maximized: true,
-      foreground_match: true,
-      source: "chrome.windows",
-      window_id: activation.window_id
+      profile_id: profileId,
+      conversation_id: staleTargetRecovered ? "" : conversationId || targetConversationId,
+      target_id: Number(resolvedTargetId),
+      target_conversation_id: staleTargetRecovered ? "" : targetConversationId,
+      target_title: title,
+      selection_reason: selectionReason,
+      active_target_id: activeTargetId,
+      active_conversation_id: activeConversationId,
+      tab_created: Boolean(createdTab),
+      stale_target_recovered: staleTargetRecovered,
+      stale_recovery_reason: staleRecoveryReason,
+      created_tab: createdTab,
+      navigation,
+      activation: activation || { ok: true, acknowledgement_delayed: true },
+      activation_acknowledgement_delayed: Boolean(activationError),
+      window_focus: windowFocus,
+      runtime_connection_source: base.source,
+      open_phase_timings: {
+        ...openPhaseTimings,
+        mcp_session: { ...(session.phaseTimings || {}) },
+        total_ms: Date.now() - openStartedAt
+      }
     };
-  }
-  if (!windowFocus?.ok) {
-    if (activationError) {
-      const reason = activationError instanceof Error ? activationError.message : String(activationError);
-      throw new Error(`Không mở được profile Chrome vì extension chưa phản hồi lệnh activate tab: ${reason}`);
+  } catch (error) {
+    if (error && typeof error === "object") {
+      error.details = {
+        ...(error.details && typeof error.details === "object" ? error.details : {}),
+        requested_target_id: targetId,
+        resolved_target_id: resolvedTargetId,
+        stale_target_recovered: staleTargetRecovered,
+        stale_recovery_reason: staleRecoveryReason,
+        open_phase_timings: {
+          ...openPhaseTimings,
+          mcp_session: { ...(session?.phaseTimings || {}) },
+          total_ms: Date.now() - openStartedAt
+        }
+      };
     }
-    throw new Error("Đã chọn đúng tab nhưng Windows chưa đưa Chrome lên trước. Hãy thử lại một lần.");
+    throw error;
+  } finally {
+    if (session) void closeLocalMcpSession(session);
   }
-
-  return {
-    ok: true,
-    profile_id: profileId,
-    conversation_id: staleTargetRecovered ? "" : conversationId || targetConversationId,
-    target_id: Number(resolvedTargetId),
-    target_conversation_id: staleTargetRecovered ? "" : targetConversationId,
-    target_title: title,
-    selection_reason: selectionReason,
-    active_target_id: activeTargetId,
-    active_conversation_id: activeConversationId,
-    tab_created: Boolean(createdTab),
-    stale_target_recovered: staleTargetRecovered,
-    created_tab: createdTab,
-    navigation,
-    activation: activation || { ok: true, acknowledgement_delayed: true },
-    activation_acknowledgement_delayed: Boolean(activationError),
-    window_focus: windowFocus
-  };
 }
 
 async function recoverProfileChatTab(payload) {
@@ -3820,7 +3877,7 @@ diagnosticIpcHandle("codexpro:open-profile-chat", {
   successMessage: "Mở Chrome profile hoàn tất",
   failureMessage: "Không mở được Chrome profile",
   details: (payload) => ({ profile_id: String(payload?.profileId || payload?.profile_id || ""), conversation_id: String(payload?.conversationId || payload?.conversation_id || ""), target_id: String(payload?.targetId || ""), target_conversation_id: String(payload?.targetConversationId || ""), target_title: String(payload?.title || ""), selection_reason: String(payload?.selectionReason || ""), active_target_id: String(payload?.activeTargetId || ""), active_conversation_id: String(payload?.activeConversationId || "") }),
-  resultDetails: (result) => ({ result_profile_id: String(result?.profile_id || ""), result_conversation_id: String(result?.conversation_id || ""), result_target_id: String(result?.target_id || ""), tab_created: Boolean(result?.tab_created), created_tab_id: String(result?.created_tab?.target_id || ""), navigation_target_id: String(result?.navigation?.target_id || ""), navigation_url: String(result?.navigation?.url || ""), activation_target_id: String(result?.activation?.target_id || ""), activation_window_id: String(result?.activation?.window_id || ""), activation_window_focused: Boolean(result?.activation?.window_focused), window_focused: Boolean(result?.window_focused || result?.window_focus?.ok), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed), window_focus: result?.window_focus || null })
+  resultDetails: (result) => ({ result_profile_id: String(result?.profile_id || ""), result_conversation_id: String(result?.conversation_id || ""), result_target_id: String(result?.target_id || ""), tab_created: Boolean(result?.tab_created), stale_target_recovered: Boolean(result?.stale_target_recovered), stale_recovery_reason: String(result?.stale_recovery_reason || ""), created_tab_id: String(result?.created_tab?.target_id || ""), navigation_target_id: String(result?.navigation?.target_id || ""), navigation_url: String(result?.navigation?.url || ""), activation_target_id: String(result?.activation?.target_id || ""), activation_window_id: String(result?.activation?.window_id || ""), activation_window_focused: Boolean(result?.activation?.window_focused), window_focused: Boolean(result?.window_focused || result?.window_focus?.ok), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed), runtime_connection_source: String(result?.runtime_connection_source || ""), open_phase_timings: result?.open_phase_timings || {}, window_focus: result?.window_focus || null })
 }, async (event, payload) => {
   const result = await openProfileChat(payload);
   const owner = BrowserWindow.fromWebContents(event.sender);
@@ -3892,6 +3949,8 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
   details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || ""), new_chat: Boolean(payload?.newChat), attachment_count: Array.isArray(payload?.attachments) ? payload.attachments.length : 0, request_scope: String(payload?.scope || "workspace"), tool_retry: Boolean(payload?.toolRetry), tool_rollover_count: Number(payload?.toolRolloverCount) || 0 }),
   resultDetails: (result) => {
     const value = result?.ok ? result.value : result;
+    const sendTimings = value?.send_phase_timings && typeof value.send_phase_timings === 'object' ? value.send_phase_timings : {};
+    const bridgeTimings = value?.bridge_phase_timings && typeof value.bridge_phase_timings === 'object' ? value.bridge_phase_timings : {};
     return {
       profile_id: String(value?.profile_id || ""),
       conversation_id: String(value?.conversation_id || ""),
@@ -3905,6 +3964,30 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
       network_error: String(value?.network_error || ""),
       manager_preflight_ms: Number(value?.manager_preflight_ms) || 0,
       manager_total_ms: Number(value?.manager_total_ms) || 0,
+      send_command_queue_ms: Number(sendTimings.command_queue_ms) || 0,
+      send_find_tab_ms: Number(sendTimings.find_tab_ms) || 0,
+      send_network_capture_probe_ms: Number(sendTimings.network_capture_probe_ms) || 0,
+      send_network_state_ms: Number(sendTimings.network_state_ms) || 0,
+      send_dom_activity_ms: Number(sendTimings.dom_activity_ms) || 0,
+      send_attachment_ownership_ms: Number(sendTimings.attachment_ownership_ms) || 0,
+      send_conversation_limit_ms: Number(sendTimings.conversation_limit_ms) || 0,
+      send_prepare_ms: Number(sendTimings.prepare_ms) || 0,
+      send_attachment_upload_ms: Number(sendTimings.attachment_upload_ms) || 0,
+      send_trusted_submit_ms: Number(sendTimings.trusted_submit_ms) || 0,
+      send_network_ack_after_submit_error_ms: Number(sendTimings.network_ack_after_submit_error_ms) || 0,
+      send_submit_lifecycle_ack_ms: Number(sendTimings.submit_lifecycle_ack_ms) || 0,
+      send_attempt_inspect_ms: Number(sendTimings.attempt_inspect_ms) || 0,
+      send_fallback_prepare_ms: Number(sendTimings.fallback_prepare_ms) || 0,
+      send_fallback_submit_ms: Number(sendTimings.fallback_submit_ms) || 0,
+      send_post_fallback_lifecycle_ack_ms: Number(sendTimings.post_fallback_lifecycle_ack_ms) || 0,
+      send_network_ack_ms: Number(sendTimings.network_ack_ms) || 0,
+      send_conversation_url_ms: Number(sendTimings.conversation_url_ms) || 0,
+      send_extension_total_ms: Number(sendTimings.extension_total_ms) || 0,
+      bridge_queue_wait_ms: Number(bridgeTimings.queue_wait_ms) || 0,
+      bridge_extension_roundtrip_ms: Number(bridgeTimings.extension_roundtrip_ms) || 0,
+      bridge_total_ms: Number(bridgeTimings.bridge_total_ms) || 0,
+      submission_ack_source: String(value?.submission_ack_source || value?.network_ack_source || ''),
+      submit_lifecycle_endpoint: String(value?.submit_lifecycle_endpoint || ''),
       runtime_connection_source: String(value?.runtime_connection_source || ""),
       profile_preflight_source: String(value?.profile_preflight_source || ""),
       profile_had_chatgpt_tab: Boolean(value?.profile_had_chatgpt_tab),

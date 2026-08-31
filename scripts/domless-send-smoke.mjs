@@ -172,10 +172,11 @@ const recoveryNetworkState = new Map([[41, { state: "completed", conversation_id
 const recoveryPostLog = new Map([[41, [{ state: "completed" }]]]);
 const recoveryPostVersion = new Map([[41, 3]]);
 const replaceUnresponsiveChatTab = Function(
-  "chrome", "waitForTab", "ensureChatNetworkStreamCapture", "ensureChatNetworkStateLoaded", "chatNetworkStateByTab", "chatNetworkPostLogByTab", "chatNetworkPostVersionByTab", "pendingConversationByTab", "persistChatNetworkState", "scheduleRealtimeProfilePush", "recentConversationCache",
+  "chrome", "waitForTab", "ensureChatNetworkStreamCapture", "ensureChatNetworkStateLoaded", "chatNetworkStateByTab", "chatNetworkPostLogByTab", "chatNetworkPostVersionByTab", "pendingConversationByTab", "persistChatNetworkState", "scheduleRealtimeProfilePush", "recentConversationCache", "serializeChatGptTabCreation", "MAX_CHATGPT_TABS", "releaseChatDebuggerForRecovery",
   `${replaceTabSource.replace(/^function/, "async function")}; return replaceUnresponsiveChatTab;`
 )(
   { tabs: {
+    query: async () => [{ id: 41, windowId: 7, active: true, url: "https://chatgpt.com/c/12345678-abcd" }],
     create: async (args) => { recoveryCalls.push(["create", args]); return { id: 42, windowId: 7, active: true, url: args.url }; },
     get: async (id) => { recoveryCalls.push(["get", id]); return { id, windowId: 7, active: true, url: "https://chatgpt.com/c/12345678-abcd" }; },
     remove: async (id) => { recoveryCalls.push(["remove", id]); }
@@ -189,7 +190,10 @@ const replaceUnresponsiveChatTab = Function(
   new Map([[41, { conversation_id: "12345678-abcd" }]]),
   async () => { recoveryCalls.push(["persist"]); },
   () => { recoveryCalls.push(["push"]); },
-  { at: 1, items: [] }
+  { at: 1, items: [] },
+  async (operation) => await operation(),
+  3,
+  async (id) => { recoveryCalls.push(["release", id]); }
 );
 const recoveryResult = await replaceUnresponsiveChatTab({ id: 41, windowId: 7, active: true, url: "https://chatgpt.com/c/12345678-abcd" }, "https://chatgpt.com/c/12345678-abcd", 5000);
 assert.equal(recoveryResult.replaced_tab_id, 41);
@@ -206,18 +210,29 @@ const networkRecovery = sendBlock.indexOf("networkAck=await waitForNetworkGenera
 const acknowledgedReturn = sendBlock.indexOf("if(networkAck)return await resultForNetwork", networkRecovery);
 const cleanup = sendBlock.indexOf("await cleanupAttempt()", timeoutCatch);
 const enterPrimary = sendBlock.indexOf("trustedSubmitChatComposerTab(tab.id,attemptId,text)");
-const earlyAckBlock = sendBlock.indexOf("let earlyAck=null", enterPrimary);
-const earlyAck = sendBlock.indexOf("waitForNetworkGeneration(tab.id,submitStartedAt-100", earlyAckBlock);
-const clickFallback = sendBlock.indexOf("trustedActivateChatSendButtonTab(tab.id,attemptId)", earlyAck);
+const lifecycleAckBlock = sendBlock.indexOf("let earlyLifecycleEvidence=[]", enterPrimary);
+const lifecycleAck = sendBlock.indexOf("waitForChatSubmitLifecycle(tab.id,submitStartedAt-100", lifecycleAckBlock);
+const lifecycleReturn = sendBlock.indexOf("if(lifecycleResult)return lifecycleResult", lifecycleAck);
+const clickFallback = sendBlock.indexOf("trustedActivateChatSendButtonTab(tab.id,attemptId)", lifecycleReturn);
 
 assert.ok(timeoutCatch >= 0, "DOM send timeout must be handled");
 assert.ok(networkRecovery > timeoutCatch, "DOM timeout must check the network tracker");
 assert.ok(acknowledgedReturn > networkRecovery, "a tracked generation must count as submitted");
 assert.ok(cleanup > acknowledgedReturn, "draft cleanup must only happen after network recovery fails");
 assert.ok(enterPrimary >= 0, "trusted Enter must exist in the primary send path");
-assert.ok(earlyAckBlock > enterPrimary, "primary Enter must establish its bounded ACK window");
-assert.ok(earlyAck > enterPrimary, "primary Enter must wait for generation ACK before fallback");
-assert.ok(clickFallback > earlyAck, "trusted Send click must only occur after the Enter ACK window");
+assert.ok(lifecycleAckBlock > enterPrimary, "primary Enter must establish its bounded submit-lifecycle ACK window");
+assert.ok(lifecycleAck > enterPrimary, "primary Enter must wait for submit lifecycle evidence before fallback");
+assert.ok(lifecycleReturn > lifecycleAck, "submit lifecycle evidence must be allowed to confirm an existing-chat submission before generation starts");
+assert.ok(clickFallback > lifecycleReturn, "trusted Send click must only occur after the submit-lifecycle ACK window");
+assert.doesNotMatch(sendBlock, /Math\.min\(6000,remainingCommandMs\(\)-500\)/, "healthy text sends must not block for the old 6 second generation ACK window");
+assert.match(sendBlock, /send_phase_timings:[\s\S]*?extension_total_ms/, "send diagnostics must expose total extension timing");
+assert.match(sendBlock, /timedSendPhase\('trusted_submit_ms'/, "send diagnostics must time trusted input dispatch");
+assert.match(sendBlock, /timedSendPhase\('submit_lifecycle_ack_ms'/, "send diagnostics must time submit-lifecycle ACK");
+const submitLifecycleWaitSource = extractFunction("waitForChatSubmitLifecycle");
+assert.match(submitLifecycleWaitSource, /filter\(isChatSubmissionAckEvidence\)/, "fast send ACK must require strict conversation/responses evidence, not generic sentinel preparation traffic");
+const strictSubmitAckSource = extractFunction("isChatSubmissionAckEvidence");
+assert.doesNotMatch(strictSubmitAckSource, /sentinel/, "sentinel chat-requirements traffic must not be treated as proof that the user message was submitted");
+assert.match(sendBlock, /lateLifecycleEvidence=recentChatPostEvidence\(tab\.id,submitStartedAt-100\)\.filter\(isChatSubmissionAckEvidence\)/, "late send ACK must reject sentinel preparation traffic just like the early ACK path");
 assert.match(sendBlock, /submitted_by:'trusted-enter'/);
 assert.match(sendBlock, /submitted_by:'trusted-click-fallback'/);
 assert.match(sendBlock, /Promise\.all\(\[[\s\S]*?probeConversationLimit\(tab\.id\)[\s\S]*?if\(conversationLimit\.reached\)throw new Error\('CONVERSATION_LIMIT_REACHED:/, "send preflight must detect a full conversation before touching its old composer");

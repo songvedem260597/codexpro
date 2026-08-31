@@ -23,6 +23,7 @@ import { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, 
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, latestTurnHasProvisionalAssistant, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
+import { confirmChatResponseFinality } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
 import { mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList } from "./ui-performance.js";
 import { createApiWorkerDraft, normalizeApiWorkerModels, switchApiWorkerProvider, validateApiWorkerDraft } from "./api-worker-form.js";
@@ -445,7 +446,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.92";
+const WORKER_EXTENSION_VERSION = "0.5.93";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -1040,6 +1041,7 @@ function App() {
   const responseScrollDiagnostics = useRef(new Map());
   const responseTurnAnchors = useRef(new Map());
   const responseAuditSignatures = useRef(new Map());
+  const responseFinalCandidates = useRef(new Map());
   const operationsRecoveryTimes = useRef(new Map());
   const operationsNotificationState = useRef(new Map());
   const operationsAutoUpdateAt = useRef(0);
@@ -1883,6 +1885,15 @@ function App() {
           if (Date.now() - lastStreamRead >= activityPollMs) {
             networkStreamReads.current.set(streamKey, Date.now());
             void loadResponse(profile, conversationId, true, false, false, networkState !== "generating");
+          }
+          continue;
+        }
+        if (currentResponse?.finalityPending) {
+          const finalityPollKey = `finality:${profile.profile_id}:${conversationId}`;
+          const lastFinalityRead = Number(connectionRecoveryReads.current.get(finalityPollKey) || 0);
+          if (Date.now() - lastFinalityRead >= LATEST_RESPONSE_RECOVERY_POLL_MS) {
+            connectionRecoveryReads.current.set(finalityPollKey, Date.now());
+            void loadResponse(profile, conversationId, true, true, false, false);
           }
           continue;
         }
@@ -2780,6 +2791,8 @@ function App() {
         responseReady: currentResponse?.responseReady,
         responseLoading: currentResponse?.loading,
         responseIncomplete: currentResponse?.incomplete,
+        awaitingAssistant: currentResponse?.conversationId === conversationId && transcriptAwaitingAssistant(materializeTranscriptMessages(currentResponse, conversationId)),
+        finalityPending: currentResponse?.finalityPending,
         canonicalBusy: currentResponse?.canonicalBusy,
         streamBusy: currentResponse?.networkStreamInProgress
       });
@@ -3298,6 +3311,33 @@ function App() {
           nextMessages = discardProvisionalAssistantAfterLatestUser(nextMessages, { includeUnverified: true });
         }
         const nextAssistantText = String([...nextMessages].reverse().find((message) => message?.role === "assistant")?.text || "").trim();
+        const rawResponseReady = Boolean(!canonicalBusy && result.response_ready && !networkStreamInProgress);
+        const incomingResponseSource = terminalAwaitingFinal ? "network_state" : String(result.response_source || previous.responseSource || "");
+        const latestUserIndex = nextMessages.findLastIndex((message) => message?.role === "user");
+        const latestUserMessage = latestUserIndex >= 0 ? nextMessages[latestUserIndex] : null;
+        const latestAssistantAfterUser = latestUserIndex >= 0
+          ? nextMessages.slice(latestUserIndex + 1).findLast((message) => message?.role === "assistant")
+          : [...nextMessages].reverse().find((message) => message?.role === "assistant");
+        const finalitySignature = latestAssistantAfterUser
+          ? JSON.stringify([
+              latestUserIndex,
+              String(latestUserMessage?.id || ""),
+              responseAuditTextFingerprint(latestUserMessage?.text || ""),
+              String(latestAssistantAfterUser.id || ""),
+              responseAuditTextFingerprint(latestAssistantAfterUser.text || ""),
+              (latestAssistantAfterUser.images || []).map((image) => String(image?.id || image?.dataUrl || "")).join("|")
+            ])
+          : "";
+        const finalityKey = `${profile.profile_id}:${conversationId}`;
+        const finality = confirmChatResponseFinality(responseFinalCandidates.current.get(finalityKey), {
+          ready: rawResponseReady,
+          source: incomingResponseSource,
+          signature: finalitySignature
+        });
+        if (finality.candidate) responseFinalCandidates.current.set(finalityKey, finality.candidate);
+        else responseFinalCandidates.current.delete(finalityKey);
+        const responseReady = Boolean(rawResponseReady && finality.confirmed);
+        const finalityPending = Boolean(rawResponseReady && !finality.confirmed);
         return {
           ...current,
           [profile.profile_id]: {
@@ -3344,8 +3384,10 @@ function App() {
             networkStatusCode: Number(result.network_status_code) || Number(previous.networkStatusCode) || 0,
             networkError: String(result.network_error || previous.networkError || ""),
             networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
-            responseReady: Boolean(!canonicalBusy && result.response_ready && !networkStreamInProgress),
-            responseSource: terminalAwaitingFinal ? "network_state" : String(result.response_source || previous.responseSource || ''),
+            responseReady,
+            finalityPending,
+            finalityReason: finality.reason,
+            responseSource: incomingResponseSource,
             responseAudit,
             responseAuditFetchMode,
             responseAuditKey,
@@ -3514,7 +3556,10 @@ function App() {
       networkState: selectedNetworkState,
       tabSettling: selectedTab?.settling,
       responseCurrent,
-      responseIncomplete: response?.incomplete
+      responseIncomplete: response?.incomplete,
+      responseReady: responseVerifiedComplete,
+      awaitingAssistant: responseCurrent && transcriptAwaitingAssistant(materializeTranscriptMessages(response, selectedTarget)),
+      finalityPending: responseCurrent && response?.finalityPending
     });
     const responseTurnActive = selectedRecoveringNetworkAbort || Boolean(sending || selectedBusy || selectedSettling || (responseCurrent && (response?.busy || response?.loading)));
     const latestTurnProvisionalAssistant = latestTurnHasProvisionalAssistant(displayResponseMessages);
@@ -3528,6 +3573,8 @@ function App() {
       responseReady: responseVerifiedComplete,
       responseLoading: response?.loading,
       responseIncomplete: response?.incomplete,
+      awaitingAssistant: responseCurrent && transcriptAwaitingAssistant(materializeTranscriptMessages(response, selectedTarget)),
+      finalityPending: responseCurrent && response?.finalityPending,
       canonicalBusy: responseCurrent && response?.canonicalBusy,
       streamBusy: responseCurrent && response?.networkStreamInProgress
     });
