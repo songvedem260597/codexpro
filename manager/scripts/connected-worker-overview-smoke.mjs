@@ -11,7 +11,7 @@ assert.match(source, /function ApiWorkerCards[\s\S]*?<WorkerIcon state=\{workerS
 assert.match(source, /const apiWorkers = \(status\?\.workers \|\| \[\]\)\.filter[\s\S]*?working:[\s\S]*?apiWorkers\.filter[\s\S]*?idle:[\s\S]*?apiWorkers\.filter/, "overview summary must count connected API workers");
 assert.match(source, /if \(refreshInFlight\.current\) \{[\s\S]*?refreshQueued\.current = true;[\s\S]*?void refresh\(queuedForeground\);/, "a refresh requested while saving must be queued instead of dropped");
 assert.match(source, /mergeRuntimeStatus\(current, nextStatus\)/, "full status refreshes must preserve the last good worker snapshot across transient MCP failures");
-assert.match(source, /status\?\.workerSnapshotStale[\s\S]*?Đang hiển thị snapshot worker gần nhất/, "the overview must disclose when preserved worker data is stale");
+assert.match(source, /status\?\.workerSnapshotStale[\s\S]*?MCP tạm thời không phản hồi, worker sẽ tự cập nhật khi kết nối phục hồi/, "the overview must disclose when preserved worker data is stale");
 assert.match(source, /connectorAutoMigrationInFlight\.current[\s\S]*?connector_update_required !== true[\s\S]*?profileSafeForWorkerUpdate\(profile\)[\s\S]*?api\.setupProfile\(profileId\)/, "outdated profile-bound connectors must auto-migrate sequentially only after the worker becomes idle");
 assert.match(source, /CONNECTOR_AUTO_MIGRATION_RETRY_MS[\s\S]*?connectorAutoMigrationAttempts\.current\.get\(profile\.profile_id\)/, "failed automatic connector migration must use retry backoff");
 assert.match(source, /autoMigratingProfileId === profile\.profile_id[\s\S]*?Đang cập nhật \+ test/, "the card must surface automatic connector migration as an in-progress update");

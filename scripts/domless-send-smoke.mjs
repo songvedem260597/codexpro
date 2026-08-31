@@ -246,7 +246,7 @@ assert.match(worker, /focusAttempt<15.*setTimeout\(resolve,50\)/s, "foreground f
 assert.match(worker, /TRUSTED_ENTER_PRE_DISPATCH:/, "trusted Enter must distinguish a definitely-unsent pre-dispatch failure");
 assert.match(worker, /TRUSTED_ENTER_DISPATCH_UNCERTAIN:/, "trusted Enter must preserve ambiguity after key dispatch starts");
 assert.match(worker, /let refocusedResult=null/, "trusted Enter metadata must retain the refocus result outside the dispatch block");
-assert.match(worker, /const heartbeat=setInterval\(\(\)=>\{void fetch\(`\$\{BRIDGE\}\/register`/, "long extension commands must keep their profile heartbeat alive");
+assert.match(worker, /const heartbeat=setInterval\(\(\)=>\{[\s\S]{0,320}?fetch\(`\$\{BRIDGE\}\/register`/, "long enabled extension commands must keep their profile heartbeat alive");
 assert.match(worker, /network_generation_endpoint/, "generation ACK must expose the matched endpoint");
 assert.match(worker, /network_recent_posts/, "safe POST path diagnostics must be exposed without request bodies");
 assert.match(worker, /CDP_NETWORK_TRACKER_MAX_MS/, "CDP tracking must have a bounded maximum lifetime");
