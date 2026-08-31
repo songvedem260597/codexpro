@@ -2696,18 +2696,30 @@ async function openProfileChat(payload) {
   const activeConversationId = String(payload?.activeConversationId || "").trim();
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (conversationId && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
-  if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome của profile này.");
+  if (targetId && !/^\d+$/.test(targetId)) throw new Error("Tab Chrome đích không hợp lệ.");
 
   const base = await readyRuntimeBaseStatus();
   if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const token = base.token;
 
+  let resolvedTargetId = targetId;
+  let createdTab = null;
+  if (!resolvedTargetId) {
+    createdTab = await localMcpTool(base.config, token, "browser_control", {
+      action: "open_tab",
+      profile_id: profileId,
+      url: conversationId ? `https://chatgpt.com/c/${conversationId}` : "https://chatgpt.com/"
+    }, 30000);
+    resolvedTargetId = String(createdTab?.target_id ?? "").trim();
+    if (!/^\d+$/.test(resolvedTargetId)) throw new Error("Đã yêu cầu mở ChatGPT nhưng extension không trả về tab mới.");
+  }
+
   let navigation = null;
-  if (conversationId && targetConversationId !== conversationId) {
+  if (!createdTab && conversationId && targetConversationId !== conversationId) {
     navigation = await localMcpTool(base.config, token, "browser_control", {
       action: "navigate",
       profile_id: profileId,
-      target_id: targetId,
+      target_id: resolvedTargetId,
       url: `https://chatgpt.com/c/${conversationId}`
     }, 30000);
   }
@@ -2718,13 +2730,13 @@ async function openProfileChat(payload) {
     activation = await localMcpTool(base.config, token, "browser_control", {
       action: "activate_tab",
       profile_id: profileId,
-      target_id: targetId
+      target_id: resolvedTargetId
     }, 32000);
   } catch (error) {
     activationError = error;
   }
 
-  let windowFocus = await focusChromeWindow(title);
+  let windowFocus = await focusChromeWindow(title || createdTab?.title || "ChatGPT");
   if (!windowFocus?.ok && activation?.window_state === "maximized" && activation?.window_focused) {
     windowFocus = {
       ok: true,
@@ -2747,12 +2759,14 @@ async function openProfileChat(payload) {
     ok: true,
     profile_id: profileId,
     conversation_id: conversationId || targetConversationId,
-    target_id: Number(targetId),
+    target_id: Number(resolvedTargetId),
     target_conversation_id: targetConversationId,
     target_title: title,
     selection_reason: selectionReason,
     active_target_id: activeTargetId,
     active_conversation_id: activeConversationId,
+    tab_created: Boolean(createdTab),
+    created_tab: createdTab,
     navigation,
     activation: activation || { ok: true, acknowledgement_delayed: true },
     activation_acknowledgement_delayed: Boolean(activationError),
@@ -2977,6 +2991,10 @@ async function sendProfileRequestUnlocked(payload) {
     profilePreflightSource = "list-profiles-refresh";
   }
   if (!profile) throw new Error("Profile Chrome này không còn được CodexPro nhận diện.");
+  const profileHadChatGptTab = Boolean(
+    (Array.isArray(profile.chatgpt_tabs) && profile.chatgpt_tabs.length)
+    || (Array.isArray(profile.conversation_tabs) && profile.conversation_tabs.length)
+  );
   if (!versionAtLeast(profile.extension_version)) {
     if (sendDebug) console.error(`[manager-send] updating worker ${profile.extension_version || "unknown"} -> ${WORKER_EXTENSION_VERSION}`);
     await localMcpToolInSession(session, "browser_control", {
@@ -3080,7 +3098,7 @@ async function sendProfileRequestUnlocked(payload) {
     attachments
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
-  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource };
+  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id) };
   } finally {
     await closeLocalMcpSession(session);
   }
@@ -3499,7 +3517,7 @@ diagnosticIpcHandle("codexpro:open-profile-chat", {
   successMessage: "Mở Chrome profile hoàn tất",
   failureMessage: "Không mở được Chrome profile",
   details: (payload) => ({ profile_id: String(payload?.profileId || payload?.profile_id || ""), conversation_id: String(payload?.conversationId || payload?.conversation_id || ""), target_id: String(payload?.targetId || ""), target_conversation_id: String(payload?.targetConversationId || ""), target_title: String(payload?.title || ""), selection_reason: String(payload?.selectionReason || ""), active_target_id: String(payload?.activeTargetId || ""), active_conversation_id: String(payload?.activeConversationId || "") }),
-  resultDetails: (result) => ({ result_profile_id: String(result?.profile_id || ""), result_conversation_id: String(result?.conversation_id || ""), result_target_id: String(result?.target_id || ""), navigation_target_id: String(result?.navigation?.target_id || ""), navigation_url: String(result?.navigation?.url || ""), activation_target_id: String(result?.activation?.target_id || ""), activation_window_id: String(result?.activation?.window_id || ""), activation_window_focused: Boolean(result?.activation?.window_focused), window_focused: Boolean(result?.window_focused || result?.window_focus?.ok), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed), window_focus: result?.window_focus || null })
+  resultDetails: (result) => ({ result_profile_id: String(result?.profile_id || ""), result_conversation_id: String(result?.conversation_id || ""), result_target_id: String(result?.target_id || ""), tab_created: Boolean(result?.tab_created), created_tab_id: String(result?.created_tab?.target_id || ""), navigation_target_id: String(result?.navigation?.target_id || ""), navigation_url: String(result?.navigation?.url || ""), activation_target_id: String(result?.activation?.target_id || ""), activation_window_id: String(result?.activation?.window_id || ""), activation_window_focused: Boolean(result?.activation?.window_focused), window_focused: Boolean(result?.window_focused || result?.window_focus?.ok), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed), window_focus: result?.window_focus || null })
 }, async (event, payload) => {
   const result = await openProfileChat(payload);
   const owner = BrowserWindow.fromWebContents(event.sender);
@@ -3585,7 +3603,9 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
       manager_preflight_ms: Number(value?.manager_preflight_ms) || 0,
       manager_total_ms: Number(value?.manager_total_ms) || 0,
       runtime_connection_source: String(value?.runtime_connection_source || ""),
-      profile_preflight_source: String(value?.profile_preflight_source || "")
+      profile_preflight_source: String(value?.profile_preflight_source || ""),
+      profile_had_chatgpt_tab: Boolean(value?.profile_had_chatgpt_tab),
+      chatgpt_tab_auto_opened: Boolean(value?.chatgpt_tab_auto_opened)
     };
   },
   resultDiagnostic: (result, payload) => {
