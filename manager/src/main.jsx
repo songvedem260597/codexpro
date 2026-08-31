@@ -384,7 +384,7 @@ function compactToolActivityMessages(messages) {
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.93";
+const WORKER_EXTENSION_VERSION = "0.5.94";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -4037,6 +4037,9 @@ function App() {
               const connectorUpdateRequired = Boolean(profile.connector_update_required);
               const connectorMessage = connectorInstalled ? "CodexPro READY" : profile.connector_message;
               const idle = profile.connected && profile.activity === "idle" && (connectorInstalled || !ready);
+              const noChatGpt = profile.connected && profile.activity === "no_chatgpt";
+              const noBrowserTabs = noChatGpt && Number(profile.tab_count || 0) === 0;
+              const chatGptTabCount = Math.max(0, Number(profile.chatgpt_tab_count) || 0);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
               const profileBorderState = profileCardBorderState({
                 connected: profile.connected,
@@ -4067,8 +4070,10 @@ function App() {
                       {settling && <span className="badge profile-settling">ĐANG HOÀN TẤT</span>}
                       {working && <WorkingBadge />}
                       {idle && <span className="badge connected">ĐANG RẢNH</span>}
+                      {noBrowserTabs && <span className="badge profile-missing">CHROME CHẠY NỀN</span>}
+                      {noChatGpt && !noBrowserTabs && <span className="badge profile-missing">CHƯA MỞ CHATGPT</span>}
                       {connectorUpdateRequired && <span className="badge profile-missing">CẦN CẬP NHẬT CONNECTOR</span>}
-                      {!connectorInstalled && !connectorUpdateRequired && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
+                      {!connectorInstalled && !connectorUpdateRequired && !profileChecking && !idle && !working && !settling && !noChatGpt && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
                       <span
                         className={`active-repo-chip ${repoLabel ? "" : "is-empty"}`}
                         title={repoTitle}
@@ -4080,7 +4085,7 @@ function App() {
                     <div className="profile-meta">
                       <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Mất heartbeat extension"}</span>
                       <span>v{profile.extension_version || "cũ"}</span>
-                      <span>{profile.tab_count} tab</span>
+                      <span>{chatGptTabCount} tab ChatGPT</span>
                       {connectorMessage && <span className={connectorInstalled ? "ready-text" : "profile-warning"}>{connectorMessage}</span>}
                     </div>
                     {profileTaskLabel && (

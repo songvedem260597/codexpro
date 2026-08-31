@@ -454,6 +454,15 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   }
   profile.lastSeen = Date.now();
   if (Array.isArray(body.tabs)) profile.tabs = body.tabs.slice(0, 500);
+  else if (Array.isArray(body.tab_inventory)) {
+    const existingTabsById = new Map(
+      profile.tabs.filter((tab: any) => Number.isInteger(Number(tab?.id))).map((tab: any) => [Number(tab.id), tab])
+    );
+    profile.tabs = body.tab_inventory
+      .slice(0, 500)
+      .filter((tab: any) => tab && typeof tab === "object" && Number.isInteger(Number(tab.id)))
+      .map((tab: any) => ({ ...(existingTabsById.get(Number(tab.id)) || {}), ...tab }));
+  }
   if (Array.isArray(body.recent_conversations)) profile.recentConversations = body.recent_conversations.slice(0, 3);
   const observedCodexProToolActivity = profile.tabs.some((tab: any) =>
     Boolean(tab?.busy || tab?.settling) && /^CodexPro đang\b/i.test(String(tab?.activity_text ?? "").trim())
