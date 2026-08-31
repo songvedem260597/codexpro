@@ -20,6 +20,45 @@ import { createChromeWorkerPlugin } from "./worker-plugins/chrome-worker-plugin.
 
 const execFileAsync = promisify(execFile);
 const workerPluginRegistry = new WorkerPluginRegistry();
+const pendingWorkerUpdates = new Map();
+let workerUpdateFlushTimer = null;
+
+function flushWorkerUpdates() {
+  workerUpdateFlushTimer = null;
+  const updates = [...pendingWorkerUpdates.values()];
+  pendingWorkerUpdates.clear();
+  if (!updates.length) return;
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) continue;
+    for (const update of updates) win.webContents.send("codexpro:worker-update", update);
+  }
+}
+
+function queueWorkerUpdate(update) {
+  const localWorkerId = String(update?.local_worker_id || "").trim();
+  if (!localWorkerId) return;
+  const activity = String(update?.activity || "idle");
+  pendingWorkerUpdates.set(`api:${localWorkerId}`, {
+    worker_id: `api:${localWorkerId}`,
+    activity,
+    current_task_id: activity === "working" ? String(update?.job_id || "") : "",
+    current_task_title: activity === "working" ? String(update?.task_title || "") : "",
+    last_task_id: String(update?.job_id || ""),
+    last_task_title: String(update?.task_title || ""),
+    last_request: String(update?.last_request || ""),
+    last_result: String(update?.result?.text || ""),
+    last_error: String(update?.error || ""),
+    stream_text: String(update?.stream_text || ""),
+    stream_revision: Math.max(0, Number(update?.stream_revision) || 0),
+    stream_phase: String(update?.stream_phase || ""),
+    stream_updated_at: String(update?.stream_updated_at || ""),
+    stream_tool_status: String(update?.stream_tool_status || ""),
+    finished_at: String(update?.finished_at || ""),
+    usage: update?.result?.usage
+  });
+  if (!workerUpdateFlushTimer) workerUpdateFlushTimer = setTimeout(flushWorkerUpdates, 40);
+}
+
 workerPluginRegistry.register(createChromeWorkerPlugin({
   sendRequest: (payload) => sendProfileRequest(payload),
   readResponse: (payload) => getProfileResponse(payload),
@@ -130,6 +169,7 @@ const managerSettingsFile = path.join(codexProHome, "manager-settings.json");
 const apiWorkerStore = createApiWorkerStore({ home: codexProHome, safeStorage });
 workerPluginRegistry.register(createApiWorkerPlugin({
   listConfigurations: () => apiWorkerStore.list(),
+  onUpdate: queueWorkerUpdate,
   createProvider: async ({ config }) => createProviderForApiWorker(config),
   createMcpClients: async ({ workerId }) => {
     const base = await readyRuntimeBaseStatus();

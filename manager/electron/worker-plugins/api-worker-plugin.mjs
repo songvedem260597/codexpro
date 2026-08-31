@@ -10,6 +10,13 @@ function localWorkerId(value) {
   return id;
 }
 
+function visibleDeltaText(value) {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (value.type && value.type !== "text") return "";
+  return String(value.text ?? value.delta ?? "");
+}
+
 function publicRun(state) {
   if (!state) return undefined;
   return {
@@ -21,12 +28,33 @@ function publicRun(state) {
     finished_at: state.finishedAt,
     result: state.result,
     error: state.error,
+    stream_text: state.streamText,
+    stream_revision: state.streamRevision,
+    stream_phase: state.streamPhase,
+    stream_updated_at: state.streamUpdatedAt,
+    stream_tool_status: state.streamToolStatus,
     events: state.events.slice(-50)
   };
 }
 
 export function createApiWorkerPlugin(options = {}) {
   const runs = new Map();
+  const publish = (workerConfigId, state) => {
+    if (runs.get(workerConfigId) !== state) return;
+    try {
+      options.onUpdate?.({ local_worker_id: workerConfigId, ...publicRun(state) });
+    } catch {
+      // A renderer update is advisory and must never fail the worker job.
+    }
+  };
+  const updateStream = (workerConfigId, state, patch = {}) => {
+    if (runs.get(workerConfigId) !== state || state.activity !== "working") return false;
+    Object.assign(state, patch);
+    state.streamRevision += 1;
+    state.streamUpdatedAt = new Date().toISOString();
+    publish(workerConfigId, state);
+    return true;
+  };
   const getConfigurations = typeof options.listConfigurations === "function"
     ? options.listConfigurations
     : async () => Array.isArray(options.configurations) ? options.configurations : [];
@@ -69,6 +97,11 @@ export function createApiWorkerPlugin(options = {}) {
           run_id: run?.jobId || "",
           last_task_id: run?.jobId || "",
           last_result: run?.result?.text || "",
+          stream_text: run?.streamText || "",
+          stream_revision: run?.streamRevision || 0,
+          stream_phase: run?.streamPhase || "idle",
+          stream_updated_at: run?.streamUpdatedAt || "",
+          stream_tool_status: run?.streamToolStatus || "",
           finished_at: run?.finishedAt || "",
           capabilities: ["send", "read", "stop", "tool-calling"],
           last_error: run?.error || "",
@@ -104,10 +137,16 @@ export function createApiWorkerPlugin(options = {}) {
         finishedAt: "",
         result: undefined,
         error: "",
+        streamText: "",
+        streamRevision: 0,
+        streamPhase: "preparing",
+        streamUpdatedAt: new Date().toISOString(),
+        streamToolStatus: "",
         events: [],
         controller
       };
       runs.set(workerConfigId, state);
+      publish(workerConfigId, state);
       const workerId = `api:${workerConfigId}`;
       let clients;
       let provider;
@@ -117,7 +156,11 @@ export function createApiWorkerPlugin(options = {}) {
       } catch (error) {
         state.error = clean(error?.message || error, 1000);
         state.activity = "failed";
+        state.streamPhase = "error";
+        state.streamRevision += 1;
+        state.streamUpdatedAt = new Date().toISOString();
         state.finishedAt = new Date().toISOString();
+        publish(workerConfigId, state);
         await Promise.allSettled([clients?.jobMcp?.close?.(), clients?.controlMcp?.close?.()]);
         throw error;
       }
@@ -137,7 +180,24 @@ export function createApiWorkerPlugin(options = {}) {
         messages: [...history, ...(Array.isArray(payload.messages) ? payload.messages : [])],
         limits: payload.limits,
         signal: controller.signal,
-        onDelta: payload.onDelta,
+        onPhase: (phase, details = {}) => updateStream(workerConfigId, state, {
+          streamPhase: clean(phase, 40) || "working",
+          streamToolStatus: phase === "tool" ? clean((details.names || []).join(", "), 300) : ""
+        }),
+        onVisibleTurnStart: () => updateStream(workerConfigId, state, {
+          streamText: "",
+          streamPhase: "streaming",
+          streamToolStatus: ""
+        }),
+        onVisibleDelta: (delta) => {
+          const text = visibleDeltaText(delta);
+          if (!text) return;
+          updateStream(workerConfigId, state, {
+            streamText: `${state.streamText}${text}`,
+            streamPhase: "streaming",
+            streamToolStatus: ""
+          });
+        },
         onTaskTitle: (title, bootstrap) => {
           state.title = clean(title, 56);
           state.root = clean(bootstrap?.root || state.root, 2048);
@@ -148,12 +208,22 @@ export function createApiWorkerPlugin(options = {}) {
         state.result = result;
         state.history = [...history, { role: "user", content: request }, { role: "assistant", content: clean(result?.text, 20_000) }].slice(-12);
         state.activity = "idle";
+        state.streamText = String(result?.text || "");
+        state.streamPhase = "complete";
+        state.streamToolStatus = "";
+        state.streamRevision += 1;
+        state.streamUpdatedAt = new Date().toISOString();
         state.finishedAt = new Date().toISOString();
+        publish(workerConfigId, state);
         return result;
       }).catch((error) => {
         state.error = clean(error?.message || error, 1000);
         state.activity = controller.signal.aborted ? "idle" : "failed";
+        state.streamPhase = controller.signal.aborted ? "cancelled" : "error";
+        state.streamRevision += 1;
+        state.streamUpdatedAt = new Date().toISOString();
         state.finishedAt = new Date().toISOString();
+        publish(workerConfigId, state);
       }).finally(async () => {
         await Promise.allSettled([clients.jobMcp?.close?.(), clients.controlMcp?.close?.()]);
       });

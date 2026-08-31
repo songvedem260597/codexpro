@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   deleteApiWorker: (id) => invoke("codexpro:delete-api-worker", id),
   testApiWorker: (id) => invoke("codexpro:test-api-worker", id),
   onBrowserProfiles: (callback) => subscribe("codexpro:browser-profiles", callback),
+  onWorkerUpdate: (callback) => subscribe("codexpro:worker-update", callback),
   controlServer: (action) => invoke("codexpro:control", action),
   copyText: (text) => invoke("codexpro:copy", text),
   logChatLayout: (payload) => ipcRenderer.send("codexpro:log-chat-layout", payload),
