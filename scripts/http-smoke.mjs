@@ -201,6 +201,14 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (!generalStatus.structuredContent.verified || generalStatus.structuredContent.task_kind !== 'general' || generalStatus.structuredContent.codexgraph_active !== false) {
       throw new Error(`general task title proof was not retained: ${JSON.stringify(generalStatus.structuredContent)}`);
     }
+    const generalWorkerStatus = await callTool(general, 'worker_job_status', { task_id: generalBegan.structuredContent.task_id });
+    if (!generalWorkerStatus.structuredContent.found || generalWorkerStatus.structuredContent.job?.policy_version !== 'worker-policy-v1' || generalWorkerStatus.structuredContent.job?.status !== 'running') {
+      throw new Error(`general task did not persist MCP worker policy evidence: ${JSON.stringify(generalWorkerStatus.structuredContent)}`);
+    }
+    const generalFinalized = await callTool(general, 'finalize_worker_job', { task_id: generalBegan.structuredContent.task_id, outcome: 'completed', summary: 'general fixture complete' });
+    if (!generalFinalized.structuredContent.finalized || generalFinalized.structuredContent.job?.status !== 'completed') {
+      throw new Error(`general task did not finalize through MCP policy: ${JSON.stringify(generalFinalized.structuredContent)}`);
+    }
     await general.close();
     clients.splice(clients.indexOf(general), 1);
     const direct = await createClient('repo-task-direct-chatgpt', 'direct-smoke');
@@ -216,6 +224,13 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     }
     const directRead = await callTool(direct, 'read', { path: 'task-workspace/gate.txt' });
     if (!directRead.structuredContent.text.includes('gate initial')) throw new Error('direct profile task remained blocked after begin_repo_task');
+    const directWorkerStatus = await callTool(direct, 'worker_job_status', { task_id: directBegan.structuredContent.task_id });
+    const directJob = directWorkerStatus.structuredContent.job;
+    if (!directJob?.rules_hash || !directJob?.agents_hash || !directJob?.codexgraph_active || directJob?.missing_obligations?.length) {
+      throw new Error(`code task did not retain rules/AGENTS/CodexGraph bootstrap evidence: ${JSON.stringify(directWorkerStatus.structuredContent)}`);
+    }
+    const directFinalized = await callTool(direct, 'finalize_worker_job', { task_id: directBegan.structuredContent.task_id, outcome: 'completed', summary: 'code fixture complete' });
+    if (directFinalized.structuredContent.job?.status !== 'completed') throw new Error(`code task did not finalize through MCP: ${JSON.stringify(directFinalized.structuredContent)}`);
     await direct.close();
     clients.splice(clients.indexOf(direct), 1);
     const actions = await callTool(gated, 'codexpro', { action: 'list_actions' });
@@ -268,7 +283,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (!preparedA.structuredContent.prepared) throw new Error('manager could not prepare repo task A');
     await expectToolErrorCode(gatedSibling, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
     for (const action of actionNames) {
-      if (action === 'begin_repo_task' || action === 'repo_task_status') continue;
+      if (['begin_repo_task', 'repo_task_status', 'worker_job_status', 'finalize_worker_job'].includes(action)) continue;
       await expectToolErrorCode(gated, 'codexpro', { action, args: {} }, 'BEGIN_REPO_TASK_REQUIRED');
     }
     await expectToolErrorCode(gated, 'edit', { path: 'gate.txt', old_text: 'gate initial', new_text: 'gate changed' }, 'BEGIN_REPO_TASK_REQUIRED');
@@ -815,7 +830,7 @@ try {
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);
   const queryToolNames = toolNames(queryTools);
-  for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+  for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'worker_job_status', 'finalize_worker_job', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
     if (!queryToolNames.includes(expected)) {
       throw new Error(`URL-token MCP tools/list missing ${expected}; got ${queryToolNames.join(', ')}`);
     }
