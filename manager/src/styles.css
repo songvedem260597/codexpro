@@ -245,6 +245,7 @@ section { margin-bottom: 38px; }
 .profile-title strong { font-size: 17px; }
 .profile-main > code { display: block; color: #778295; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .profile-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 7px 14px; margin-top: 9px; color: #929cad; font-size: 13px; }
+.profile-run-duration { color: #f2bd70; font-family: inherit; font-size: 12px; font-weight: 700; letter-spacing: .01em; }
 .profile-meta > span { display: inline-flex; align-items: center; gap: 6px; }
 .profile-meta .ready-text { color: #70d99a; }
 .profile-meta .profile-warning { color: #ffb26c; }

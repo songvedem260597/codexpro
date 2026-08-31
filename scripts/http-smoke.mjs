@@ -283,7 +283,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (!preparedA.structuredContent.prepared) throw new Error('manager could not prepare repo task A');
     await expectToolErrorCode(gatedSibling, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
     for (const action of actionNames) {
-      if (['begin_repo_task', 'repo_task_status', 'worker_job_status', 'finalize_worker_job'].includes(action)) continue;
+      if (['begin_repo_task', 'repo_task_status', 'worker_job_status', 'worker_job_history', 'finalize_worker_job'].includes(action)) continue;
       await expectToolErrorCode(gated, 'codexpro', { action, args: {} }, 'BEGIN_REPO_TASK_REQUIRED');
     }
     await expectToolErrorCode(gated, 'edit', { path: 'gate.txt', old_text: 'gate initial', new_text: 'gate changed' }, 'BEGIN_REPO_TASK_REQUIRED');
@@ -928,7 +928,7 @@ try {
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);
   const queryToolNames = toolNames(queryTools);
-  for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'worker_job_status', 'finalize_worker_job', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+  for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'worker_job_status', 'worker_job_history', 'finalize_worker_job', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
     if (!queryToolNames.includes(expected)) {
       throw new Error(`URL-token MCP tools/list missing ${expected}; got ${queryToolNames.join(', ')}`);
     }

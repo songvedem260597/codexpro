@@ -1,4 +1,5 @@
 import React, { useMemo } from "react";
+import { WorkerRunningDuration } from "./worker-running-duration.jsx";
 
 function bytes(value) {
   const size = Math.max(0, Number(value) || 0);
@@ -86,6 +87,47 @@ function Empty({ children }) {
   return <div className="control-empty">{children}</div>;
 }
 
+function terminalStateLabel(status) {
+  if (status === "completed") return "Hoàn thành";
+  if (status === "cancelled") return "Đã dừng";
+  if (status === "blocked") return "Bị chặn";
+  return "Thất bại";
+}
+
+function terminalWorkerLabel(job, profiles, workers) {
+  const workerId = String(job?.worker_id || "");
+  const profile = profiles.find((item) => item.profile_id === workerId);
+  if (profile) return profile.email || profile.label || `Chrome ${workerId.slice(0, 8)}`;
+  const worker = workers.find((item) => item.worker_id === workerId || item.local_worker_id === workerId);
+  return worker?.label || (workerId.startsWith("api:") ? workerId.slice(4) : "Worker CodexPro");
+}
+
+function TerminalTaskSection({ jobs, profiles, workers, projects, failed = false }) {
+  const title = failed ? "Task thất bại" : "Task hoàn thành";
+  return (
+    <section className={`control-section control-terminal-section ${failed ? "is-failed" : "is-completed"}`}>
+      <div className="control-section-head"><div><p className="eyebrow">{failed ? "FAILED TASKS" : "COMPLETED TASKS"}</p><h2>{title}</h2></div><span className="control-section-count">{jobs.length} task</span></div>
+      {!jobs.length ? <Empty>Chưa có {title.toLocaleLowerCase("vi-VN")}.</Empty> : <div className="control-terminal-list">
+        {jobs.map((job) => {
+          const project = projects.find((item) => String(item.root || "").toLowerCase() === String(job.root || "").toLowerCase());
+          return <article className={`control-terminal-task is-${job.status}`} key={job.job_id}>
+            <span className="control-terminal-state">{terminalStateLabel(job.status)}</span>
+            <div className="control-terminal-main">
+              <strong>{job.title || "Task CodexPro"}</strong>
+              <small>{terminalWorkerLabel(job, profiles, workers)} · {project?.name || project?.localName || (job.root ? String(job.root).split(/[\\/]/).at(-1) : "Tất cả vùng")}</small>
+              {job.error && <p>{job.error}</p>}
+            </div>
+            <div className="control-terminal-time">
+              <WorkerRunningDuration startedAt={job.started_at || job.prepared_at} finishedAt={job.finished_at || job.updated_at} />
+              <small>{relativeTime(job.finished_at || job.updated_at)}</small>
+            </div>
+          </article>;
+        })}
+      </div>}
+    </section>
+  );
+}
+
 export function ControlCenter({
   status,
   projects = [],
@@ -107,6 +149,10 @@ export function ControlCenter({
   onRestartServer
 }) {
   const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+  const workers = Array.isArray(status?.workers) ? status.workers : [];
+  const workerJobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
+  const completedTasks = workerJobs.filter((job) => job?.status === "completed");
+  const failedTasks = workerJobs.filter((job) => ["failed", "cancelled", "blocked"].includes(String(job?.status)));
   const tasks = useMemo(() => profiles
     .filter((profile) => {
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
@@ -172,7 +218,7 @@ export function ControlCenter({
                       <span className={task.root ? "ok" : "missing"}>{project?.name || project?.localName || (task.root ? task.root.split(/[\\/]/).at(-1) : "Workspace ?")}</span><b>→</b>
                       <span className={project?.repoFullName ? "ok" : "missing"}>{project?.repoFullName || task.profile.current_workspace_repo || "Repo ?"}</span>
                     </div>
-                    <small>{task.tab?.activity_text || `Bắt đầu ${relativeTime(task.startedAt)}`}</small>
+                    <div className="control-task-progress"><small>{task.tab?.activity_text || "CodexPro đang xử lý"}</small><WorkerRunningDuration startedAt={task.startedAt} /></div>
                     {project?.isGit && (
                       <div className="control-task-git" title={project.root || task.root}>
                         <span>{project.branch || "detached"}</span>
@@ -198,6 +244,11 @@ export function ControlCenter({
           </div>
         )}
       </section>
+
+      <div className="control-two-column control-task-history-grid">
+        <TerminalTaskSection jobs={completedTasks} profiles={profiles} workers={workers} projects={projects} />
+        <TerminalTaskSection jobs={failedTasks} profiles={profiles} workers={workers} projects={projects} failed />
+      </div>
 
       <div className="control-two-column">
         <section className="control-section">

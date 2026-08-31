@@ -102,6 +102,7 @@ export function createApiWorkerPlugin(options = {}) {
           stream_phase: run?.streamPhase || "idle",
           stream_updated_at: run?.streamUpdatedAt || "",
           stream_tool_status: run?.streamToolStatus || "",
+          started_at: run?.startedAt || "",
           finished_at: run?.finishedAt || "",
           capabilities: ["send", "read", "stop", "tool-calling"],
           last_error: run?.error || "",

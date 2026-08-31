@@ -23,6 +23,9 @@
 .control-task-main { min-width: 0; }
 .control-task-main > strong { display: block; overflow: hidden; color: #e9edf4; font-size: var(--font-title); font-weight: var(--weight-title); text-overflow: ellipsis; white-space: nowrap; }
 .control-task-main > small { display: block; margin-top: 6px; overflow: hidden; color: #8390a3; font-size: var(--font-description); text-overflow: ellipsis; white-space: nowrap; }
+.control-task-progress { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 7px; }
+.control-task-progress small { min-width: 0; overflow: hidden; color: #8390a3; font-size: var(--font-description); text-overflow: ellipsis; white-space: nowrap; }
+.control-task-progress .profile-run-duration { flex: 0 0 auto; color: #f2bd70; font-variant-numeric: tabular-nums; }
 .control-task-git { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; color: #9aa8bc; font-size: var(--font-micro); }
 .control-task-git span, .control-task-git b { padding: 3px 6px; border: 1px solid #2f3948; border-radius: 5px; background: #0c1118; font-weight: var(--weight-semibold); white-space: nowrap; }
 .control-task-git b { color: #ff9da8; border-color: #70343f; background: #281217; }
@@ -33,6 +36,20 @@
 .control-mapping-row b { color: #536074; font-size: 10px; }
 .control-task-actions { display: grid; grid-template-columns: repeat(2, minmax(72px, 1fr)); gap: 7px; }
 .control-task-actions .button { min-height: 34px; padding: 7px 10px; font-size: var(--font-description); }
+.control-terminal-list { display: grid; gap: 8px; max-height: 360px; overflow: auto; padding-right: 3px; }
+.control-terminal-task { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 11px 12px; border: 1px solid #2c3744; border-radius: 7px; background: #0e1319; }
+.control-terminal-task.is-completed { border-color: #28553c; box-shadow: inset 3px 0 0 #53d889; }
+.control-terminal-task.is-failed, .control-terminal-task.is-blocked, .control-terminal-task.is-cancelled { border-color: #65343c; box-shadow: inset 3px 0 0 #e35d6a; }
+.control-terminal-state { padding: 4px 7px; color: #9ee3b9; border: 1px solid #28553c; border-radius: 999px; background: #102319; font-size: var(--font-micro); font-weight: var(--weight-semibold); white-space: nowrap; }
+.control-terminal-task:not(.is-completed) .control-terminal-state { color: #ffabb5; border-color: #65343c; background: #281217; }
+.control-terminal-main { min-width: 0; }
+.control-terminal-main strong, .control-terminal-main small, .control-terminal-main p { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.control-terminal-main strong { color: #e4e9f1; font-size: var(--font-body); }
+.control-terminal-main small { margin-top: 3px; color: #7f8c9f; font-size: var(--font-description); }
+.control-terminal-main p { margin: 5px 0 0; color: #e78d98; font-size: var(--font-micro); }
+.control-terminal-time { display: grid; justify-items: end; gap: 3px; }
+.control-terminal-time .profile-run-duration { color: #d7e0ec; font-size: var(--font-body); font-variant-numeric: tabular-nums; }
+.control-terminal-time small { color: #6f7d92; font-size: var(--font-micro); white-space: nowrap; }
 .control-warning { margin-top: 10px; padding: 8px 10px; color: #f1c17d; border: 1px solid #5f4826; border-radius: 6px; background: #21190d; font-size: var(--font-description); line-height: 1.45; }
 .control-empty { padding: 26px 14px; color: #728096; border: 1px dashed #2d3746; border-radius: 7px; text-align: center; font-size: var(--font-description); }
 .performance-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
@@ -103,5 +120,7 @@
   .performance-grid { grid-template-columns: 1fr; }
   .control-task-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .repo-safety-row { grid-template-columns: 1fr; }
+  .control-terminal-task { grid-template-columns: auto minmax(0, 1fr); }
+  .control-terminal-time { grid-column: 1 / -1; grid-auto-flow: column; justify-content: space-between; justify-items: start; width: 100%; }
   .repo-safety-stats { flex-wrap: wrap; }
 }

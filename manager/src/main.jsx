@@ -31,6 +31,7 @@ import { CodeGraphView } from "./code-graph-view.jsx";
 import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
 import { ControlCenter } from "./control-center.jsx";
 import { LatestMessagePanel } from "./latest-message-panel.jsx";
+import { WorkerRunningDuration } from "./worker-running-duration.jsx";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -821,7 +822,7 @@ function ApiWorkerCards({ workers, customImages, onRun, onStop }) {
             <span className="badge">{worker.provider}</span>
             {worker.activity === "working" ? <WorkingBadge /> : <span className={`badge ${worker.connected ? "connected" : "profile-missing"}`}>{worker.connected ? "ĐANG RẢNH" : "THIẾU KEY"}</span>}
           </div>
-          <code>{worker.worker_id}</code>
+          {worker.activity === "working" && <WorkerRunningDuration startedAt={worker.started_at} />}
           <div className="profile-meta"><span><Dot ok={worker.connected} />{worker.model}</span><span>MCP-ONLY</span></div>
           {(worker.current_task_title || worker.last_task_title) && <div className="profile-task-summary"><span>{worker.activity === "working" ? "Task hiện tại" : "Task gần nhất"}</span><strong>{worker.current_task_title || worker.last_task_title}</strong></div>}
           {worker.last_error && <div className="profile-warning">{worker.last_error}</div>}
@@ -3811,7 +3812,7 @@ function App() {
                       {!connectorInstalled && !connectorUpdateRequired && !profileChecking && !idle && !working && !settling && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
                       {profile.connected && profileRepository?.label && <span className="active-repo-chip" title={profileRepository.title}>{profileRepository.label}</span>}
                     </div>
-                    <code>{profile.email ? profile.label : profile.profile_id}</code>
+                    {(working || settling) && <WorkerRunningDuration startedAt={profile.busy_since || liveTab?.network_last_started_at} />}
                     <div className="profile-meta">
                       <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Mất heartbeat extension"}</span>
                       <span>v{profile.extension_version || "cũ"}</span>

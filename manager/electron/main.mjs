@@ -53,6 +53,7 @@ function queueWorkerUpdate(update) {
     stream_phase: String(update?.stream_phase || ""),
     stream_updated_at: String(update?.stream_updated_at || ""),
     stream_tool_status: String(update?.stream_tool_status || ""),
+    started_at: String(update?.started_at || ""),
     finished_at: String(update?.finished_at || ""),
     usage: update?.result?.usage
   });
@@ -2106,8 +2107,9 @@ async function runtimeBaseStatus(options = {}) {
 
 async function runtimeStatus(options = {}) {
   const base = await runtimeBaseStatus(options);
-  const browserProfilesRaw = base.local.ok
-    ? await listBrowserProfilesThroughMcp(base.config, base.token).catch((error) => {
+  const [browserProfilesRaw, workerJobs] = base.local.ok
+    ? await Promise.all([
+      listBrowserProfilesThroughMcp(base.config, base.token).catch((error) => {
         if (diagnosticAllowed(`runtime-list-profiles:${String(error?.message || error).slice(0, 160)}`, 30_000)) {
           diagnostic("warn", "manager", "profile", `Không đọc được danh sách profile trong runtime status: ${error?.message || String(error)}`, {
             action: "runtime-list-profiles-fallback",
@@ -2115,8 +2117,13 @@ async function runtimeStatus(options = {}) {
           });
         }
         return [];
-      })
-    : [];
+      }),
+      localMcpTool(base.config, base.token, "worker_job_history", {
+        statuses: ["completed", "failed", "cancelled", "blocked"],
+        limit: 60
+      }).then((result) => Array.isArray(result?.jobs) ? result.jobs : []).catch(() => [])
+    ])
+    : [[], []];
   const browserProfiles = await Promise.all(browserProfilesRaw.map(async (profile) => {
     const workspaceRoot = String(profile.current_workspace_root || "").trim();
     if (!workspaceRoot) return { ...profile, current_workspace_repo: "" };
@@ -2133,6 +2140,7 @@ async function runtimeStatus(options = {}) {
     browserProfiles,
     workers: workerStatus.workers,
     workerSources: workerStatus.sources,
+    workerJobs,
     mcpLink: base.mcpLink,
     tokenConfigured: base.tokenConfigured,
     autoStart: base.autoStart
