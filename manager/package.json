@@ -13,6 +13,7 @@
     "test:worker-packs": "node scripts/worker-pack-assets-smoke.mjs",
     "test:diagnostic": "node scripts/diagnostic-log-smoke.mjs && node scripts/runtime-health-diagnostic-smoke.mjs && node scripts/operations-metrics-smoke.mjs",
     "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs",
+    "test:chat-response-finality": "node scripts/chat-response-finality-smoke.mjs",
     "test:runtime-restart": "node scripts/runtime-restart-send-race-smoke.mjs",
     "test:mcp-response-queue": "node scripts/mcp-response-queue-smoke.mjs",
     "test:api-worker-form": "node scripts/api-worker-form-smoke.mjs",

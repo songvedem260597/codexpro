@@ -26,8 +26,10 @@ export function shouldShowChatBusy({ networkState, tabBusy, responseCurrent, res
   return networkState === "generating" || Boolean(responseCurrent && responseBusy);
 }
 
-export function shouldShowChatSettling({ networkState, tabSettling, responseCurrent, responseIncomplete }) {
+export function shouldShowChatSettling({ networkState, tabSettling, responseCurrent, responseIncomplete, responseReady = false, awaitingAssistant = false, finalityPending = false }) {
   if (tabSettling) return true;
+  if (responseCurrent && finalityPending) return true;
+  if (networkState === "completed" && responseCurrent && !responseReady && awaitingAssistant) return true;
   if (isTerminalChatNetworkState(networkState)) return false;
   return Boolean(responseCurrent && responseIncomplete);
 }
