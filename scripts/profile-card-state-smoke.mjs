@@ -24,5 +24,11 @@ assert.deepEqual(profileChromeActionState({ profile: { connected: true, chatgpt_
   label: "Mở ChatGPT",
   title: "Mở một tab ChatGPT mới trong đúng Chrome profile"
 }, "an online profile without a ChatGPT tab must remain actionable");
+assert.deepEqual(profileChromeActionState({ profile: newChatProfile, busy: "", rendererUnresponsive: true }), {
+  target: newChatProfile.chatgpt_tabs[0],
+  disabled: false,
+  label: "Khôi phục tab",
+  title: "Đóng tab renderer bị treo và tạo một chat ChatGPT mới"
+}, "a hung profile must offer a fresh chat instead of reopening the broken conversation");
 
 console.log("✓ Profile card state smoke test passed");

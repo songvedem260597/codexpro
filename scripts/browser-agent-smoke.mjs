@@ -450,9 +450,9 @@ assert.doesNotMatch(worker, /if\(action==='press'\)\{\s*const target=\{tabId:tab
 const openProfileChat = managerMain.slice(managerMain.indexOf("async function openProfileChat"), managerMain.indexOf("async function reloadChromeProfiles"));
 assert.match(openProfileChat, /if \(!resolvedTargetId\)[\s\S]*?action: "open_tab"[\s\S]*?url: conversationId \? `https:\/\/chatgpt\.com\/c\/\$\{conversationId\}` : "https:\/\/chatgpt\.com\/"/, "Manager must create a ChatGPT tab in the selected online profile when none is open");
 assert.match(openProfileChat, /action: "activate_tab"[\s\S]*?}, 32000\)/, "Manager must wait longer than the 25-second extension bridge command timeout");
-assert.match(openProfileChat, /catch \(error\) \{\s*activationError = error;\s*\}[\s\S]*?focusChromeWindow\(title\)/, "a delayed activate acknowledgement must still verify whether Chrome actually opened");
+assert.match(openProfileChat, /catch \(error\) \{[\s\S]*?else \{\s*activationError = error;\s*\}[\s\S]*?focusChromeWindow\(title/, "a delayed non-stale activate acknowledgement must still verify whether Chrome actually opened");
 assert.match(openProfileChat, /activation_acknowledgement_delayed: Boolean\(activationError\)/, "open-profile diagnostics must expose delayed activation acknowledgements");
-assert.match(openProfileChat, /let navigation = null[\s\S]*?navigation = await localMcpTool[\s\S]*?target_conversation_id: targetConversationId[\s\S]*?navigation,\s*activation:/, "open-profile results must preserve navigation and target-selection evidence");
+assert.match(openProfileChat, /let navigation = null[\s\S]*?navigation = await localMcpTool[\s\S]*?target_conversation_id: staleTargetRecovered \? "" : targetConversationId[\s\S]*?navigation,\s*activation:/, "open-profile results must preserve navigation evidence and clear a stale conversation after fresh-chat fallback");
 assert.match(managerMain, /codexpro:open-profile-chat[\s\S]*?logSuccess: true[\s\S]*?selection_reason:[\s\S]*?activation_target_id:[\s\S]*?window_focus:/, "every successful open-profile request must persist the requested target and actual activation evidence");
 assert.match(managerUi, /action: "profile-tab-open-selection"[\s\S]*?tab_candidates:[\s\S]*?action: "profile-tab-open-result"[\s\S]*?activation_target_id:[\s\S]*?action: "profile-tab-open-error"/, "renderer diagnostics must capture tab candidates, selection reason, activation result, and failures");
 assert.match(managerUi, /className="button primary profile-chat"[\s\S]*?disabled=\{!profile\.connected \|\| !connectorInstalled\}[\s\S]*?CodexPro sẽ tự mở tab ChatGPT khi gửi/, "an online prepared profile must allow opening the composer before a ChatGPT tab exists");
@@ -664,7 +664,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.90");
+assert.equal(manifest.version, "0.5.91");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");

@@ -21,7 +21,7 @@ export function profileChromeActionState({ profile, busy, rendererUnresponsive }
       target,
       disabled: Boolean(busy) || !open,
       label: "Khôi phục tab",
-      title: "Đóng tab renderer bị treo và mở lại đúng conversation trong một tab mới"
+      title: "Đóng tab renderer bị treo và tạo một chat ChatGPT mới"
     };
   }
   return {

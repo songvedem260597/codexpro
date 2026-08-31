@@ -231,7 +231,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.90";
+const WORKER_EXTENSION_VERSION = "0.5.91";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -3261,6 +3261,10 @@ $foregroundMatch=($foreground -eq $found)
   }
 }
 
+function isMissingChromeTabError(error) {
+  return /No tab with id|tab (?:was )?(?:closed|removed|not found)|không (?:còn|tìm thấy) tab/i.test(error instanceof Error ? error.message : String(error || ""));
+}
+
 async function openProfileChat(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
@@ -3280,6 +3284,18 @@ async function openProfileChat(payload) {
 
   let resolvedTargetId = targetId;
   let createdTab = null;
+  let staleTargetRecovered = false;
+  const openFreshChat = async () => {
+    createdTab = await localMcpTool(base.config, token, "browser_control", {
+      action: "open_tab",
+      profile_id: profileId,
+      url: "https://chatgpt.com/"
+    }, 30000);
+    resolvedTargetId = String(createdTab?.target_id ?? "").trim();
+    if (!/^\d+$/.test(resolvedTargetId)) throw new Error("Đã yêu cầu tạo chat mới nhưng extension không trả về tab mới.");
+    staleTargetRecovered = true;
+    return createdTab;
+  };
   if (!resolvedTargetId) {
     createdTab = await localMcpTool(base.config, token, "browser_control", {
       action: "open_tab",
@@ -3292,12 +3308,17 @@ async function openProfileChat(payload) {
 
   let navigation = null;
   if (!createdTab && conversationId && targetConversationId !== conversationId) {
-    navigation = await localMcpTool(base.config, token, "browser_control", {
-      action: "navigate",
-      profile_id: profileId,
-      target_id: resolvedTargetId,
-      url: `https://chatgpt.com/c/${conversationId}`
-    }, 30000);
+    try {
+      navigation = await localMcpTool(base.config, token, "browser_control", {
+        action: "navigate",
+        profile_id: profileId,
+        target_id: resolvedTargetId,
+        url: `https://chatgpt.com/c/${conversationId}`
+      }, 30000);
+    } catch (error) {
+      if (!isMissingChromeTabError(error)) throw error;
+      await openFreshChat();
+    }
   }
 
   let activation = null;
@@ -3309,7 +3330,16 @@ async function openProfileChat(payload) {
       target_id: resolvedTargetId
     }, 32000);
   } catch (error) {
-    activationError = error;
+    if (!createdTab && isMissingChromeTabError(error)) {
+      await openFreshChat();
+      activation = await localMcpTool(base.config, token, "browser_control", {
+        action: "activate_tab",
+        profile_id: profileId,
+        target_id: resolvedTargetId
+      }, 32000);
+    } else {
+      activationError = error;
+    }
   }
 
   let windowFocus = await focusChromeWindow(title || createdTab?.title || "ChatGPT");
@@ -3334,14 +3364,15 @@ async function openProfileChat(payload) {
   return {
     ok: true,
     profile_id: profileId,
-    conversation_id: conversationId || targetConversationId,
+    conversation_id: staleTargetRecovered ? "" : conversationId || targetConversationId,
     target_id: Number(resolvedTargetId),
-    target_conversation_id: targetConversationId,
+    target_conversation_id: staleTargetRecovered ? "" : targetConversationId,
     target_title: title,
     selection_reason: selectionReason,
     active_target_id: activeTargetId,
     active_conversation_id: activeConversationId,
     tab_created: Boolean(createdTab),
+    stale_target_recovered: staleTargetRecovered,
     created_tab: createdTab,
     navigation,
     activation: activation || { ok: true, acknowledgement_delayed: true },
@@ -3356,16 +3387,19 @@ async function recoverProfileChatTab(payload) {
   const targetId = String(payload?.targetId ?? "").trim();
   const title = String(payload?.title || "").trim();
   const silent = payload?.silent === true;
+  const newChat = payload?.newChat === true;
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
-  if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat cần khôi phục không hợp lệ.");
-  if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome cần khôi phục.");
-  const base = await readyRuntimeBaseStatus();
-  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat cần khôi phục không hợp lệ.");
+  if (!newChat && (!targetId || !/^\d+$/.test(targetId))) throw new Error("Không tìm thấy tab Chrome cần khôi phục.");
+  if (targetId && !/^\d+$/.test(targetId)) throw new Error("Tab Chrome cần khôi phục không hợp lệ.");
+  const base = await runtimeConnectionForSend();
+  if (!base?.config?.port || !base?.token) throw new Error("Local MCP chưa sẵn sàng.");
   const result = await localMcpTool(base.config, base.token, "browser_control", {
     action: "recover_chat_tab",
     profile_id: profileId,
-    conversation_id: conversationId,
-    target_id: targetId
+    conversation_id: conversationId || undefined,
+    target_id: targetId || undefined,
+    new_chat: newChat
   }, 60000);
   const windowFocus = silent ? { ok: false, skipped: true, source: "auto-recovery" } : await focusChromeWindow(title);
   return { ...result, window_focus: windowFocus };
