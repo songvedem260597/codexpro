@@ -15,6 +15,7 @@
     "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:extension-sync": "node scripts/extension-sync-smoke.mjs",
+    "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "dist:mac": "npm run build && electron-builder --mac dmg zip",
