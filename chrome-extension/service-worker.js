@@ -29,7 +29,7 @@ const ATTACHMENT_UPLOAD_TIMEOUT_MS = 30000;
 const ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS = 2500;
 const CONVERSATION_LIMIT_PROBE_TIMEOUT_MS = 1500;
 const PENDING_CONVERSATION_TTL_MS = 60 * 1000;
-const MAX_CHATGPT_TABS = 6;
+const MAX_CHATGPT_TABS = 3;
 const CHAT_TAB_CLEANUP_INTERVAL_MS = 30 * 1000;
 const CHAT_TAB_HEALTH_TIMEOUT_MS = 1200;
 const CHAT_TAB_HEALTH_FAILURES_TO_CLOSE = 2;
@@ -52,6 +52,7 @@ const chatAttachmentOwnershipByTab = new Map();
 const chatDomActivityByTab = new Map();
 const chatTabHealthByTab = new Map();
 let lastChatTabCleanupAt = 0;
+let chatTabCreationTail = Promise.resolve();
 let chatNetworkStateLoaded = false;
 let chatNetworkStateLoadPromise = null;
 let chatAttachmentOwnershipLoaded = false;
@@ -109,6 +110,7 @@ async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
   const now=Date.now();
   if(options.force!==true&&now-lastChatTabCleanupAt<CHAT_TAB_CLEANUP_INTERVAL_MS)return {skipped:true,closed_count:0};
   lastChatTabCleanupAt=now;
+  const maxTabs=Math.max(1,Number(options.maxTabs)||MAX_CHATGPT_TABS);
   await ensureChatAttachmentOwnershipLoaded();
   const rawTabs=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(tab=>Number.isInteger(tab.id));
   const liveIds=new Set(rawTabs.map(tab=>tab.id));
@@ -132,7 +134,7 @@ async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
     return {...tab,...summary,last_accessed:Number(tab.lastAccessed)||0,pending,health_failures:Number(chatTabHealthByTab.get(tab.id)?.failures||0)};
   });
   const plan=planChatTabCleanup(policyTabs,{
-    maxTabs:MAX_CHATGPT_TABS,
+    maxTabs,
     recentConversationIds:(Array.isArray(recentConversations)?recentConversations:[]).map(item=>item?.id)
   });
   const closed=[];
@@ -151,11 +153,41 @@ async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
     }catch{}
   }
   if(closed.length){
-    await chrome.storage.local.set({codexproChatTabCleanup:{at:new Date().toISOString(),max_tabs:MAX_CHATGPT_TABS,closed}}).catch(()=>{});
+    await chrome.storage.local.set({codexproChatTabCleanup:{at:new Date().toISOString(),max_tabs:maxTabs,closed}}).catch(()=>{});
     recentConversationCache={at:0,items:[]};
     scheduleRealtimeProfilePush(0);
   }
   return {...plan,closed,closed_count:closed.length};
+}
+
+async function serializeChatGptTabCreation(operation) {
+  const previous=chatTabCreationTail;
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const tail=previous.catch(()=>{}).then(()=>gate);
+  chatTabCreationTail=tail;
+  await previous.catch(()=>{});
+  try{return await operation();}
+  finally{
+    release();
+    if(chatTabCreationTail===tail)chatTabCreationTail=Promise.resolve();
+  }
+}
+
+async function createChatGptTab(createArgs={}) {
+  const url=String(createArgs?.url||'https://chatgpt.com/');
+  if(!isChatGptTabUrl(url))return await chrome.tabs.create(createArgs);
+  return await serializeChatGptTabCreation(async()=>{
+    let current=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(tab=>Number.isInteger(tab.id));
+    if(current.length>=MAX_CHATGPT_TABS){
+      const summaries=await tabList();
+      const recentConversations=await recentConversationList(MAX_CHATGPT_TABS);
+      await cleanupChatGptTabs(summaries,recentConversations,{force:true,maxTabs:MAX_CHATGPT_TABS-1});
+      current=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(tab=>Number.isInteger(tab.id));
+    }
+    if(current.length>=MAX_CHATGPT_TABS)throw new Error(`CHAT_TAB_LIMIT_REACHED: Worker chỉ cho phép tối đa ${MAX_CHATGPT_TABS} tab ChatGPT; các tab hiện tại đều đang hoạt động hoặc được bảo vệ.`);
+    return await chrome.tabs.create(createArgs);
+  });
 }
 
 function isChatGenerationRequest(details) {
@@ -1886,7 +1918,7 @@ async function execute(command) {
         replaced=await replaceUnresponsiveChatTab(tab,'https://chatgpt.com/',45000,{carryState:false});
       }else{
         if(Number.isInteger(requestedId))await releaseChatDebuggerForRecovery(requestedId);
-        let replacement=await chrome.tabs.create({url:'https://chatgpt.com/',active:true});
+        let replacement=await createChatGptTab({url:'https://chatgpt.com/',active:true});
         await waitForTab(replacement.id,45000);
         replacement=await chrome.tabs.get(replacement.id);
         await ensureChatNetworkStreamCapture(replacement.id);
@@ -1922,7 +1954,7 @@ async function execute(command) {
     const tabs=await chrome.tabs.query({});
     const conversations=tabs.filter(candidate=>candidate.id&&String(candidate.url||'').startsWith('https://chatgpt.com/c/'));
     let tab=newChat
-      ? await chrome.tabs.create({url:'https://chatgpt.com/',active:false})
+      ? await createChatGptTab({url:'https://chatgpt.com/',active:false})
       : conversationId
         ? conversations.find(candidate=>{try{return new URL(candidate.url).pathname==='/c/'+conversationId;}catch{return false;}})
         : Number.isInteger(requestedId)
@@ -1932,7 +1964,7 @@ async function execute(command) {
     if(!tab&&conversationId){
       const recent=await recentConversationList(3);
       if(!recent.some(conversation=>conversation.id===conversationId))throw new Error('Đoạn chat không còn thuộc 3 chat gần nhất của profile này.');
-      tab=await chrome.tabs.create({url:'https://chatgpt.com/c/'+conversationId,active:false});await waitForTab(tab.id,Math.max(1000,Math.min(45000,remainingCommandMs()-2000)));tab=await chrome.tabs.get(tab.id);
+      tab=await createChatGptTab({url:'https://chatgpt.com/c/'+conversationId,active:false});await waitForTab(tab.id,Math.max(1000,Math.min(45000,remainingCommandMs()-2000)));tab=await chrome.tabs.get(tab.id);
     }
     if(!tab?.id)throw new Error('Profile này không có đoạn chat dự án đang mở.');
     const targetConversationId=newChat?'':conversationId||conversationIdFromUrl(tab.url);
@@ -2215,7 +2247,7 @@ if(action==='rename_chat'){
     if(!tab){
       const recent=await recentConversationList(3);
       if(!recent.some(conversation=>conversation.id===conversationId))throw new Error('Đoạn chat không còn thuộc 3 chat gần nhất của profile này.');
-      tab=await chrome.tabs.create({url:`https://chatgpt.com/c/${conversationId}`,active:false});await waitForTab(tab.id,45000);tab=await chrome.tabs.get(tab.id);
+      tab=await createChatGptTab({url:`https://chatgpt.com/c/${conversationId}`,active:false});await waitForTab(tab.id,45000);tab=await chrome.tabs.get(tab.id);
     }
     if(!tab?.id)throw new Error('Không mở được đoạn chat cần đọc phản hồi.');
     addResponsePhaseTiming('find_tab_ms',findTabStartedAt);
@@ -2439,7 +2471,7 @@ if(action==='rename_chat'){
       },{dom:{ok:false,error:String(error?.message||error)},canonical,networkStream});
     }
   }
-  if(action==='open_tab'){const tab=await chrome.tabs.create({url:args.url,active:false});return {action,target_id:tab.id,title:tab.title||'',url:tab.url||args.url,background:true};}
+  if(action==='open_tab'){const tab=await createChatGptTab({url:args.url,active:false});return {action,target_id:tab.id,title:tab.title||'',url:tab.url||args.url,background:true};}
   const tab=await targetTab(args);
   if(action==='activate_tab'){
     await chrome.tabs.update(tab.id,{active:true});
@@ -2576,7 +2608,20 @@ async function replaceUnresponsiveChatTab(tab,recoveryUrl,timeoutMs=45000,option
   const replacedTabId=tab.id;
   const createArgs={url:safeUrl,active:Boolean(tab.active)};
   if(Number.isInteger(tab.windowId))createArgs.windowId=tab.windowId;
-  let replacement=await chrome.tabs.create(createArgs);
+  await ensureChatNetworkStateLoaded();
+  const previousState=chatNetworkStateByTab.get(replacedTabId);
+  const previousPosts=chatNetworkPostLogByTab.get(replacedTabId);
+  const previousVersion=chatNetworkPostVersionByTab.get(replacedTabId);
+  let replacedTabRemoved=false;
+  let replacement=await serializeChatGptTabCreation(async()=>{
+    const current=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(candidate=>Number.isInteger(candidate.id));
+    if(current.length>=MAX_CHATGPT_TABS){
+      await releaseChatDebuggerForRecovery(replacedTabId);
+      await chrome.tabs.remove(replacedTabId);
+      replacedTabRemoved=true;
+    }
+    return await chrome.tabs.create(createArgs);
+  });
   try{
     await waitForTab(replacement.id,timeoutMs);
     replacement=await chrome.tabs.get(replacement.id);
@@ -2585,15 +2630,14 @@ async function replaceUnresponsiveChatTab(tab,recoveryUrl,timeoutMs=45000,option
     await chrome.tabs.remove(replacement.id).catch(()=>{});
     throw error;
   }
-  await ensureChatNetworkStateLoaded();
-  const previousState=chatNetworkStateByTab.get(replacedTabId);
-  const previousPosts=chatNetworkPostLogByTab.get(replacedTabId);
-  const previousVersion=chatNetworkPostVersionByTab.get(replacedTabId);
   if(carryState&&previousState)chatNetworkStateByTab.set(replacement.id,{...previousState});
   if(carryState&&previousPosts)chatNetworkPostLogByTab.set(replacement.id,[...previousPosts]);
   if(carryState&&previousVersion)chatNetworkPostVersionByTab.set(replacement.id,previousVersion);
   pendingConversationByTab.delete(replacedTabId);
-  await chrome.tabs.remove(replacedTabId);
+  if(!replacedTabRemoved){
+    await releaseChatDebuggerForRecovery(replacedTabId);
+    await chrome.tabs.remove(replacedTabId);
+  }
   await persistChatNetworkState();
   recentConversationCache={at:0,items:[]};
   scheduleRealtimeProfilePush(0);
@@ -2628,7 +2672,7 @@ async function openChatGpt(url) {
   // the ChatGPT home route. Use an already-open matching route or create a fresh tab.
   const tab=reusable
     ? await chrome.tabs.update(reusable.id,{active:true})
-    : await chrome.tabs.create({url,active:true});
+    : await createChatGptTab({url,active:true});
   if(tab.windowId)await chrome.windows.update(tab.windowId,{focused:true});
   const loaded=await new Promise((resolve,reject)=>{
     const matches=candidate=>{try{return candidate?.status==='complete'&&new URL(String(candidate.url||'')).pathname===wantedPath;}catch{return false;}};
@@ -2804,7 +2848,7 @@ async function checkConnectorInstalled() {
   const profile=await profileInfo();
   const connector=await connectorInfo(profile);
   const [previousActive]=await chrome.tabs.query({active:true,currentWindow:true});
-  const tab=await chrome.tabs.create({url:connector.settings_url || 'https://chatgpt.com/plugins?q=CodexPro',active:true});
+  const tab=await createChatGptTab({url:connector.settings_url || 'https://chatgpt.com/plugins?q=CodexPro',active:true});
   try{
     if(tab.windowId)await chrome.windows.update(tab.windowId,{focused:true});
     await waitForTab(tab.id);
