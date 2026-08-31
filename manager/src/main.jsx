@@ -25,6 +25,7 @@ import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
 import { mergeBrowserProfilePayload, sameProjectList } from "./ui-performance.js";
+import { createApiWorkerDraft, switchApiWorkerProvider, validateApiWorkerDraft } from "./api-worker-form.js";
 import { CodeGraphView } from "./code-graph-view.jsx";
 import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
 import { ControlCenter } from "./control-center.jsx";
@@ -795,25 +796,40 @@ function ChatRequestComposer({
   );
 }
 
-const EMPTY_API_WORKER = { id: "", label: "", provider: "9router", base_url: "http://localhost:20128/v1", model: "", api_key: "", enabled: true };
-
 function ApiWorkerSettings({ onChanged, notify, onError }) {
   const [configs, setConfigs] = useState([]);
-  const [draft, setDraft] = useState(EMPTY_API_WORKER);
+  const [draft, setDraft] = useState(() => createApiWorkerDraft());
+  const [editingId, setEditingId] = useState("");
   const [busy, setBusy] = useState("");
   const load = useCallback(async () => {
-    try { setConfigs(await api.listApiWorkers?.() || []); }
+    try {
+      const next = await api.listApiWorkers?.() || [];
+      setConfigs(next);
+      return next;
+    }
     catch (error) { onError(error); }
+    return [];
   }, [onError]);
   useEffect(() => { void load(); }, [load]);
   const update = (key, value) => setDraft((current) => ({ ...current, [key]: value }));
-  const edit = (config) => setDraft({ ...EMPTY_API_WORKER, ...config, api_key: "" });
+  const createNew = () => {
+    setEditingId("");
+    setDraft(createApiWorkerDraft("9router", configs.map((item) => item.id)));
+  };
+  const edit = (config) => {
+    setEditingId(config.id);
+    setDraft({ ...createApiWorkerDraft(config.provider), ...config, api_key: "" });
+  };
+  const credentialAvailable = Boolean(editingId && configs.find((item) => item.id === editingId)?.credential_available);
+  const validation = validateApiWorkerDraft(draft, { configs, editingId, credentialAvailable });
   const save = async () => {
+    if (!validation.valid) return;
     setBusy("save");
     try {
       await api.saveApiWorker(draft);
-      setDraft(EMPTY_API_WORKER);
-      await load();
+      const next = await load();
+      setEditingId("");
+      setDraft(createApiWorkerDraft("9router", next.map((item) => item.id)));
       await onChanged?.();
       notify("Đã lưu API worker bằng kho bí mật của hệ điều hành");
     } catch (error) { onError(error); }
@@ -831,8 +847,11 @@ function ApiWorkerSettings({ onChanged, notify, onError }) {
     setBusy(`delete:${id}`);
     try {
       await api.deleteApiWorker(id);
-      if (draft.id === id) setDraft(EMPTY_API_WORKER);
-      await load();
+      const next = await load();
+      if (editingId === id) {
+        setEditingId("");
+        setDraft(createApiWorkerDraft("9router", next.map((item) => item.id)));
+      }
       await onChanged?.();
       notify("Đã xóa API worker và credential mã hóa");
     } catch (error) { onError(error); }
@@ -845,14 +864,14 @@ function ApiWorkerSettings({ onChanged, notify, onError }) {
         <span className="global-rules-badge">MCP-ONLY</span>
       </div>
       <div className="api-worker-form">
-        <label><span>ID worker</span><input value={draft.id} disabled={Boolean(configs.find((item) => item.id === draft.id))} placeholder="9router-main" onChange={(event) => update("id", event.target.value)} /></label>
+        <label><span>ID worker · bắt buộc</span><input value={draft.id} disabled={Boolean(editingId)} placeholder="9router-main" onChange={(event) => update("id", event.target.value)} /></label>
         <label><span>Tên hiển thị</span><input value={draft.label} placeholder="9Router chính" onChange={(event) => update("label", event.target.value)} /></label>
-        <label><span>Provider</span><select value={draft.provider} onChange={(event) => update("provider", event.target.value)}><option value="9router">9Router</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
-        <label><span>Model</span><input value={draft.model} placeholder="cc/claude-opus-4-6" onChange={(event) => update("model", event.target.value)} /></label>
-        <label className="api-worker-wide"><span>Base URL</span><input value={draft.base_url} placeholder="http://localhost:20128/v1" onChange={(event) => update("base_url", event.target.value)} /></label>
-        <label className="api-worker-wide"><span>API key {configs.find((item) => item.id === draft.id)?.credential_available ? "(để trống để giữ key hiện tại)" : ""}</span><input type="password" autoComplete="new-password" value={draft.api_key} placeholder="Được mã hóa bằng kho bí mật của hệ điều hành" onChange={(event) => update("api_key", event.target.value)} /></label>
+        <label><span>Provider</span><select value={draft.provider} onChange={(event) => setDraft((current) => switchApiWorkerProvider(current, event.target.value, configs.map((item) => item.id)))}><option value="9router">9Router</option><option value="openai-compatible">OpenAI-compatible</option></select></label>
+        <label><span>Model · bắt buộc</span><input value={draft.model} placeholder="cc/claude-opus-4-6" onChange={(event) => update("model", event.target.value)} /></label>
+        <label className="api-worker-wide"><span>Base URL · bắt buộc</span><input value={draft.base_url} placeholder="http://localhost:20128/v1" onChange={(event) => update("base_url", event.target.value)} /></label>
+        <label className="api-worker-wide"><span>API key · {credentialAvailable ? "để trống để giữ key hiện tại" : "bắt buộc"}</span><input type="password" autoComplete="new-password" value={draft.api_key} placeholder="Được mã hóa bằng kho bí mật của hệ điều hành" onChange={(event) => update("api_key", event.target.value)} /></label>
       </div>
-      <div className="api-worker-form-actions"><button className="button ghost" type="button" onClick={() => setDraft(EMPTY_API_WORKER)} disabled={Boolean(busy)}>Tạo mới</button><button className="button primary" type="button" onClick={() => void save()} disabled={Boolean(busy) || !draft.id.trim() || !draft.model.trim()}>{busy === "save" ? "Đang mã hóa…" : "Lưu worker"}</button></div>
+      <div className="api-worker-form-actions"><span className={`api-worker-save-status ${validation.valid ? "is-ready" : "is-blocked"}`}>{validation.message}</span><button className="button ghost" type="button" onClick={createNew} disabled={Boolean(busy)}>Tạo mới</button><button className="button primary" type="button" onClick={() => void save()} disabled={Boolean(busy) || !validation.valid}>{busy === "save" ? "Đang mã hóa…" : editingId ? "Lưu thay đổi" : "Lưu worker"}</button></div>
       <div className="api-worker-config-list">
         {!configs.length && <div className="empty">Chưa cấu hình API worker. Feature vẫn tắt cho đến khi có cấu hình và API key.</div>}
         {configs.map((config) => <article key={config.id} className="api-worker-config"><div><strong>{config.label}</strong><code>api:{config.id}</code><small>{config.provider} · {config.model}</small></div><span className={`badge ${config.credential_available ? "connected" : "profile-missing"}`}>{config.credential_available ? "KEY ĐÃ MÃ HÓA" : "THIẾU KEY"}</span><div><button className="button ghost" type="button" onClick={() => edit(config)} disabled={Boolean(busy)}>Sửa</button><button className="button secondary" type="button" onClick={() => void test(config.id)} disabled={Boolean(busy) || !config.credential_available}>{busy === `test:${config.id}` ? "Đang test…" : "Test"}</button><button className="button danger-quiet" type="button" onClick={() => void remove(config.id)} disabled={Boolean(busy)}>{busy === `delete:${config.id}` ? "Đang xóa…" : "Xóa"}</button></div></article>)}

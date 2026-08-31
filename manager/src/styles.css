@@ -1077,9 +1077,12 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
 .api-worker-form input, .api-worker-form select, .api-worker-form textarea { min-height: 42px; }
 .api-worker-form textarea { resize: vertical; line-height: var(--leading-body); }
 .api-worker-wide { grid-column: 1 / -1; }
-.api-worker-form-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.api-worker-form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
 .api-worker-settings > .api-worker-form-actions { margin: 14px 0 16px; }
 .api-worker-settings > .api-worker-form-actions .button { width: 128px; min-height: 42px; white-space: nowrap; }
+.api-worker-save-status { min-width: 0; margin-right: auto; color: #8996a8; font-size: var(--font-description); line-height: 1.4; }
+.api-worker-save-status.is-ready { color: #78c99a; }
+.api-worker-save-status.is-blocked { color: #e5b875; }
 .api-worker-config { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid #283241; border-radius: var(--radius-control); background: #0e131a; }
 .api-worker-config > div:first-child { min-width: 0; display: grid; gap: 3px; }
 .api-worker-config > div:last-child { display: flex; gap: 7px; }

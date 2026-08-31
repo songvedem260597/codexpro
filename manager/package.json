@@ -14,6 +14,7 @@
     "test:diagnostic": "node scripts/diagnostic-log-smoke.mjs && node scripts/runtime-health-diagnostic-smoke.mjs && node scripts/operations-metrics-smoke.mjs",
     "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs",
     "test:runtime-restart": "node scripts/runtime-restart-send-race-smoke.mjs",
+    "test:api-worker-form": "node scripts/api-worker-form-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:extension-sync": "node scripts/extension-sync-smoke.mjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
