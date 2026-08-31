@@ -20,6 +20,7 @@ const subscribe = (channel, callback) => {
 
 contextBridge.exposeInMainWorld("codexpro", {
   getStatus: () => invoke("codexpro:status"),
+  listWorkers: () => invoke("codexpro:workers"),
   onBrowserProfiles: (callback) => subscribe("codexpro:browser-profiles", callback),
   controlServer: (action) => invoke("codexpro:control", action),
   copyText: (text) => invoke("codexpro:copy", text),

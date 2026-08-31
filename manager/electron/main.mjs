@@ -9,8 +9,16 @@ import { promisify } from "node:util";
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
+import { WorkerPluginRegistry } from "./worker-core/plugin-registry.mjs";
+import { createChromeWorkerPlugin } from "./worker-plugins/chrome-worker-plugin.mjs";
 
 const execFileAsync = promisify(execFile);
+const workerPluginRegistry = new WorkerPluginRegistry();
+workerPluginRegistry.register(createChromeWorkerPlugin({
+  sendRequest: (payload) => sendProfileRequest(payload),
+  readResponse: (payload) => getProfileResponse(payload),
+  stopTask: (payload) => stopProfileTask(payload)
+}));
 const here = path.dirname(fileURLToPath(import.meta.url));
 const MANAGER_VERSION = app.getVersion();
 const MANAGER_RUN_ID = `mgr_${Date.now().toString(36)}_${randomBytes(4).toString("hex")}`;
@@ -1971,6 +1979,7 @@ async function runtimeStatus(options = {}) {
     if (!workspaceRoot) return { ...profile, current_workspace_repo: "" };
     return { ...profile, current_workspace_repo: await githubRepoForRoot(workspaceRoot) };
   }));
+  const workerStatus = await workerPluginRegistry.list({ browserProfiles });
   return {
     checkedAt: new Date().toISOString(),
     task: base.task,
@@ -1979,6 +1988,8 @@ async function runtimeStatus(options = {}) {
     tunnel: base.tunnel,
     processes: base.processes,
     browserProfiles,
+    workers: workerStatus.workers,
+    workerSources: workerStatus.sources,
     mcpLink: base.mcpLink,
     tokenConfigured: base.tokenConfigured,
     autoStart: base.autoStart
@@ -3300,6 +3311,10 @@ function ensureFreshRuntimeAfterManagerStart() {
 }
 
 diagnosticIpcHandle("codexpro:status", { category: "status", action: "runtime-status", slowMs: 5_000 }, () => runtimeStatus());
+diagnosticIpcHandle("codexpro:workers", { category: "status", action: "list-workers", slowMs: 5_000 }, async () => {
+  const status = await runtimeStatus();
+  return { workers: status.workers, sources: status.workerSources };
+});
 diagnosticIpcHandle("codexpro:control", {
   category: "status",
   action: "control-server",
