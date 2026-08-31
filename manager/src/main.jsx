@@ -3923,7 +3923,7 @@ function App() {
           </div>
           {status?.workerSnapshotStale && (
             <div className="worker-snapshot-warning" role="status">
-              MCP tạm thời không phản hồi. Đang hiển thị snapshot worker gần nhất và sẽ tự cập nhật khi kết nối phục hồi.
+              MCP tạm thời không phản hồi, worker sẽ tự cập nhật khi kết nối phục hồi.
             </div>
           )}
           <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout`}>
