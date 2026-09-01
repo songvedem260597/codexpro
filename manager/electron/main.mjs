@@ -3002,16 +3002,19 @@ async function openProfileChat(payload) {
       activation = await timedOpenPhase("activate_tab_ms", () => callBrowserControl({
         action: "activate_tab",
         profile_id: profileId,
-        target_id: resolvedTargetId
+        target_id: resolvedTargetId,
+        conversation_id: conversationId || targetConversationId || undefined
       }, 32000));
     } catch (error) {
+      if (/CONVERSATION_VERIFY_FAILED/i.test(error instanceof Error ? error.message : String(error || ""))) throw error;
       if (!createdTab && isMissingChromeTabError(error)) {
         staleRecoveryReason = "activate_missing_tab";
         await openFreshChat();
         activation = await timedOpenPhase("stale_recovery_activate_ms", () => callBrowserControl({
           action: "activate_tab",
           profile_id: profileId,
-          target_id: resolvedTargetId
+          target_id: resolvedTargetId,
+          conversation_id: conversationId || targetConversationId || undefined
         }, 32000));
       } else {
         activationError = error;
@@ -3083,12 +3086,27 @@ async function recoverProfileChatTab(payload) {
   const title = String(payload?.title || "").trim();
   const silent = payload?.silent === true;
   const newChat = payload?.newChat === true;
+  const discardOnly = payload?.discardOnly === true;
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
-  if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat cần khôi phục không hợp lệ.");
-  if (!newChat && (!targetId || !/^\d+$/.test(targetId))) throw new Error("Không tìm thấy tab Chrome cần khôi phục.");
-  if (targetId && !/^\d+$/.test(targetId)) throw new Error("Tab Chrome cần khôi phục không hợp lệ.");
+  if (targetId && !/^\d+$/.test(targetId)) throw new Error("Tab Chrome không hợp lệ.");
   const base = await runtimeConnectionForSend();
   if (!base?.config?.port || !base?.token) throw new Error("Local MCP chưa sẵn sàng.");
+  if (discardOnly) {
+    if (!targetId) throw new Error("Không tìm thấy tab cũ cần đóng.");
+    try {
+      const closed = await localMcpTool(base.config, base.token, "browser_control", {
+        action: "close_tab",
+        profile_id: profileId,
+        target_id: targetId
+      }, 15000);
+      return { ...closed, ok: true, discarded: true, target_id: Number(targetId) };
+    } catch (error) {
+      if (isMissingChromeTabError(error)) return { ok: true, discarded: true, already_closed: true, target_id: Number(targetId) };
+      throw error;
+    }
+  }
+  if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat cần khôi phục không hợp lệ.");
+  if (!newChat && !targetId) throw new Error("Khong tim thay tab Chrome can khoi phuc.");
   const result = await localMcpTool(base.config, base.token, "browser_control", {
     action: "recover_chat_tab",
     profile_id: profileId,
@@ -3099,7 +3117,6 @@ async function recoverProfileChatTab(payload) {
   const windowFocus = silent ? { ok: false, skipped: true, source: "auto-recovery" } : await focusChromeWindow(title);
   return { ...result, window_focus: windowFocus };
 }
-
 async function stopProfileTask(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();

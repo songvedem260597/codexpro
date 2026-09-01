@@ -532,11 +532,15 @@ function visibleUserMessageText(value) {
 }
 
 function buildConversationRolloverPrompt(result) {
+  const recoveryContinuation = String(result?.continuation_reason || "") === "recovery";
   const prefix = [
-    "Đoạn chat trước vừa đạt giới hạn độ dài nên CodexPro đã tự tạo cuộc chat mới này.",
+    recoveryContinuation
+      ? "Tab ChatGPT trước bị treo hoặc không thể khôi phục an toàn nên CodexPro đã tự tạo cuộc chat tiếp nối này."
+      : "Đoạn chat trước vừa đạt giới hạn độ dài nên CodexPro đã tự tạo cuộc chat mới này.",
     "Hãy tiếp tục đúng dự án/công việc đang làm từ bối cảnh gần nhất bên dưới. Không bắt đầu lại từ đầu và không yêu cầu người dùng lặp lại thông tin đã có nếu có thể suy ra từ bối cảnh.",
     result?.projectRoot ? `Repo tiếp tục (đã khóa trong CodexPro): ${String(result.projectRoot).trim()}` : "",
     result?.title ? `Tên chat trước: ${String(result.title).trim()}` : "",
+    result?.recovery_reason ? `Lý do chuyển chat: ${String(result.recovery_reason).trim()}` : "",
     "",
     "Bối cảnh gần nhất từ chat trước:"
   ].filter((line) => line !== "").join("\n");
@@ -1009,6 +1013,8 @@ function App() {
   const [requestFiles, setRequestFiles] = useState({});
   const [attachmentPreview, setAttachmentPreview] = useState(null);
   const [requestResponses, setRequestResponses] = useState({});
+  const requestResponsesRef = useRef({});
+  requestResponsesRef.current = requestResponses;
   const [profileTaskLabels, setProfileTaskLabels] = useState(() => loadProfileTaskLabels());
   const [responseSelection, setResponseSelection] = useState({ key: "", text: "" });
   const [clearedResponseTargets, setClearedResponseTargets] = useState({});
@@ -1336,27 +1342,12 @@ function App() {
       if (!targetTab?.id) continue;
       const conversationId = String(targetTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
       if (!conversationId) continue;
-      const newChat = Boolean(targetTab.renderer_unresponsive || targetTab.message_delivery_timed_out || String(targetTab.network_state || "").toLowerCase() === "failed" || targetTab.network_error);
+      const hardFailure = Boolean(targetTab.renderer_unresponsive || targetTab.message_delivery_timed_out || String(targetTab.network_state || "").toLowerCase() === "failed" || targetTab.network_error);
       const key = `${profile.profile_id}:${conversationId}`;
       const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
       if (Date.now() - previous < 120_000) continue;
       operationsRecoveryTimes.current.set(key, Date.now());
-      void api.recoverProfileChat?.({
-        profileId: profile.profile_id,
-        conversationId,
-        targetId: targetTab.id,
-        title: targetTab.title || profile.active_chat_title || "",
-        silent: true,
-        newChat
-      }).then(() => {
-        if (newChat) {
-          setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
-        }
-        logRendererDiagnostic(api, "info", "profile", newChat ? "Auto Recovery đã tạo chat mới sau khi renderer treo" : "Auto Recovery đã thay tab ChatGPT bất thường", { action: "auto-recovery", profile_id: profile.profile_id, conversation_id: conversationId, new_chat: newChat });
-        window.setTimeout(() => void refresh(false), 1200);
-      }).catch((err) => {
-        logRendererDiagnostic(api, "error", "profile", `Auto Recovery thất bại: ${err?.message || String(err)}`, { action: "auto-recovery-failed", profile_id: profile.profile_id, conversation_id: conversationId, error: err });
-      });
+      void recoverProfileTab(profile, { targetTab, silent: true, automatic: true, hardFailure });
     }
   }, [managerSettings.autoRecovery, status?.browserProfiles]);
 
@@ -2689,39 +2680,98 @@ function App() {
     }
   }
 
-  async function recoverProfileTab(profile) {
-    const tabs = profile.conversation_tabs || [];
-    const conversationOf = (tab) => String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-    const selectedConversationId = String(requestTargets[profile.profile_id] || "");
-    const selectedTab = tabs.find((tab) => conversationOf(tab) === selectedConversationId);
-    const targetTab = selectedTab || tabs.find((tab) => tab.active) || tabs[0];
-    const conversationId = conversationOf(targetTab);
+  async function recoveryContinuationSnapshot(profile, conversationId, targetTab) {
+    const profileId = String(profile?.profile_id || "");
+    const liveResponse = requestResponsesRef.current[profileId] || {};
+    const liveMatches = String(liveResponse?.conversationId || "") === conversationId;
+    const liveMessages = liveMatches ? cacheableTranscriptMessages(materializeTranscriptMessages(liveResponse, conversationId)) : [];
+    const cached = liveMessages.length ? null : await api.getChatResponseCache({ profileId, conversationId }).catch(() => null);
+    const cachedMessages = trimRecentTranscriptMessages(cached?.messages);
+    const messages = trimRecentTranscriptMessages(liveMessages.length ? liveMessages : cachedMessages);
     const selectedConversation = profileRequestChats(profile).find((chat) => String(chat.id) === conversationId);
-    setBusy(`recover-profile:${profile.profile_id}`);
-    setError("");
-    try {
-      const result = await api.recoverProfileChat({
-        profileId: profile.profile_id,
-        conversationId,
-        targetId: targetTab?.id,
-        title: selectedConversation?.title || targetTab?.title || profile.active_chat_title || "",
-        newChat: true
-      });
-      setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
-      setRequestResponses((current) => ({
-        ...current,
-        [profile.profile_id]: { visible: false, loading: false, error: "", conversationId: "", text: "", messages: [] }
-      }));
-      logRendererDiagnostic(api, "info", "profile", "Đã bỏ tab treo và tạo chat ChatGPT mới", { action: "recover-profile-new-chat", profile_id: profile.profile_id, abandoned_conversation_id: conversationId, result_target_id: String(result?.target_id || "") });
-      notify("Đã bỏ tab bị treo và tạo chat mới");
-      window.setTimeout(() => void refresh(false), 1200);
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setBusy("");
-    }
+    const projectRoot = String(liveResponse?.repoTaskRequest?.projectRoot || requestProjectRoots[profileId] || projectRootForProfile(profile) || "");
+    return {
+      ...(cached || {}),
+      ...(liveMatches ? liveResponse : {}),
+      title: selectedConversation?.title || targetTab?.title || profile?.active_chat_title || "",
+      messages,
+      projectRoot,
+      repoTaskScope: String(liveResponse?.repoTaskScope || ""),
+      repoTaskRequest: liveResponse?.repoTaskRequest || null,
+      continuation_reason: "recovery"
+    };
   }
 
+  async function recoverProfileTab(profile, options = {}) {
+    const tabs = profile.conversation_tabs || [];
+    const conversationOf = (tab) => String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+    const selectedConversationId = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
+    const selectedTab = tabs.find((tab) => conversationOf(tab) === selectedConversationId);
+    const targetTab = options.targetTab || selectedTab || tabs.find((tab) => tab.active) || tabs[0];
+    const conversationId = conversationOf(targetTab);
+    const selectedConversation = profileRequestChats(profile).find((chat) => String(chat.id) === conversationId);
+    const title = selectedConversation?.title || targetTab?.title || profile.active_chat_title || "";
+    const silent = options.silent === true;
+    if (!conversationId || !targetTab?.id) {
+      const message = "Kh\u00f4ng x\u00e1c \u0111\u1ecbnh \u0111\u01b0\u1ee3c h\u1ed9i tho\u1ea1i c\u0169 c\u1ea7n kh\u00f4i ph\u1ee5c.";
+      if (!silent) setError(message);
+      logRendererDiagnostic(api, "error", "profile", message, { action: "recover-profile-missing-target", profile_id: profile.profile_id });
+      return null;
+    }
+    const snapshot = await recoveryContinuationSnapshot(profile, conversationId, targetTab);
+    if (!silent) setBusy(`recover-profile:${profile.profile_id}`);
+    if (!silent) setError("");
+    try {
+      try {
+        const restored = await api.recoverProfileChat({
+          profileId: profile.profile_id,
+          conversationId,
+          targetId: targetTab.id,
+          title,
+          silent,
+          newChat: false
+        });
+        requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: conversationId };
+        setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
+        logRendererDiagnostic(api, "info", "profile", "Recovered original ChatGPT conversation", { action: "recover-profile-same-conversation", profile_id: profile.profile_id, conversation_id: conversationId, old_target_id: String(targetTab.id), result_target_id: String(restored?.target_id || ""), automatic: Boolean(options.automatic) });
+        if (!silent) notify("\u0110\u00e3 kh\u00f4i ph\u1ee5c \u0111\u00fang h\u1ed9i tho\u1ea1i c\u0169");
+        window.setTimeout(() => void refresh(false), 900);
+        return { mode: "same_conversation", conversationId, result: restored };
+      } catch (restoreError) {
+        const recoveryReason = String(restoreError?.message || restoreError || "Original renderer could not be recovered.").slice(0, 600);
+        logRendererDiagnostic(api, "warn", "profile", `Original conversation recovery failed; creating continuation chat: ${recoveryReason}`, { action: "recover-profile-rollover-start", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(targetTab.id), automatic: Boolean(options.automatic), hard_failure: Boolean(options.hardFailure), error: restoreError });
+        const newConversationId = await rolloverFullConversation(profile, conversationId, {
+          ...snapshot,
+          title,
+          continuation_reason: "recovery",
+          recovery_reason: recoveryReason,
+          silent
+        });
+        if (!newConversationId) throw new Error(`Original chat recovery failed and continuation chat was not created. ${recoveryReason}`);
+        await api.recoverProfileChat({
+          profileId: profile.profile_id,
+          conversationId,
+          targetId: targetTab.id,
+          title,
+          silent: true,
+          discardOnly: true
+        }).catch((discardError) => {
+          logRendererDiagnostic(api, "warn", "profile", `Continuation created but old tab could not be closed: ${discardError?.message || String(discardError)}`, { action: "recover-profile-discard-old-tab-failed", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(targetTab.id), error: discardError });
+        });
+        logRendererDiagnostic(api, "info", "profile", "Moved cached context from unrecoverable tab to continuation chat", { action: "recover-profile-rollover-done", profile_id: profile.profile_id, abandoned_conversation_id: conversationId, conversation_id: newConversationId, automatic: Boolean(options.automatic) });
+        if (!silent) notify("Tab c\u0169 kh\u00f4ng kh\u00f4i ph\u1ee5c \u0111\u01b0\u1ee3c \u00b7 \u0111\u00e3 chuy\u1ec3n sang chat ti\u1ebfp n\u1ed1i");
+        window.setTimeout(() => void refresh(false), 900);
+        return { mode: "continuation", conversationId: newConversationId };
+      }
+    } catch (err) {
+      const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "profile", `Chat recovery failed: ${message}`, { action: "recover-profile-failed", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(targetTab.id), automatic: Boolean(options.automatic), error: err });
+      if (!silent) setError(message);
+      return null;
+    } finally {
+      if (!silent) setBusy("");
+    }
+  }
   async function stopControlTask(task) {
     const profile = task?.profile;
     const tab = task?.tab;
@@ -3000,10 +3050,22 @@ function App() {
 
   async function rolloverFullConversation(profile, conversationId, result) {
     const profileId = profile.profile_id;
-    const key = `${profileId}:${conversationId}`;
+    const continuationReason = String(result?.continuation_reason || "limit");
+    const recoveryContinuation = continuationReason === "recovery";
+    const key = `${profileId}:${conversationId}:${continuationReason}`;
     const previousAttempt = conversationRollovers.current.get(key);
     if (previousAttempt?.status === "creating" || previousAttempt?.status === "done") return previousAttempt?.conversationId || null;
     if (previousAttempt?.status === "failed" && Date.now() - Number(previousAttempt.at || 0) < 10000) return null;
+
+    const creatingNotice = recoveryContinuation
+      ? "Tab c\u0169 kh\u00f4ng th\u1ec3 kh\u00f4i ph\u1ee5c an to\u00e0n. CodexPro \u0111ang t\u1ea1o chat ti\u1ebfp n\u1ed1i v\u00e0 chuy\u1ec3n b\u1ed1i c\u1ea3nh g\u1ea7n nh\u1ea5t \u0111\u1ec3 b\u1ea1n ti\u1ebfp t\u1ee5c d\u1ef1 \u00e1n."
+      : "\u0110o\u1ea1n chat \u0111\u00e3 \u0111\u1ea7y. CodexPro \u0111ang t\u1ef1 t\u1ea1o chat m\u1edbi v\u00e0 chuy\u1ec3n b\u1ed1i c\u1ea3nh g\u1ea7n nh\u1ea5t \u0111\u1ec3 b\u1ea1n ti\u1ebfp t\u1ee5c d\u1ef1 \u00e1n.";
+    const doneNotice = recoveryContinuation
+      ? "Tab c\u0169 kh\u00f4ng th\u1ec3 kh\u00f4i ph\u1ee5c. CodexPro \u0111\u00e3 t\u1ea1o chat ti\u1ebfp n\u1ed1i v\u00e0 chuy\u1ec3n b\u1ed1i c\u1ea3nh g\u1ea7n nh\u1ea5t. B\u1ea1n c\u00f3 th\u1ec3 ti\u1ebfp t\u1ee5c d\u1ef1 \u00e1n ngay t\u1ea1i \u0111\u00e2y."
+      : "Chat c\u0169 \u0111\u00e3 \u0111\u1ea1t gi\u1edbi h\u1ea1n. CodexPro \u0111\u00e3 t\u1ef1 t\u1ea1o chat m\u1edbi v\u00e0 chuy\u1ec3n b\u1ed1i c\u1ea3nh g\u1ea7n nh\u1ea5t. B\u1ea1n c\u00f3 th\u1ec3 ti\u1ebfp t\u1ee5c d\u1ef1 \u00e1n ngay t\u1ea1i \u0111\u00e2y.";
+    const failedNotice = recoveryContinuation
+      ? "Tab c\u0169 kh\u00f4ng th\u1ec3 kh\u00f4i ph\u1ee5c v\u00e0 CodexPro ch\u01b0a t\u1ea1o \u0111\u01b0\u1ee3c chat ti\u1ebfp n\u1ed1i t\u1ef1 \u0111\u1ed9ng."
+      : "ChatGPT \u0111\u00e3 b\u00e1o \u0111o\u1ea1n chat n\u00e0y \u0111\u1ea1t gi\u1edbi h\u1ea1n nh\u01b0ng CodexPro ch\u01b0a t\u1ea1o \u0111\u01b0\u1ee3c chat m\u1edbi t\u1ef1 \u0111\u1ed9ng.";
 
     conversationRollovers.current.set(key, { status: "creating", at: Date.now() });
     setRequestResponses((current) => {
@@ -3013,10 +3075,11 @@ function App() {
         ...current,
         [profileId]: {
           ...previous,
-          conversationLimitReached: true,
-          conversationLimitMessage: result?.conversation_limit_message || "ChatGPT báo đoạn chat đã đạt giới hạn độ dài.",
+          conversationLimitReached: recoveryContinuation ? false : true,
+          conversationLimitMessage: recoveryContinuation ? "" : (result?.conversation_limit_message || "ChatGPT b\u00e1o \u0111o\u1ea1n chat \u0111\u00e3 \u0111\u1ea1t gi\u1edbi h\u1ea1n \u0111\u1ed9 d\u00e0i."),
           rolloverStatus: "creating",
-          rolloverNotice: "Đoạn chat đã đầy. CodexPro đang tự tạo chat mới và chuyển bối cảnh gần nhất để bạn tiếp tục dự án."
+          rolloverReason: continuationReason,
+          rolloverNotice: creatingNotice
         }
       };
     });
@@ -3037,7 +3100,7 @@ function App() {
         attachments: Array.isArray(result?.rollover_attachments) ? result.rollover_attachments : []
       });
       const newConversationId = String(created?.conversation_id || "").trim();
-      if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT chưa trả conversation id cho chat tiếp nối.");
+      if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT ch\u01b0a tr\u1ea3 conversation id cho chat ti\u1ebfp n\u1ed1i.");
 
       conversationRollovers.current.set(key, { status: "done", at: Date.now(), conversationId: newConversationId });
       requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: newConversationId };
@@ -3057,16 +3120,21 @@ function App() {
           busy: true,
           conversationLimitReached: false,
           rolloverStatus: "done",
+          rolloverReason: continuationReason,
           rolloverFromConversationId: conversationId,
-          rolloverNotice: "Chat cũ đã đạt giới hạn. CodexPro đã tự tạo chat mới và chuyển bối cảnh gần nhất. Bạn có thể tiếp tục dự án ngay tại đây."
+          rolloverNotice: doneNotice
         }
       }));
-      notify("Chat cũ đã đầy · CodexPro đã tự tạo chat mới để tiếp tục dự án");
+      if (!result?.silent) {
+        notify(recoveryContinuation
+          ? "\u0110\u00e3 chuy\u1ec3n sang chat ti\u1ebfp n\u1ed1i v\u00e0 gi\u1eef b\u1ed1i c\u1ea3nh c\u00f4ng vi\u1ec7c"
+          : "Chat c\u0169 \u0111\u00e3 \u0111\u1ea7y \u00b7 CodexPro \u0111\u00e3 t\u1ef1 t\u1ea1o chat m\u1edbi \u0111\u1ec3 ti\u1ebfp t\u1ee5c d\u1ef1 \u00e1n");
+      }
       window.setTimeout(() => void refresh(false), 500);
       return newConversationId;
     } catch (err) {
       const message = err?.message || String(err);
-      logRendererDiagnostic(api, "error", "chat", `Không tạo được chat tiếp nối: ${message}`, { action: "conversation-rollover", profile_id: profileId, conversation_id: conversationId, error: err });
+      logRendererDiagnostic(api, "error", "chat", `Continuation chat creation failed: ${message}`, { action: "conversation-rollover", profile_id: profileId, conversation_id: conversationId, continuation_reason: continuationReason, error: err });
       conversationRollovers.current.set(key, { status: "failed", at: Date.now() });
       setRequestResponses((current) => {
         const previous = current[profileId] || {};
@@ -3077,16 +3145,18 @@ function App() {
             ...previous,
             loading: false,
             rolloverStatus: "failed",
-            rolloverNotice: "ChatGPT đã báo đoạn chat này đạt giới hạn nhưng CodexPro chưa tạo được chat mới tự động.",
-            error: `Không tạo được chat tiếp nối: ${message}`
+            rolloverReason: continuationReason,
+            rolloverNotice: failedNotice,
+            error: `Kh\u00f4ng t\u1ea1o \u0111\u01b0\u1ee3c chat ti\u1ebfp n\u1ed1i: ${message}`
           }
         };
       });
-      setRequestSendErrors((current) => ({ ...current, [profileId]: `Chat đã đầy. Không tạo được chat mới tự động: ${message}` }));
+      setRequestSendErrors((current) => ({ ...current, [profileId]: recoveryContinuation
+        ? `Kh\u00f4ng kh\u00f4i ph\u1ee5c \u0111\u01b0\u1ee3c chat c\u0169 v\u00e0 ch\u01b0a t\u1ea1o \u0111\u01b0\u1ee3c chat ti\u1ebfp n\u1ed1i: ${message}`
+        : `Chat \u0111\u00e3 \u0111\u1ea7y. Kh\u00f4ng t\u1ea1o \u0111\u01b0\u1ee3c chat m\u1edbi t\u1ef1 \u0111\u1ed9ng: ${message}` }));
       return null;
     }
   }
-
   async function verifyRepoTaskUse(profile, conversationId, response, networkCompletedAt) {
     const taskId = String(response?.repoTaskId || "");
     if (!taskId || response?.conversationId !== conversationId) return;

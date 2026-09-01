@@ -1886,7 +1886,16 @@ async function execute(command) {
       const networkState=await chatRequestState(tab.id,conversationId);
       if(networkState.busy)throw new Error('WORKER_BUSY: ChatGPT vẫn đang generation; không thay tab để tránh gián đoạn hoặc gửi trùng.');
       replaced=await replaceUnresponsiveChatTab(tab,`https://chatgpt.com/c/${conversationId}`);
-    }
+      let recoveredTab=await chrome.tabs.get(replaced.tab.id);
+      let recoveredConversationId=conversationIdFromUrl(recoveredTab.url);
+      if(recoveredConversationId!==conversationId){
+        await chrome.tabs.update(recoveredTab.id,{url:`https://chatgpt.com/c/${conversationId}`});
+        await waitForTab(recoveredTab.id,45000);
+        recoveredTab=await chrome.tabs.get(recoveredTab.id);
+        recoveredConversationId=conversationIdFromUrl(recoveredTab.url);
+      }
+      if(recoveredConversationId!==conversationId)throw new Error(`RECOVERY_CONVERSATION_VERIFY_FAILED: expected ${conversationId} but recovered ${recoveredConversationId||'none'}.`);
+      replaced={...replaced,tab:recoveredTab,recovery_url:`https://chatgpt.com/c/${conversationId}`};    }
     let windowInfo=null;
     if(Number.isInteger(replaced.tab.windowId)){
       try{await chrome.tabs.update(replaced.tab.id,{active:true});}catch{}
@@ -2494,13 +2503,26 @@ if(action==='rename_chat'){
   if(action==='open_tab'){const tab=await createChatGptTab({url:args.url,active:false});return {action,target_id:tab.id,title:tab.title||'',url:tab.url||args.url,background:true};}
   const tab=await targetTab(args);
   if(action==='activate_tab'){
-    await chrome.tabs.update(tab.id,{active:true});
-    let windowInfo=null;
-    if(Number.isInteger(tab.windowId)){
-      try{await chrome.windows.update(tab.windowId,{state:'maximized'});}catch{}
-      try{windowInfo=await chrome.windows.update(tab.windowId,{focused:true});}catch{}
+    const expectedConversationId=String(args.conversation_id||'').trim();
+    let activeTab=tab;
+    let actualConversationId=conversationIdFromUrl(activeTab.url);
+    if(expectedConversationId){
+      if(!/^[A-Za-z0-9-]{8,160}$/.test(expectedConversationId))throw new Error('Expected conversation id is invalid.');
+      if(actualConversationId!==expectedConversationId){
+        await chrome.tabs.update(activeTab.id,{url:`https://chatgpt.com/c/${expectedConversationId}`});
+        await waitForTab(activeTab.id,45000);
+        activeTab=await chrome.tabs.get(activeTab.id);
+        actualConversationId=conversationIdFromUrl(activeTab.url);
+      }
+      if(actualConversationId!==expectedConversationId)throw new Error(`CONVERSATION_VERIFY_FAILED: expected ${expectedConversationId} but tab resolved to ${actualConversationId||'none'}.`);
     }
-    return {action,target_id:tab.id,ok:true,window_id:tab.windowId,window_state:String(windowInfo?.state||''),window_focused:Boolean(windowInfo?.focused)};
+    await chrome.tabs.update(activeTab.id,{active:true});
+    let windowInfo=null;
+    if(Number.isInteger(activeTab.windowId)){
+      try{await chrome.windows.update(activeTab.windowId,{state:'maximized'});}catch{}
+      try{windowInfo=await chrome.windows.update(activeTab.windowId,{focused:true});}catch{}
+    }
+    return {action,target_id:activeTab.id,ok:true,conversation_verified:expectedConversationId?actualConversationId===expectedConversationId:true,expected_conversation_id:expectedConversationId,actual_conversation_id:actualConversationId,window_id:activeTab.windowId,window_state:String(windowInfo?.state||''),window_focused:Boolean(windowInfo?.focused)};
   }
   if(action==='close_tab'){await chrome.tabs.remove(tab.id);return {action,target_id:tab.id,ok:true};}
   const executeOnTab=async(action,args)=>{
