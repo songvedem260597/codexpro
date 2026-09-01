@@ -15,7 +15,7 @@
 .task-workflow-progress-meter i { display: block; height: 100%; background: linear-gradient(90deg, #2bd88f, #69e6b4); transition: width 180ms ease; }
 .task-workflow-checklist { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
 .task-workflow-checklist-step { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; padding: 12px; border: 1px solid #29364b; border-radius: 12px; background: #0d131d; }
-.task-workflow-checklist-step .task-workflow-check { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; border: 1px solid #42516b; color: #9aa8bd; font-weight: 700; }
+.task-workflow-checklist-step .task-workflow-check { display: grid; place-items: center; align-self: center; width: 26px; height: 26px; border-radius: 8px; border: 1px solid #42516b; color: #9aa8bd; font-weight: 700; }
 .task-workflow-checklist-step strong { display: block; }
 .task-workflow-checklist-step small { display: block; margin-top: 4px; color: var(--muted, #93a0b5); overflow-wrap: anywhere; }
 .task-workflow-checklist-step.is-completed { border-color: rgba(43, 216, 143, .45); }

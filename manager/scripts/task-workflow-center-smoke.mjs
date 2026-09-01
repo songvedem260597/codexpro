@@ -50,6 +50,7 @@ assert.match(center, /readWorkerResponse|readChromeProgress/, "the page must ref
 assert.match(center, /getRepoTaskStatus/, "Chrome checklist completion must require verified begin_repo_task evidence");
 assert.match(center, /deriveTaskWorkflowProgress/, "rendered checkboxes must be derived from worker evidence");
 assert.match(styles, /\.task-workflow-checklist-step\.is-completed/, "completed checklist steps need a distinct visual state");
+assert.match(styles, /\.task-workflow-checklist-step \.task-workflow-check \{[^}]*display: grid;[^}]*place-items: center;[^}]*align-self: center;/, "checklist number/icon badges must be vertically centered without changing their horizontal layout");
 assert.match(managerMain, /resolveTaskWorkflow/, "Chrome dispatch must use the generic workflow registry");
 assert.match(agentLoop, /resolveTaskWorkflow/, "API dispatch must use the generic workflow registry");
 assert.match(agentLoop, /workflow_progress/, "API workers must publish structured progress evidence between checklist steps");
