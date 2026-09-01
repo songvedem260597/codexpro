@@ -126,7 +126,7 @@ export function createApiWorkerPlugin(options = {}) {
       const sameWorkspace = Boolean(existing?.scope === scope && (scope === "all_allowed" || (existing?.root && root && existing.root.toLowerCase() === root.toLowerCase())));
       const history = sameWorkspace && Array.isArray(existing?.history) ? existing.history.slice(-12) : [];
       const attachmentNames = Array.isArray(payload.attachment_names) ? payload.attachment_names.map((name) => clean(name, 260)).filter(Boolean) : [];
-      const request = clean(payload.text || payload.request, 12_000) || `Đã gửi ${attachmentNames.length} file: ${attachmentNames.join(", ")}`;
+      const request = clean(payload.text || payload.request, 20_000) || `Đã gửi ${attachmentNames.length} file: ${attachmentNames.join(", ")}`;
       const state = {
         jobId: clean(payload.task_id || payload.taskId, 40),
         title: "",
