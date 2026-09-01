@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList } from "../src/ui-performance.js";
 
 const previous = [{
@@ -87,5 +90,16 @@ assert.deepEqual(authoritativeEmpty.browserProfiles, [], "a successful authorita
 assert.deepEqual(authoritativeEmpty.workers, [], "a successful authoritative empty snapshot must clear disconnected workers");
 assert.equal(authoritativeEmpty.workerSnapshotStale, false, "a successful refresh must clear the stale marker");
 assert.equal(authoritativeEmpty.workerSnapshotStaleSince, "");
+
+const managerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const rendererSource = fs.readFileSync(path.join(managerRoot, "src", "main.jsx"), "utf8");
+const mainProcessSource = fs.readFileSync(path.join(managerRoot, "electron", "main.mjs"), "utf8");
+assert.match(rendererSource, /const responseMemoryCache = useRef\(new Map\(\)\)/, "recent chat transcripts must stay in renderer memory for instant revisit");
+assert.match(rendererSource, /function prefetchProfileResponseCaches\(profile\)/, "recent chat transcript caches must be prefetched before selection");
+assert.match(rendererSource, /responseMemoryCache\.current\.has\(key\)[\s\S]{0,180}await getResponseCacheEntry/, "chat hydration must use the synchronous renderer-memory path before IPC");
+assert.match(rendererSource, /loadResponseMarkdownModule\(\)[\s\S]{0,80}\}, 120\)/, "heavy Markdown rendering code must warm shortly after app mount");
+assert.match(mainProcessSource, /let managerChatCacheIndex = null;/, "main process must keep a chat-cache lookup index");
+assert.match(mainProcessSource, /if \(managerChatCacheEntries && managerChatCacheIndex\) return managerChatCacheEntries;/, "main process must avoid rereading the cache file after warmup");
+assert.match(mainProcessSource, /setImmediate\(\(\) => readManagerChatCache\(\)\)/, "main process must warm the persistent chat cache after window creation");
 
 console.log("UI performance smoke OK");

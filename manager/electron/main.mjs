@@ -248,6 +248,8 @@ let managerChatResponseAuditLogWrite = Promise.resolve();
 const MAX_CHAT_CACHE_ENTRIES = 30;
 const MAX_CHAT_CACHE_MESSAGES = 12;
 const MAX_CHAT_CACHE_TEXT_CHARS = 40000;
+let managerChatCacheEntries = null;
+let managerChatCacheIndex = null;
 const MAX_REQUEST_ATTACHMENTS = 4;
 const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
@@ -805,19 +807,27 @@ function normalizeChatCacheEntry(value) {
   };
 }
 
+function setManagerChatCacheMemory(entries) {
+  const normalized = entries.map(normalizeChatCacheEntry).filter(Boolean).slice(-MAX_CHAT_CACHE_ENTRIES);
+  managerChatCacheEntries = normalized;
+  managerChatCacheIndex = new Map(normalized.map((entry) => [chatCacheKey(entry.profileId, entry.conversationId), entry]));
+  return normalized;
+}
+
 function readManagerChatCache() {
+  if (managerChatCacheEntries && managerChatCacheIndex) return managerChatCacheEntries;
   try {
     const parsed = JSON.parse(fs.readFileSync(managerChatCacheFile, "utf8"));
     const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
-    return entries.map(normalizeChatCacheEntry).filter(Boolean).slice(-MAX_CHAT_CACHE_ENTRIES);
+    return setManagerChatCacheMemory(entries);
   } catch {
-    return [];
+    return setManagerChatCacheMemory([]);
   }
 }
 
 function writeManagerChatCache(entries) {
   fs.mkdirSync(codexProHome, { recursive: true });
-  const normalized = entries.map(normalizeChatCacheEntry).filter(Boolean).slice(-MAX_CHAT_CACHE_ENTRIES);
+  const normalized = setManagerChatCacheMemory(entries);
   fs.writeFileSync(managerChatCacheFile, `${JSON.stringify({ version: 1, entries: normalized }, null, 2)}\n`, "utf8");
 }
 
@@ -826,7 +836,8 @@ function getManagerChatCacheEntry(payload) {
   const conversationId = String(payload?.conversationId || "").trim();
   if (!/^[A-Za-z0-9._-]{1,160}$/.test(profileId) || !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) return null;
   const key = chatCacheKey(profileId, conversationId);
-  return readManagerChatCache().find((entry) => chatCacheKey(entry.profileId, entry.conversationId) === key) || null;
+  readManagerChatCache();
+  return managerChatCacheIndex.get(key) || null;
 }
 
 function saveManagerChatCacheEntry(payload) {
@@ -4810,6 +4821,7 @@ if (!hasSingleInstanceLock) {
       });
     }
     createWindow();
+    setImmediate(() => readManagerChatCache());
     void ensureFreshRuntimeAfterManagerStart();
     void headlessWorkers.startAutoWorkers().catch((error) => {
       console.warn("Không thể tự khởi động headless worker:", error instanceof Error ? error.message : String(error));
