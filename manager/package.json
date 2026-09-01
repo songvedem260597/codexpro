@@ -23,6 +23,7 @@
     "test:interruption-alert": "node scripts/interruption-alert-smoke.mjs",
     "test:completion-sound": "node scripts/task-completion-sound-smoke.mjs",
     "test:task-unfinalized": "node scripts/task-unfinalized-diagnostic-smoke.mjs",
+    "test:system-maintenance": "node scripts/system-maintenance-workflow-smoke.mjs",
     "test:api-worker-job-modal": "node scripts/api-worker-job-modal-smoke.mjs",
     "test:api-worker-streaming": "node scripts/api-worker-streaming-smoke.mjs",
     "test:dropdowns": "node scripts/app-dropdown-smoke.mjs",
