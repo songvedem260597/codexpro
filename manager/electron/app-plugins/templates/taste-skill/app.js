@@ -6,6 +6,7 @@ const elements = {
   selectedCount: document.querySelector("#selected-count"),
   folder: document.querySelector("#folder"),
   name: document.querySelector("#name"),
+  summary: document.querySelector("#summary"),
   description: document.querySelector("#description"),
   content: document.querySelector("#content"),
   copy: document.querySelector("#copy"),
@@ -47,7 +48,7 @@ function toggleSkill(id) {
 function visibleSkills() {
   const query = state.query.trim().toLowerCase();
   if (!query) return state.catalog?.skills || [];
-  return (state.catalog?.skills || []).filter((skill) => [skill.install_name, skill.id, skill.description].join(" ").toLowerCase().includes(query));
+  return (state.catalog?.skills || []).filter((skill) => [skill.install_name, skill.id, skill.summary_vi, skill.description].join(" ").toLowerCase().includes(query));
 }
 
 function renderList() {
@@ -80,7 +81,7 @@ function renderList() {
     const name = document.createElement("strong");
     name.textContent = skill.install_name;
     const description = document.createElement("span");
-    description.textContent = skill.description || skill.id;
+    description.textContent = skill.summary_vi || skill.description || skill.id;
     copy.append(name, description);
     button.append(check, copy);
     button.addEventListener("click", () => toggleSkill(skill.id));
@@ -93,6 +94,7 @@ function renderDetail() {
   const skill = selectedSkill();
   elements.folder.textContent = skill ? skill.id : "NO RESULT";
   elements.name.textContent = skill?.install_name || "Không tìm thấy skill";
+  elements.summary.textContent = skill?.summary_vi ? `Giải thích nhanh: ${skill.summary_vi}` : "";
   elements.description.textContent = skill?.description || "Thử một từ khóa khác.";
   elements.content.textContent = skill?.content || "";
   elements.copy.disabled = !skill;

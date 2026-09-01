@@ -110,6 +110,7 @@ try {
   assert.equal(tasteCatalog.skills[0].install_name, "gpt-taste");
   assert.equal(tasteCatalog.skills[0].group_id, "design-foundation");
   assert.equal(tasteCatalog.skills[0].group_exclusive, true);
+  assert.match(tasteCatalog.skills[0].summary_vi, /giao diện|thiết kế/i);
   assert.match(tasteCatalog.skills[0].content, /Build a deliberate interface/);
   assert.match(fs.readFileSync(path.join(managedTasteRoot, ".codexpro-plugin", "plugin.json"), "utf8"), /codexpro-plugin:\/\/taste-skill/);
 
@@ -144,6 +145,7 @@ try {
   assert.match(tasteTemplate, /state\.selected = \[\]/, "Taste Skill must keep a multi-select collection");
   assert.match(tasteTemplate, /group_exclusive/, "Taste Skill must replace conflicting choices inside exclusive groups");
   assert.match(tasteTemplate, /Chọn 1/, "Taste Skill must label exclusive groups clearly");
+  assert.match(tasteTemplate, /summary_vi/, "Taste Skill must show a short Vietnamese explanation for each skill");
   assert.match(center, /Bước 2 · Chọn dự án/, "selected skills must open the project assignment flow");
   assert.match(center, /sendWorkerRequest/, "plugin tasks must support API workers");
   assert.match(center, /sendProfileRequest/, "plugin tasks must support Chrome workers");

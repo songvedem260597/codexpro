@@ -21,6 +21,22 @@ const TASTE_SKILL_GROUPS = Object.freeze({
   "brandkit": { id: "image-generation", label: "Tạo hình ảnh", order: 50, exclusive: false }
 });
 
+const TASTE_SKILL_SUMMARIES_VI = Object.freeze({
+  "design-taste-frontend": "Thiết kế và viết giao diện web cao cấp, tránh kiểu AI rập khuôn; phù hợp landing page, portfolio và redesign.",
+  "design-taste-frontend-v1": "Bản quy tắc thiết kế cũ để giữ tương thích với dự án đang dùng hành vi của phiên bản v1.",
+  "gpt-taste": "Tạo giao diện giàu chuyển động GSAP, bố cục AIDA sáng tạo và kiểm soát chặt chữ, khoảng cách, lưới bento.",
+  "high-end-visual-design": "Nâng thẩm mỹ lên kiểu agency cao cấp với font, khoảng cách, bóng, thẻ và chuyển động được chuẩn hóa.",
+  "minimalist-ui": "Phong cách tối giản, sạch, thiên biên tập với màu ấm, bố cục phẳng và ít hiệu ứng nặng.",
+  "industrial-brutalist-ui": "Phong cách công nghiệp, thô và tương phản mạnh; hợp dashboard dữ liệu, portfolio hoặc giao diện cá tính.",
+  "redesign-existing-projects": "Rà soát và nâng cấp giao diện dự án có sẵn mà vẫn giữ nguyên chức năng và framework hiện tại.",
+  "image-to-code": "Tạo ảnh thiết kế tham chiếu trước, phân tích kỹ rồi viết giao diện bám sát hình ảnh đó.",
+  "full-output-enforcement": "Yêu cầu worker xuất đầy đủ code và nội dung, tránh placeholder hoặc tự rút gọn giữa chừng.",
+  "stitch-design-taste": "Tạo file DESIGN.md cho Google Stitch để thống nhất chữ, màu sắc, bố cục và chuyển động.",
+  "imagegen-frontend-web": "Tạo ảnh thiết kế riêng cho từng phần của website, dùng chung bảng màu để lập trình lại chính xác.",
+  "imagegen-frontend-mobile": "Tạo concept nhiều màn hình app mobile đồng nhất trong mockup điện thoại cao cấp; chỉ tạo ảnh, không viết code.",
+  "brandkit": "Tạo bộ nhận diện thương hiệu gồm logo, guideline, mockup và bảng định hướng hình ảnh cao cấp."
+});
+
 export const DEFAULT_APP_PLUGIN_CATALOG = Object.freeze([{
   id: "taste-skill",
   name: "Taste Skill",
@@ -52,6 +68,7 @@ function readSkill(skillPath) {
     id: folder,
     install_name: installName,
     description: scalar(frontmatter, "description"),
+    summary_vi: TASTE_SKILL_SUMMARIES_VI[installName] || "Skill bổ trợ từ thư viện Taste Skill; hãy đọc mô tả gốc để biết phạm vi áp dụng.",
     content,
     group_id: group.id,
     group_label: group.label,
