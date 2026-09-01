@@ -34,7 +34,7 @@ import {
   runVerifiedGeminiScout,
   runVerifiedOpenCodeInvestigation
 } from './opencode-subagent-runner.mjs';
-import { createRuntimeLifecycleLogger } from './runtime-lifecycle-log.mjs';
+import { cloudflaredOutputLevel, createRuntimeLifecycleLogger } from './runtime-lifecycle-log.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UNTRACKED_FILE_HASH_BYTES = 64 * 1024;
@@ -1184,11 +1184,8 @@ function spawnLogged(name, command, args, options = {}) {
     while (logLines.length > 120) logLines.shift();
     if (name === 'cloudflared') {
       for (const line of lines) {
-        const level = /\b(error|failed|failure|unable|fatal)\b/i.test(line)
-          ? 'error'
-          : /\b(warn|warning|timeout|reconnect|retry|closed|disconnect)\b/i.test(line)
-            ? 'warn'
-            : 'info';
+        const level = cloudflaredOutputLevel(line);
+        if (!level) continue;
         logRuntimeLifecycle('child-output', `cloudflared ${streamName}`, {
           child_name: name,
           child_pid: child.pid ?? null,
@@ -4513,7 +4510,7 @@ async function main() {
   });
 
   const localBase = `http://${host}:${port}`;
-  await waitForHealth(`${localBase}/healthz`, token);
+  await waitForHealth(`${localBase}/healthz`, token, 30000);
   logRuntimeLifecycle('local-ready', 'Local MCP health probe succeeded', {
     server_pid: server.pid ?? null,
     host,
