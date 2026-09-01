@@ -130,6 +130,7 @@ const DEFAULT_MANAGER_SETTINGS = {
   fontWeight: 400,
   profileLayout: "rows",
   profileCardHeight: 390,
+  workingBorderStyle: "shine",
   maxSubagents: 1,
   autoRecovery: false,
   autoUpdateWorkers: false,
@@ -885,6 +886,7 @@ function ApiWorkerCards({ workers, customImages, onRun, onStop }) {
     const cardState = workerState === "hung" ? "error" : workerState;
     return (
       <article className={`browser-profile api-worker-card ${worker.connected ? "is-online" : "is-offline"} is-${cardState}`} key={worker.worker_id}>
+        <span className="worker-active-border" aria-hidden="true" />
         <WorkerIcon state={workerState} customImages={customImages} />
         <div className="profile-main">
           <div className="profile-title">
@@ -1141,6 +1143,7 @@ function App() {
       busy === `request:${chatProfileId}`,
       Boolean(openChatResponse.busy),
       Boolean(openChatResponse.loading),
+      Boolean(openChatResponse.transcriptLoading),
       Boolean(openChatResponse.networkStreamInProgress),
       Boolean(openTab?.busy),
       Boolean(openTab?.settling),
@@ -1163,6 +1166,7 @@ function App() {
       || (responseCurrent && (
         openChatResponse.busy
         || openChatResponse.loading
+        || openChatResponse.transcriptLoading
         || openChatResponse.networkStreamInProgress
         || openChatResponse.canonicalBusy
         || openChatResponse.incomplete
@@ -2069,7 +2073,7 @@ function App() {
             ? "selected_tab_settling"
             : response?.conversationId === target && response?.rolloverStatus === "creating"
               ? "conversation_rollover"
-              : response?.conversationId === target && (response?.busy || response?.loading || response?.networkStreamInProgress || response?.canonicalBusy)
+              : response?.conversationId === target && (response?.busy || response?.loading || response?.transcriptLoading || response?.networkStreamInProgress || response?.canonicalBusy)
                 ? "selected_response_busy"
                 : "";
     const previous = requestTargetDiagnostics.current.get(chatProfileId);
@@ -2552,6 +2556,7 @@ function App() {
     responseCacheLoads.current.add(key);
     try {
       const cached = await api.getChatResponseCache({ profileId: profile.profile_id, conversationId }).catch(() => null);
+      const cacheFresh = cachedResponseIsFresh(profile, conversationId, cached);
       if (cached) {
         const tab = profileConversationTab(profile, conversationId);
         const networkState = String(tab?.network_state || cached.networkState || "idle");
@@ -2591,6 +2596,7 @@ function App() {
               ...cached,
               visible: true,
               loading: false,
+              transcriptLoading: !cacheFresh,
               error: "",
               conversationId,
               text: cachedText,
@@ -2605,7 +2611,7 @@ function App() {
       }
       const selectedTargetNow = String(requestTargetsRef.current[profile.profile_id] || "");
       if (selectedTargetNow && selectedTargetNow !== conversationId) return;
-      if (!cachedResponseIsFresh(profile, conversationId, cached)) {
+      if (!cacheFresh) {
         const cachedHasContent = Boolean(cached?.messages?.length || String(cached?.text || "").trim());
         const fastResult = await loadResponse(profile, conversationId, true, false);
         const fastHasContent = Boolean(
@@ -2668,7 +2674,8 @@ function App() {
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
         const sameConversation = previous.conversationId === conversationId;
-        return { ...current, [profile.profile_id]: { ...(sameConversation ? previous : {}), visible: true, loading: !sameConversation, error: "", conversationId, messages: sameConversation ? trimRecentTranscriptMessages(previous.messages) : [] } };
+        const activeTurn = sameConversation && Boolean(previous.loading || previous.busy || previous.networkStreamInProgress || previous.canonicalBusy);
+        return { ...current, [profile.profile_id]: { ...(sameConversation ? previous : {}), visible: true, loading: activeTurn ? Boolean(previous.loading) : false, transcriptLoading: !activeTurn, error: "", conversationId, messages: sameConversation ? trimRecentTranscriptMessages(previous.messages) : [] } };
       });
       void hydrateCachedResponse(profile, conversationId).finally(() => {
         window.requestAnimationFrame(() => {
@@ -2701,7 +2708,7 @@ function App() {
     requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: nextTarget };
     requestTargetReasons.current.set(profileId, "user_selected_conversation");
     setRequestTargets((current) => ({ ...current, [profileId]: nextTarget }));
-    setRequestResponses((current) => ({ ...current, [profileId]: { visible: true, loading: true, error: "", conversationId: nextTarget, text: "", messages: [] } }));
+    setRequestResponses((current) => ({ ...current, [profileId]: { visible: true, loading: false, transcriptLoading: true, error: "", conversationId: nextTarget, text: "", messages: [] } }));
     void hydrateCachedResponse(profile, nextTarget);
   }
 
@@ -2966,7 +2973,7 @@ function App() {
         responseCurrent: currentResponse?.conversationId === conversationId,
         responseBusy: currentResponse?.busy,
         responseReady: currentResponse?.responseReady,
-        responseLoading: currentResponse?.loading,
+        responseLoading: currentResponse?.loading || currentResponse?.transcriptLoading,
         responseIncomplete: currentResponse?.incomplete,
         awaitingAssistant: currentResponse?.conversationId === conversationId && transcriptAwaitingAssistant(materializeTranscriptMessages(currentResponse, conversationId)),
         finalityPending: currentResponse?.finalityPending,
@@ -3469,6 +3476,7 @@ function App() {
       const contentAvailable = domAvailable || canonicalAvailable;
       const networkStreamPayloadAvailable = Boolean(result.network_stream_available && (result.text || result.messages?.length || result.network_stream_activity_text));
       const responseAudit = result.response_audit && typeof result.response_audit === "object" ? result.response_audit : null;
+      const needsDomFallback = completedResponseNeedsDomFallback(result);
       const responseAuditFetchMode = canonicalOnly ? "canonical_only" : readDom ? (recoverStaleDom ? "dom_recovery" : "dom") : "network_only";
       const responseAuditKey = responseAudit ? JSON.stringify([responseAuditFetchMode, responseAudit]) : "";
       setRequestResponses((current) => {
@@ -3544,6 +3552,7 @@ function App() {
             ...(sameConversation ? previous : {}),
             visible: true,
             loading: false,
+            transcriptLoading: Boolean(previous.transcriptLoading && needsDomFallback),
             error: "",
             conversationId,
             text: terminalAwaitingFinal
@@ -3602,7 +3611,7 @@ function App() {
       const message = err?.message || String(err);
       logRendererDiagnostic(api, "error", "chat", `Đọc phản hồi thất bại: ${message}`, { action: "load-response", profile_id: profile.profile_id, conversation_id: conversationId, read_dom: readDom, recover_stale_dom: recoverStaleDom, canonical_only: canonicalOnly, silent, error: err });
       setRequestResponses((current) => responseTargetStillCurrent()
-        ? { ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: false, error: message, conversationId } }
+        ? { ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: false, transcriptLoading: false, error: message, conversationId } }
         : current);
       if (!silent && responseTargetStillCurrent()) setError(message);
       return null;
@@ -3749,7 +3758,7 @@ function App() {
       responseCurrent,
       responseBusy: response?.busy,
       responseReady: responseVerifiedComplete,
-      responseLoading: response?.loading,
+      responseLoading: response?.loading || response?.transcriptLoading,
       streamBusy: responseCurrent && response?.networkStreamInProgress,
       canonicalBusy: responseCurrent && response?.canonicalBusy
     });
@@ -4078,7 +4087,7 @@ function App() {
               MCP tạm thời không phản hồi, worker sẽ tự cập nhật khi kết nối phục hồi.
             </div>
           )}
-          <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout`}>
+          <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout working-border-${managerSettings.workingBorderStyle === "beam" ? "beam" : "shine"}`}>
             {!(status?.workers || []).some((worker) => worker.worker_type === "api") && !status?.browserProfiles?.length && (
               <div className="empty">Chưa có worker nào kết nối. Hãy lưu API worker hoặc Load unpacked extension CodexPro trong Chrome profile cần dùng.</div>
             )}
@@ -4145,6 +4154,7 @@ function App() {
               const profileTaskLabel = String(profile.current_task_title || profileTaskLabels[profile.profile_id] || "").trim();
               return (
                 <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`} key={profile.profile_id}>
+                  <span className="worker-active-border" aria-hidden="true" />
                   <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
                   <div className="profile-main">
                     <div className="profile-title">
@@ -4608,6 +4618,19 @@ function App() {
                     onChange={(value) => void saveManagerSetting({ profileLayout: value }, value === "cards" ? "Đã chuyển sang thẻ dọc" : "Đã chuyển sang danh sách ngang")}
                   />
                 </div>
+                <div className="profile-border-style-select">
+                  <label>Viền worker đang hoạt động</label>
+                  <SettingsDropdown
+                    value={managerSettings.workingBorderStyle}
+                    options={[
+                      { value: "shine", label: "Ánh sáng xoay", hint: "Kiểu viền hiện tại" },
+                      { value: "beam", label: "Tia chạy quanh viền", hint: "Border Beam gọn theo Ant Design" }
+                    ]}
+                    disabled={settingsBusy === "save"}
+                    ariaLabel="Chọn kiểu viền worker đang hoạt động"
+                    onChange={(value) => void saveManagerSetting({ workingBorderStyle: value }, value === "beam" ? "Đã chọn viền tia chạy" : "Đã chọn viền ánh sáng xoay")}
+                  />
+                </div>
                 <div className="profile-card-height-control">
                   <label>Chiều cao thẻ dọc</label>
                   <div className="profile-card-height-field">
@@ -4640,9 +4663,10 @@ function App() {
                 </div>
               </div>
             </div>
-            <div className={`profile-layout-preview is-${managerSettings.profileLayout === "cards" ? "card" : "row"}`} aria-hidden="true">
+            <div className={`profile-layout-preview is-${managerSettings.profileLayout === "cards" ? "card" : "row"} working-border-${managerSettings.workingBorderStyle === "beam" ? "beam" : "shine"}`} aria-hidden="true">
               {["idle", "working", "idle", "hung"].map((state, index) => (
-                <span className="profile-layout-preview-item" key={`${state}-${index}`}>
+                <span className={`profile-layout-preview-item is-${state}`} key={`${state}-${index}`}>
+                  <span className="worker-active-border" />
                   <WorkerIcon state={state} customImages={managerSettings.workerImageDataUrls} />
                   <i />
                 </span>
