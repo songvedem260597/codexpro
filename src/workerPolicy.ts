@@ -40,6 +40,7 @@ export type WorkerJobRecord = {
 };
 
 const writeTails = new Map<string, Promise<void>>();
+const workerBootstrapTails = new Map<string, Promise<void>>();
 const MAX_EVENTS = 100;
 
 function workerJobsDir(): string {
@@ -59,6 +60,11 @@ function uniqueStrings(values: unknown, maxItems = 100): string[] {
   return [...new Set((Array.isArray(values) ? values : [])
     .map((value) => clean(value, 300))
     .filter(Boolean))].slice(0, maxItems);
+}
+
+function workerOwnerKey(value: unknown): string {
+  const workerId = clean(value, 160);
+  return workerId.startsWith("browser:") ? workerId.slice("browser:".length) : workerId;
 }
 
 function normalizeRecord(value: unknown): WorkerJobRecord | undefined {
@@ -195,7 +201,7 @@ export async function prepareWorkerJob(input: {
   }));
 }
 
-export async function bootstrapWorkerJob(input: {
+async function bootstrapWorkerJobRecord(input: {
   jobId: string;
   workerId: string;
   title: string;
@@ -212,7 +218,7 @@ export async function bootstrapWorkerJob(input: {
   codexGraphRelationshipCount?: number;
 }): Promise<WorkerJobRecord> {
   return await updateWorkerJob(input.jobId, (current) => {
-    if (current && current.workerId !== input.workerId) throw new Error("Worker job owner mismatch.");
+    if (current && workerOwnerKey(current.workerId) !== workerOwnerKey(input.workerId)) throw new Error("Worker job owner mismatch.");
     const requiredObligations = input.kind === "code" ? ["global_rules", "agents_chain", "codexgraph"] : ["job_title"];
     const completedObligations = input.kind === "code"
       ? [
@@ -234,6 +240,7 @@ export async function bootstrapWorkerJob(input: {
         completedObligations: [],
         events: []
       }),
+      workerId: input.workerId,
       status: "running",
       scope: input.scope,
       root: input.root,
@@ -254,6 +261,42 @@ export async function bootstrapWorkerJob(input: {
       events: [...(current?.events || []), event("bootstrapped", { kind: input.kind, policy_version: WORKER_POLICY_VERSION })]
     };
   });
+}
+
+async function supersedeRunningWorkerJobs(workerId: string, nextJobId: string): Promise<void> {
+  const ownerKey = workerOwnerKey(workerId);
+  const supersededAt = new Date().toISOString();
+  const staleRunningJobs = listWorkerJobs({ statuses: ["running"], limit: 200 })
+    .filter((record) => record.jobId !== nextJobId && workerOwnerKey(record.workerId) === ownerKey);
+  for (const stale of staleRunningJobs) {
+    await updateWorkerJob(stale.jobId, (current) => {
+      if (!current || current.status !== "running" || workerOwnerKey(current.workerId) !== ownerKey) return current!;
+      return {
+        ...current,
+        status: "cancelled",
+        finishedAt: supersededAt,
+        summary: current.summary || `Task superseded by ${nextJobId}.`,
+        events: [...current.events, event("superseded", { superseded_by: nextJobId })]
+      };
+    });
+  }
+}
+
+export async function bootstrapWorkerJob(input: Parameters<typeof bootstrapWorkerJobRecord>[0]): Promise<WorkerJobRecord> {
+  const ownerKey = workerOwnerKey(input.workerId);
+  const previous = workerBootstrapTails.get(ownerKey) ?? Promise.resolve();
+  let result!: WorkerJobRecord;
+  const next = previous.catch(() => undefined).then(async () => {
+    await supersedeRunningWorkerJobs(input.workerId, input.jobId);
+    result = await bootstrapWorkerJobRecord(input);
+  });
+  workerBootstrapTails.set(ownerKey, next);
+  try {
+    await next;
+    return result;
+  } finally {
+    if (workerBootstrapTails.get(ownerKey) === next) workerBootstrapTails.delete(ownerKey);
+  }
 }
 
 export async function finalizeWorkerJob(input: {

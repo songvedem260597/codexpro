@@ -26,12 +26,24 @@ const idle = taskUnfinalizedIncident(job, {
   now,
   profiles: [{ profile_id: "chrome-one", connected: true, activity: "idle", current_task_id: job.job_id, current_task_title: job.title, conversation_tabs: [] }]
 });
-assert.equal(idle?.category, "task-unfinalized");
-assert.equal(idle?.details?.classification, "task_unfinalized");
-assert.equal(idle?.details?.suspected_cause, "browser_task_became_idle_without_finalize");
-assert.equal(idle?.details?.incident_fingerprint, `task-unfinalized:${job.job_id}`);
-assert.equal(idle?.details?.last_event?.type, "bootstrapped");
-assert.ok(idle?.details?.stale_ms > 0);
+assert.equal(idle, null, "a connected worker that still owns the task must not be treated as unfinalized merely because browser generation is idle during tool work");
+
+const prefixedOwner = taskUnfinalizedIncident({ ...job, worker_id: "browser:chrome-one" }, {
+  now,
+  profiles: [{ profile_id: "chrome-one", connected: true, activity: "idle", current_task_id: job.job_id, current_task_title: job.title, conversation_tabs: [] }]
+});
+assert.equal(prefixedOwner, null, "legacy browser:<profile> job ids must resolve to the same live browser profile owner");
+
+const orphaned = taskUnfinalizedIncident(job, {
+  now,
+  profiles: [{ profile_id: "chrome-one", connected: true, activity: "idle", current_task_id: "", current_task_title: "", conversation_tabs: [] }]
+});
+assert.equal(orphaned?.category, "task-unfinalized");
+assert.equal(orphaned?.details?.classification, "task_unfinalized");
+assert.equal(orphaned?.details?.suspected_cause, "browser_task_pointer_missing_without_finalize");
+assert.equal(orphaned?.details?.incident_fingerprint, `task-unfinalized:${job.job_id}`);
+assert.equal(orphaned?.details?.last_event?.type, "bootstrapped");
+assert.ok(orphaned?.details?.stale_ms > 0);
 
 assert.equal(taskUnfinalizedIncident(job, {
   now,
@@ -61,8 +73,8 @@ try {
       source: "manager",
       category: "task-unfinalized",
       action: "task-unfinalized-detected",
-      message: idle.message,
-      details: idle.details
+      message: orphaned.message,
+      details: orphaned.details
     });
   }
   const persisted = await readDiagnosticLogs(diagnosticRoot, { category: "task-unfinalized", hours: 24 });

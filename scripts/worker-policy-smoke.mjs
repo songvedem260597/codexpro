@@ -108,6 +108,35 @@ try {
   assert.equal(reconciled.finishedAt, evidenceFinishedAt);
   assert.equal(reconciled.events.at(-1)?.type, "reconciled_completed");
 
+  const supersededId = "cpt_444444444444444444444444";
+  const replacementId = "cpt_555555555555555555555555";
+  await prepareWorkerJob({ jobId: supersededId, workerId: "browser:chrome.fixture-supersede", scope: "workspace", root: "C:\\repo" });
+  await bootstrapWorkerJob({
+    jobId: supersededId,
+    workerId: "browser:chrome.fixture-supersede",
+    title: "Older browser task",
+    kind: "general",
+    root: "",
+    workspaceId: "",
+    scope: "workspace"
+  });
+  await prepareWorkerJob({ jobId: replacementId, workerId: "chrome.fixture-supersede", scope: "workspace", root: "C:\\repo" });
+  const replacement = await bootstrapWorkerJob({
+    jobId: replacementId,
+    workerId: "chrome.fixture-supersede",
+    title: "Replacement browser task",
+    kind: "general",
+    root: "",
+    workspaceId: "",
+    scope: "workspace"
+  });
+  const superseded = readWorkerJob(supersededId);
+  assert.equal(superseded?.status, "cancelled", "starting a newer task on the same worker must close the previous running job");
+  assert.equal(superseded?.events.at(-1)?.type, "superseded");
+  assert.equal(superseded?.events.at(-1)?.details?.superseded_by, replacementId);
+  assert.equal(replacement.status, "running");
+  await finalizeWorkerJob({ jobId: replacementId, workerId: "chrome.fixture-supersede", outcome: "completed" });
+
   console.log("✓ Worker MCP policy persistence smoke test passed");
 } finally {
   fs.rmSync(home, { recursive: true, force: true });
