@@ -2898,7 +2898,8 @@ function App() {
       const result = await api.stopProfileTask({
         profileId: profile.profile_id,
         conversationId,
-        targetId: tab.id
+        targetId: tab.id,
+        taskId: String(profile.current_task_id || "")
       });
       notify(result?.stopped ? "Đã dừng task ChatGPT" : "Task đã ngừng trước khi nhận lệnh dừng");
       window.setTimeout(() => void refresh(false), 700);
@@ -3442,9 +3443,12 @@ function App() {
         : current);
     }
     try {
+      const activeResponse = requestResponsesRef.current[profile.profile_id] || {};
+      const responseTaskId = activeResponse.conversationId === conversationId ? String(activeResponse.repoTaskId || "") : "";
       const result = await api.getProfileResponse({
         profileId: profile.profile_id,
         conversationId,
+        taskId: responseTaskId,
         readDom,
         recoverStaleDom,
         canonicalOnly,

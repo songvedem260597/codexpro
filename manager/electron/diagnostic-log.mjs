@@ -199,7 +199,6 @@ function trimToByteLimit(records) {
 function annotateIncidentOccurrences(records) {
   const incidents = new Map();
   for (const record of records) {
-    if (record?.source !== "user" || record?.category !== "user-reported-error") continue;
     const fingerprint = String(record?.details?.incident_fingerprint || "").trim();
     if (!fingerprint) continue;
     const current = incidents.get(fingerprint) || { count: 0, firstSeenAt: record.timestamp, lastSeenAt: record.timestamp };

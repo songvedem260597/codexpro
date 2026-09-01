@@ -12,6 +12,7 @@ import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
 import { syncUnpackedCodexProExtensions } from "./extension-sync.mjs";
 import { createInterruptionAlertTracker } from "./interruption-alert.mjs";
+import { taskUnfinalizedIncidents, TASK_UNFINALIZED_REPEAT_MS } from "./task-unfinalized-diagnostic.mjs";
 import { classifyUserReportedError } from "./user-reported-error.mjs";
 import { createRuntimeRestartGuard } from "./runtime-restart-guard.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
@@ -2575,6 +2576,13 @@ async function runtimeStatus(options = {}) {
     return { ...profile, current_workspace_repo: await githubRepoForRoot(workspaceRoot) };
   }));
   const workerStatus = await workerPluginRegistry.list({ browserProfiles });
+  for (const incident of taskUnfinalizedIncidents(workerJobs, { profiles: browserProfiles, workers: workerStatus.workers })) {
+    if (!diagnosticAllowed(incident.fingerprint, TASK_UNFINALIZED_REPEAT_MS)) continue;
+    diagnostic(incident.level, incident.source, incident.category, incident.message, {
+      action: incident.action,
+      ...incident.details
+    });
+  }
   return {
     checkedAt: new Date().toISOString(),
     task: base.task,
@@ -3526,6 +3534,7 @@ async function stopProfileTask(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
   const targetId = String(payload?.targetId ?? "").trim();
+  const taskId = String(payload?.taskId || "").trim();
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (conversationId && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat cần dừng không hợp lệ.");
   if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome cần dừng.");
@@ -3535,7 +3544,8 @@ async function stopProfileTask(payload) {
     action: "stop_chat_generation",
     profile_id: profileId,
     conversation_id: conversationId || undefined,
-    target_id: targetId
+    target_id: targetId,
+    task_id: /^cpt_[a-f0-9]{24}$/.test(taskId) ? taskId : undefined
   }, 15000);
 }
 
@@ -3907,6 +3917,7 @@ async function renameProfileChat(payload) {
 async function getProfileResponse(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
+  const taskId = String(payload?.taskId || "").trim();
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   const managerStartedAt = Date.now();
@@ -3930,7 +3941,8 @@ async function getProfileResponse(payload) {
       // the unknown flag but still perform the existing canonical + DOM response read.
       read_dom: payload?.canonicalOnly === true || payload?.readDom !== false,
       canonical_only: payload?.canonicalOnly === true,
-      recover_stale_dom: payload?.recoverStaleDom === true
+      recover_stale_dom: payload?.recoverStaleDom === true,
+      task_id: /^cpt_[a-f0-9]{24}$/.test(taskId) ? taskId : undefined
     }, 80000);
     const responseProfileId = String(result?.profile_id || "").trim();
     const responseConversationId = String(result?.conversation_id || "").trim()
