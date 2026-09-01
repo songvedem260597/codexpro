@@ -2700,7 +2700,7 @@ async function discoverGitRepositories(scanRoots) {
   if (repoScanPromise?.key === cacheKey) return repoScanPromise.promise;
   const promise = (async () => {
     const started = Date.now();
-    const queue = scanRoots.map((root) => ({ root: path.resolve(root), depth: 0 }));
+    const queue = scanRoots.map((root) => ({ root: path.resolve(root), depth: 0, insideRepository: false }));
     const visited = new Set();
     const repositories = new Set();
     let scanned = 0;
@@ -2719,12 +2719,19 @@ async function discoverGitRepositories(scanRoots) {
         scanned += 1;
         if (entries.some((entry) => entry.name.toLowerCase() === ".git" && (entry.isDirectory() || entry.isFile()))) {
           repositories.add(item.root);
+          if (!item.insideRepository && item.depth < REPO_SCAN_MAX_DEPTH) {
+            for (const entry of entries) {
+              if (!entry.isDirectory() || entry.isSymbolicLink() || REPO_SCAN_SKIPPED_DIRECTORIES.has(entry.name.toLowerCase())) continue;
+              queue.push({ root: path.join(item.root, entry.name), depth: item.depth + 1, insideRepository: true });
+            }
+          }
           continue;
         }
+        if (item.insideRepository) continue;
         if (item.depth >= REPO_SCAN_MAX_DEPTH) continue;
         for (const entry of entries) {
           if (!entry.isDirectory() || entry.isSymbolicLink() || REPO_SCAN_SKIPPED_DIRECTORIES.has(entry.name.toLowerCase())) continue;
-          queue.push({ root: path.join(item.root, entry.name), depth: item.depth + 1 });
+          queue.push({ root: path.join(item.root, entry.name), depth: item.depth + 1, insideRepository: false });
         }
       }
     }

@@ -326,8 +326,15 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
                 <section className="app-plugin-task-launcher" aria-label="Áp dụng skill cho dự án">
                   <div className="app-plugin-task-summary">
                     <div><span>BƯỚC 1 · SKILL ĐÃ CHỌN</span><strong>{skillSelection.length} skill</strong></div>
-                    <p>{skillSelection.map((skill) => skill.name).join(" · ")}</p>
-                    <button type="button" onClick={() => setSkillSelection([])} disabled={launching}>Chọn lại</button>
+                    <div className="app-plugin-task-skill-list" aria-label="Skill áp dụng cho dự án">
+                      {skillSelection.map((skill) => (
+                        <span key={skill.id}>
+                          <span>{skill.name}</span>
+                          <button type="button" onClick={() => setSkillSelection((current) => current.filter((item) => item.id !== skill.id))} disabled={launching} aria-label={`Xóa ${skill.name} khỏi dự án`} title={`Xóa ${skill.name} khỏi dự án`}>×</button>
+                        </span>
+                      ))}
+                    </div>
+                    <button type="button" onClick={() => setSkillSelection([])} disabled={launching}>Xóa tất cả</button>
                   </div>
                   <div className="app-plugin-task-fields">
                     <label><span>Bước 2 · Chọn dự án</span><AppDropdown value={workspaceRoot} options={projects.map((project) => ({ value: project.root, label: project.name, hint: project.root }))} onChange={setWorkspaceRoot} disabled={launching} ariaLabel="Chọn dự án áp dụng skill" searchable={projects.length > 5} placeholder="Chưa có dự án" /></label>
