@@ -3066,7 +3066,7 @@ function App() {
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Tin nhắn đã gửi nhưng AI gặp lỗi network${result?.network_error ? `: ${result.network_error}` : ""}.` }));
         notify("Tin nhắn đã gửi · AI gặp lỗi network");
       } else {
-        notify(newChat ? "Đã tạo chat mới và gửi tin nhắn đầu tiên" : `Đã gửi${result.attachment_count ? ` ${result.attachment_count} file` : ""} vào ${result.title || profile.active_chat_title || profile.label}`);
+        notify("Đã gửi tin nhắn thành công");
       }
       window.setTimeout(() => void refresh(false), 500);
       return true;
