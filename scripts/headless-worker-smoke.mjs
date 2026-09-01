@@ -36,6 +36,7 @@ try {
 
   const initial = manager.listWorkers();
   assert.equal(initial.supported, true);
+  assert.equal(initial.chromePath, process.execPath);
   assert.equal(initial.sourceProfiles.length, 1);
   assert.equal(initial.sourceProfiles[0].profileDirectory, "Profile 1");
   assert.equal(initial.sourceProfiles[0].userName, "worker@example.com");

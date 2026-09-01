@@ -61,6 +61,7 @@ export function createHeadlessWorkerManager(options = {}) {
     if (process.env.CODEXPRO_CHROME_PATH) return [path.resolve(process.env.CODEXPRO_CHROME_PATH)];
     if (process.platform === "darwin") {
       return [
+        path.join(codexProHome, "browsers", "chrome-for-testing", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"),
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         path.join(os.homedir(), "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome")
       ];
@@ -329,6 +330,9 @@ export function createHeadlessWorkerManager(options = {}) {
       "--window-size=1280,900",
       "--remote-debugging-port=0"
     ];
+    if (fs.existsSync(path.join(extensionRoot, "manifest.json"))) {
+      args.push(`--disable-extensions-except=${extensionRoot}`, `--load-extension=${extensionRoot}`);
+    }
     const child = spawn(chromePath, args, {
       detached: true,
       stdio: "ignore",
