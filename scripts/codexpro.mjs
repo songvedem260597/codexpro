@@ -1177,10 +1177,26 @@ function spawnLogged(name, command, args, options = {}) {
   child.codexproKillTree = Boolean(invocation.killTree);
   child.codexproExpectedExit = false;
   const logLines = [];
-  const record = (stream, chunk) => {
+  const record = (stream, streamName, chunk) => {
     const text = redactForLog(String(chunk));
-    logLines.push(...text.split(/\r?\n/).filter(Boolean).map((line) => `[${name}] ${line}`));
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    logLines.push(...lines.map((line) => `[${name}] ${line}`));
     while (logLines.length > 120) logLines.shift();
+    if (name === 'cloudflared') {
+      for (const line of lines) {
+        const level = /\b(error|failed|failure|unable|fatal)\b/i.test(line)
+          ? 'error'
+          : /\b(warn|warning|timeout|reconnect|retry|closed|disconnect)\b/i.test(line)
+            ? 'warn'
+            : 'info';
+        logRuntimeLifecycle('child-output', `cloudflared ${streamName}`, {
+          child_name: name,
+          child_pid: child.pid ?? null,
+          stream: streamName,
+          line
+        }, level);
+      }
+    }
     if (verbose) stream.write(`[${name}] ${text}`);
   };
   child.codexproLogTail = () => logLines.join('\n');
@@ -1192,8 +1208,8 @@ function spawnLogged(name, command, args, options = {}) {
     cwd: spawnOptions.cwd || '',
     expected_exit: false
   });
-  child.stdout.on('data', (chunk) => record(process.stdout, chunk));
-  child.stderr.on('data', (chunk) => record(process.stderr, chunk));
+  child.stdout.on('data', (chunk) => record(process.stdout, 'stdout', chunk));
+  child.stderr.on('data', (chunk) => record(process.stderr, 'stderr', chunk));
   child.on('error', (error) => {
     logRuntimeLifecycle('child-error', `${name} process emitted an error`, {
       child_name: name,

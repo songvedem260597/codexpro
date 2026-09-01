@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
 import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
+import { collectTunnelOfflineEvidence } from "./tunnel-offline-diagnostic.mjs";
 import { createInterruptionAlertTracker } from "./interruption-alert.mjs";
 import { taskUnfinalizedIncidents, TASK_UNFINALIZED_REPEAT_MS } from "./task-unfinalized-diagnostic.mjs";
 import { classifyUserReportedError } from "./user-reported-error.mjs";
@@ -2117,6 +2118,9 @@ async function health(base, token) {
       ok: response.ok && body.ok === true,
       status: response.status,
       latency: Date.now() - started,
+      response_server: String(response.headers.get("server") || ""),
+      cf_ray: String(response.headers.get("cf-ray") || ""),
+      content_type: String(response.headers.get("content-type") || ""),
       data: body
     };
   } catch (error) {
@@ -2174,27 +2178,42 @@ async function runtimeBaseStatus(options = {}) {
       processes = [];
     }
     const processSummaries = processes.map((item) => ({ pid: item.ProcessId, name: item.Name }));
-    const healthDiagnostics = [
-      runtimeHealthDiagnosticTracker.observe({
-        target: "local",
-        label: "Local MCP",
-        base: localBase,
-        result: local,
-        healthCycleId,
-        processes: processSummaries,
-        slowMs: 1_000
-      }),
-      runtimeHealthDiagnosticTracker.observe({
-        target: "tunnel",
-        label: "Public tunnel",
-        base: publicBase,
-        configured: Boolean(publicBase),
-        result: tunnel,
-        healthCycleId,
-        processes: processSummaries,
-        slowMs: 2_500
-      })
-    ];
+    const localHealthEvent = runtimeHealthDiagnosticTracker.observe({
+      target: "local",
+      label: "Local MCP",
+      base: localBase,
+      result: local,
+      healthCycleId,
+      processes: processSummaries,
+      slowMs: 1_000
+    });
+    const tunnelHealthEvent = runtimeHealthDiagnosticTracker.observe({
+      target: "tunnel",
+      label: "Public tunnel",
+      base: publicBase,
+      configured: Boolean(publicBase),
+      result: tunnel,
+      healthCycleId,
+      processes: processSummaries,
+      slowMs: 2_500
+    });
+    if (tunnelHealthEvent && publicBase && !tunnel.ok) {
+      try {
+        const offlineEvidence = await collectTunnelOfflineEvidence({
+          home: codexProHome,
+          publicBase,
+          local,
+          tunnel,
+          processes: processSummaries,
+          timeoutMs: 1_500
+        });
+        Object.assign(tunnelHealthEvent.details, offlineEvidence);
+        tunnel.offline_diagnostic = offlineEvidence;
+      } catch (error) {
+        tunnelHealthEvent.details.offline_diagnostic_error = String(error?.message || error).slice(0, 500);
+      }
+    }
+    const healthDiagnostics = [localHealthEvent, tunnelHealthEvent];
     for (const event of healthDiagnostics) {
       if (!event) continue;
       diagnostic(event.level, event.source, event.category, event.message, event.details);
