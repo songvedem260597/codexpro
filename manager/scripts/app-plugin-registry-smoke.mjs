@@ -45,9 +45,9 @@ try {
 
   const entry = registry.resolveResource("alpha", "/");
   const asset = registry.resolveResource("alpha", "/app.js");
-  assert.equal(entry.path, path.join(alphaRoot, "dist", "index.html"));
+  assert.equal(fs.realpathSync(entry.path), fs.realpathSync(path.join(alphaRoot, "dist", "index.html")));
   assert.equal(entry.mime_type, "text/html; charset=utf-8");
-  assert.equal(asset.path, path.join(alphaRoot, "dist", "app.js"));
+  assert.equal(fs.realpathSync(asset.path), fs.realpathSync(path.join(alphaRoot, "dist", "app.js")));
   assert.equal(asset.mime_type, "text/javascript; charset=utf-8");
   assert.throws(() => registry.resolveResource("alpha", "/%2e%2e/.codexpro-plugin/plugin.json"), /ngoài thư mục giao diện/i);
   assert.throws(() => registry.resolveResource("missing", "/"), /chưa được cài/i);
