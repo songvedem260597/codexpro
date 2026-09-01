@@ -358,6 +358,11 @@ const domCompletedActivity = runChatActivityProbe({ assistantText: "Đã hoàn t
 assert.equal(domCompletedActivity.busy, false, "a finished assistant turn must not remain busy when the stop control is gone");
 assert.equal(domCompletedActivity.response_ready, true, "a finished text response after the latest user must become authoritative completion evidence");
 assert.equal(domCompletedActivity.source, "dom_response_ready", "finished text responses must be distinguishable from stale generic DOM state");
+const domVietnameseInterrupted = runChatActivityProbe({ assistantText: "K\u1ebft n\u1ed1i b\u1ecb gi\u00e1n \u0111o\u1ea1n. \u0110ang ch\u1edd c\u00e2u tr\u1ea3 l\u1eddi ho\u00e0n ch\u1ec9nh", controls: [] });
+assert.equal(domVietnameseInterrupted.connection_interrupted, true, "Vietnamese Connection interrupted placeholder must trigger recovery");
+assert.equal(domVietnameseInterrupted.source, "dom_connection_interrupted", "Vietnamese interrupted placeholder must use the Connection interrupted state");
+assert.equal(domVietnameseInterrupted.busy, true, "Vietnamese interrupted placeholder must keep the turn incomplete while recovery waits");
+assert.equal(domVietnameseInterrupted.response_ready, false, "Vietnamese interrupted placeholder must not be treated as a completed answer");
 
 assert.match(server, /task_title:[\s\S]*?words >= 4 && words <= 6/, "begin_repo_task must require a clear 4-6 word AI-generated task title");
 assert.match(server, /task_kind: z\.enum\(\["general", "code"\]\)/, "every profile task must declare whether it needs coding context");

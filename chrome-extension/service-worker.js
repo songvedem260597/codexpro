@@ -700,7 +700,7 @@ function probeChatActivityPage() {
   });
   const imageResponseReady=Boolean(generatedImage&&!imageGenerationLoading);
   const pageText=String(document.body?.innerText||document.body?.textContent||'').replace(/\u200b/g,' ');
-  const connectionInterrupted=/connection interrupted\.\s*waiting for the complete answer/i.test(pageText);
+  const connectionInterrupted=/(?:connection interrupted\.\s*waiting for the complete answer|k\u1ebft n\u1ed1i b\u1ecb gi\u00e1n \u0111o\u1ea1n\.\s*\u0111ang ch\u1edd c\u00e2u tr\u1ea3 l\u1eddi ho\u00e0n ch\u1ec9nh)/i.test(pageText);
   const messageDeliveryTimedOut=/message delivery timed out\.\s*please try again/i.test(pageText);
   const recoveryRequired=connectionInterrupted||messageDeliveryTimedOut;
   const toolCallVisible=Array.from(latestTurn?.querySelectorAll?.('button,[role="button"],summary')||[]).some(control=>visible(control)&&/^(?:called|calling) tool\b|^(?:đã|đang) gọi tool\b/i.test(String(control.getAttribute?.('aria-label')||control.innerText||control.textContent||'').trim()));
@@ -1385,7 +1385,7 @@ async function readChatResponsePage() {
   });
   const imageResponseReady=Boolean(generatedImage&&!imageGenerationLoading);
   const pageText=String(document.body?.innerText||document.body?.textContent||'').replace(/\u200b/g,' ');
-  const connectionInterrupted=/connection interrupted\.\s*waiting for the complete answer/i.test(pageText);
+  const connectionInterrupted=/(?:connection interrupted\.\s*waiting for the complete answer|k\u1ebft n\u1ed1i b\u1ecb gi\u00e1n \u0111o\u1ea1n\.\s*\u0111ang ch\u1edd c\u00e2u tr\u1ea3 l\u1eddi ho\u00e0n ch\u1ec9nh)/i.test(pageText);
   const messageDeliveryTimedOut=/message delivery timed out\.\s*please try again/i.test(pageText);
   const recoveryRequired=connectionInterrupted||messageDeliveryTimedOut;
   const busy=Boolean(imageGenerationLoading||!imageResponseReady&&(stopControl||thinkingPlaceholder||recoveryRequired));
