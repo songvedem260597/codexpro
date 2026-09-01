@@ -673,7 +673,7 @@ function ChatRequestComposer({
         <textarea
           id={`request-${profileId}`}
           value={draft}
-          maxLength={12000}
+          maxLength={20000}
           placeholder={placeholder}
           onPaste={onPaste}
           onChange={(event) => {
@@ -707,7 +707,7 @@ function ChatRequestComposer({
               <path d="M20.5 11.5 11 21a6 6 0 0 1-8.5-8.5l10-10a4 4 0 0 1 5.7 5.6l-10 10a2 2 0 1 1-2.9-2.8l9.6-9.6" />
             </svg>
           </button>
-          <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${draft.length.toLocaleString("vi-VN")}/12.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
+          <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${draft.length.toLocaleString("vi-VN")}/20.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
         </div>
       </div>
       {sendError && <div className="request-send-error">{sendError}</div>}
@@ -993,7 +993,7 @@ function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChoo
             <textarea
               id="api-job-request"
               value={request}
-              maxLength={12000}
+              maxLength={20000}
               placeholder="Nhập file hoặc tin nhắn"
               onPaste={onPaste}
               onChange={(event) => setRequest(event.target.value)}
@@ -1007,7 +1007,7 @@ function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChoo
             {attachments.length > 0 && <div className="request-files">{attachments.map((file) => <div className="request-file" key={file.path} title={file.path} role="button" tabIndex={0} aria-label={`Xem trước ${file.name}`} onClick={() => void onOpenAttachmentPreview(file)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void onOpenAttachmentPreview(file); } }}>{file.previewDataUrl ? <img className="request-file-image" src={file.previewDataUrl} alt="" /> : <span className="request-file-icon">▤</span>}<span className="request-file-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span><button type="button" aria-label={`Bỏ ${file.name}`} onClick={(event) => { event.stopPropagation(); onRemoveAttachment(file.path); }} disabled={working}>×</button></div>)}</div>}
             <div className="request-composer-toolbar">
               <button type="button" className="attach-button" aria-label="Thêm file" title="Thêm file" onClick={onChooseAttachments} disabled={working || attachments.length >= 4}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20.5 11.5 11 21a6 6 0 0 1-8.5-8.5l10-10a4 4 0 0 1 5.7 5.6l-10 10a2 2 0 1 1-2.9-2.8l9.6-9.6" /></svg></button>
-              <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${request.length.toLocaleString("vi-VN")}/12.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
+              <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${request.length.toLocaleString("vi-VN")}/20.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
             </div>
           </div>
 

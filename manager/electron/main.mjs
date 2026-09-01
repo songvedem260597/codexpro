@@ -595,7 +595,7 @@ async function chooseRequestFiles() {
 
 async function materializeApiWorkerRequest(payload) {
   const source = payload && typeof payload === "object" ? payload : {};
-  const text = String(source.text || source.request || "").trim().slice(0, 12_000);
+  const text = String(source.text || source.request || "").trim().slice(0, 20_000);
   const requestedFiles = Array.isArray(source.attachments) ? source.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
   const files = requestedFiles.map((file) => requestFileSummary(file?.path));
@@ -3659,7 +3659,7 @@ async function sendProfileRequestUnlocked(payload) {
   if (!newChat && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
   if (requestedScope === "workspace" && !requestedProjectRoot) throw new Error("Hãy chọn thư mục hoặc dự án cần làm trước khi gửi yêu cầu.");
-  if (text.length > 12000) throw new Error("Yêu cầu dài quá 12.000 ký tự.");
+  if (text.length > 20000) throw new Error("Yêu cầu dài quá 20.000 ký tự.");
   const sendStartedAt = Date.now();
   const files = requestedFiles.map((file) => requestFileSummary(file?.path));
   if (files.some((file) => file.size > MAX_REQUEST_ATTACHMENT_BYTES)) throw new Error("Mỗi file được tối đa 8 MB.");

@@ -2007,7 +2007,7 @@ async function execute(command) {
     const attachments=Array.isArray(args.attachments)?args.attachments.slice(0,4).map(file=>({name:String(file?.name||'').trim().slice(0,255),mime_type:String(file?.mime_type||'application/octet-stream').trim().slice(0,160),data_base64:String(file?.data_base64||'')})):[];
     const newChat=Boolean(args.new_chat);
     if(!text&&!attachments.length)throw new Error('Yêu cầu và file đính kèm không được cùng để trống.');
-    if(text.length>12000)throw new Error('Yêu cầu dài quá 12.000 ký tự.');
+    if(text.length>20000)throw new Error('Yêu cầu dài quá 20.000 ký tự.');
     if(attachments.some(file=>!file.name||!file.data_base64))throw new Error('File đính kèm không hợp lệ.');
     if(attachments.reduce((total,file)=>total+file.data_base64.length,0)>14000000)throw new Error('Tổng file đính kèm quá lớn.');
     const requestedId=Number(args.target_id);
