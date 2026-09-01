@@ -176,6 +176,7 @@ export function createApiWorkerPlugin(options = {}) {
           kind: payload.task_kind || payload.taskKind,
           scope,
           root: state.root,
+          workflow: payload.workflow,
           workspaceCandidates: payload.workspaceCandidates || payload.workspace_candidates
         },
         request: payload.text || payload.request,

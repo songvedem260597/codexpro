@@ -1,4 +1,5 @@
 import { assertProvider, mcpToolsToProviderTools, normalizeProviderToolCalls } from "../provider-core/provider-contract.mjs";
+import { buildSystemMaintenanceWorkflowPrompt, resolveSystemMaintenanceWorkflow } from "../system-maintenance-workflow.mjs";
 
 const LIFECYCLE_TOOLS = new Set([
   "prepare_repo_task",
@@ -128,6 +129,7 @@ export async function runMcpAgentJob(input = {}) {
   const scope = job.scope === "all_allowed" ? "all_allowed" : "workspace";
   let root = clean(job.root, 2048);
   const workspaceCandidates = [...new Set((Array.isArray(job.workspaceCandidates) ? job.workspaceCandidates : []).map((candidate) => clean(candidate, 2048)).filter(Boolean))].slice(0, 80);
+  const maintenanceWorkflow = resolveSystemMaintenanceWorkflow(job.workflow, input.request);
   if (scope === "workspace" && !root) throw new Error("Workspace-scoped API jobs require an exact root.");
   if (kind === "code" && scope === "all_allowed" && !root && !workspaceCandidates.length) throw new Error("All-allowed code API jobs require at least one workspace candidate.");
 
@@ -257,6 +259,10 @@ export async function runMcpAgentJob(input = {}) {
     if (kind === "code" && !providerTools.length) throw new Error("CodexPro MCP exposed no tools for a code job.");
     const allowedTools = new Set(runnableMcpTools.map((tool) => String(tool.name)));
     messages.push({ role: "system", content: bootstrapMessage(bootstrap) });
+    if (maintenanceWorkflow) {
+      messages.push({ role: "system", content: buildSystemMaintenanceWorkflowPrompt() });
+      emit("workflow_started", { workflow_id: maintenanceWorkflow.id, workflow_version: maintenanceWorkflow.version });
+    }
     let toolCallCount = 0;
     let finalText = "";
 
@@ -300,7 +306,17 @@ export async function runMcpAgentJob(input = {}) {
           summary: clean(finalText, 4000)
         }, { signal: input.signal });
         emit("completed", { turn, tool_call_count: toolCallCount });
-        return { job_id: jobId, worker_id: workerId, task_title: title, text: finalText, usage, provider_state: providerState, bootstrap, finalized };
+        return {
+          job_id: jobId,
+          worker_id: workerId,
+          task_title: title,
+          text: finalText,
+          usage,
+          provider_state: providerState,
+          bootstrap,
+          finalized,
+          workflow: maintenanceWorkflow || undefined
+        };
       }
       input.onPhase?.("tool", { names: toolCalls.map((call) => call.name) });
       if (toolCallCount + toolCalls.length > limits.maxToolCalls) throw new Error("Provider exceeded the configured MCP tool-call limit.");
