@@ -172,7 +172,7 @@ const recoveryNetworkState = new Map([[41, { state: "completed", conversation_id
 const recoveryPostLog = new Map([[41, [{ state: "completed" }]]]);
 const recoveryPostVersion = new Map([[41, 3]]);
 const replaceUnresponsiveChatTab = Function(
-  "chrome", "waitForTab", "ensureChatNetworkStreamCapture", "ensureChatNetworkStateLoaded", "chatNetworkStateByTab", "chatNetworkPostLogByTab", "chatNetworkPostVersionByTab", "pendingConversationByTab", "persistChatNetworkState", "scheduleRealtimeProfilePush", "recentConversationCache", "serializeChatGptTabCreation", "MAX_CHATGPT_TABS", "releaseChatDebuggerForRecovery",
+  "chrome", "waitForTab", "ensureChatNetworkStreamCapture", "ensureChatNetworkStateLoaded", "chatNetworkStateByTab", "chatNetworkPostLogByTab", "chatNetworkPostVersionByTab", "pendingConversationByTab", "persistChatNetworkState", "scheduleRealtimeProfilePush", "recentConversationCache", "serializeChatGptTabCreation", "MAX_CHATGPT_TABS", "chatGptTabLimit", "releaseChatDebuggerForRecovery",
   `${replaceTabSource.replace(/^function/, "async function")}; return replaceUnresponsiveChatTab;`
 )(
   { tabs: {
@@ -193,6 +193,7 @@ const replaceUnresponsiveChatTab = Function(
   { at: 1, items: [] },
   async (operation) => await operation(),
   3,
+  async () => 3,
   async (id) => { recoveryCalls.push(["release", id]); }
 );
 const recoveryResult = await replaceUnresponsiveChatTab({ id: 41, windowId: 7, active: true, url: "https://chatgpt.com/c/12345678-abcd" }, "https://chatgpt.com/c/12345678-abcd", 5000);
