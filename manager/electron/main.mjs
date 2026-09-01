@@ -2989,20 +2989,10 @@ async function openProfileChat(payload) {
       }
     }
 
-    let windowFocus = null;
-    if (activation?.window_state === "maximized" && activation?.window_focused) {
-      windowFocus = {
-        ok: true,
-        activated: true,
-        maximized: true,
-        foreground_match: true,
-        source: "chrome.windows",
-        window_id: activation.window_id
-      };
-      openPhaseTimings.window_focus_ms = 0;
-    } else {
-      windowFocus = await timedOpenPhase("window_focus_ms", () => focusChromeWindow(title || createdTab?.title || "ChatGPT"));
-    }
+    // chrome.windows.update({ focused: true }) may report success before Windows
+    // has actually transferred foreground ownership. Always verify/force the
+    // native foreground window so a hidden Chrome window is never treated as open.
+    const windowFocus = await timedOpenPhase("window_focus_ms", () => focusChromeWindow(title || createdTab?.title || "ChatGPT"));
     if (!windowFocus?.ok) {
       if (activationError) {
         const reason = activationError instanceof Error ? activationError.message : String(activationError);
@@ -3903,12 +3893,7 @@ diagnosticIpcHandle("codexpro:open-profile-chat", {
   failureMessage: "Không mở được Chrome profile",
   details: (payload) => ({ profile_id: String(payload?.profileId || payload?.profile_id || ""), conversation_id: String(payload?.conversationId || payload?.conversation_id || ""), target_id: String(payload?.targetId || ""), target_conversation_id: String(payload?.targetConversationId || ""), target_title: String(payload?.title || ""), selection_reason: String(payload?.selectionReason || ""), active_target_id: String(payload?.activeTargetId || ""), active_conversation_id: String(payload?.activeConversationId || "") }),
   resultDetails: (result) => ({ result_profile_id: String(result?.profile_id || ""), result_conversation_id: String(result?.conversation_id || ""), result_target_id: String(result?.target_id || ""), tab_created: Boolean(result?.tab_created), stale_target_recovered: Boolean(result?.stale_target_recovered), stale_recovery_reason: String(result?.stale_recovery_reason || ""), created_tab_id: String(result?.created_tab?.target_id || ""), navigation_target_id: String(result?.navigation?.target_id || ""), navigation_url: String(result?.navigation?.url || ""), activation_target_id: String(result?.activation?.target_id || ""), activation_window_id: String(result?.activation?.window_id || ""), activation_window_focused: Boolean(result?.activation?.window_focused), window_focused: Boolean(result?.window_focused || result?.window_focus?.ok), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed), runtime_connection_source: String(result?.runtime_connection_source || ""), open_phase_timings: result?.open_phase_timings || {}, window_focus: result?.window_focus || null })
-}, async (event, payload) => {
-  const result = await openProfileChat(payload);
-  const owner = BrowserWindow.fromWebContents(event.sender);
-  if (result?.window_focus?.ok && owner && !owner.isDestroyed()) owner.minimize();
-  return result;
-});
+}, (_event, payload) => openProfileChat(payload));
 diagnosticIpcHandle("codexpro:recover-profile-chat", {
   category: "chat",
   action: "recover-profile-chat",
