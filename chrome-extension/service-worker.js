@@ -831,7 +831,7 @@ async function tabList() {
       busy_request_count:Math.max(Number(networkState.busy_request_count)||0,domImageBusy||canonicalBusy?1:0),
       busy_since:networkState.busy_since||(canonicalBusy&&canonicalActivity.busy_since?new Date(canonicalActivity.busy_since).toISOString():''),
       busy_source:streamBusy?'network_stream':networkState.busy?'network':domImageBusy?'dom_image_generation':domToolBusy?'dom_tool':canonicalBusy?'canonical':domActivity.busy?domActivity.source:'',
-      activity_text:streamBusy?(streamActivity||'CodexPro đang sử dụng tool'):domImageBusy?domActivity.activity_text:domToolBusy?domActivity.activity_text:canonicalBusy?'ChatGPT đang tiếp tục xử lý':domActivity.busy?domActivity.activity_text:'',
+      activity_text:streamBusy?(streamActivity||'Codex Pro đang sử dụng công cụ'):domImageBusy?domActivity.activity_text:domToolBusy?domActivity.activity_text:canonicalBusy?'ChatGPT đang tiếp tục xử lý':domActivity.busy?domActivity.activity_text:'',
       network_stream_in_progress:streamBusy,
       dom_busy:domActivity.busy,
       image_generation_in_progress:Boolean(domActivity.image_generation_in_progress),

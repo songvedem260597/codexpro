@@ -330,55 +330,51 @@ function formatRepoActivity(project) {
   return `${label} ${new Date(timestamp).toLocaleDateString("vi-VN")}`;
 }
 
-function toolActivityFromText(text) {
-  const source = String(text || "").trim();
-  if (!source.includes("/CodexPro/") || !source.includes("args")) return null;
-  const normalized = source.replace(/\\"/g, '"');
-  let toolPath = "";
-  let args = {};
-  try {
-    const payload = JSON.parse(normalized);
-    toolPath = String(payload?.path || "");
-    args = payload?.args && typeof payload.args === "object" ? payload.args : {};
-  } catch {
-    toolPath = normalized.match(/"path"\s*:\s*"(\/CodexPro\/[^"\s]+)"/)?.[1] || "";
-    args = {
-      path: normalized.match(/"args"\s*:\s*\{[\s\S]*?"path"\s*:\s*"([^"]+)"/)?.[1] || "",
-      cwd: normalized.match(/"args"\s*:\s*\{[\s\S]*?"cwd"\s*:\s*"([^"]+)"/)?.[1] || "",
-      root: normalized.match(/"args"\s*:\s*\{[\s\S]*?"root"\s*:\s*"([^"]+)"/)?.[1] || ""
-    };
-  }
-  if (!toolPath.includes("/CodexPro/")) return null;
-  const action = toolPath.split("/").filter(Boolean).pop() || "tool";
-  const target = String(args.path || args.cwd || args.root || "").trim();
-  const shortTarget = target ? target.replace(/\\+/g, "/").split("/").slice(-3).join("/") : "";
-  const labels = {
-    begin_repo_task: "Đang ghi nhận task",
-    open_workspace: "Đang mở repo",
-    open_current_workspace: "Đang mở workspace",
-    search: shortTarget ? `Đang tìm trong ${shortTarget}` : "Đang tìm trong repo",
-    read: shortTarget ? `Đang đọc ${shortTarget}` : "Đang đọc file",
-    edit: shortTarget ? `Đang sửa ${shortTarget}` : "Đang sửa code",
-    write: shortTarget ? `Đang ghi ${shortTarget}` : "Đang ghi file",
-    apply_patch: "Đang áp dụng thay đổi",
-    show_changes: "Đang kiểm tra thay đổi",
-    bash: "Đang chạy kiểm tra",
-    view_image: shortTarget ? `Đang kiểm tra ${shortTarget}` : "Đang kiểm tra ảnh",
-    inspect_workspace: "Đang phân tích repo"
-  };
-  return labels[action] || `Đang chạy ${action}`;
+const GENERIC_TOOL_ACTIVITY_TEXT = "Codex Pro đang sử dụng công cụ";
+
+function codexProToolActivityLabel(text) {
+  return /^Codex\s*Pro đang\b/i.test(String(text || "").trim());
 }
 
-function compactToolActivityMessages(messages) {
+function looksLikeToolArgumentPayload(text, { requireCodexHint = true } = {}) {
+  const source = String(text || "").trim().replace(/\\"/g, '"');
+  if (!source || source.length > 12000 || !source.startsWith("{") || !source.endsWith("}")) return false;
+  try {
+    const payload = JSON.parse(source);
+    if (!payload || Array.isArray(payload) || typeof payload !== "object") return false;
+    const keys = Object.keys(payload);
+    if (!keys.length) return false;
+    const codexHint = JSON.stringify(payload).toLowerCase().includes("codexpro");
+    const toolKeys = new Set(["action", "args", "browser", "command", "cwd", "path", "paths", "profile_id", "query", "root", "scope", "selector", "target_id", "task_id", "task_kind", "task_title", "text", "url", "workspace_id"]);
+    return (!requireCodexHint || codexHint) && keys.every((key) => toolKeys.has(key));
+  } catch {
+    return false;
+  }
+}
+
+function toolActivityFromText(text, { collapseArgumentPayload = false } = {}) {
+  const source = String(text || "").trim();
+  if (!source) return null;
+  if (collapseArgumentPayload && looksLikeToolArgumentPayload(source, { requireCodexHint: false })) return GENERIC_TOOL_ACTIVITY_TEXT;
+  const normalized = source.replace(/\\"/g, '"');
+  if (normalized.includes("/CodexPro/") && normalized.includes("args")) return GENERIC_TOOL_ACTIVITY_TEXT;
+  if (looksLikeToolArgumentPayload(normalized)) return GENERIC_TOOL_ACTIVITY_TEXT;
+  return null;
+}
+
+function compactToolActivityMessages(messages, { collapseArgumentPayloads = false } = {}) {
   const output = [];
   let pendingActivity = null;
   for (const message of Array.isArray(messages) ? messages : []) {
-    const activity = message?.role === "assistant" ? toolActivityFromText(message.text) : null;
+    const activity = message?.role === "assistant" ? toolActivityFromText(message.text, { collapseArgumentPayload: collapseArgumentPayloads }) : null;
     if (activity) {
-      pendingActivity = { ...message, id: "codexpro-live-tool-activity", text: activity, toolActivity: true };
+      pendingActivity = { ...message, id: "codexpro-live-tool-activity", text: GENERIC_TOOL_ACTIVITY_TEXT, toolActivity: true };
       continue;
     }
-    pendingActivity = null;
+    if (pendingActivity) {
+      output.push(pendingActivity);
+      pendingActivity = null;
+    }
     output.push(message);
   }
   if (pendingActivity) output.push(pendingActivity);
@@ -3716,8 +3712,9 @@ function App() {
     const selectedResponseText = responseSelection.key === clearedKey ? responseSelection.text : "";
     const responseCleared = Boolean(clearedResponseTargets[clearedKey]);
     const responseMessages = responseCurrent && Array.isArray(response?.messages) ? response.messages : [];
-    const compactResponseMessages = compactToolActivityMessages(responseMessages);
-    const liveNetworkToolActivity = responseCurrent && response?.networkStreamInProgress ? String(response?.networkStreamActivityText || "").trim() : "";
+    const rawLiveNetworkToolActivity = responseCurrent && response?.networkStreamInProgress ? String(response?.networkStreamActivityText || "").trim() : "";
+    const liveNetworkToolActivity = codexProToolActivityLabel(rawLiveNetworkToolActivity) ? GENERIC_TOOL_ACTIVITY_TEXT : rawLiveNetworkToolActivity;
+    const compactResponseMessages = compactToolActivityMessages(responseMessages, { collapseArgumentPayloads: codexProToolActivityLabel(rawLiveNetworkToolActivity) });
     const displayResponseMessages = liveNetworkToolActivity
       ? [...compactResponseMessages.filter((message) => !message?.toolActivity), { id: "codexpro-live-tool-activity", role: "assistant", text: liveNetworkToolActivity, truncated: false, toolActivity: true }]
       : compactResponseMessages;
@@ -3873,7 +3870,7 @@ function App() {
                 </div>
               )}
               {/* Trạng thái gửi nằm ngay trên thanh trạng thái phản hồi. */}
-              {responseCleared ? <div className="response-empty">Chat đã được dọn.</div> : !profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedRecoveringNetworkAbort && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang xác minh phản hồi sau khi Chrome hủy transport cũ…</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang chờ AI hoàn tất qua network…</div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
+              {responseCleared ? <div className="response-empty">Chat đã được dọn.</div> : !profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedRecoveringNetworkAbort && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang xác minh phản hồi sau khi Chrome hủy transport cũ…</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="thinking-state latest-response-typing"><span>Đang tải tin nhắn…</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span></div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
                 <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, event.deltaY)} onTouchMove={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, -1)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
                   {(displayResponseMessages.length ? displayResponseMessages : [fallbackResponseMessage]).map((message, messageIndex, allMessages) => {
                     const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");

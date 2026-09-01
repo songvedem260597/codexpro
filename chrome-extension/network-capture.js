@@ -56,34 +56,7 @@
   const toolActivityFromText = (text) => {
     const source = String(text || "").trim().replace(/\\\"/g, '"');
     if (!source.includes("/CodexPro/") || !source.includes("args")) return "";
-    let toolPath = "";
-    let args = {};
-    try {
-      const payload = JSON.parse(source);
-      toolPath = String(payload?.path || "");
-      args = payload?.args && typeof payload.args === "object" ? payload.args : {};
-    } catch {
-      toolPath = source.match(/"path"\s*:\s*"(\/CodexPro\/[^"\s]+)"/)?.[1] || "";
-    }
-    if (!toolPath.includes("/CodexPro/")) return "";
-    const action = toolPath.split("/").filter(Boolean).pop() || "tool";
-    const target = String(args.path || args.cwd || args.root || "").trim();
-    const shortTarget = target ? target.replace(/\\+/g, "/").split("/").slice(-3).join("/") : "";
-    const labels = {
-      begin_repo_task: "CodexPro đang xác minh repo",
-      open_workspace: "CodexPro đang mở repo",
-      open_current_workspace: "CodexPro đang mở workspace",
-      search: shortTarget ? `CodexPro đang tìm trong ${shortTarget}` : "CodexPro đang tìm trong mã nguồn",
-      read: shortTarget ? `CodexPro đang đọc ${shortTarget}` : "CodexPro đang đọc file",
-      edit: shortTarget ? `CodexPro đang sửa ${shortTarget}` : "CodexPro đang sửa code",
-      write: shortTarget ? `CodexPro đang ghi ${shortTarget}` : "CodexPro đang ghi file",
-      apply_patch: "CodexPro đang áp dụng thay đổi",
-      show_changes: "CodexPro đang kiểm tra thay đổi",
-      bash: "CodexPro đang chạy lệnh kiểm tra",
-      view_image: shortTarget ? `CodexPro đang kiểm tra ${shortTarget}` : "CodexPro đang kiểm tra ảnh",
-      inspect_workspace: "CodexPro đang phân tích repo"
-    };
-    return labels[action] || `CodexPro đang sử dụng ${action}`;
+    return "Codex Pro đang sử dụng công cụ";
   };
   const visibleAssistant = (message) => {
     const candidate = message?.message || message;

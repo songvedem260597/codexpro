@@ -351,7 +351,7 @@ assert.match(managerMain, /function ensureFreshRuntimeAfterManagerStart[\s\S]*?l
 assert.match(managerMain, /createWindow\(\);\s*void ensureFreshRuntimeAfterManagerStart\(\)/, "Manager startup must run the runtime freshness check without blocking the UI");
 assert.match(server, /managerPrepared && !preparedOwner && !gateProfileId[\s\S]*?repo_task_owner_missing[\s\S]*?REPO_TASK_NOT_PREPARED/, "a Manager task must never start without a resolvable owning Chrome profile");
 assert.match(managerMain, /did-fail-load[\s\S]*?preload-error[\s\S]*?console-message[\s\S]*?renderer-console/, "Electron page, preload, and renderer console failures must enter persistent diagnostics");
-assert.match(managerUi, /begin_repo_task: "Đang ghi nhận task"/, "Manager must describe begin_repo_task as universal task registration");
+assert.match(managerUi, /GENERIC_TOOL_ACTIVITY_TEXT = "Codex Pro đang sử dụng công cụ"/, "Manager must collapse CodexPro tool calls to one generic activity label");
 assert.match(managerUi, /function repoTaskEvidenceSummary[\s\S]*?GENERAL · không tải Rules\/CodexGraph[\s\S]*?CODE · Rules[\s\S]*?CodexGraph \$\{symbols\} symbols \/ \$\{relationships\} edges/, "Manager must distinguish title-only GENERAL evidence from CODE Rules/CodexGraph evidence");
 
 for (const action of ["trusted_click", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch"]) {
@@ -396,7 +396,7 @@ assert.match(worker, /reconcileChatNetworkCompletion/, "canonical/stream complet
 assert.match(worker, /networkStream\.completed/, "stream completion must end a generation without waiting for CDP loadingFinished");
 assert.match(worker, /network_stream_activity_text:visibleNetworkStreamActivityText/, "worker responses must expose only currently live CodexPro tool activity separately from assistant text");
 assert.match(worker, /network_stream_in_progress:networkStreamInProgress/, "worker responses must expose whether the tool stream is still open");
-assert.match(worker, /streamBusy\?\(streamActivity\|\|'CodexPro đang sử dụng tool'\)/, "profile status must prefer live tool activity over stale DOM activity");
+assert.match(worker, /streamBusy\?\(streamActivity\|\|'Codex Pro đang sử dụng công cụ'\)/, "profile status must prefer generic live tool activity over stale DOM activity");
 assert.match(worker, /probeCanonicalCompletion/, "tracker timeout must verify canonical response before reporting failure");
 assert.match(worker, /function probeChatActivityPage/, "profile status must supplement network state with a lightweight DOM activity probe");
 assert.match(worker, /if\(!Number\.isInteger\(tabId\)\)return \{available:false,busy:false,source:'',activity_text:''\};/, "DOM activity probing must also run for ChatGPT tabs that have not received a /c/ conversation URL yet");

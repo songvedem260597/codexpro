@@ -103,7 +103,7 @@ const toolActivity = context.__codexproNetworkStreamCaptureV1.read("conversation
 assert.equal(toolActivity.available, true);
 assert.equal(toolActivity.text, "", "raw tool-call JSON must never be exposed as assistant response text");
 assert.equal(toolActivity.messages.length, 0, "raw tool-call JSON must never be exposed in the visible transcript");
-assert.equal(toolActivity.activity_text, "CodexPro đang đọc src/editor.js");
+assert.equal(toolActivity.activity_text, "Codex Pro đang sử dụng công cụ", "tool activity must stay generic and never expose paths or action names");
 assert.equal(toolActivity.in_progress, true, "the UI must keep showing tool activity while the stream is open");
 await toolResponse.text();
 await new Promise((resolve) => setTimeout(resolve, 0));
