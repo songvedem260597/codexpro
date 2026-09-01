@@ -43,6 +43,7 @@ try {
 
   const created = await manager.createWorker({ sourceProfileDirectory: "Profile 1", autoStart: false });
   assert.equal(created.running, false);
+  assert.equal(created.label, "ChatGPT Worker");
   assert.equal(created.sourceProfileDirectory, "Profile 1");
   assert.equal(created.sourceHasCodexProExtension, true);
   assert.ok(created.lastSyncedAt);
@@ -54,6 +55,12 @@ try {
   assert.equal(toggled.autoStart, true);
   const synced = await manager.syncWorker(created.id);
   assert.ok(synced.lastSyncedAt);
+
+  const legacyState = JSON.parse(fs.readFileSync(path.join(codexProHome, "headless-workers.json"), "utf8"));
+  legacyState.workers[0].label = "Headless · ChatGPT Worker";
+  fs.writeFileSync(path.join(codexProHome, "headless-workers.json"), JSON.stringify(legacyState));
+  assert.equal(manager.listWorkers().workers[0].label, "ChatGPT Worker");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(codexProHome, "headless-workers.json"), "utf8")).workers[0].label, "ChatGPT Worker");
 
   const removed = await manager.deleteWorker(created.id);
   assert.equal(removed.removed, true);

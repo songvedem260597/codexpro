@@ -205,6 +205,11 @@ export function createHeadlessWorkerManager(options = {}) {
     const state = readState();
     let dirty = false;
     for (const worker of state.workers) {
+      const legacyDefaultLabel = worker.sourceProfileName ? `Headless · ${worker.sourceProfileName}` : "";
+      if (legacyDefaultLabel && worker.label === legacyDefaultLabel) {
+        worker.label = worker.sourceProfileName;
+        dirty = true;
+      }
       if (worker.pid && !processAlive(Number(worker.pid))) {
         worker.pid = 0;
         worker.lastStoppedAt = worker.lastStoppedAt || new Date().toISOString();
@@ -309,7 +314,7 @@ export function createHeadlessWorkerManager(options = {}) {
     }
     const bootstrap = new URL("http://127.0.0.1:9224/headless-bootstrap");
     bootstrap.searchParams.set("worker_id", worker.id);
-    bootstrap.searchParams.set("label", worker.label || `Headless ${worker.id.slice(-8)}`);
+    bootstrap.searchParams.set("label", worker.label || worker.sourceProfileName || worker.sourceProfileDirectory || worker.id.slice(-8));
     const version = await chromeVersion(chromePath);
     const userAgent = chromeUserAgent(version);
     await fs.promises.rm(path.join(userDataDir, "DevToolsActivePort"), { force: true }).catch(() => {});
@@ -360,7 +365,7 @@ export function createHeadlessWorkerManager(options = {}) {
     const id = `headless-${randomBytes(6).toString("hex")}`;
     const worker = {
       id,
-      label: String(payload.label || `Headless · ${source.name}`).trim().slice(0, 100),
+      label: String(payload.label || source.name || source.userName || source.profileDirectory).trim().slice(0, 100),
       sourceProfileDirectory,
       sourceProfileName: source.name,
       sourceUserName: source.userName,
