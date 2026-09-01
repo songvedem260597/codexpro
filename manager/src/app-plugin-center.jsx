@@ -12,7 +12,8 @@ function pluginTaskId() {
 
 function unwrap(value) {
   if (value?.ok === false) throw new Error(String(value?.error?.message || "Không thực hiện được thao tác."));
-  return value?.ok === true ? value.value : value;
+  if (value?.ok === true && Object.prototype.hasOwnProperty.call(value, "value")) return value.value;
+  return value;
 }
 
 function pluginWorkerOptions(status) {

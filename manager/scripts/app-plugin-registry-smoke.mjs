@@ -150,6 +150,8 @@ try {
   assert.match(center, /Bước 2 · Chọn dự án/, "selected skills must open the project assignment flow");
   assert.match(center, /sendWorkerRequest/, "plugin tasks must support API workers");
   assert.match(center, /sendProfileRequest/, "plugin tasks must support Chrome workers");
+  assert.match(center, /value\?\.ok === true && Object\.prototype\.hasOwnProperty\.call\(value, "value"\)/, "plugin action unwrapping must preserve successful Chrome send results that use ok as a domain field rather than an IPC envelope");
+  assert.doesNotMatch(center, /return value\?\.ok === true \? value\.value : value/, "plugin action unwrapping must not discard a successful Chrome send result merely because it contains ok: true");
   assert.match(center, /classifyChromeTaskDispatch/, "plugin tasks must classify Chrome submission evidence instead of requiring an immediate conversation id");
   assert.doesNotMatch(center, /Chrome worker chưa trả conversation id cho task plugin/, "a submitted new chat may legitimately return conversation_pending before its URL is assigned");
   const pendingDispatch = classifyChromeTaskDispatch({ submission_state: "submitted", submitted: true, network_acknowledged: true, conversation_id: "", conversation_pending: true });
