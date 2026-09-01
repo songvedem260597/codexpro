@@ -10,11 +10,15 @@ import {
 import { deriveTaskWorkflowProgress } from "../src/task-workflow-progress.js";
 
 const workflows = listTaskWorkflows();
-assert.ok(workflows.length >= 1, "the workflow registry must expose at least one reusable checklist");
+assert.ok(workflows.length >= 2, "the workflow registry must expose reusable stability and performance checklists");
 assert.equal(new Set(workflows.map((workflow) => workflow.id)).size, workflows.length, "workflow ids must be unique");
-assert.equal(getTaskWorkflow("system_stability_maintenance")?.label, "Bảo trì ổn định hệ thống");
+assert.equal(getTaskWorkflow("system_stability_maintenance")?.label, "Bảo trì ổn định dự án");
+assert.equal(getTaskWorkflow("project_performance_optimization")?.label, "Tối ưu tốc độ và hiệu suất dự án");
 assert.equal(resolveTaskWorkflow("system_stability_maintenance", "")?.id, "system_stability_maintenance");
+assert.equal(resolveTaskWorkflow("project_performance_optimization", "")?.id, "project_performance_optimization");
 assert.equal(resolveTaskWorkflow("", "Hãy bảo trì hệ thống")?.id, "system_stability_maintenance");
+assert.equal(resolveTaskWorkflow("", "Bảo trì ổn định dự án này")?.id, "system_stability_maintenance");
+assert.equal(resolveTaskWorkflow("", "Tối ưu tốc độ dự án này")?.id, "project_performance_optimization");
 assert.equal(resolveTaskWorkflow("unknown", "Hãy bảo trì hệ thống"), null, "unknown explicit workflow ids must fail closed");
 
 const prompt = buildTaskWorkflowPrompt("system_stability_maintenance");
