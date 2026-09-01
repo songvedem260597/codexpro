@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://media.flora.ai data:; style-src 'self'; script-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'" />
+    <title>FLORA Desktop Generator</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">FLORA DESKTOP</p>
+          <h1>Image Generator</h1>
+        </div>
+        <div class="auth-wrap">
+          <span id="authBadge" class="badge">Checking session…</span>
+          <button id="loginBtn" class="ghost">Outlook sign in</button>
+          <button id="logoutBtn" class="ghost subtle" hidden>Sign out</button>
+        </div>
+      </header>
+
+      <section id="credentialPanel" class="auth-panel">
+        <div class="auth-panel-head">
+          <div>
+            <p class="eyebrow">AUTO SIGN IN</p>
+            <h2>FLORA account</h2>
+          </div>
+          <span id="authHint" class="auth-hint">Use Microsoft / Outlook sign in, or enter your FLORA email and password below.</span>
+        </div>
+        <form id="credentialForm" class="credential-form">
+          <label class="credential-field">
+            <span>Email</span>
+            <input id="loginEmail" type="email" placeholder="you@example.com" autocomplete="username" required />
+          </label>
+          <label class="credential-field">
+            <span>Password</span>
+            <input id="loginPassword" type="password" placeholder="FLORA password" autocomplete="current-password" required />
+          </label>
+          <div class="credential-actions">
+            <button id="autoLoginBtn" class="primary auth-primary" type="submit">Auto sign in</button>
+            <button id="outlookLoginBtn" class="ghost auth-oauth" type="button">Outlook</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="grid">
+        <section class="panel form-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">INPUT</p>
+              <h2>Create from reference</h2>
+            </div>
+          </div>
+
+          <div class="field">
+            <span>Reference image</span>
+            <div class="image-picker-row">
+              <button id="chooseImageBtn" class="ghost choose-image">Choose local image</button>
+              <span id="selectedImageName" class="selected-file">No file selected</span>
+            </div>
+            <input id="imageUrl" type="url" placeholder="Or paste https://media.flora.ai/node-inputs/..." autocomplete="off" />
+            <small>Local images upload through your signed-in FLORA session; an existing FLORA/media URL can be used directly.</small>
+          </div>
+
+          <label class="field">
+            <span>Prompt</span>
+            <textarea id="prompt" rows="8" placeholder="Describe the edit or the image you want…"></textarea>
+          </label>
+
+          <div class="row three">
+            <label class="field compact">
+              <span>Aspect ratio</span>
+              <select id="aspectRatio" disabled>
+                <option value="source">Source image</option>
+              </select>
+            </label>
+
+            <label class="field compact">
+              <span>Resolution</span>
+              <select id="resolution" disabled>
+                <option value="1k">1K</option>
+              </select>
+            </label>
+
+            <label class="field compact">
+              <span>Model</span>
+              <select id="model">
+                <option value="grok-imagine-image">Grok Imagine</option>
+              </select>
+            </label>
+          </div>
+
+          <details class="advanced">
+            <summary>Advanced</summary>
+            <label class="field compact">
+              <span>Endpoint ID</span>
+              <input id="endpointId" value="i2i-xai-imagine" autocomplete="off" readonly />
+            </label>
+          </details>
+
+          <button id="generateBtn" class="primary">Generate image</button>
+          <p id="errorText" class="error" hidden></p>
+        </section>
+
+        <section class="panel result-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">OUTPUT</p>
+              <h2>Generated image</h2>
+            </div>
+            <span id="generationId" class="mono"></span>
+          </div>
+
+          <div id="emptyState" class="empty-state">
+            <div class="orb"></div>
+            <p>Your generated image will appear here.</p>
+          </div>
+
+          <div id="resultWrap" class="result-wrap" hidden>
+            <img id="resultImage" alt="Generated FLORA output" />
+            <a id="openOutput" class="output-link" target="_blank" rel="noreferrer">Open full image</a>
+          </div>
+
+          <div class="progress-card">
+            <div class="progress-head">
+              <span>Status</span>
+              <span id="statusText">Idle</span>
+            </div>
+            <div id="progressLog" class="progress-log"></div>
+          </div>
+        </section>
+      </section>
+
+      <footer>
+        <span>Session stays inside this app profile.</span>
+        <span>No HAR token replay.</span>
+      </footer>
+    </main>
+    <script src="renderer.js"></script>
+  </body>
+</html>
