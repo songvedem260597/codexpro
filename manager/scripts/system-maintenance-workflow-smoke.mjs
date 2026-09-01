@@ -61,12 +61,12 @@ const managerMain = fs.readFileSync(new URL("../electron/main.mjs", import.meta.
 const agentLoop = fs.readFileSync(new URL("../electron/worker-core/mcp-agent-loop.mjs", import.meta.url), "utf8");
 const apiPlugin = fs.readFileSync(new URL("../electron/worker-plugins/api-worker-plugin.mjs", import.meta.url), "utf8");
 
-assert.match(managerMain, /detectSystemMaintenanceWorkflow\(text\)/, "Chrome worker dispatch must auto-detect maintenance requests");
-assert.match(managerMain, /buildSystemMaintenanceWorkflowPrompt\(\)/, "Chrome worker dispatch must inject the predefined checklist");
-assert.match(managerMain, /workflow_id:[\s\S]*SYSTEM_MAINTENANCE_WORKFLOW_ID/, "Chrome worker result must expose workflow evidence");
-assert.match(managerMain, /system-maintenance-workflow-started/, "Chrome worker dispatch must write a traceable workflow-start diagnostic");
+assert.match(managerMain, /resolveTaskWorkflow\(requestedWorkflow, text\)/, "Chrome worker dispatch must auto-detect registered maintenance requests");
+assert.match(managerMain, /buildTaskWorkflowPrompt\(taskWorkflow\.id\)/, "Chrome worker dispatch must inject the registered checklist");
+assert.match(managerMain, /workflow_id: taskWorkflow\?\.id/, "Chrome worker result must expose workflow evidence");
+assert.match(managerMain, /task-workflow-started/, "Chrome worker dispatch must write a traceable workflow-start diagnostic");
 assert.match(apiPlugin, /workflow:[\s\S]*payload\.workflow/, "API plugin must forward explicit workflow selection");
-assert.match(agentLoop, /resolveSystemMaintenanceWorkflow/, "API worker loop must resolve the maintenance workflow");
-assert.match(agentLoop, /buildSystemMaintenanceWorkflowPrompt\(\)/, "API worker loop must inject the predefined checklist");
+assert.match(agentLoop, /resolveTaskWorkflow/, "API worker loop must resolve the maintenance workflow");
+assert.match(agentLoop, /buildTaskWorkflowPrompt\(taskWorkflow\.id\)/, "API worker loop must inject the predefined checklist");
 
 console.log("system-maintenance-workflow-smoke: ok");

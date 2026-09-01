@@ -1,4 +1,5 @@
 import { runMcpAgentJob } from "../worker-core/mcp-agent-loop.mjs";
+import { resolveTaskWorkflow } from "../task-workflow-registry.mjs";
 
 function clean(value, maxLength = 1000) {
   return String(value ?? "").trim().slice(0, maxLength);
@@ -34,6 +35,9 @@ function publicRun(state) {
     stream_phase: state.streamPhase,
     stream_updated_at: state.streamUpdatedAt,
     stream_tool_status: state.streamToolStatus,
+    workflow_id: state.workflow?.id || "",
+    workflow_version: state.workflow?.version || "",
+    workflow_evidence: state.workflowEvidence,
     events: state.events.slice(-50)
   };
 }
@@ -127,6 +131,7 @@ export function createApiWorkerPlugin(options = {}) {
       const history = sameWorkspace && Array.isArray(existing?.history) ? existing.history.slice(-12) : [];
       const attachmentNames = Array.isArray(payload.attachment_names) ? payload.attachment_names.map((name) => clean(name, 260)).filter(Boolean) : [];
       const request = clean(payload.text || payload.request, 20_000) || `Đã gửi ${attachmentNames.length} file: ${attachmentNames.join(", ")}`;
+      const workflow = resolveTaskWorkflow(payload.workflow, request);
       const state = {
         jobId: clean(payload.task_id || payload.taskId, 40),
         title: "",
@@ -145,6 +150,8 @@ export function createApiWorkerPlugin(options = {}) {
         streamUpdatedAt: new Date().toISOString(),
         streamToolStatus: "",
         events: [],
+        workflow,
+        workflowEvidence: "",
         controller
       };
       runs.set(workerConfigId, state);
@@ -195,6 +202,7 @@ export function createApiWorkerPlugin(options = {}) {
         onVisibleDelta: (delta) => {
           const text = visibleDeltaText(delta);
           if (!text) return;
+          state.workflowEvidence = `${state.workflowEvidence}${text}`.slice(-100_000);
           updateStream(workerConfigId, state, {
             streamText: `${state.streamText}${text}`,
             streamPhase: "streaming",
@@ -205,7 +213,13 @@ export function createApiWorkerPlugin(options = {}) {
           state.title = clean(title, 56);
           state.root = clean(bootstrap?.root || state.root, 2048);
         },
-        onEvent: (event) => state.events.push(event)
+        onEvent: (event) => {
+          state.events.push(event);
+          if (event?.type === "workflow_progress" && event.text) {
+            state.workflowEvidence = `${state.workflowEvidence}\n${event.text}`.trim().slice(-100_000);
+            publish(workerConfigId, state);
+          }
+        }
       }).then((result) => {
         state.title = clean(result?.task_title || state.title, 56);
         state.result = result;

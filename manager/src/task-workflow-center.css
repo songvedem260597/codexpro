@@ -1,0 +1,29 @@
+.task-workflow-center { display: grid; gap: 18px; }
+.task-workflow-launcher, .task-workflow-progress-card { border: 1px solid var(--border, #263248); border-radius: 18px; background: var(--panel, #111722); padding: 20px; }
+.task-workflow-launcher-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+.task-workflow-field { display: grid; gap: 7px; min-width: 0; }
+.task-workflow-field > span { color: var(--muted, #93a0b5); font-size: var(--font-description, 13px); }
+.task-workflow-field .app-dropdown { width: 100%; min-width: 0; }
+.task-workflow-field textarea { width: 100%; border: 1px solid var(--border, #2b374d); border-radius: 10px; background: var(--input, #0c111a); color: inherit; padding: 10px 12px; font: inherit; min-height: 92px; resize: vertical; }
+.task-workflow-field.is-wide { grid-column: 1 / -1; }
+.task-workflow-launch-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+.task-workflow-launch-actions small { color: var(--muted, #93a0b5); }
+.task-workflow-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.task-workflow-progress-head div { display: grid; gap: 4px; }
+.task-workflow-progress-head span { color: var(--muted, #93a0b5); font-size: var(--font-description, 13px); }
+.task-workflow-progress-meter { height: 8px; border-radius: 999px; background: #202a3b; overflow: hidden; margin-bottom: 16px; }
+.task-workflow-progress-meter i { display: block; height: 100%; background: linear-gradient(90deg, #2bd88f, #69e6b4); transition: width 180ms ease; }
+.task-workflow-checklist { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.task-workflow-checklist-step { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; padding: 12px; border: 1px solid #29364b; border-radius: 12px; background: #0d131d; }
+.task-workflow-checklist-step .task-workflow-check { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; border: 1px solid #42516b; color: #9aa8bd; font-weight: 700; }
+.task-workflow-checklist-step strong { display: block; }
+.task-workflow-checklist-step small { display: block; margin-top: 4px; color: var(--muted, #93a0b5); overflow-wrap: anywhere; }
+.task-workflow-checklist-step.is-completed { border-color: rgba(43, 216, 143, .45); }
+.task-workflow-checklist-step.is-completed .task-workflow-check { border-color: #2bd88f; background: rgba(43, 216, 143, .14); color: #69e6b4; }
+.task-workflow-checklist-step.is-running { border-color: rgba(82, 139, 255, .55); box-shadow: inset 3px 0 #528bff; }
+.task-workflow-checklist-step.is-running .task-workflow-check { color: #7aa5ff; }
+.task-workflow-checklist-step.is-issue { border-color: rgba(255, 178, 71, .55); }
+.task-workflow-checklist-step.is-issue .task-workflow-check { color: #ffb247; }
+.task-workflow-checklist-step.is-skipped { opacity: .66; }
+.task-workflow-run-error { margin-top: 12px; color: #ff8d8d; }
+@media (max-width: 900px) { .task-workflow-launcher-grid { grid-template-columns: 1fr; } .task-workflow-field.is-wide { grid-column: auto; } }

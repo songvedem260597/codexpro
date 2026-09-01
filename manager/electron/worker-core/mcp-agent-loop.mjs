@@ -1,5 +1,5 @@
 import { assertProvider, mcpToolsToProviderTools, normalizeProviderToolCalls } from "../provider-core/provider-contract.mjs";
-import { buildSystemMaintenanceWorkflowPrompt, resolveSystemMaintenanceWorkflow } from "../system-maintenance-workflow.mjs";
+import { buildTaskWorkflowPrompt, resolveTaskWorkflow } from "../task-workflow-registry.mjs";
 
 const LIFECYCLE_TOOLS = new Set([
   "prepare_repo_task",
@@ -129,7 +129,7 @@ export async function runMcpAgentJob(input = {}) {
   const scope = job.scope === "all_allowed" ? "all_allowed" : "workspace";
   let root = clean(job.root, 2048);
   const workspaceCandidates = [...new Set((Array.isArray(job.workspaceCandidates) ? job.workspaceCandidates : []).map((candidate) => clean(candidate, 2048)).filter(Boolean))].slice(0, 80);
-  const maintenanceWorkflow = resolveSystemMaintenanceWorkflow(job.workflow, input.request);
+  const taskWorkflow = resolveTaskWorkflow(job.workflow, input.request);
   if (scope === "workspace" && !root) throw new Error("Workspace-scoped API jobs require an exact root.");
   if (kind === "code" && scope === "all_allowed" && !root && !workspaceCandidates.length) throw new Error("All-allowed code API jobs require at least one workspace candidate.");
 
@@ -259,9 +259,9 @@ export async function runMcpAgentJob(input = {}) {
     if (kind === "code" && !providerTools.length) throw new Error("CodexPro MCP exposed no tools for a code job.");
     const allowedTools = new Set(runnableMcpTools.map((tool) => String(tool.name)));
     messages.push({ role: "system", content: bootstrapMessage(bootstrap) });
-    if (maintenanceWorkflow) {
-      messages.push({ role: "system", content: buildSystemMaintenanceWorkflowPrompt() });
-      emit("workflow_started", { workflow_id: maintenanceWorkflow.id, workflow_version: maintenanceWorkflow.version });
+    if (taskWorkflow) {
+      messages.push({ role: "system", content: buildTaskWorkflowPrompt(taskWorkflow.id) });
+      emit("workflow_started", { workflow_id: taskWorkflow.id, workflow_version: taskWorkflow.version });
     }
     let toolCallCount = 0;
     let finalText = "";
@@ -297,6 +297,9 @@ export async function runMcpAgentJob(input = {}) {
         } : {})
       };
       messages.push(assistantMessage);
+      if (taskWorkflow && String(completion?.text || "").trim()) {
+        emit("workflow_progress", { workflow_id: taskWorkflow.id, text: clean(completion.text, 12_000) });
+      }
       if (!toolCalls.length) {
         finalText = String(completion?.text || "");
         if (finalText.length > limits.maxOutputChars) throw new Error("Provider output exceeded the configured job limit.");
@@ -315,7 +318,7 @@ export async function runMcpAgentJob(input = {}) {
           provider_state: providerState,
           bootstrap,
           finalized,
-          workflow: maintenanceWorkflow || undefined
+          workflow: taskWorkflow || undefined
         };
       }
       input.onPhase?.("tool", { names: toolCalls.map((call) => call.name) });

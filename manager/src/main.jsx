@@ -15,6 +15,7 @@ import "@fontsource/jetbrains-mono/400.css";
 import "@fontsource/jetbrains-mono/500.css";
 import "@fontsource/jetbrains-mono/600.css";
 import "@fontsource/jetbrains-mono/700.css";
+import { TaskWorkflowCenter } from "./task-workflow-center.jsx";
 import workerHung from "./assets/worker-hung.gif";
 import workerIdle from "./assets/worker-idle.gif";
 import workerWorking from "./assets/worker-working.gif";
@@ -4014,6 +4015,7 @@ function App() {
         <nav>
           <button type="button" className={activePage === "overview" ? "active" : ""} onClick={() => setActivePage("overview")}><Icon>⌁</Icon>Tổng quan</button>
           <button type="button" className={activePage === "control" ? "active" : ""} onClick={() => setActivePage("control")}><Icon>◫</Icon>Điều phối</button>
+          <button type="button" className={activePage === "workflows" ? "active" : ""} onClick={() => setActivePage("workflows")}><Icon>✓</Icon>Quy trình</button>
           <button type="button" className={activePage === "logs" ? "active" : ""} onClick={() => setActivePage("logs")}><Icon>≡</Icon>Nhật ký</button>
           <button type="button" className={activePage === "settings" ? "active" : ""} onClick={() => setActivePage("settings")}><Icon>⚙</Icon>Cài đặt</button>
         </nav>
@@ -4023,12 +4025,12 @@ function App() {
         </div>
       </aside>
 
-      <main className={activePage === "settings" ? "page-settings" : activePage === "logs" ? "page-logs" : activePage === "control" ? "page-control" : "page-overview"}>
+      <main className={activePage === "settings" ? "page-settings" : activePage === "logs" ? "page-logs" : activePage === "workflows" ? "page-workflows" : activePage === "control" ? "page-control" : "page-overview"}>
         <header>
           <div>
-            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : activePage === "control" ? "AGENT OPERATIONS" : "WINDOWS CONTROL CENTER"}</p>
-            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "control" ? "Trung tâm điều phối" : "CodexPro của bạn"}</h1>
-            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : activePage === "control" ? "Theo dõi task, hiệu suất, tự phục hồi, phiên bản và an toàn repo trong một màn hình." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
+            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : activePage === "workflows" ? "TASK WORKFLOWS" : activePage === "control" ? "AGENT OPERATIONS" : "WINDOWS CONTROL CENTER"}</p>
+            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "workflows" ? "Trung tâm quy trình" : activePage === "control" ? "Trung tâm điều phối" : "CodexPro của bạn"}</h1>
+            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : activePage === "workflows" ? "Giao task theo checklist có sẵn và theo dõi từng bước bằng bằng chứng của worker." : activePage === "control" ? "Theo dõi task, hiệu suất, tự phục hồi, phiên bản và an toàn repo trong một màn hình." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
@@ -4289,6 +4291,17 @@ function App() {
             onToggleSetting={(key, value) => void saveManagerSetting({ [key]: value }, value ? "Đã bật tự động hóa" : "Đã tắt tự động hóa")}
             onUpdateWorkers={() => void reloadProfiles()}
             onRestartServer={() => void control("restart")}
+          />
+        </div>
+
+        <div className="task-workflow-page" hidden={activePage !== "workflows"}>
+          <TaskWorkflowCenter
+            api={api}
+            status={status}
+            projects={projects}
+            notify={notify}
+            onError={(workflowError) => setError(workflowError?.message || String(workflowError))}
+            onRefresh={() => void refresh(false)}
           />
         </div>
 

@@ -22,7 +22,7 @@ import { createWorkerMcpClients } from "./mcp/http-client.mjs";
 import { create9RouterProvider, createOpenAICompatibleProvider, createOpenRouterProvider } from "./provider-core/openai-compatible-provider.mjs";
 import { createApiWorkerPlugin } from "./worker-plugins/api-worker-plugin.mjs";
 import { createChromeWorkerPlugin } from "./worker-plugins/chrome-worker-plugin.mjs";
-import { SYSTEM_MAINTENANCE_WORKFLOW_ID, SYSTEM_MAINTENANCE_WORKFLOW_VERSION, buildSystemMaintenanceWorkflowPrompt, detectSystemMaintenanceWorkflow } from "./system-maintenance-workflow.mjs";
+import { buildTaskWorkflowPrompt, resolveTaskWorkflow } from "./task-workflow-registry.mjs";
 
 const execFileAsync = promisify(execFile);
 const workerPluginRegistry = new WorkerPluginRegistry();
@@ -71,6 +71,9 @@ function queueWorkerUpdate(update) {
     stream_phase: String(update?.stream_phase || ""),
     stream_updated_at: String(update?.stream_updated_at || ""),
     stream_tool_status: String(update?.stream_tool_status || ""),
+    workflow_id: String(update?.workflow_id || ""),
+    workflow_version: String(update?.workflow_version || ""),
+    workflow_evidence: String(update?.workflow_evidence || ""),
     started_at: String(update?.started_at || ""),
     finished_at: String(update?.finished_at || ""),
     usage: update?.result?.usage
@@ -3315,8 +3318,7 @@ async function sendProfileRequestUnlocked(payload) {
   const newChat = Boolean(payload?.newChat);
   const text = String(payload?.text || "").trim();
   const requestedWorkflow = String(payload?.workflow || "").trim();
-  const maintenanceWorkflowActive = requestedWorkflow === SYSTEM_MAINTENANCE_WORKFLOW_ID
-    || (!requestedWorkflow && detectSystemMaintenanceWorkflow(text));
+  const taskWorkflow = resolveTaskWorkflow(requestedWorkflow, text);
   const requestedScope = payload?.scope === "all_allowed" ? "all_allowed" : "workspace";
   const requestedProjectRoot = String(payload?.projectRoot || "").trim();
   const requestedWorkspaceCandidates = Array.isArray(payload?.workspaceCandidates) ? payload.workspaceCandidates.slice(0, 80) : [];
@@ -3513,7 +3515,7 @@ async function sendProfileRequestUnlocked(payload) {
     ...(newChat ? ["@CodexPro"] : ["Hãy sử dụng MCP CodexPro đã được kích hoạt trong đoạn chat này."]),
     ...taskScopeLines,
     ...(toolRetry ? ["Đây là lần gửi lại vì phản hồi trước không trả task title qua CodexPro. Phải gọi codexpro action=begin_repo_task với task_title và task_kind ngay."] : []),
-    ...(maintenanceWorkflowActive ? ["", buildSystemMaintenanceWorkflowPrompt()] : []),
+    ...(taskWorkflow ? ["", buildTaskWorkflowPrompt(taskWorkflow.id)] : []),
     "",
     text ? `Yêu cầu của người dùng:\n${text}` : "Yêu cầu của người dùng nằm trong file đính kèm."
   ].join("\n");
@@ -3528,18 +3530,18 @@ async function sendProfileRequestUnlocked(payload) {
     attachments
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
-  if (maintenanceWorkflowActive) {
-    diagnostic("info", "worker", "system-maintenance-workflow", "Đã giao checklist bảo trì ổn định cho Chrome worker", {
-      action: "system-maintenance-workflow-started",
-      workflow_id: SYSTEM_MAINTENANCE_WORKFLOW_ID,
-      workflow_version: SYSTEM_MAINTENANCE_WORKFLOW_VERSION,
+  if (taskWorkflow) {
+    diagnostic("info", "worker", "task-workflow", `Đã giao checklist ${taskWorkflow.label} cho Chrome worker`, {
+      action: "task-workflow-started",
+      workflow_id: taskWorkflow.id,
+      workflow_version: taskWorkflow.version,
       task_id: taskId,
       profile_id: profileId,
       workspace_root: initialWorkspaceRoot,
       request_scope: requestScope
     });
   }
-  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, codexpro_workspace_expanded_scope: codexProWorkspaceExpanded, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id), workflow_id: maintenanceWorkflowActive ? SYSTEM_MAINTENANCE_WORKFLOW_ID : undefined, workflow_version: maintenanceWorkflowActive ? SYSTEM_MAINTENANCE_WORKFLOW_VERSION : undefined };
+  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, codexpro_workspace_expanded_scope: codexProWorkspaceExpanded, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id), workflow_id: taskWorkflow?.id, workflow_version: taskWorkflow?.version };
   } finally {
     await closeLocalMcpSession(session);
   }
@@ -3862,7 +3864,7 @@ diagnosticIpcHandle("codexpro:worker-send", {
   logSuccess: true,
   successMessage: "Worker đã nhận job",
   failureMessage: "Không gửi được job tới worker",
-  details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || ""), task_id: String(payload?.task_id || payload?.taskId || ""), task_kind: String(payload?.task_kind || payload?.taskKind || "") })
+  details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || ""), task_id: String(payload?.task_id || payload?.taskId || ""), task_kind: String(payload?.task_kind || payload?.taskKind || ""), workflow_id: String(payload?.workflow || "") })
 }, async (_event, payload) => {
   const prepared = await materializeApiWorkerRequest(payload);
   recordUserReportedError(prepared, { request_channel: "worker_job" });
@@ -4104,7 +4106,7 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
   logSuccess: true,
   successMessage: "ChatGPT đã nhận yêu cầu gửi",
   failureMessage: "Gửi yêu cầu ChatGPT thất bại",
-  details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || ""), new_chat: Boolean(payload?.newChat), attachment_count: Array.isArray(payload?.attachments) ? payload.attachments.length : 0, request_scope: String(payload?.scope || "workspace"), tool_retry: Boolean(payload?.toolRetry), tool_rollover_count: Number(payload?.toolRolloverCount) || 0 }),
+  details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || ""), new_chat: Boolean(payload?.newChat), attachment_count: Array.isArray(payload?.attachments) ? payload.attachments.length : 0, request_scope: String(payload?.scope || "workspace"), workflow_id: String(payload?.workflow || ""), tool_retry: Boolean(payload?.toolRetry), tool_rollover_count: Number(payload?.toolRolloverCount) || 0 }),
   resultDetails: (result) => {
     const value = result?.ok ? result.value : result;
     const sendTimings = value?.send_phase_timings && typeof value.send_phase_timings === 'object' ? value.send_phase_timings : {};
