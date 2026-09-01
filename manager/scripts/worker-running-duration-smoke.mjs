@@ -16,6 +16,6 @@ assert.doesNotMatch(source, /<code>\{profile\.email \? profile\.label : profile\
 
 const component = fs.readFileSync(new URL("../src/worker-running-duration.jsx", import.meta.url), "utf8");
 assert.match(component, /setInterval\(\(\) => setNow\(Date\.now\(\)\), 1_000\)/, "duration display must update every second without rerendering the whole worker list");
-assert.match(component, /Hoạt động trong \{label\}/, "duration display must explain that the clock is elapsed activity time");
+assert.match(component, /\{prefix\} \{label\}/, "duration display must support context-specific running and completed labels");
 
 console.log("✓ Worker running duration and hidden Chrome UUID smoke test passed");

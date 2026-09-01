@@ -39,6 +39,8 @@
 .control-terminal-list { display: grid; gap: 8px; max-height: 360px; overflow: auto; padding-right: 3px; }
 .control-terminal-task { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; padding: 11px 12px; border: 1px solid #2c3744; border-radius: 7px; background: #0e1319; }
 .control-terminal-task.is-completed { border-color: #28553c; box-shadow: inset 3px 0 0 #53d889; }
+.control-terminal-task.is-running { border-color: #6c5825; box-shadow: inset 3px 0 0 #e7b94c; }
+.control-terminal-section.is-unfinished .control-terminal-state { color: #ffd77c; border-color: #6c5825; background: #2b230f; }
 .control-terminal-task.is-failed, .control-terminal-task.is-blocked, .control-terminal-task.is-cancelled { border-color: #65343c; box-shadow: inset 3px 0 0 #e35d6a; }
 .control-terminal-state { padding: 4px 7px; color: #9ee3b9; border: 1px solid #28553c; border-radius: 999px; background: #102319; font-size: var(--font-micro); font-weight: var(--weight-semibold); white-space: nowrap; }
 .control-terminal-task:not(.is-completed) .control-terminal-state { color: #ffabb5; border-color: #65343c; background: #281217; }

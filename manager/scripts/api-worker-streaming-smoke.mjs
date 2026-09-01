@@ -29,7 +29,7 @@ const plugin = createApiWorkerPlugin({
         if (turn === 1) {
           return {
             text: "",
-            toolCalls: [{ id: `title-${runNumber}`, name: "begin_repo_task", arguments: { task_title: runNumber === 1 ? "Stream first answer" : "Stream second answer" } }]
+            toolCalls: [{ id: `title-${runNumber}`, name: "begin_repo_task", arguments: { task_title: runNumber === 1 ? "Stream first API answer" : "Stream second API answer" } }]
           };
         }
         const parts = runNumber === 1 ? ["First ", "answer"] : ["Second ", "answer"];

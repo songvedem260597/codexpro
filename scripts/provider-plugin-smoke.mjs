@@ -181,7 +181,7 @@ try {
     async listTools() {
       calls.push({ channel: "job", name: "tools/list" });
       return [
-        { name: "begin_repo_task", description: "AI must choose and register a 2-6 word task title.", inputSchema: { type: "object", properties: { task_title: { type: "string" } }, required: ["task_title"] } },
+        { name: "begin_repo_task", description: "AI must choose and register a 4-6 word task title.", inputSchema: { type: "object", properties: { task_title: { type: "string" } }, required: ["task_title"] } },
         { name: "read", description: "Read an allowed workspace file.", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
         { name: "finalize_worker_job", description: "internal lifecycle", inputSchema: { type: "object" } }
       ];
@@ -293,7 +293,7 @@ try {
           turn += 1;
           if (turn === 1) throw Object.assign(new Error("Provider HTTP 429: reset after 1ms"), { status: 429, retryAfterMs: 1 });
           if (turn <= 3) return { text: "Tôi chưa phát tool call.", toolCalls: [], usage: { total_tokens: 1 } };
-          if (turn === 4) return { text: '{"task_title":"Trả lời API","root":"C:\\\\fixture"}', toolCalls: [], usage: { total_tokens: 2 } };
+          if (turn === 4) return { text: '{"task_title":"Trả lời yêu cầu API","root":"C:\\\\fixture"}', toolCalls: [], usage: { total_tokens: 2 } };
           return { text: "API worker hoàn tất.", toolCalls: [], usage: { total_tokens: 3 } };
         }
       };
@@ -308,7 +308,7 @@ try {
         async callTool(name, args) {
           apiLifecycle.push(`job:${name}`);
           apiCallArgs.push({ name, args });
-          if (name === "begin_repo_task") return { verified: true, gate_active: true, global_rules_loaded: true, agents_loaded: true, codexgraph_active: true, task_title: "Trả lời API", task_kind: "code", root: "C:\\fixture", policy_version: "worker-policy-v1" };
+          if (name === "begin_repo_task") return { verified: true, gate_active: true, global_rules_loaded: true, agents_loaded: true, codexgraph_active: true, task_title: "Trả lời yêu cầu API", task_kind: "code", root: "C:\\fixture", policy_version: "worker-policy-v1" };
           if (name === "finalize_worker_job") return { finalized: true, job: { status: args.outcome } };
           throw new Error(`unexpected API fixture tool ${name}`);
         },
@@ -331,7 +331,7 @@ try {
   assert.equal(accepted.accepted, true);
   const after = await waitForWorkerToSettle(registry, "api:fixture-api");
   assert.equal(after.activity, "idle");
-  assert.equal(after.task_title, "Trả lời API");
+  assert.equal(after.task_title, "Trả lời yêu cầu API");
   assert.equal(after.result.text, "API worker hoàn tất.");
   const listedAfter = await registry.list();
   assert.equal(listedAfter.workers[0].last_result, "API worker hoàn tất.");

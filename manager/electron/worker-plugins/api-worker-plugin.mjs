@@ -22,6 +22,7 @@ function publicRun(state) {
   return {
     job_id: state.jobId,
     task_title: state.title,
+    current_workspace_root: state.root,
     last_request: state.request,
     activity: state.activity,
     started_at: state.startedAt,

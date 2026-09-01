@@ -20,7 +20,7 @@ assert.match(modal, /Tin nhắn gần nhất[\s\S]*?<LatestMessagePanel[\s\S]*?N
 assert.match(latestMessagePanel, /chat-response is-inline[\s\S]*?latest-response chat-transcript/, "the shared latest-message surface must preserve the fixed Chat response geometry");
 assert.match(modal, /<LatestMessagePanel[\s\S]*?worker\.stream_text[\s\S]*?worker\.last_result/, "API workers must render live stream text through the shared latest-message surface before falling back to the settled result");
 assert.match(modal, /request-files[\s\S]*?request-file-image[\s\S]*?attach-button/, "the API popup must keep Chat file/image attachment controls");
-assert.match(modal, /AI tự đặt title 2–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP/, "API job composer must explain the AI-owned MCP title bootstrap");
+assert.match(modal, /AI tự đặt title 4–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP/, "API job composer must explain the AI-owned MCP title bootstrap");
 
 assert.match(source, /<span className="already-connected">✓ Đã kết nối CodexPro<\/span>/, "connected API cards must show the CodexPro connection strip below Run job");
 assert.match(source, /onClick=\{\(\) => onRun\(worker\)\}>Chat<\/button>/, "API worker cards must use the same Chat action label as Chrome profiles");

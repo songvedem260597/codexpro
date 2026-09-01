@@ -311,7 +311,7 @@ assert.equal(domCompletedActivity.busy, false, "a finished assistant turn must n
 assert.equal(domCompletedActivity.response_ready, true, "a finished text response after the latest user must become authoritative completion evidence");
 assert.equal(domCompletedActivity.source, "dom_response_ready", "finished text responses must be distinguishable from stale generic DOM state");
 
-assert.match(server, /task_title:[\s\S]*?words >= 2 && words <= 6/, "begin_repo_task must require a short AI-generated task title");
+assert.match(server, /task_title:[\s\S]*?words >= 4 && words <= 6/, "begin_repo_task must require a clear 4-6 word AI-generated task title");
 assert.match(server, /task_kind: z\.enum\(\["general", "code"\]\)/, "every profile task must declare whether it needs coding context");
 assert.match(server, /args\.task_kind === "code" \? await readGlobalRulesSnapshot\(\) : undefined[\s\S]*?args\.task_kind === "code" \? await requireCodexGraphForWorkspace/, "only code tasks may load global rules and CodexGraph");
 assert.match(server, /proof\.taskKind === "general"[\s\S]*?global_rules_loaded: false[\s\S]*?codexgraph_active: false/, "general tasks must retain their title without loading coding context");

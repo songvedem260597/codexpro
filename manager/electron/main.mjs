@@ -11,6 +11,7 @@ import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiag
 import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
 import { syncUnpackedCodexProExtensions } from "./extension-sync.mjs";
+import { createInterruptionAlertTracker } from "./interruption-alert.mjs";
 import { classifyUserReportedError } from "./user-reported-error.mjs";
 import { createRuntimeRestartGuard } from "./runtime-restart-guard.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
@@ -26,6 +27,15 @@ const execFileAsync = promisify(execFile);
 const workerPluginRegistry = new WorkerPluginRegistry();
 const pendingWorkerUpdates = new Map();
 let workerUpdateFlushTimer = null;
+const interruptionAlertTracker = createInterruptionAlertTracker();
+
+function showManagerNotification(payload) {
+  if (!Notification.isSupported()) return false;
+  const title = String(payload?.title || "CodexPro").trim().slice(0, 120) || "CodexPro";
+  const body = String(payload?.body || "").trim().slice(0, 500);
+  new Notification({ title, body, silent: payload?.silent === true }).show();
+  return true;
+}
 
 function flushWorkerUpdates() {
   workerUpdateFlushTimer = null;
@@ -41,12 +51,15 @@ function flushWorkerUpdates() {
 function queueWorkerUpdate(update) {
   const localWorkerId = String(update?.local_worker_id || "").trim();
   if (!localWorkerId) return;
+  const interruptionAlert = interruptionAlertTracker.observeApiWorker(update);
+  if (interruptionAlert && readManagerSettings().taskNotifications !== false) showManagerNotification(interruptionAlert);
   const activity = String(update?.activity || "idle");
   pendingWorkerUpdates.set(`api:${localWorkerId}`, {
     worker_id: `api:${localWorkerId}`,
     activity,
     current_task_id: activity === "working" ? String(update?.job_id || "") : "",
     current_task_title: activity === "working" ? String(update?.task_title || "") : "",
+    current_workspace_root: activity === "working" ? String(update?.current_workspace_root || "") : "",
     last_task_id: String(update?.job_id || ""),
     last_task_title: String(update?.task_title || ""),
     last_request: String(update?.last_request || ""),
@@ -1071,6 +1084,20 @@ const browserProfileStreamControllers = new WeakMap();
 let latestBrowserProfileStream = { connected: false, checkedAt: "", profiles: [] };
 let lastBrowserProfileStreamErrorAt = 0;
 const browserProfileDiagnosticState = new Map();
+
+function activeBrowserTaskSummaries() {
+  return (Array.isArray(latestBrowserProfileStream?.profiles) ? latestBrowserProfileStream.profiles : [])
+    .filter((profile) => {
+      const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+      return ["working", "completing"].includes(String(profile?.activity || "").toLowerCase())
+        || tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "").toLowerCase() === "generating");
+    })
+    .map((profile) => ({
+      task_id: String(profile?.current_task_id || ""),
+      task_title: String(profile?.current_task_title || profile?.active_chat_title || "Task CodexPro"),
+      workspace: String(profile?.current_workspace_root || "")
+    }));
+}
 
 function profileDiagnosticSnapshot(profile) {
   const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
@@ -2487,6 +2514,8 @@ async function runtimeBaseStatus(options = {}) {
     for (const event of healthDiagnostics) {
       if (!event) continue;
       diagnostic(event.level, event.source, event.category, event.message, event.details);
+      const interruptionAlert = interruptionAlertTracker.observeRuntimeHealth(event, activeBrowserTaskSummaries());
+      if (interruptionAlert && readManagerSettings().taskNotifications !== false) showManagerNotification(interruptionAlert);
     }
     const value = {
       task,
@@ -2526,7 +2555,7 @@ async function runtimeStatus(options = {}) {
         return { available: false, profiles: [] };
       }),
       localMcpTool(base.config, base.token, "worker_job_history", {
-        statuses: ["completed", "failed", "cancelled", "blocked"],
+        statuses: ["running", "completed", "failed", "cancelled", "blocked"],
         limit: 60
       }).then((result) => ({
         available: true,
@@ -3763,10 +3792,10 @@ async function sendProfileRequestUnlocked(payload) {
         "Vì workspace chính là CodexPro, Manager tự kèm quyền truy cập TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN để có thể đọc/đối chiếu source tham chiếu bên ngoài repo chính khi cần.",
         `Các vùng CodexPro hiện được phép truy cập: ${allowedRoots.join(" ; ")}`,
         `Task ID bắt buộc: ${taskId}`,
-        "BẮT BUỘC tự đặt task_title ngắn gọn 2-6 từ, mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
+        "BẮT BUỘC tự đặt task_title tự nhiên, dễ hiểu, dài 4-6 từ và mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
         "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
-        `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","task_kind":"general","scope":"all_allowed"}.`,
-        `Nếu task_kind=code: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","task_kind":"code","root":"${selectedProject.root.replace(/\\/g, "\\\\")}","scope":"all_allowed"} trước mọi câu trả lời. Workspace CodexPro vẫn là workspace chính để sửa/build/test.`,
+        `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"general","scope":"all_allowed"}.`,
+        `Nếu task_kind=code: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"code","root":"${selectedProject.root.replace(/\\/g, "\\\\")}","scope":"all_allowed"} trước mọi câu trả lời. Workspace CodexPro vẫn là workspace chính để sửa/build/test.`,
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
         "Sau khi begin_repo_task với task_kind=code thành công, bạn ĐƯỢC PHÉP dùng open_workspace để chuyển sang bất kỳ repo/thư mục nào nằm trong các vùng đã cấp quyền ở trên nhằm ĐỌC và đối chiếu source tham chiếu (ví dụ DeepSeek Harness), rồi quay lại workspace CodexPro để sửa/build/test. Không được truy cập đường dẫn ngoài các vùng đó và không sửa source tham chiếu ngoài workspace chính trừ khi người dùng yêu cầu rõ."
       ]
@@ -3776,19 +3805,19 @@ async function sendProfileRequestUnlocked(payload) {
         `Các vùng CodexPro hiện được phép truy cập: ${allowedRoots.join(" ; ")}`,
         ...(workspaceCandidates.length ? [`Các repo/thư mục Manager đang biết: ${workspaceCandidates.join(" ; ")}`] : []),
         `Task ID bắt buộc: ${taskId}`,
-        "BẮT BUỘC tự đặt task_title ngắn gọn 2-6 từ, mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
+        "BẮT BUỘC tự đặt task_title tự nhiên, dễ hiểu, dài 4-6 từ và mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
         "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
-        `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","task_kind":"general","scope":"all_allowed"}. Không truyền root vì task này không dùng workspace.`,
-        `Nếu task_kind=code: BẮT BUỘC tự chọn đúng repo/thư mục thực sự liên quan tới yêu cầu rồi gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","task_kind":"code","root":"<đường dẫn repo/thư mục thực sự cần thao tác>","scope":"all_allowed"}. Không được mặc định dùng workspace CodexPro hiện tại/default chỉ vì nó đang mở; nếu chưa biết repo cụ thể, chọn vùng được cấp quyền hẹp nhất phù hợp để tìm từ đó.`,
+        `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"general","scope":"all_allowed"}. Không truyền root vì task này không dùng workspace.`,
+        `Nếu task_kind=code: BẮT BUỘC tự chọn đúng repo/thư mục thực sự liên quan tới yêu cầu rồi gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"code","root":"<đường dẫn repo/thư mục thực sự cần thao tác>","scope":"all_allowed"}. Không được mặc định dùng workspace CodexPro hiện tại/default chỉ vì nó đang mở; nếu chưa biết repo cụ thể, chọn vùng được cấp quyền hẹp nhất phù hợp để tìm từ đó.`,
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
         "Sau khi begin_repo_task với task_kind=code thành công, bạn ĐƯỢC PHÉP dùng open_workspace để chuyển giữa các workspace nằm bên trong những vùng CodexPro đã được cấp quyền ở trên nhằm tìm đúng dự án hoặc file. Không được truy cập đường dẫn nằm ngoài các vùng đó."
       ]
     : [
         `Workspace đã được CodexPro Manager khóa cho yêu cầu này: ${selectedProject.root}`,
         `Task ID bắt buộc: ${taskId}`,
-        "BẮT BUỘC tự đặt task_title ngắn gọn 2-6 từ, mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
+        "BẮT BUỘC tự đặt task_title tự nhiên, dễ hiểu, dài 4-6 từ và mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
         "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
-        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 2-6 từ do bạn tự đặt>","task_kind":"<general hoặc code>","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Phải thay cả hai placeholder bằng giá trị thật. task_kind=general chỉ ghi title, không đọc CODEXPRO.md và không chạy CodexGraph; task_kind=code mới nạp rule, chạy CodexGraph và mở tool workspace.`,
+        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"<general hoặc code>","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Phải thay cả hai placeholder bằng giá trị thật. task_kind=general chỉ ghi title, không đọc CODEXPRO.md và không chạy CodexGraph; task_kind=code mới nạp rule, chạy CodexGraph và mở tool workspace.`,
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
         "Sau khi begin_repo_task với task_kind=code thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác."
       ];
@@ -4254,11 +4283,7 @@ ipcMain.handle("codexpro:clear-diagnostic-logs", () => clearDiagnosticLogs(codex
 ipcMain.handle("codexpro:prune-diagnostic-logs", () => pruneDiagnosticLogs(codexProHome));
 diagnosticIpcHandle("codexpro:operations-performance", { category: "performance", action: "operations-performance", slowMs: 2_500 }, (_event, pids) => collectOperationsPerformance(Array.isArray(pids) ? pids : []));
 ipcMain.handle("codexpro:notify", (_event, payload) => {
-  if (!Notification.isSupported()) return false;
-  const title = String(payload?.title || "CodexPro").trim().slice(0, 120) || "CodexPro";
-  const body = String(payload?.body || "").trim().slice(0, 500);
-  new Notification({ title, body, silent: payload?.silent === true }).show();
-  return true;
+  return showManagerNotification(payload);
 });
 diagnosticIpcHandle("codexpro:rotate-link", {
   category: "settings",

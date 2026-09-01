@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { formatWorkerRunningDuration } from "./worker-running-duration.js";
 
-export function WorkerRunningDuration({ startedAt, finishedAt = "" }) {
+export function WorkerRunningDuration({ startedAt, finishedAt = "", prefix = "Hoạt động trong" }) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -13,5 +13,5 @@ export function WorkerRunningDuration({ startedAt, finishedAt = "" }) {
 
   const finishedAtMs = Date.parse(String(finishedAt || ""));
   const label = formatWorkerRunningDuration(startedAt, Number.isFinite(finishedAtMs) ? finishedAtMs : now);
-  return label ? <code className="profile-run-duration" title="Thời lượng task">Hoạt động trong {label}</code> : null;
+  return label ? <code className="profile-run-duration" title="Thời lượng task">{prefix} {label}</code> : null;
 }

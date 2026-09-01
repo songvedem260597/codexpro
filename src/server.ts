@@ -924,7 +924,7 @@ function serverInstructions(config: CodexProConfig, requireRepoTask = false): st
     "",
     "Preferred workflow:",
     requireRepoTask
-      ? "1. Every profile-bound ChatGPT task must call begin_repo_task once with a clear AI-generated task_title of 2-6 words and task_kind=general or code. Use general for answers/research that do not touch source; use code before any repository/workspace tool. If a CodexPro Manager prompt supplies an exact task id/root/scope, pass those exact values. For a direct ChatGPT request, omit task_id and root; CodexPro generates the task id and uses this profile's locked workspace. A newly begun task invalidates the previous active task immediately. The codexpro wrapper may be used for action=list_actions/help and action=begin_repo_task; repo_task_status is also available before activation."
+      ? "1. Every profile-bound ChatGPT task must call begin_repo_task once with a clear, natural, easy-to-understand AI-generated task_title of 4-6 words and task_kind=general or code. Use general for answers/research that do not touch source; use code before any repository/workspace tool. If a CodexPro Manager prompt supplies an exact task id/root/scope, pass those exact values. For a direct ChatGPT request, omit task_id and root; CodexPro generates the task id and uses this profile's locked workspace. A newly begun task invalidates the previous active task immediately. The codexpro wrapper may be used for action=list_actions/help and action=begin_repo_task; repo_task_status is also available before activation."
       : config.controlPlaneUrl && config.toolMode !== "minimal"
         ? "1. In a role-bound CodexPro Worker Chat, call worker_cycle_start exactly once for each Control Plane wake job. It automatically ACKs governance and claims the next role-compatible task without a schedule. If it returns TASK_CLAIMED, open_workspace with the returned workerBinding.worktreePath and continue tool calls until its nextAction and pendingInstructions are completed or a real blocker is recorded; do not stop after narrating what you will do. If it returns IDLE, stop cleanly. In an ordinary session, start with open_current_workspace."
         : "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
@@ -2105,13 +2105,13 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
     "begin_repo_task",
     {
       title: "Register Profile Task",
-      description: "Mandatory lightweight first call for every profile-bound worker task. Always provide a clear 2-6 word task_title. Use task_kind=general for answers/research without source access; only task_kind=code loads global rules, activates CodexGraph, and unlocks repository tools.",
+      description: "Mandatory lightweight first call for every profile-bound worker task. Always provide a clear, natural, easy-to-understand 4-6 word task_title. Use task_kind=general for answers/research without source access; only task_kind=code loads global rules, activates CodexGraph, and unlocks repository tools.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional().describe("Exact task id included by CodexPro Manager. Omit only for a request typed directly in ChatGPT."),
         task_title: z.string().trim().min(4).max(56)
-          .refine((value) => { const words = value.split(/\s+/).filter(Boolean).length; return words >= 2 && words <= 6; }, "Task title must contain 2-6 words.")
+          .refine((value) => { const words = value.split(/\s+/).filter(Boolean).length; return words >= 4 && words <= 6; }, "Task title must contain 4-6 words.")
           .refine((value) => !/^(?:làm sao|sửa đi|làm đi|fix đi|check lỗi|kiểm tra|tiếp tục)$/iu.test(value.trim()), "Task title must describe the actual work, not a vague request.")
-          .describe("Required title chosen and returned by the AI: 2-6 short, clear words describing the actual work."),
+          .describe("Required title chosen and returned by the AI: 4-6 short, clear, natural words describing the actual work."),
         task_kind: z.enum(["general", "code"]).describe("Use general when no source/workspace tool is needed. Use code before reading, changing, building, or testing a repository."),
         root: z.string().min(1).optional().describe("Initial workspace root included by CodexPro Manager. Omit for a direct ChatGPT request to use the profile's locked workspace."),
         scope: z.enum(["workspace", "all_allowed"]).optional().describe("Task scope. Omit or use workspace for a locked workspace; use all_allowed only when Manager explicitly enables all allowed roots.")
