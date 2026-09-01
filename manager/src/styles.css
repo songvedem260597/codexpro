@@ -459,6 +459,14 @@ section { margin-bottom: 38px; }
 .response-head-actions { flex: 0 0 auto; }
 .chat-response-head .continue-response { color: #ffd58e; border-color: #77582d; background: #2a2113; }
 .chat-response-head .continue-response:hover:not(:disabled) { color: #ffe6ba; border-color: #a17739; background: #352817; }
+.chat-response-notices { position: absolute; z-index: 3; top: 60px; left: 12px; right: 12px; display: grid; gap: 6px; pointer-events: none; }
+.chat-response-notices .conversation-rollover-notice,
+.chat-response-notices .network-response-notice { border: 1px solid #334267; border-radius: 8px; box-shadow: 0 8px 24px #0008; }
+.chat-response-notices .network-response-notice { border-color: #294530; }
+.chat-response-notices .network-response-notice.is-generating { border-color: #334267; }
+.chat-response-notices .network-response-notice.is-failed,
+.chat-response-notices .conversation-rollover-notice.is-failed { border-color: #6a3540; }
+.chat-response-notices .conversation-rollover-notice.is-creating { border-color: #66502d; }
 .conversation-rollover-notice { flex: 0 0 auto; display: grid; gap: 3px; padding: 9px 12px; color: #b9c8f7; border-bottom: 1px solid #334267; background: #121a2b; font-size: 12px; line-height: 1.45; }
 .conversation-rollover-notice strong { color: #dce5ff; font-size: 12px; }
 .conversation-rollover-notice span { color: #9eacd0; }

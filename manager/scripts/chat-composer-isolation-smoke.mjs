@@ -2,6 +2,7 @@
 import fs from "node:fs";
 
 const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const composerStart = source.indexOf("function ChatRequestComposer(");
 const appStart = source.indexOf("function App()", composerStart);
 assert.ok(composerStart >= 0 && appStart > composerStart, "ChatRequestComposer must stay isolated above App");
@@ -9,6 +10,7 @@ assert.ok(composerStart >= 0 && appStart > composerStart, "ChatRequestComposer m
 const composer = source.slice(composerStart, appStart);
 assert.match(composer, /const \[draft, setDraft\] = useState\(/, "composer draft must be local state");
 assert.match(composer, /onDraftSnapshot\(normalized\)/, "composer must snapshot draft without lifting render state");
+assert.match(composer, /onDraftActivityChange\(Boolean\(normalized\.trim\(\)\)\)/, "typing must mark the composer active so background transcript pinning cannot move the reader viewport");
 assert.match(composer, /\[profileId, draftResetVersion\]/, "composer must reset local draft when switching profiles");
 assert.doesNotMatch(composer, /setRequestDrafts/, "composer must not update App state on each keystroke");
 
@@ -38,6 +40,13 @@ assert.match(source, /const cacheFresh = cachedResponseIsFresh[\s\S]*transcriptL
 assert.match(source, /const activeTurn = sameConversation[\s\S]*transcriptLoading: !activeTurn/, "opening an idle existing chat must show transcript loading even when stale messages are already cached");
 assert.match(source, /transcriptLoading: Boolean\(previous\.transcriptLoading && needsDomFallback\)/, "a network-only read must preserve transcript loading while a DOM fallback is still required");
 assert.match(source, /responseCurrent && response\?\.transcriptLoading \? <div className="response-empty">[\s\S]*Đang tải tin nhắn<\/span>/, "transcript loading must hide stale cached messages behind an explicit loading state without duplicating animated dots in the text");
+assert.match(styles, /\.chat-response-notices \{[^}]*position:\s*absolute/, "response notices must overlay the fixed chat frame instead of shrinking the transcript viewport");
+assert.match(modal, /const hasResponseNotice = showRolloverNotice \|\| showRepoTaskNotice \|\| showNetworkNotice/, "chat response notices must share one non-layout overlay host");
+assert.match(modal, /className="chat-response-notices"/, "chat response notices must render through the overlay host");
+assert.match(source, /const responseComposerActive = useRef\(new Map\(\)\)/, "composer activity must use a dedicated lock instead of overwriting manual scroll ownership");
+assert.match(source, /responseScrollLocked\.current\.get\(profileId\) \|\| responseComposerActive\.current\.get\(profileId\)/, "auto-positioning must pause while the user is drafting");
+assert.match(source, /type: "chat-frame-geometry"/, "chat frame diagnostics must persist geometry changes");
+assert.match(source, /const geometry = \{[\s\S]*panel:[\s\S]*transcript:[\s\S]*composer:[\s\S]*textarea:/, "chat frame diagnostics must include frame, transcript, composer, and textarea geometry");
 assert.match(modal, /data-layout-transcript-loading=\{responseCurrent && response\?\.transcriptLoading \? "1" : "0"\}/, "chat modal must expose transcript loading for runtime UI verification");
 
 console.log("chat-composer-isolation-smoke: ok");
