@@ -19,5 +19,6 @@ CODEXPRO_MCP_REPORT.md
 *.local.md
 *.local.json
 *.log
+.qa-*
 SOCIAL_POSTS.md
 LAUNCH_COPY.md
