@@ -7,6 +7,7 @@ const DIAGNOSTIC_RENDER_BATCH = 180;
 
 const CATEGORY_LABELS = {
   "user-reported-error": "Lỗi người dùng phát hiện",
+  "task-unfinalized": "Task chưa chốt trạng thái",
   runtime: "Runtime",
   status: "Trạng thái",
   projects: "Dự án",
@@ -68,7 +69,7 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
   const available = data?.available || { levels: summary, sources: {}, categories: {} };
   const availableTotal = Object.values(available.levels || {}).reduce((total, count) => total + (Number(count) || 0), 0);
   const sourceOptions = ["all", ...new Set(["user", "renderer", "mcp", ...(data?.sources || [])])];
-  const categoryOptions = ["all", ...new Set(["user-reported-error", "runtime", "status", "projects", "profile", "chat", "network", "tool", "transport", ...(data?.categories || [])])];
+  const categoryOptions = ["all", ...new Set(["user-reported-error", "task-unfinalized", "runtime", "status", "projects", "profile", "chat", "network", "tool", "transport", ...(data?.categories || [])])];
   const levelOptions = [
     { value: "all", label: "Tất cả mức", hint: "Hiển thị toàn bộ mức độ", tone: "neutral", count: availableTotal },
     { value: "error", label: "Lỗi", hint: "Cần điều tra ngay", tone: "error", count: available.levels?.error || 0 },
@@ -156,7 +157,7 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
                 <span className="diagnostic-source"><strong>{SOURCE_LABELS[entry.source] || entry.source || "Manager"}</strong><small>{CATEGORY_LABELS[entry.category] || entry.category || "Runtime"}</small></span>
                 <span className="diagnostic-action">{entry.action || "—"}</span>
                 <span className="diagnostic-message">{entry.message || "—"}</span>
-                <span className="diagnostic-occurrence">{entry.category === "user-reported-error" ? `${Number(entry.details?.occurrence_count) || 1} lần` : "—"}</span>
+                <span className="diagnostic-occurrence">{entry.details?.incident_fingerprint ? `${Number(entry.details?.occurrence_count) || 1} lần` : "—"}</span>
                 <span className="diagnostic-duration">{Number.isFinite(Number(entry.duration_ms)) ? `${Number(entry.duration_ms)} ms` : "—"}</span>
               </button>
             );

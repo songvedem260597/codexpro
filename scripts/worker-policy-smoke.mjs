@@ -13,6 +13,7 @@ const {
   listWorkerJobs,
   prepareWorkerJob,
   readWorkerJob,
+  reconcileCompletedWorkerJob,
   workerJobPublicRecord
 } = await import("../dist/workerPolicy.js");
 
@@ -84,6 +85,28 @@ try {
     () => finalizeWorkerJob({ jobId: codeId, workerId: "api.other", outcome: "failed" }),
     /owner mismatch/
   );
+
+  const reconciledId = "cpt_333333333333333333333333";
+  await prepareWorkerJob({ jobId: reconciledId, workerId: "chrome.fixture", scope: "workspace", root: "C:\\repo" });
+  const running = await bootstrapWorkerJob({
+    jobId: reconciledId,
+    workerId: "chrome.fixture",
+    title: "Reconcile completed browser task",
+    kind: "general",
+    root: "",
+    workspaceId: "",
+    scope: "workspace"
+  });
+  const evidenceFinishedAt = new Date(Date.parse(running.startedAt) + 5000).toISOString();
+  const reconciled = await reconcileCompletedWorkerJob({
+    jobId: reconciledId,
+    workerId: "chrome.fixture",
+    finishedAt: evidenceFinishedAt,
+    evidence: "manager_chat_response_audit"
+  });
+  assert.equal(reconciled.status, "completed");
+  assert.equal(reconciled.finishedAt, evidenceFinishedAt);
+  assert.equal(reconciled.events.at(-1)?.type, "reconciled_completed");
 
   console.log("✓ Worker MCP policy persistence smoke test passed");
 } finally {

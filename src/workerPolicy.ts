@@ -285,6 +285,35 @@ export async function finalizeWorkerJob(input: {
   });
 }
 
+export async function reconcileCompletedWorkerJob(input: {
+  jobId: string;
+  workerId?: string;
+  finishedAt: string;
+  evidence: string;
+  summary?: string;
+}): Promise<WorkerJobRecord> {
+  const finishedAtMs = Date.parse(input.finishedAt);
+  if (!Number.isFinite(finishedAtMs)) throw new Error("Worker job reconciliation requires a valid completion timestamp.");
+  return await updateWorkerJob(input.jobId, (current) => {
+    if (!current) throw new Error("Worker job was not prepared.");
+    if (input.workerId && current.workerId !== input.workerId) throw new Error("Worker job owner mismatch.");
+    if (current.status !== "running") return current;
+    const startedAtMs = Date.parse(current.startedAt || current.preparedAt);
+    if (Number.isFinite(startedAtMs) && finishedAtMs < startedAtMs) throw new Error("Worker job completion evidence predates the task start.");
+    return {
+      ...current,
+      status: "completed",
+      finishedAt: new Date(finishedAtMs).toISOString(),
+      summary: clean(input.summary, 4000) || current.summary,
+      events: [...current.events, event("reconciled_completed", {
+        evidence: clean(input.evidence, 300),
+        evidence_finished_at: new Date(finishedAtMs).toISOString(),
+        reconciled_at: new Date().toISOString()
+      })]
+    };
+  });
+}
+
 export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Record<string, unknown> | undefined {
   if (!record) return undefined;
   const missingObligations = record.requiredObligations.filter((obligation) => !record.completedObligations.includes(obligation));

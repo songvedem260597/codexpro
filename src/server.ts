@@ -3569,6 +3569,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
         target_id: z.string().optional().describe("Tab id from list_tabs. Omit to use the first page tab."),
         conversation_id: z.string().optional().describe("Exact ChatGPT conversation id for send_chat_request, rename_chat, or get_chat_response."),
+        task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional().describe("Exact Manager task id to finalize when a ChatGPT response reaches a terminal state."),
         read_dom: z.boolean().optional().describe("For get_chat_response, read transcript text from the page DOM. Set false to return network state only."),
         canonical_only: z.boolean().optional().describe("For get_chat_response, read the authenticated canonical conversation without querying the rendered DOM."),
         recover_stale_dom: z.boolean().optional().describe("For get_chat_response after network completion, compare the live DOM with the canonical ChatGPT conversation and reload the exact tab when the rendered stream is stale."),
@@ -3756,6 +3757,28 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           traceMs: args.trace_ms
         });
         result.browser_backend = "dedicated";
+      }
+      if (selectedProfile && args.task_id && (args.action === "get_chat_response" || args.action === "stop_chat_generation")) {
+        const workerJob = readWorkerJob(args.task_id);
+        const terminalOutcome = args.action === "stop_chat_generation"
+          ? "cancelled"
+          : String(result.network_state || "").toLowerCase() === "failed" || result.network_error
+            ? "failed"
+            : result.response_ready === true && result.busy !== true && result.network_stream_in_progress !== true
+              ? "completed"
+              : null;
+        if (workerJob?.status === "running" && workerJob.workerId === selectedProfile && terminalOutcome) {
+          const finalized = await finalizeWorkerJob({
+            jobId: args.task_id,
+            workerId: selectedProfile,
+            outcome: terminalOutcome,
+            summary: terminalOutcome === "completed" ? "ChatGPT response finalized." : undefined,
+            error: terminalOutcome === "failed" ? String(result.network_error || result.error || "ChatGPT generation failed.") : undefined
+          });
+          result.worker_job_finalized = true;
+          result.worker_job_status = finalized.status;
+          result.worker_job_finished_at = finalized.finishedAt;
+        }
       }
       if (result.image_base64) {
         const { image_base64, ...structured } = result;
