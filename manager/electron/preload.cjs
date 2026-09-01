@@ -76,6 +76,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   getRepoTaskStatus: (payload) => invoke("codexpro:get-repo-task-status", payload),
   listAppPlugins: () => invoke("codexpro:list-app-plugins"),
   listAppPluginCatalog: () => invoke("codexpro:list-app-plugin-catalog"),
+  prepareAppPluginTask: (payload) => invoke("codexpro:prepare-app-plugin-task", payload),
   installCatalogAppPlugin: (id) => invoke("codexpro:install-catalog-app-plugin", id),
   updateCatalogAppPlugin: (id) => invoke("codexpro:update-catalog-app-plugin", id),
   installAppPlugin: () => invoke("codexpro:install-app-plugin"),

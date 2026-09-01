@@ -27,6 +27,7 @@ import { createChromeWorkerPlugin } from "./worker-plugins/chrome-worker-plugin.
 import { buildTaskWorkflowPrompt, resolveTaskWorkflow } from "./task-workflow-registry.mjs";
 import { createAppPluginRegistry } from "./app-plugins/app-plugin-registry.mjs";
 import { createManagedAppPluginInstaller } from "./app-plugins/managed-app-plugin-installer.mjs";
+import { createPluginSkillBundle } from "./app-plugins/plugin-skill-bundle.mjs";
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "codexpro-plugin",
@@ -4883,6 +4884,22 @@ diagnosticIpcHandle("codexpro:list-app-plugin-catalog", {
   category: "app-plugin",
   action: "list-app-plugin-catalog"
 }, () => managedAppPluginInstaller.listCatalog());
+diagnosticIpcHandle("codexpro:prepare-app-plugin-task", {
+  category: "app-plugin",
+  action: "prepare-app-plugin-task",
+  logSuccess: true,
+  successMessage: "Đã tạo gói skill cho task plugin",
+  failureMessage: "Không tạo được gói skill cho task plugin",
+  details: (payload) => ({ plugin_id: String(payload?.pluginId || ""), skill_count: Array.isArray(payload?.skillIds) ? payload.skillIds.length : 0 })
+}, (_event, payload) => {
+  const bundle = createPluginSkillBundle({
+    registry: appPluginRegistry,
+    home: codexProHome,
+    pluginId: payload?.pluginId,
+    skillIds: payload?.skillIds
+  });
+  return { ...bundle, attachment: requestFileSummary(bundle.path) };
+});
 diagnosticIpcHandle("codexpro:install-catalog-app-plugin", {
   category: "app-plugin",
   action: "install-catalog-app-plugin",

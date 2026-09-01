@@ -6,6 +6,8 @@ import path from "node:path";
 
 import { createAppPluginRegistry } from "../electron/app-plugins/app-plugin-registry.mjs";
 import { createManagedAppPluginInstaller } from "../electron/app-plugins/managed-app-plugin-installer.mjs";
+import { createPluginSkillBundle } from "../electron/app-plugins/plugin-skill-bundle.mjs";
+import { buildPluginTaskPrompt, normalizePluginSkills } from "../src/plugin-task-prompt.js";
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-app-plugin-"));
 const home = path.join(scratch, "home");
@@ -106,6 +108,8 @@ try {
   const managedTasteRoot = path.join(home, "app-plugin-repos", "taste-skill");
   const tasteCatalog = JSON.parse(fs.readFileSync(path.join(managedTasteRoot, "dist", "catalog.json"), "utf8"));
   assert.equal(tasteCatalog.skills[0].install_name, "gpt-taste");
+  assert.equal(tasteCatalog.skills[0].group_id, "design-foundation");
+  assert.equal(tasteCatalog.skills[0].group_exclusive, true);
   assert.match(tasteCatalog.skills[0].content, /Build a deliberate interface/);
   assert.match(fs.readFileSync(path.join(managedTasteRoot, ".codexpro-plugin", "plugin.json"), "utf8"), /codexpro-plugin:\/\/taste-skill/);
 
@@ -122,6 +126,7 @@ try {
   const managerHtml = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const app = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
   const center = fs.readFileSync(new URL("../src/app-plugin-center.jsx", import.meta.url), "utf8");
+  const tasteTemplate = fs.readFileSync(new URL("../electron/app-plugins/templates/taste-skill/app.js", import.meta.url), "utf8");
   assert.match(managerMain, /protocol\.registerSchemesAsPrivileged/, "custom plugin resources must use a private Electron protocol");
   assert.match(managerHtml, /frame-src codexpro-plugin:/, "Manager CSP must allow the isolated plugin frame instead of rendering a blank panel");
   assert.match(managerMain, /codexpro:list-app-plugins/);
@@ -135,6 +140,45 @@ try {
   assert.match(center, /Không xóa repo/, "uninstall UI must explain that source code remains untouched");
   assert.match(center, /Taste Skill/, "the Plugin tab must expose the Taste Skill integration");
   assert.match(center, /codexpro:copy-text/, "sandboxed skill plugins need the limited copy bridge, not direct preload access");
+  assert.match(tasteTemplate, /codexpro:use-skills/, "Taste Skill must send a multi-skill selection to Manager");
+  assert.match(tasteTemplate, /state\.selected = \[\]/, "Taste Skill must keep a multi-select collection");
+  assert.match(tasteTemplate, /group_exclusive/, "Taste Skill must replace conflicting choices inside exclusive groups");
+  assert.match(tasteTemplate, /Chọn 1/, "Taste Skill must label exclusive groups clearly");
+  assert.match(center, /Bước 2 · Chọn dự án/, "selected skills must open the project assignment flow");
+  assert.match(center, /sendWorkerRequest/, "plugin tasks must support API workers");
+  assert.match(center, /sendProfileRequest/, "plugin tasks must support Chrome workers");
+  assert.match(center, /prepareAppPluginTask/, "plugin tasks must materialize selected skills as a verified attachment");
+  assert.match(preload, /prepareAppPluginTask/);
+
+  const normalizedSkills = normalizePluginSkills([
+    { id: "a", install_name: "first-skill", description: "First", content: "Rule A" },
+    { id: "a", install_name: "duplicate", content: "Ignored" },
+    { id: "b", install_name: "second-skill", content: "Rule B" }
+  ]);
+  assert.deepEqual(normalizedSkills.map((skill) => skill.name), ["first-skill", "second-skill"], "skill payload must preserve selection order and remove duplicates");
+  const pluginPrompt = buildPluginTaskPrompt("Redesign dashboard", normalizedSkills);
+  assert.match(pluginPrompt, /# Yêu cầu người dùng[\s\S]*Redesign dashboard/);
+  assert.match(pluginPrompt, /`first-skill`, `second-skill`/);
+  assert.doesNotMatch(pluginPrompt, /Rule A|Rule B/, "large skill bodies must stay out of the 20,000-character chat request");
+  assert.match(pluginPrompt, /file CodexPro Plugin Skill Bundle đính kèm/);
+  assert.ok(pluginPrompt.length <= 20_000, "the composed Chrome request must stay inside the transport limit");
+  assert.throws(() => buildPluginTaskPrompt("x".repeat(20_000), normalizedSkills), /dài quá/i);
+  assert.throws(() => buildPluginTaskPrompt("", normalizedSkills), /nhập yêu cầu/i);
+  assert.throws(() => normalizePluginSkills([
+    { id: "minimal", install_name: "minimalist-ui", content: "Minimal", group_id: "visual-direction", group_label: "Phong cách", group_exclusive: true },
+    { id: "brutal", install_name: "industrial-brutalist-ui", content: "Brutal", group_id: "visual-direction", group_label: "Phong cách", group_exclusive: true }
+  ]), /chỉ được chọn một skill/i, "Manager must reject conflicting skills even if a plugin bypasses its own UI");
+
+  const bundle = createPluginSkillBundle({
+    registry: persisted,
+    home,
+    pluginId: "taste-skill",
+    skillIds: tasteCatalog.skills.map((skill) => skill.id)
+  });
+  assert.equal(fs.existsSync(bundle.path), true);
+  assert.deepEqual(bundle.skill_names, ["gpt-taste"]);
+  assert.match(fs.readFileSync(bundle.path, "utf8"), /Skill 1: gpt-taste[\s\S]*Build a deliberate interface/);
+  assert.throws(() => createPluginSkillBundle({ registry: persisted, home, pluginId: "taste-skill", skillIds: ["missing"] }), /không còn tồn tại/i);
 
   console.log("app-plugin-registry-smoke: ok");
 } finally {

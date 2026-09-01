@@ -5,6 +5,22 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+const TASTE_SKILL_GROUPS = Object.freeze({
+  "design-taste-frontend": { id: "design-foundation", label: "Nền thiết kế", order: 10, exclusive: true },
+  "design-taste-frontend-v1": { id: "design-foundation", label: "Nền thiết kế", order: 10, exclusive: true },
+  "gpt-taste": { id: "design-foundation", label: "Nền thiết kế", order: 10, exclusive: true },
+  "high-end-visual-design": { id: "visual-direction", label: "Phong cách", order: 20, exclusive: true },
+  "minimalist-ui": { id: "visual-direction", label: "Phong cách", order: 20, exclusive: true },
+  "industrial-brutalist-ui": { id: "visual-direction", label: "Phong cách", order: 20, exclusive: true },
+  "redesign-existing-projects": { id: "implementation-workflow", label: "Quy trình triển khai", order: 30, exclusive: false },
+  "image-to-code": { id: "implementation-workflow", label: "Quy trình triển khai", order: 30, exclusive: false },
+  "full-output-enforcement": { id: "support", label: "Bổ trợ", order: 40, exclusive: false },
+  "stitch-design-taste": { id: "support", label: "Bổ trợ", order: 40, exclusive: false },
+  "imagegen-frontend-web": { id: "image-generation", label: "Tạo hình ảnh", order: 50, exclusive: false },
+  "imagegen-frontend-mobile": { id: "image-generation", label: "Tạo hình ảnh", order: 50, exclusive: false },
+  "brandkit": { id: "image-generation", label: "Tạo hình ảnh", order: 50, exclusive: false }
+});
+
 export const DEFAULT_APP_PLUGIN_CATALOG = Object.freeze([{
   id: "taste-skill",
   name: "Taste Skill",
@@ -30,11 +46,17 @@ function readSkill(skillPath) {
   const content = fs.readFileSync(skillPath, "utf8");
   const frontmatter = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] || "";
   const folder = path.basename(path.dirname(skillPath));
+  const installName = scalar(frontmatter, "name") || folder;
+  const group = TASTE_SKILL_GROUPS[installName] || { id: "other", label: "Khác", order: 90, exclusive: false };
   return {
     id: folder,
-    install_name: scalar(frontmatter, "name") || folder,
+    install_name: installName,
     description: scalar(frontmatter, "description"),
-    content
+    content,
+    group_id: group.id,
+    group_label: group.label,
+    group_order: group.order,
+    group_exclusive: group.exclusive
   };
 }
 
@@ -83,7 +105,7 @@ export function createManagedAppPluginInstaller({ home, registry, templateRoot, 
       .map((entry) => path.join(skillsRoot, entry.name, "SKILL.md"))
       .filter((skillPath) => fs.statSync(skillPath, { throwIfNoEntry: false })?.isFile())
       .map(readSkill)
-      .sort((left, right) => left.install_name.localeCompare(right.install_name, "en"));
+      .sort((left, right) => left.group_order - right.group_order || left.install_name.localeCompare(right.install_name, "en"));
     if (!skills.length) throw new Error("Repo Taste Skill không có SKILL.md hợp lệ.");
 
     const manifestRoot = path.join(root, ".codexpro-plugin");
