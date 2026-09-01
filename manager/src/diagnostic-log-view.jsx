@@ -2,10 +2,11 @@ import React, { useEffect, useState } from "react";
 import { AppDropdown } from "./app-dropdown.jsx";
 
 const LEVEL_LABELS = { info: "INFO", warn: "CẢNH BÁO", error: "LỖI" };
-const SOURCE_LABELS = { manager: "Manager", renderer: "Giao diện", mcp: "MCP", worker: "Worker", electron: "Electron" };
+const SOURCE_LABELS = { user: "Người dùng", manager: "Manager", renderer: "Giao diện", mcp: "MCP", worker: "Worker", electron: "Electron" };
 const DIAGNOSTIC_RENDER_BATCH = 180;
 
 const CATEGORY_LABELS = {
+  "user-reported-error": "Lỗi người dùng phát hiện",
   runtime: "Runtime",
   status: "Trạng thái",
   projects: "Dự án",
@@ -59,15 +60,15 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
   const entries = Array.isArray(data?.entries) ? data.entries : [];
   const [visibleCount, setVisibleCount] = useState(DIAGNOSTIC_RENDER_BATCH);
   const visibleEntries = entries.slice(0, visibleCount);
-  const summary = data?.summary || { total: 0, info: 0, warn: 0, error: 0 };
+  const summary = data?.summary || { total: 0, info: 0, warn: 0, error: 0, user_reported_error: 0, user_reported_incidents: 0 };
 
   useEffect(() => {
     setVisibleCount(DIAGNOSTIC_RENDER_BATCH);
   }, [data?.checked_at, filters.level, filters.source, filters.category, filters.hours, filters.query]);
   const available = data?.available || { levels: summary, sources: {}, categories: {} };
   const availableTotal = Object.values(available.levels || {}).reduce((total, count) => total + (Number(count) || 0), 0);
-  const sourceOptions = ["all", ...new Set(["renderer", "mcp", ...(data?.sources || [])])];
-  const categoryOptions = ["all", ...new Set(["runtime", "status", "projects", "profile", "chat", "network", "tool", "transport", ...(data?.categories || [])])];
+  const sourceOptions = ["all", ...new Set(["user", "renderer", "mcp", ...(data?.sources || [])])];
+  const categoryOptions = ["all", ...new Set(["user-reported-error", "runtime", "status", "projects", "profile", "chat", "network", "tool", "transport", ...(data?.categories || [])])];
   const levelOptions = [
     { value: "all", label: "Tất cả mức", hint: "Hiển thị toàn bộ mức độ", tone: "neutral", count: availableTotal },
     { value: "error", label: "Lỗi", hint: "Cần điều tra ngay", tone: "error", count: available.levels?.error || 0 },
@@ -77,8 +78,8 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
   const sourceFilterOptions = sourceOptions.map((item) => ({
     value: item,
     label: item === "all" ? "Tất cả nguồn" : (SOURCE_LABELS[item] || item),
-    hint: item === "all" ? "Manager, giao diện và MCP" : `Chỉ log từ ${SOURCE_LABELS[item] || item}`,
-    tone: item === "mcp" ? "mcp" : item === "renderer" ? "renderer" : "neutral",
+    hint: item === "all" ? "Người dùng, Manager, giao diện và MCP" : `Chỉ log từ ${SOURCE_LABELS[item] || item}`,
+    tone: item === "user" ? "error" : item === "mcp" ? "mcp" : item === "renderer" ? "renderer" : "neutral",
     count: item === "all" ? availableTotal : available.sources?.[item]
   }));
   const categoryFilterOptions = categoryOptions.map((item) => ({
@@ -100,6 +101,7 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
       <section className="diagnostic-summary-grid" aria-label="Tóm tắt log 24 giờ">
         <article><span>Tổng log</span><strong>{summary.total || 0}</strong><small>trong {data?.queried_hours || filters.hours} giờ</small></article>
         <article className="is-error"><span>Lỗi</span><strong>{summary.error || 0}</strong><small>cần ưu tiên điều tra</small></article>
+        <article className="is-user-error"><span>Lỗi người dùng phát hiện</span><strong>{summary.user_reported_error || 0}</strong><small>{summary.user_reported_incidents || 0} lỗi riêng biệt</small></article>
         <article className="is-warn"><span>Cảnh báo</span><strong>{summary.warn || 0}</strong><small>có thể tự phục hồi</small></article>
         <article className="is-info"><span>Thông tin</span><strong>{summary.info || 0}</strong><small>MCP / runtime bình thường</small></article>
       </section>
@@ -141,7 +143,7 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
 
         <div className="diagnostic-table" role="table" aria-label="Nhật ký chẩn đoán CodexPro">
           <div className="diagnostic-row diagnostic-head" role="row">
-            <span>Thời gian</span><span>Mức</span><span>Nguồn / nhóm</span><span>Action</span><span>Nội dung</span><span>Thời lượng</span>
+            <span>Thời gian</span><span>Mức</span><span>Nguồn / nhóm</span><span>Action</span><span>Nội dung</span><span>Lặp lại</span><span>Thời lượng</span>
           </div>
           {!entries.length && <div className="diagnostic-empty">Không có log phù hợp trong khoảng thời gian đã chọn.</div>}
           {visibleEntries.map((entry, index) => {
@@ -151,9 +153,10 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
               <button className={`diagnostic-row diagnostic-entry is-${entry.level || "info"} ${active ? "is-selected" : ""}`} type="button" role="row" key={key} onClick={() => onSelect(active ? null : entry)}>
                 <span className="diagnostic-time">{diagnosticTime(entry.timestamp)}</span>
                 <span><b className={`diagnostic-level is-${entry.level || "info"}`}>{LEVEL_LABELS[entry.level] || "INFO"}</b></span>
-                <span className="diagnostic-source"><strong>{entry.source || "manager"}</strong><small>{entry.category || "runtime"}</small></span>
+                <span className="diagnostic-source"><strong>{SOURCE_LABELS[entry.source] || entry.source || "Manager"}</strong><small>{CATEGORY_LABELS[entry.category] || entry.category || "Runtime"}</small></span>
                 <span className="diagnostic-action">{entry.action || "—"}</span>
                 <span className="diagnostic-message">{entry.message || "—"}</span>
+                <span className="diagnostic-occurrence">{entry.category === "user-reported-error" ? `${Number(entry.details?.occurrence_count) || 1} lần` : "—"}</span>
                 <span className="diagnostic-duration">{Number.isFinite(Number(entry.duration_ms)) ? `${Number(entry.duration_ms)} ms` : "—"}</span>
               </button>
             );
@@ -162,11 +165,11 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
         {selected && (
           <div className="diagnostic-detail">
             <div className="diagnostic-detail-head">
-              <div><b>{LEVEL_LABELS[selected.level] || "INFO"} · {selected.source || "manager"}</b><span>{diagnosticTime(selected.timestamp)} · {selected.category || "runtime"}</span></div>
+              <div><b>{LEVEL_LABELS[selected.level] || "INFO"} · {SOURCE_LABELS[selected.source] || selected.source || "Manager"}</b><span>{diagnosticTime(selected.timestamp)} · {CATEGORY_LABELS[selected.category] || selected.category || "Runtime"}</span></div>
               <button className="button secondary" type="button" onClick={() => onCopy(selected)}>Copy chi tiết</button>
             </div>
             <strong>{selected.message || "Không có message"}</strong>
-            <pre>{JSON.stringify({ action: selected.action || "", duration_ms: selected.duration_ms ?? null, details: selected.details || {} }, null, 2)}</pre>
+            <pre>{JSON.stringify({ action: selected.action || "", occurrence_count: selected.details?.occurrence_count ?? null, duration_ms: selected.duration_ms ?? null, details: selected.details || {} }, null, 2)}</pre>
           </div>
         )}
       </section>

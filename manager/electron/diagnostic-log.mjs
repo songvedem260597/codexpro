@@ -196,6 +196,34 @@ function trimToByteLimit(records) {
   return kept;
 }
 
+function annotateIncidentOccurrences(records) {
+  const incidents = new Map();
+  for (const record of records) {
+    if (record?.source !== "user" || record?.category !== "user-reported-error") continue;
+    const fingerprint = String(record?.details?.incident_fingerprint || "").trim();
+    if (!fingerprint) continue;
+    const current = incidents.get(fingerprint) || { count: 0, firstSeenAt: record.timestamp, lastSeenAt: record.timestamp };
+    current.count += 1;
+    if (Date.parse(record.timestamp || "") < Date.parse(current.firstSeenAt || "")) current.firstSeenAt = record.timestamp;
+    if (Date.parse(record.timestamp || "") > Date.parse(current.lastSeenAt || "")) current.lastSeenAt = record.timestamp;
+    incidents.set(fingerprint, current);
+  }
+  return records.map((record) => {
+    const fingerprint = String(record?.details?.incident_fingerprint || "").trim();
+    const occurrence = fingerprint ? incidents.get(fingerprint) : null;
+    if (!occurrence) return record;
+    return {
+      ...record,
+      details: {
+        ...(record.details || {}),
+        occurrence_count: occurrence.count,
+        first_seen_at: occurrence.firstSeenAt,
+        last_seen_at: occurrence.lastSeenAt
+      }
+    };
+  });
+}
+
 async function ensureWriteTarget(home, state) {
   const file = logPath(home);
   if (!state.directoryReady) {
@@ -357,14 +385,14 @@ export async function readDiagnosticLogs(home, options = {}) {
   const category = String(options.category || "all").toLowerCase();
   const query = String(options.query || "").trim().toLowerCase().slice(0, 200);
   const limit = Math.max(1, Math.min(MAX_READ_ENTRIES, Number(options.limit) || 1000));
-  const windowRecords = [
+  const windowRecords = annotateIncidentOccurrences([
     ...await readValidRecords(home),
     ...await readProfileTaskEventRecords(home),
     ...await readRuntimeLifecycleRecords(home)
   ].filter((item) => {
     const timestamp = Date.parse(item.timestamp || "");
     return Number.isFinite(timestamp) && timestamp >= cutoff;
-  }).sort((left, right) => Date.parse(left.timestamp || "") - Date.parse(right.timestamp || ""));
+  }).sort((left, right) => Date.parse(left.timestamp || "") - Date.parse(right.timestamp || "")));
   const records = windowRecords.filter((item) => {
     if (level !== "all" && item.level !== level) return false;
     if (source !== "all" && String(item.source || "").toLowerCase() !== source) return false;
@@ -379,8 +407,13 @@ export async function readDiagnosticLogs(home, options = {}) {
   const summary = entries.reduce((acc, item) => {
     acc.total += 1;
     acc[item.level] = (acc[item.level] || 0) + 1;
+    if (item.source === "user" && item.category === "user-reported-error") acc.user_reported_error += 1;
     return acc;
-  }, { total: 0, info: 0, warn: 0, error: 0 });
+  }, { total: 0, info: 0, warn: 0, error: 0, user_reported_error: 0 });
+  summary.user_reported_incidents = new Set(entries
+    .filter((item) => item.source === "user" && item.category === "user-reported-error")
+    .map((item) => String(item?.details?.incident_fingerprint || item.record_id || ""))
+    .filter(Boolean)).size;
   const available = windowRecords.reduce((acc, item) => {
     const sourceName = String(item.source || "manager");
     const categoryName = String(item.category || "runtime");

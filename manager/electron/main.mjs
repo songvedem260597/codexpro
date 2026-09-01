@@ -11,6 +11,7 @@ import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiag
 import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
 import { syncUnpackedCodexProExtensions } from "./extension-sync.mjs";
+import { classifyUserReportedError } from "./user-reported-error.mjs";
 import { createRuntimeRestartGuard } from "./runtime-restart-guard.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
 import { WorkerPluginRegistry } from "./worker-core/plugin-registry.mjs";
@@ -92,6 +93,29 @@ const diagnostic = (level, source, category, message, details = {}) => {
     console.error("[manager-diagnostic]", error?.message || error);
   });
 };
+function recordUserReportedError(payload, context = {}) {
+  if (payload?.toolRetry || Number(payload?.toolRolloverCount) > 0 || payload?.user_report_logging === false) return null;
+  const report = classifyUserReportedError(payload);
+  if (!report.is_error) return report;
+  diagnostic("error", "user", "user-reported-error", `Người dùng báo lỗi: ${report.summary}`, {
+    action: "user-reported-error",
+    classification: report.classification,
+    report_origin: "chat_request",
+    incident_fingerprint: report.incident_fingerprint,
+    detection_confidence: report.detection_confidence,
+    detection_signals: report.detection_signals,
+    report_excerpt: report.excerpt,
+    attachment_names: report.attachment_names,
+    attachment_count: report.attachment_names.length,
+    worker_id: String(payload?.workerId || payload?.worker_id || ""),
+    profile_id: String(payload?.profileId || payload?.profile_id || ""),
+    conversation_id: String(payload?.conversationId || payload?.conversation_id || ""),
+    task_id: String(payload?.task_id || payload?.taskId || ""),
+    request_scope: String(payload?.scope || "workspace"),
+    ...context
+  });
+  return report;
+}
 const diagnosticThrottleState = new Map();
 function diagnosticAllowed(key, intervalMs) {
   if (!key || !(Number(intervalMs) > 0)) return true;
@@ -4151,6 +4175,7 @@ diagnosticIpcHandle("codexpro:worker-send", {
   details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || ""), task_id: String(payload?.task_id || payload?.taskId || ""), task_kind: String(payload?.task_kind || payload?.taskKind || "") })
 }, async (_event, payload) => {
   const prepared = await materializeApiWorkerRequest(payload);
+  recordUserReportedError(prepared, { request_channel: "worker_job" });
   return await workerPluginRegistry.invoke("send", String(prepared?.workerId || prepared?.worker_id || ""), prepared);
 });
 diagnosticIpcHandle("codexpro:worker-read", {
@@ -4465,7 +4490,10 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
     if (generationState === "failed" || value?.network_error) return { level: "error", message: "ChatGPT nhận yêu cầu nhưng generation lỗi network" };
     return null;
   }
-}, (_event, payload) => ipcResult(() => sendProfileRequest(payload)));
+}, (_event, payload) => {
+  recordUserReportedError(payload, { request_channel: "chat_composer" });
+  return ipcResult(() => sendProfileRequest(payload));
+});
 diagnosticIpcHandle("codexpro:rename-profile-chat", {
   category: "chat",
   action: "rename-profile-chat",
