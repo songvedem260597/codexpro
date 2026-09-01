@@ -1749,6 +1749,7 @@ function createWindow() {
           process.env.CODEXPRO_MANAGER_SMOKE_RENAME,
           process.env.CODEXPRO_MANAGER_SMOKE_DROPDOWN,
           process.env.CODEXPRO_MANAGER_SMOKE_RESPONSE,
+          process.env.CODEXPRO_MANAGER_SMOKE_COMPOSER_LAYOUT,
           process.env.CODEXPRO_MANAGER_SMOKE_SEND,
           process.env.CODEXPRO_MANAGER_SMOKE_PASTE_IMAGE,
           process.env.CODEXPRO_MANAGER_SMOKE_REALTIME_RESPONSE
@@ -1796,6 +1797,102 @@ function createWindow() {
           })()`, true);
           await win.webContents.executeJavaScript("document.querySelector('.project-dropdown-trigger:not(:disabled)')?.click()", true);
           await new Promise((resolve) => setTimeout(resolve, 120));
+        }
+        let composerLayoutProbe = null;
+        if (process.env.CODEXPRO_MANAGER_SMOKE_COMPOSER_LAYOUT === "1") {
+          const readComposerLayout = () => win.webContents.executeJavaScript(`(() => {
+            const modal = document.querySelector('.chat-modal');
+            const card = modal?.querySelector('.chat-popup-card');
+            const panel = card?.querySelector('.chat-response');
+            const transcript = panel?.querySelector('.latest-response');
+            const composer = card?.querySelector('.request-composer');
+            const textarea = composer?.querySelector('textarea');
+            const rect = (node) => node ? node.getBoundingClientRect() : null;
+            const panelRect = rect(panel);
+            const transcriptRect = rect(transcript);
+            const composerRect = rect(composer);
+            const textareaRect = rect(textarea);
+            return {
+              modalScrollTop: Math.round(modal?.scrollTop || 0),
+              modalScrollHeight: Math.round(modal?.scrollHeight || 0),
+              panelTop: panelRect ? Math.round(panelRect.top) : null,
+              panelHeight: panelRect ? Math.round(panelRect.height) : null,
+              transcriptTop: transcriptRect ? Math.round(transcriptRect.top) : null,
+              transcriptHeight: transcriptRect ? Math.round(transcriptRect.height) : null,
+              transcriptClientHeight: transcript?.clientHeight ?? null,
+              transcriptScrollTop: Math.round(transcript?.scrollTop || 0),
+              composerTop: composerRect ? Math.round(composerRect.top) : null,
+              composerHeight: composerRect ? Math.round(composerRect.height) : null,
+              textareaHeight: textareaRect ? Math.round(textareaRect.height) : null,
+              textareaScrollHeight: textarea?.scrollHeight ?? null,
+              draftLength: textarea?.value?.length || 0
+            };
+          })()`, true);
+          const originalDraft = await win.webContents.executeJavaScript(`(() => {
+            const textarea = document.querySelector('.chat-modal .request-composer textarea');
+            if (!textarea || textarea.disabled) return null;
+            textarea.focus({ preventScroll: true });
+            textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+            return textarea.value;
+          })()`, true);
+          if (originalDraft !== null) {
+            const transcriptDeadline = Date.now() + 4000;
+            while (Date.now() < transcriptDeadline) {
+              const hasTranscript = await win.webContents.executeJavaScript("Boolean(document.querySelector('.chat-modal .chat-response .latest-response'))", true);
+              if (hasTranscript) break;
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+            const samples = [{ step: "focused", ...(await readComposerLayout()) }];
+            for (const chunk of ["a", " bcdefghijklmnopqrstuvwxyz", " 0123456789".repeat(18)]) {
+              win.webContents.insertText(chunk);
+              await new Promise((resolve) => setTimeout(resolve, 140));
+              samples.push({ step: `typed-${samples.length}`, ...(await readComposerLayout()) });
+            }
+            const noticePosition = await win.webContents.executeJavaScript(`(() => {
+              const panel = document.querySelector('.chat-modal .chat-response');
+              if (!panel) return '';
+              const host = document.createElement('div');
+              host.className = 'chat-response-notices qa-composer-layout-notice';
+              host.innerHTML = '<div class="network-response-notice is-generating"><strong>QA network status</strong><span>Đang kiểm tra khung chat không đổi chiều cao khi status xuất hiện.</span></div>';
+              panel.append(host);
+              return getComputedStyle(host).position;
+            })()`, true);
+            await new Promise((resolve) => setTimeout(resolve, 160));
+            samples.push({ step: "notice-added", ...(await readComposerLayout()) });
+            await win.webContents.executeJavaScript("document.querySelector('.qa-composer-layout-notice')?.remove()", true);
+            await new Promise((resolve) => setTimeout(resolve, 160));
+            samples.push({ step: "notice-removed", ...(await readComposerLayout()) });
+            const restored = await win.webContents.executeJavaScript(`(() => {
+              const textarea = document.querySelector('.chat-modal .request-composer textarea');
+              if (!textarea) return false;
+              const oldValue = textarea.value;
+              const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+              setter?.call(textarea, ${JSON.stringify(originalDraft)});
+              if (textarea._valueTracker) textarea._valueTracker.setValue(oldValue);
+              textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertReplacementText' }));
+              textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+              return textarea.value === ${JSON.stringify(originalDraft)};
+            })()`, true);
+            await new Promise((resolve) => setTimeout(resolve, 120));
+            samples.push({ step: "restored", ...(await readComposerLayout()) });
+            const baseline = samples[0];
+            const stableGeometry = samples.every((sample) => (
+              sample.panelHeight === baseline.panelHeight
+              && sample.panelTop === baseline.panelTop
+              && sample.modalScrollTop === baseline.modalScrollTop
+              && sample.composerTop === baseline.composerTop
+              && sample.composerHeight === baseline.composerHeight
+              && sample.textareaHeight === baseline.textareaHeight
+              && sample.transcriptClientHeight === baseline.transcriptClientHeight
+              && sample.transcriptTop === baseline.transcriptTop
+            ));
+            composerLayoutProbe = {
+              ok: Boolean(restored) && noticePosition === "absolute" && stableGeometry,
+              noticePosition,
+              stableGeometry,
+              samples
+            };
+          } else composerLayoutProbe = { ok: false, error: "Không có textarea rảnh để test layout khi nhập." };
         }
         let renameProbe = null;
         if (process.env.CODEXPRO_MANAGER_SMOKE_RENAME === "1") {
@@ -2217,7 +2314,7 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         }
         const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        const smokeResult = { ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, inspectionUiProbe, settingsProbe, diagnosticProbe, chatModalProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe, activeRepoProbe, toastProbe };
+        const smokeResult = { ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, inspectionUiProbe, settingsProbe, diagnosticProbe, chatModalProbe, composerLayoutProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe, activeRepoProbe, toastProbe };
         const smokeResultFile = String(process.env.CODEXPRO_MANAGER_SMOKE_RESULT || "").trim();
         if (smokeResultFile) fs.writeFileSync(smokeResultFile, `${JSON.stringify(smokeResult, null, 2)}\n`, "utf8");
         console.log(JSON.stringify(smokeResult));

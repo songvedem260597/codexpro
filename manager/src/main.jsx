@@ -659,6 +659,7 @@ function ChatRequestComposer({
   onRemoveAttachment,
   onClearSendError,
   onDraftSnapshot,
+  onDraftActivityChange,
   onClose,
   onOpenChrome,
   onSend
@@ -670,7 +671,8 @@ function ChatRequestComposer({
     const normalized = String(nextDraft || "");
     setDraft(normalized);
     onDraftSnapshot(normalized);
-  }, [onDraftSnapshot]);
+    onDraftActivityChange(Boolean(normalized.trim()));
+  }, [onDraftActivityChange, onDraftSnapshot]);
 
   useEffect(() => {
     updateDraft(initialDraft);
@@ -1132,6 +1134,7 @@ function App() {
   const chatModalRef = useRef(null);
   const chatResponseRef = useRef(null);
   const responseScrollLocked = useRef(new Map());
+  const responseComposerActive = useRef(new Map());
   const responseScrollResumeTimers = useRef(new Map());
   const responseScrollPositions = useRef(new Map());
   const responseScrollDiagnostics = useRef(new Map());
@@ -1934,7 +1937,7 @@ function App() {
   }, [logResponseScrollAdjustment]);
 
   const maintainResponsePosition = useCallback((profileId, cause = "unspecified") => {
-    if (responseScrollLocked.current.get(profileId)) return;
+    if (responseScrollLocked.current.get(profileId) || responseComposerActive.current.get(profileId)) return;
     if (scrollResponseToTurnAnchor(profileId, cause)) return;
     scrollResponseToBottom(profileId, cause);
   }, [scrollResponseToBottom, scrollResponseToTurnAnchor]);
@@ -1954,7 +1957,7 @@ function App() {
   }, []);
 
   const positionOpenChatViewport = useCallback((profileId, cause = "open-chat") => {
-    if (responseScrollLocked.current.get(profileId)) return;
+    if (responseScrollLocked.current.get(profileId) || responseComposerActive.current.get(profileId)) return;
     maintainResponsePosition(profileId, cause);
     const modal = chatModalRef.current;
     if (!modal) return;
@@ -2471,10 +2474,102 @@ function App() {
     return installResponseAutoPin({
       panel: chatResponseRef.current,
       getContainer: () => responseBodyRefs.current.get(chatProfileId),
-      isLocked: () => Boolean(responseScrollLocked.current.get(chatProfileId)),
+      isLocked: () => Boolean(responseScrollLocked.current.get(chatProfileId) || responseComposerActive.current.get(chatProfileId)),
       scrollToBottom: (cause) => maintainResponsePosition(chatProfileId, `observer:${cause}`)
     });
   }, [chatProfileId, requestTargets[chatProfileId], maintainResponsePosition]);
+
+  useEffect(() => {
+    if (!chatProfileId || typeof api.logChatLayout !== "function") return undefined;
+    const modal = chatModalRef.current;
+    const panel = chatResponseRef.current;
+    if (!modal || !panel) return undefined;
+    let timer = 0;
+    let previousSignature = "";
+    let textarea = null;
+    const observedNodes = new WeakSet();
+    const resizeObserver = new ResizeObserver(() => schedule("geometry-resize"));
+    const roundedRect = (node) => {
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      return { top: Math.round(rect.top), height: Math.round(rect.height) };
+    };
+    const observeNode = (node) => {
+      if (!node || observedNodes.has(node)) return;
+      observedNodes.add(node);
+      resizeObserver.observe(node);
+    };
+    const capture = (cause) => {
+      const transcript = responseBodyRefs.current.get(chatProfileId) || panel.querySelector(".latest-response");
+      const composer = modal.querySelector(".request-composer");
+      const nextTextarea = composer?.querySelector("textarea") || null;
+      const notices = [...panel.querySelectorAll(".chat-response-notices > .conversation-rollover-notice, .chat-response-notices > .network-response-notice")].map((node) => ({
+        className: String(node.className || "").slice(0, 160),
+        height: Math.round(node.getBoundingClientRect().height)
+      }));
+      const geometry = {
+        panel: { ...roundedRect(panel), clientHeight: panel.clientHeight },
+        transcript: transcript ? { ...roundedRect(transcript), clientHeight: transcript.clientHeight, scrollTop: Math.round(transcript.scrollTop), scrollHeight: transcript.scrollHeight } : null,
+        composer: roundedRect(composer),
+        textarea: nextTextarea ? { ...roundedRect(nextTextarea), scrollHeight: nextTextarea.scrollHeight, draftLength: nextTextarea.value.length, draftActive: Boolean(nextTextarea.value.trim()) } : null,
+        modal: { scrollTop: Math.round(modal.scrollTop), scrollHeight: modal.scrollHeight, clientHeight: modal.clientHeight },
+        notices,
+        scrollLocked: Boolean(responseScrollLocked.current.get(chatProfileId)),
+        composerActive: Boolean(responseComposerActive.current.get(chatProfileId))
+      };
+      const signature = JSON.stringify({
+        panel: geometry.panel,
+        transcript: geometry.transcript ? { top: geometry.transcript.top, height: geometry.transcript.height, clientHeight: geometry.transcript.clientHeight } : null,
+        composer: geometry.composer,
+        textarea: geometry.textarea ? { height: geometry.textarea.height, scrollHeight: geometry.textarea.scrollHeight, draftActive: geometry.textarea.draftActive } : null,
+        notices,
+        scrollLocked: geometry.scrollLocked,
+        composerActive: geometry.composerActive
+      });
+      if (signature === previousSignature) return;
+      previousSignature = signature;
+      api.logChatLayout({
+        at: new Date().toISOString(),
+        type: "chat-frame-geometry",
+        profileId: chatProfileId,
+        conversationId: String(panel.dataset.layoutConversationId || requestTargetsRef.current[chatProfileId] || ""),
+        cause,
+        ...geometry
+      });
+      observeNode(transcript);
+      observeNode(composer);
+      observeNode(nextTextarea);
+    };
+    function schedule(cause) {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => capture(cause), 90);
+    }
+    const onComposerInput = () => schedule("composer-input");
+    const attachTextarea = () => {
+      const nextTextarea = modal.querySelector(".request-composer textarea");
+      if (textarea === nextTextarea) return;
+      textarea?.removeEventListener("input", onComposerInput);
+      textarea = nextTextarea;
+      textarea?.addEventListener("input", onComposerInput, { passive: true });
+      observeNode(textarea);
+    };
+    const mutationObserver = new MutationObserver(() => {
+      attachTextarea();
+      schedule("panel-mutation");
+    });
+    observeNode(panel);
+    observeNode(modal.querySelector(".request-composer"));
+    observeNode(responseBodyRefs.current.get(chatProfileId) || panel.querySelector(".latest-response"));
+    attachTextarea();
+    mutationObserver.observe(panel, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+    schedule("attach");
+    return () => {
+      window.clearTimeout(timer);
+      textarea?.removeEventListener("input", onComposerInput);
+      mutationObserver.disconnect();
+      resizeObserver.disconnect();
+    };
+  }, [chatProfileId, requestTargets[chatProfileId]]);
 
   useEffect(() => {
     if (!DEEP_UI_DIAGNOSTICS_ENABLED || !chatProfileId || typeof api.logChatLayout !== "function") return undefined;
@@ -4194,6 +4289,10 @@ function App() {
     const canSendBase = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0);
     const working = profile.connected && ((profile.activity === "working" && !selectedResponseClearsProfileBusy) || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
+    const showRolloverNotice = Boolean(responseCurrent && !responseCleared && response?.rolloverNotice);
+    const showRepoTaskNotice = Boolean(responseCurrent && !responseCleared && response?.repoTaskId && (response.repoTaskStatus === "verified" || response.repoTaskStatus === "failed"));
+    const showNetworkNotice = Boolean(responseCurrent && !responseCleared && !isNewChat && !responseVerifiedComplete && (selectedNetworkFailed || selectedRecoveringNetworkAbort));
+    const hasResponseNotice = showRolloverNotice || showRepoTaskNotice || showNetworkNotice;
     const responseHeadline = responseCleared
       ? "Chat đã được dọn"
       : isNewChat
@@ -4264,22 +4363,26 @@ function App() {
                   {responseCurrent && hasResponseContent && !selectedBusy && <button type="button" onClick={() => { setClearedResponseTargets((current) => ({ ...current, [clearedKey]: true })); notify("Đã dọn chat trong Manager"); }}>Clear</button>}
                 </div>
               </div>
-              {responseCurrent && !responseCleared && response?.rolloverNotice && (
-                <div className={`conversation-rollover-notice is-${response.rolloverStatus || "done"}`}>
-                  <strong>{response.rolloverStatus === "creating" ? "Chat đã đầy · đang chuyển sang chat mới" : response.rolloverStatus === "failed" ? "Chat đã đầy · chuyển chat tự động thất bại" : "Đã chuyển sang chat mới"}</strong>
-                  <span>{response.rolloverNotice}</span>
-                </div>
-              )}
-              {responseCurrent && !responseCleared && response?.repoTaskId && (response.repoTaskStatus === "verified" || response.repoTaskStatus === "failed") && (
-                <div className={`network-response-notice is-${response.repoTaskStatus === "verified" ? "completed" : response.repoTaskStatus === "failed" ? "failed" : "generating"}`}>
-                  <strong>{response.repoTaskStatus === "verified" ? (response.repoTaskProof?.task_kind === "code" ? "CodexPro: Rules + CodexGraph đã xác minh" : "CodexPro: đã ghi nhận task title") : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT thiếu title · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ task title"}</strong>
-                  <span>{response.repoTaskStatus === "verified" ? repoTaskEvidenceSummary(response.repoTaskProof) : response.repoTaskStatus === "failed" ? "ChatGPT không trả task title qua CodexPro nên Manager không công nhận phản hồi này." : "Mọi task phải có title; chỉ task CODE mới tải Rules và CodexGraph."}</span>
-                </div>
-              )}
-              {responseCurrent && !responseCleared && !isNewChat && !responseVerifiedComplete && (selectedNetworkFailed || selectedRecoveringNetworkAbort) && (
-                <div className={`network-response-notice is-${selectedNetworkState}`}>
-                  <strong>{selectedRecoveringNetworkAbort ? "Network: transport cũ bị hủy · đang xác minh" : selectedBusy ? "Network: AI đang xử lý" : "Network: request thất bại"}</strong>
-                  <span>{selectedRecoveringNetworkAbort ? "Chrome đã hủy transport cũ nhưng ChatGPT có thể vẫn tiếp tục ở backend. CodexPro đang kiểm tra transcript canonical trước khi kết luận lỗi." : selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
+              {hasResponseNotice && (
+                <div className="chat-response-notices" aria-live="polite">
+                  {showRolloverNotice && (
+                    <div className={`conversation-rollover-notice is-${response.rolloverStatus || "done"}`}>
+                      <strong>{response.rolloverStatus === "creating" ? "Chat đã đầy · đang chuyển sang chat mới" : response.rolloverStatus === "failed" ? "Chat đã đầy · chuyển chat tự động thất bại" : "Đã chuyển sang chat mới"}</strong>
+                      <span>{response.rolloverNotice}</span>
+                    </div>
+                  )}
+                  {showRepoTaskNotice && (
+                    <div className={`network-response-notice is-${response.repoTaskStatus === "verified" ? "completed" : response.repoTaskStatus === "failed" ? "failed" : "generating"}`}>
+                      <strong>{response.repoTaskStatus === "verified" ? (response.repoTaskProof?.task_kind === "code" ? "CodexPro: Rules + CodexGraph đã xác minh" : "CodexPro: đã ghi nhận task title") : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT thiếu title · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ task title"}</strong>
+                      <span>{response.repoTaskStatus === "verified" ? repoTaskEvidenceSummary(response.repoTaskProof) : response.repoTaskStatus === "failed" ? "ChatGPT không trả task title qua CodexPro nên Manager không công nhận phản hồi này." : "Mọi task phải có title; chỉ task CODE mới tải Rules và CodexGraph."}</span>
+                    </div>
+                  )}
+                  {showNetworkNotice && (
+                    <div className={`network-response-notice is-${selectedNetworkState}`}>
+                      <strong>{selectedRecoveringNetworkAbort ? "Network: transport cũ bị hủy · đang xác minh" : selectedBusy ? "Network: AI đang xử lý" : "Network: request thất bại"}</strong>
+                      <span>{selectedRecoveringNetworkAbort ? "Chrome đã hủy transport cũ nhưng ChatGPT có thể vẫn tiếp tục ở backend. CodexPro đang kiểm tra transcript canonical trước khi kết luận lỗi." : selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
+                    </div>
+                  )}
                 </div>
               )}
               {/* Trạng thái gửi nằm ngay trên thanh trạng thái phản hồi. */}
@@ -4342,6 +4445,10 @@ function App() {
               onRemoveAttachment={(filePath) => setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== filePath) }))}
               onClearSendError={() => setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }))}
               onDraftSnapshot={(nextDraft) => { requestDraftsRef.current[profile.profile_id] = nextDraft; }}
+              onDraftActivityChange={(active) => {
+                if (active) responseComposerActive.current.set(profile.profile_id, true);
+                else responseComposerActive.current.delete(profile.profile_id);
+              }}
               onClose={() => setChatProfileId("")}
               onOpenChrome={() => openProfile(profile)}
               onSend={(nextDraft) => sendRequest(profile, nextDraft)}
