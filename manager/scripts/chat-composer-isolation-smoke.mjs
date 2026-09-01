@@ -39,7 +39,11 @@ assert.match(source, /responseProfileId !== profile\.profile_id \|\| responseCon
 assert.match(source, /const cacheFresh = cachedResponseIsFresh[\s\S]*transcriptLoading: !cacheFresh/, "stale cached transcripts must remain visibly loading until refreshed");
 assert.match(source, /const activeTurn = sameConversation[\s\S]*transcriptLoading: !activeTurn/, "opening an idle existing chat must show transcript loading even when stale messages are already cached");
 assert.match(source, /transcriptLoading: Boolean\(previous\.transcriptLoading && needsDomFallback\)/, "a network-only read must preserve transcript loading while a DOM fallback is still required");
-assert.match(source, /responseCurrent && response\?\.transcriptLoading \? <div className="response-empty">[\s\S]*Đang tải tin nhắn<\/span>/, "transcript loading must hide stale cached messages behind an explicit loading state without duplicating animated dots in the text");
+assert.match(source, /responseCurrent && response\?\.transcriptLoading \? <div className="response-empty is-transcript-loading">[\s\S]*Đang tải tin nhắn<\/span>/, "transcript loading must hide stale cached messages behind an explicit loading state without duplicating animated dots in the text");
+assert.match(source, /!responseCurrent \|\| response\?\.loading && !hasResponseContent \? <div className="response-empty is-transcript-loading">/, "initial response loading must use the same aligned loading state");
+assert.match(styles, /\.latest-response \{[^}]*padding:\s*15px 14px 18px/, "tool activity transcript must retain its 14px container inset");
+assert.match(styles, /\.tool-activity-live \{[^}]*padding-left:\s*31px/, "CodexPro tool activity must retain its 31px inner inset");
+assert.match(styles, /\.response-empty\.is-transcript-loading \{\s*padding-left:\s*45px;\s*\}/, "loading text must align exactly with tool activity at 14px + 31px from the response edge");
 assert.match(styles, /\.chat-response-notices \{[^}]*position:\s*absolute/, "response notices must overlay the fixed chat frame instead of shrinking the transcript viewport");
 assert.match(modal, /const hasResponseNotice = showRolloverNotice \|\| showRepoTaskNotice \|\| showNetworkNotice/, "chat response notices must share one non-layout overlay host");
 assert.match(modal, /className="chat-response-notices"/, "chat response notices must render through the overlay host");
