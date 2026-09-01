@@ -119,9 +119,11 @@ try {
 
   const managerMain = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
   const preload = fs.readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
+  const managerHtml = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const app = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
   const center = fs.readFileSync(new URL("../src/app-plugin-center.jsx", import.meta.url), "utf8");
   assert.match(managerMain, /protocol\.registerSchemesAsPrivileged/, "custom plugin resources must use a private Electron protocol");
+  assert.match(managerHtml, /frame-src codexpro-plugin:/, "Manager CSP must allow the isolated plugin frame instead of rendering a blank panel");
   assert.match(managerMain, /codexpro:list-app-plugins/);
   assert.match(managerMain, /codexpro:install-app-plugin/);
   assert.match(managerMain, /codexpro:uninstall-app-plugin/);
