@@ -61,6 +61,16 @@ function extractFunction(name) {
 const generationSource = extractFunction("isChatGenerationRequest");
 const isChatGenerationRequest = Function(`${generationSource}; return isChatGenerationRequest;`)();
 
+const attachmentUploadStageSource = extractFunction("attachmentUploadStage");
+const isAttachmentUploadEndpointSource = extractFunction("isAttachmentUploadEndpoint");
+const attachmentUploadHelpers = Function(`${attachmentUploadStageSource}; ${isAttachmentUploadEndpointSource}; return { attachmentUploadStage, isAttachmentUploadEndpoint };`)();
+
+assert.equal(attachmentUploadHelpers.attachmentUploadStage("/backend-api/files"), "base");
+assert.equal(attachmentUploadHelpers.attachmentUploadStage("/backend-api/files/process_upload_stream"), "processing");
+assert.equal(attachmentUploadHelpers.attachmentUploadStage("/unauth-mweb/image-uploads"), "base", "headless ChatGPT image upload endpoint must be recognized");
+assert.equal(attachmentUploadHelpers.attachmentUploadStage("/unauth-mweb/image-uploads/process"), "processing", "headless ChatGPT image processing endpoint must be recognized");
+assert.equal(attachmentUploadHelpers.isAttachmentUploadEndpoint("/unauth-mweb/events/business"), false, "unrelated mweb telemetry must not acknowledge an attachment upload");
+
 assert.equal(isChatGenerationRequest({
   tabId: 9,
   method: "POST",
@@ -81,6 +91,16 @@ assert.equal(isChatGenerationRequest({
   method: "POST",
   url: "https://chatgpt.com/backend-api/f/conversation/prepare"
 }), false, "prepare is not generation ACK");
+assert.equal(isChatGenerationRequest({
+  tabId: 9,
+  method: "POST",
+  url: "https://chatgpt.com/unauth-mweb/conversation/prepare"
+}), true, "guest headless prepare is the generation request");
+assert.equal(isChatGenerationRequest({
+  tabId: 9,
+  method: "POST",
+  url: "https://chatgpt.com/unauth-mweb/conversation/updates"
+}), false, "guest update polling is not sufficient generation ACK evidence");
 assert.equal(isChatGenerationRequest({
   tabId: 9,
   method: "POST",
@@ -232,6 +252,9 @@ assert.match(sendBlock, /timedSendPhase\('submit_lifecycle_ack_ms'/, "send diagn
 const submitLifecycleWaitSource = extractFunction("waitForChatSubmitLifecycle");
 assert.match(submitLifecycleWaitSource, /filter\(isChatSubmissionAckEvidence\)/, "fast send ACK must require strict conversation/responses evidence, not generic sentinel preparation traffic");
 const strictSubmitAckSource = extractFunction("isChatSubmissionAckEvidence");
+const strictSubmitAck = Function(`${strictSubmitAckSource}; return isChatSubmissionAckEvidence;`)();
+assert.equal(strictSubmitAck({ endpoint: "/unauth-mweb/conversation/prepare" }), true, "guest headless prepare must acknowledge submission");
+assert.equal(strictSubmitAck({ endpoint: "/unauth-mweb/conversation/updates" }), false, "guest update polling must not acknowledge submission");
 assert.doesNotMatch(strictSubmitAckSource, /sentinel/, "sentinel chat-requirements traffic must not be treated as proof that the user message was submitted");
 assert.match(sendBlock, /lateLifecycleEvidence=recentChatPostEvidence\(tab\.id,submitStartedAt-100\)\.filter\(isChatSubmissionAckEvidence\)/, "late send ACK must reject sentinel preparation traffic just like the early ACK path");
 assert.match(sendBlock, /submitted_by:'trusted-enter'/);

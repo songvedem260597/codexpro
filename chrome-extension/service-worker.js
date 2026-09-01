@@ -201,7 +201,8 @@ function isChatGenerationRequest(details) {
     const path=url.pathname.replace(/\/+$/,'');
     if(url.hostname!=='chatgpt.com'&&!url.hostname.endsWith('.chatgpt.com'))return false;
     return /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|steer_turn)$/.test(path)
-      || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(path);
+      || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(path)
+      || path==='/unauth-mweb/conversation/prepare';
   }catch{return false;}
 }
 
@@ -288,18 +289,29 @@ function rejectChatNetworkWaiters(tabId,error) {
 
 function isChatSubmitLifecycleEvidence(item) {
   const endpoint=String(item?.endpoint||'');
-  return Boolean(item?.matched_generation)||/\/(?:backend-api|backend-anon)\/(?:sentinel\/|(?:f\/)?(?:conversation|steer_turn)|(?:f\/)?(?:codex\/)?responses)/.test(endpoint);
+  return Boolean(item?.matched_generation)
+    || /\/(?:backend-api|backend-anon)\/(?:sentinel\/|(?:f\/)?(?:conversation|steer_turn)|(?:f\/)?(?:codex\/)?responses)/.test(endpoint)
+    || endpoint.replace(/\/+$/,'')==='/unauth-mweb/conversation/prepare';
 }
 
 function isChatSubmissionAckEvidence(item) {
   const endpoint=String(item?.endpoint||'').replace(/\/+$/,'');
   return Boolean(item?.matched_generation)
     || /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|steer_turn)$/.test(endpoint)
-    || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(endpoint);
+    || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(endpoint)
+    || endpoint==='/unauth-mweb/conversation/prepare';
+}
+
+function attachmentUploadStage(endpoint) {
+  const normalized=String(endpoint||'').replace(/\/+$/,'');
+  if(/\/backend-api\/files\/process_upload_stream$/.test(normalized)||/\/unauth-mweb\/image-uploads\/process$/.test(normalized))return 'processing';
+  if(normalized==='/backend-api/files'||normalized==='/unauth-mweb/image-uploads')return 'base';
+  if(/\/backend-api\/files(?:\/|$)/.test(normalized))return 'upload';
+  return '';
 }
 
 function isAttachmentUploadEndpoint(endpoint) {
-  return /\/backend-api\/files(?:\/|$)/.test(String(endpoint||''));
+  return Boolean(attachmentUploadStage(endpoint));
 }
 
 async function waitForChatSubmitLifecycle(tabId,startedAfterMs,timeoutMs=1800) {
@@ -336,13 +348,13 @@ async function waitForAttachmentUploadNetwork(tabId,startedAfterMs,timeoutMs=ATT
     const uploads=(chatNetworkPostLogByTab.get(tabId)||[]).filter(item=>Number(item.observed_at_ms||0)>=Number(startedAfterMs||0)&&isAttachmentUploadEndpoint(item.endpoint));
     const failed=uploads.find(item=>item.phase==='failed'||Number(item.status_code)>=400);
     if(failed)throw new Error(`ChatGPT upload file thất bại tại ${failed.endpoint}: ${failed.error||`HTTP ${failed.status_code}`}`);
-    const processingSeen=uploads.some(item=>/\/process_upload_stream$/.test(item.endpoint));
-    const processingComplete=uploads.some(item=>/\/process_upload_stream$/.test(item.endpoint)&&item.phase==='completed'&&Number(item.status_code)>0&&Number(item.status_code)<400);
-    if(processingComplete)return {acknowledged:true,endpoint:'/backend-api/files/process_upload_stream',fallback:false};
-    const baseCompleted=[...uploads].reverse().find(item=>item.endpoint==='/backend-api/files'&&item.phase==='completed'&&Number(item.status_code)>0&&Number(item.status_code)<400);
+    const processingSeen=uploads.some(item=>attachmentUploadStage(item.endpoint)==='processing');
+    const processingComplete=[...uploads].reverse().find(item=>attachmentUploadStage(item.endpoint)==='processing'&&item.phase==='completed'&&Number(item.status_code)>0&&Number(item.status_code)<400);
+    if(processingComplete)return {acknowledged:true,endpoint:processingComplete.endpoint,fallback:false};
+    const baseCompleted=[...uploads].reverse().find(item=>attachmentUploadStage(item.endpoint)==='base'&&item.phase==='completed'&&Number(item.status_code)>0&&Number(item.status_code)<400);
     const quietRemaining=baseCompleted&&!processingSeen?Math.max(0,ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS-(Date.now()-Number(baseCompleted.observed_at_ms||0))):null;
     if(quietRemaining===0){
-      return {acknowledged:true,endpoint:'/backend-api/files',fallback:true};
+      return {acknowledged:true,endpoint:baseCompleted.endpoint,fallback:true};
     }
     await waitForChange(Math.min(deadline-Date.now(),quietRemaining===null?deadline-Date.now():quietRemaining));
   }
