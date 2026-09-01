@@ -30,8 +30,14 @@ assert.match(source, /action: "open-chat-target-selection"[\s\S]*?draft_length:[
 assert.match(modal, /profileRequestChats\(profile, pinnedTarget\)/, "refresh must keep the pinned conversation in the selector");
 assert.match(source, /const relevant = selectedTarget[\s\S]*\? selectedTarget === conversationId\s*:\s*currentResponse\?\.conversationId === conversationId/, "an explicit target must be the only auto-loaded conversation for that profile");
 assert.match(source, /const fetchKey = responseCacheKey\(profile\.profile_id, conversationId\)[\s\S]*responseFetches\.current\.has\(fetchKey\)[\s\S]*responseFetches\.current\.delete\(fetchKey\)/, "response fetch locks must be scoped by profile and conversation instead of profile only");
-assert.match(source, /hydrateCachedResponse[\s\S]*selectedTargetNow[\s\S]*selectedTargetNow !== conversationId[\s\S]*cachedResponseIsFresh/, "stale cache hydration must stop when the user switches conversations");
+assert.match(source, /hydrateCachedResponse[\s\S]*const cacheFresh = cachedResponseIsFresh[\s\S]*selectedTargetNow[\s\S]*selectedTargetNow !== conversationId/, "stale cache hydration must stop when the user switches conversations");
 assert.match(source, /const responseTargetStillCurrent = \(\) =>[\s\S]*currentTarget === conversationId[\s\S]*if \(!responseTargetStillCurrent\(\)\) return null/, "late response reads must be discarded after the selected conversation changes");
 assert.match(source, /responseProfileId !== profile\.profile_id \|\| responseConversationId !== conversationId[\s\S]*RESPONSE_OWNERSHIP_MISMATCH/, "renderer must reject responses whose profile or conversation ownership does not match the request");
+
+assert.match(source, /const cacheFresh = cachedResponseIsFresh[\s\S]*transcriptLoading: !cacheFresh/, "stale cached transcripts must remain visibly loading until refreshed");
+assert.match(source, /const activeTurn = sameConversation[\s\S]*transcriptLoading: !activeTurn/, "opening an idle existing chat must show transcript loading even when stale messages are already cached");
+assert.match(source, /transcriptLoading: Boolean\(previous\.transcriptLoading && needsDomFallback\)/, "a network-only read must preserve transcript loading while a DOM fallback is still required");
+assert.match(source, /responseCurrent && response\?\.transcriptLoading \? <div className="response-empty">[\s\S]*Đang tải tin nhắn…/, "transcript loading must hide stale cached messages behind an explicit loading state");
+assert.match(modal, /data-layout-transcript-loading=\{responseCurrent && response\?\.transcriptLoading \? "1" : "0"\}/, "chat modal must expose transcript loading for runtime UI verification");
 
 console.log("chat-composer-isolation-smoke: ok");

@@ -6,8 +6,16 @@ import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRepoTaskCompletionCur
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "../manager/src/chat-transcript.js";
 import { projectSelectionChanged } from "../manager/src/chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "../manager/src/chat-response-audit.js";
+import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shouldRolloverConversation } from "../manager/src/conversation-message-limit.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
+
+assert.equal(CHATGPT_CONVERSATION_MESSAGE_LIMIT, 18, "ChatGPT conversations must roll over inside the requested 15-20 message safety range");
+assert.equal(conversationTotalMessageCount({ totalMessageCount: 18, messageCount: 9, messages: [] }), 18, "the canonical total must win over the assistant-only response count");
+assert.equal(conversationTotalMessageCount({ messageCount: 9, messages: [{ role: "user", text: "latest" }, { role: "assistant", text: "latest reply" }] }), 18, "legacy assistant counts must conservatively reconstruct the total conversation size");
+assert.equal(shouldRolloverConversation({ totalMessageCount: 17 }), false, "a conversation below the safety limit must stay on the current ChatGPT tab");
+assert.equal(shouldRolloverConversation({ totalMessageCount: 18 }), true, "a conversation at the safety limit must move the next request to a new ChatGPT tab");
+assert.equal(shouldRolloverConversation({ totalMessageCount: 18 }, 0), false, "an invalid disabled limit must never create rollover loops");
 
 assert.equal(shouldShowChatSettling({ networkState: "completed", tabSettling: false, responseCurrent: true, responseIncomplete: true }), false, "completed network state must clear stale DOM settling");
 assert.equal(shouldShowChatSettling({ networkState: "failed", tabSettling: true, responseCurrent: true, responseIncomplete: true }), true, "fresh tab settling must override a terminal network request");
@@ -541,6 +549,11 @@ assert.match(managerSendUiSource, /draftOverride !== null \? draftOverride : \(r
 assert.match(managerUi, /const submitted = await onSend\(draft\);\s*if \(submitted\) updateDraft\(""\)/, "the local composer must clear its draft only after a confirmed submission");
 assert.match(managerSendUiSource, /scope: allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "all_allowed sends must preserve scope and provide known workspace candidates to the backend");
 assert.match(managerSendUiSource, /restoreSubmittedInputs\(\)[\s\S]*?Trạng thái gửi chưa chắc chắn[\s\S]*?return false/, "an uncertain submission must preserve the local composer draft instead of silently clearing it");
+assert.match(managerSendUiSource, /shouldRolloverConversation\(currentResponse\)[\s\S]*?continuation_reason: "message_limit"[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a settled conversation at the 18-message safety limit must roll the pending request and attachments into a fresh ChatGPT tab");
+assert.match(managerSendUiSource, /conversation-message-limit-rollover[\s\S]*?message_limit:[\s\S]*?message_count:/, "automatic message-limit rollover must leave a diagnostic trail with the configured and observed counts");
+assert.match(managerUi, /totalMessageCount: contentAvailable[\s\S]*?result\.total_message_count/, "Manager response state must retain ChatGPT's complete user-plus-assistant message count");
+assert.match(managerUi, /saveChatResponseCache\(\{[\s\S]*?totalMessageCount: Number\(response\?\.totalMessageCount\)/, "the complete conversation count must survive Manager cache hydration");
+assert.match(managerMain, /function normalizeChatCacheEntry[\s\S]*?totalMessageCount: Math\.max\(0, Math\.floor\(Number\(value\?\.totalMessageCount\)/, "the Electron cache must normalize the persisted complete conversation count");
 assert.match(managerSendUiSource, /CONVERSATION_LIMIT_REACHED:[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a terminal full-conversation banner must roll the pending user request and attachments into a new chat");
 const conversationRolloverSource = managerUi.slice(managerUi.indexOf("async function rolloverFullConversation"), managerUi.indexOf("async function verifyRepoTaskUse"));
 assert.match(conversationRolloverSource, /newChat: true[\s\S]*?text: handoffText[\s\S]*?attachments:/, "conversation rollover must create a fresh ChatGPT chat and send the preserved context once");

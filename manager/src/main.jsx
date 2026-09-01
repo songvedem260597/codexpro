@@ -23,6 +23,7 @@ import { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, 
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, latestTurnHasProvisionalAssistant, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
+import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shouldRolloverConversation } from "./conversation-message-limit.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
 import { mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList } from "./ui-performance.js";
@@ -2529,6 +2530,8 @@ function App() {
       Boolean(response?.responseReady),
       String(response?.responseSource || ""),
       Boolean(response?.truncated),
+      Number(response?.messageCount) || 0,
+      Number(response?.totalMessageCount) || 0,
       text,
       messages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain), Boolean(message?.provisional), message?.endTurn])
     ]);
@@ -2544,6 +2547,8 @@ function App() {
       networkState,
       responseReady: Boolean(response?.responseReady),
       responseSource: String(response?.responseSource || ""),
+      messageCount: Number(response?.messageCount) || 0,
+      totalMessageCount: Number(response?.totalMessageCount) || 0,
       updatedAt: String(response?.updatedAt || new Date().toISOString())
     }).catch(() => {
       if (responseCacheSaveSignatures.current.get(key) === signature) responseCacheSaveSignatures.current.delete(key);
@@ -2950,6 +2955,7 @@ function App() {
     const text = String(draftOverride !== null ? draftOverride : (requestDraftsRef.current[profile.profile_id] || "")).trim();
     const attachments = requestFiles[profile.profile_id] || [];
     const projectRoot = projectRootForProfile(profile);
+    const currentResponse = requestResponses[profile.profile_id] || {};
     if (!text && !attachments.length) return false;
     if (!projectRoot) {
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có workspace nào được chọn." }));
@@ -2957,7 +2963,6 @@ function App() {
     }
     if (!newChat) {
       const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${conversationId}`));
-      const currentResponse = requestResponses[profile.profile_id];
       const networkState = String(selectedTab?.network_state || currentResponse?.networkState || (selectedTab?.busy ? "generating" : "idle"));
       const selectedRecoveringNetworkAbort = isRecoverableAbortedChatNetworkFailure({
         networkState,
@@ -2983,6 +2988,41 @@ function App() {
       if (!turnReady) {
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước. Chờ trạng thái về ĐANG RẢNH rồi gửi để tin nhắn không bị nhập vào turn cũ." }));
         return false;
+      }
+    }
+    if (!newChat && currentResponse?.conversationId === conversationId && shouldRolloverConversation(currentResponse)) {
+      const observedMessageCount = conversationTotalMessageCount(currentResponse);
+      const cleanMessages = materializeTranscriptMessages(currentResponse, conversationId).filter((item) => !item?.pending);
+      const rolloverMessages = text
+        ? trimRecentTranscriptMessages([...cleanMessages, { id: `rollover-user-${Date.now()}`, role: "user", text, submissionState: "submitted", createdAt: new Date().toISOString() }])
+        : trimRecentTranscriptMessages(cleanMessages);
+      setBusy(`request:${profile.profile_id}`);
+      setError("");
+      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+      try {
+        const newConversationId = await rolloverFullConversation(profile, conversationId, {
+          ...currentResponse,
+          title: conversations.find((chat) => chat.id === conversationId)?.title || profile.active_chat_title || "",
+          messages: rolloverMessages,
+          continuation_reason: "message_limit",
+          conversation_limit_reached: true,
+          conversation_limit_message: `Đoạn chat đã đạt giới hạn an toàn ${CHATGPT_CONVERSATION_MESSAGE_LIMIT} tin nhắn.`,
+          projectRoot,
+          rollover_attachments: attachments
+        });
+        if (!newConversationId) return false;
+        setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
+        logRendererDiagnostic(api, "info", "chat", "Automatically moved a full conversation to a new ChatGPT tab", {
+          action: "conversation-message-limit-rollover",
+          profile_id: profile.profile_id,
+          previous_conversation_id: conversationId,
+          conversation_id: newConversationId,
+          message_limit: CHATGPT_CONVERSATION_MESSAGE_LIMIT,
+          message_count: observedMessageCount
+        });
+        return true;
+      } finally {
+        setBusy("");
       }
     }
     responseScrollLocked.current.delete(profile.profile_id);
@@ -3601,6 +3641,9 @@ function App() {
             responseAuditFetchMode,
             responseAuditKey,
             messageCount: contentAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
+            totalMessageCount: contentAvailable
+              ? Number(result.total_message_count) || Number(result.message_count) || nextMessages.length
+              : Number(previous.totalMessageCount) || 0,
             awaitingAssistant: transcriptAwaitingAssistant(nextMessages),
             updatedAt: result.updated_at || new Date().toISOString()
           }
@@ -3857,7 +3900,7 @@ function App() {
             )}
             <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => selectRequestConversation(profile, id)} disabled={!profile.connected || !conversations.length || sending} />
             <label className="request-label">Tin nhắn gần nhất</label>
-            <div className={`chat-response is-inline ${sending || selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
+            <div className={`chat-response is-inline ${sending || selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-transcript-loading={responseCurrent && response?.transcriptLoading ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
               <div className="chat-response-head">
                 <div><span className="response-status-dot" /><strong title={responseHeadline}>{responseHeadline}</strong>{sending && <span className="chat-response-send-state"><span>Đang gửi tin nhắn</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span>}{!sending && !isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
                 <div className="response-head-actions">
@@ -3887,7 +3930,7 @@ function App() {
                 </div>
               )}
               {/* Trạng thái gửi nằm ngay trên thanh trạng thái phản hồi. */}
-              {responseCleared ? <div className="response-empty">Chat đã được dọn.</div> : !profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : selectedRecoveringNetworkAbort && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang xác minh phản hồi sau khi Chrome hủy transport cũ…</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="thinking-state latest-response-typing"><span>Đang tải tin nhắn…</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span></div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
+              {responseCleared ? <div className="response-empty">Chat đã được dọn.</div> : !profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : responseCurrent && response?.transcriptLoading ? <div className="response-empty"><span className="thinking-state latest-response-typing"><span>Đang tải tin nhắn…</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span></div> : selectedRecoveringNetworkAbort && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang xác minh phản hồi sau khi Chrome hủy transport cũ…</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty"><span className="thinking-state latest-response-typing"><span>Đang tải tin nhắn…</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span></div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
                 <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, event.deltaY)} onTouchMove={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, -1)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
                   {(displayResponseMessages.length ? displayResponseMessages : [fallbackResponseMessage]).map((message, messageIndex, allMessages) => {
                     const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
