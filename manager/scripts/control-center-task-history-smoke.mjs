@@ -12,6 +12,7 @@ assert.match(source, /\["failed", "cancelled", "blocked"\]/, "failed task histor
 assert.match(source, /WorkerRunningDuration startedAt=\{task\.startedAt\}/, "running tasks must show a live duration clock");
 assert.match(source, /prefix=\{job\.status === "completed" \? "Hoàn thành trong" : "Hoạt động trong"\}/, "completed tasks alone must label their frozen duration as completion time");
 assert.match(source, /const unfinishedTasks = workerJobs\.filter[\s\S]*?job\?\.status === "running"[\s\S]*?!liveTaskIds\.has/, "only non-live running jobs must appear as unfinished coordination tasks");
+assert.ok(source.indexOf("UPDATE CENTER") < source.indexOf("TASK CENTER"), "Update Center must be the first coordination section before Task Center");
 assert.match(main, /"worker_job_history"[\s\S]*?statuses: \["running", "completed", "failed", "cancelled", "blocked"\]/, "Manager must load unfinished and terminal task history through MCP");
 
 console.log("✓ Control center completed/failed task duration smoke test passed");
