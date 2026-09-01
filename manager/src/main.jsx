@@ -36,7 +36,8 @@ import { WorkerRunningDuration } from "./worker-running-duration.jsx";
 import { playTaskCompletionSound } from "./task-completion-sound.js";
 import { pruneTimestampMap, trimMapEntries, trimSetEntries } from "./performance-retention.js";
 
-const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
+const loadResponseMarkdownModule = () => import("./response-markdown.jsx");
+const ResponseText = React.lazy(() => loadResponseMarkdownModule().then((module) => ({ default: module.ResponseText })));
 const CodeGraphView = React.lazy(() => import("./code-graph-view.jsx").then((module) => ({ default: module.CodeGraphView })));
 const ControlCenter = React.lazy(() => import("./control-center.jsx").then((module) => ({ default: module.ControlCenter })));
 const api = window.codexpro;
@@ -1033,7 +1034,8 @@ function App() {
   const connectorAutoMigrationAttempts = useRef(new Map());
   const connectorAutoMigrationInFlight = useRef("");
   const responseFetches = useRef(new Set());
-  const responseCacheLoads = useRef(new Set());
+  const responseCacheLoads = useRef(new Map());
+  const responseMemoryCache = useRef(new Map());
   const responseCacheSaveSignatures = useRef(new Map());
   const networkStreamReads = useRef(new Map());
   const networkCompletionReads = useRef(new Map());
@@ -1058,6 +1060,13 @@ function App() {
   const operationsNotificationState = useRef(new Map());
   const operationsLongTaskAudits = useRef(new Set());
   const operationsAutoUpdateAt = useRef(0);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void loadResponseMarkdownModule();
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     const sweepRetentionCaches = () => {
@@ -1919,6 +1928,15 @@ function App() {
   }, [status?.browserProfiles]);
 
   useEffect(() => {
+    const profiles = status?.browserProfiles || [];
+    if (!profiles.length) return undefined;
+    const timer = window.setTimeout(() => {
+      for (const profile of profiles) prefetchProfileResponseCaches(profile);
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [status?.browserProfiles]);
+
+  useEffect(() => {
     for (const profile of status?.browserProfiles || []) {
       if (!profile?.connected || !extensionReady(profile.extension_version)) continue;
       for (const tab of profile.conversation_tabs || []) {
@@ -2483,6 +2501,36 @@ function App() {
     return `${profileId}:${conversationId}`;
   }
 
+  function rememberResponseCacheEntry(key, cached) {
+    responseMemoryCache.current.delete(key);
+    responseMemoryCache.current.set(key, cached || null);
+    trimMapEntries(responseMemoryCache.current, 30);
+    return cached || null;
+  }
+
+  function getResponseCacheEntry(profileId, conversationId) {
+    const key = responseCacheKey(profileId, conversationId);
+    if (responseMemoryCache.current.has(key)) return Promise.resolve(responseMemoryCache.current.get(key));
+    const existing = responseCacheLoads.current.get(key);
+    if (existing) return existing;
+    const pending = api.getChatResponseCache({ profileId, conversationId })
+      .catch(() => null)
+      .then((cached) => rememberResponseCacheEntry(key, cached))
+      .finally(() => {
+        if (responseCacheLoads.current.get(key) === pending) responseCacheLoads.current.delete(key);
+      });
+    responseCacheLoads.current.set(key, pending);
+    return pending;
+  }
+
+  function prefetchProfileResponseCaches(profile) {
+    if (!profile?.connected) return;
+    for (const chat of profileRequestChats(profile)) {
+      const conversationId = String(chat?.id || "");
+      if (/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) void getResponseCacheEntry(profile.profile_id, conversationId);
+    }
+  }
+
   function profileConversationTab(profile, conversationId) {
     return (profile?.conversation_tabs || []).find((tab) => String(tab?.url || "").includes(`/c/${conversationId}`)) || null;
   }
@@ -2517,9 +2565,7 @@ function App() {
       text,
       messages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain), Boolean(message?.provisional), message?.endTurn])
     ]);
-    if (responseCacheSaveSignatures.current.get(key) === signature) return;
-    responseCacheSaveSignatures.current.set(key, signature);
-    void api.saveChatResponseCache({
+    const cacheEntry = {
       profileId,
       conversationId,
       messages,
@@ -2532,18 +2578,21 @@ function App() {
       messageCount: Number(response?.messageCount) || 0,
       totalMessageCount: Number(response?.totalMessageCount) || 0,
       updatedAt: String(response?.updatedAt || new Date().toISOString())
-    }).catch(() => {
+    };
+    rememberResponseCacheEntry(key, cacheEntry);
+    if (responseCacheSaveSignatures.current.get(key) === signature) return;
+    responseCacheSaveSignatures.current.set(key, signature);
+    void api.saveChatResponseCache(cacheEntry).catch(() => {
       if (responseCacheSaveSignatures.current.get(key) === signature) responseCacheSaveSignatures.current.delete(key);
     });
   }
 
   async function hydrateCachedResponse(profile, conversationId) {
     const key = responseCacheKey(profile.profile_id, conversationId);
-    if (responseCacheLoads.current.has(key)) return;
-    responseCacheLoads.current.add(key);
-    try {
-      const cached = await api.getChatResponseCache({ profileId: profile.profile_id, conversationId }).catch(() => null);
-      const cacheFresh = cachedResponseIsFresh(profile, conversationId, cached);
+    const cached = responseMemoryCache.current.has(key)
+      ? responseMemoryCache.current.get(key)
+      : await getResponseCacheEntry(profile.profile_id, conversationId);
+    const cacheFresh = cachedResponseIsFresh(profile, conversationId, cached);
       if (cached) {
         const tab = profileConversationTab(profile, conversationId);
         const networkState = String(tab?.network_state || cached.networkState || "idle");
@@ -2608,9 +2657,6 @@ function App() {
         if (!fastHasContent && completedResponseNeedsDomFallback(fastResult)) {
           window.setTimeout(() => void loadResponse(profile, conversationId, true, true, false, false), cachedHasContent ? 250 : 0);
         }
-      }
-    } finally {
-      responseCacheLoads.current.delete(key);
     }
   }
 
