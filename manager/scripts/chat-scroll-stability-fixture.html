@@ -119,6 +119,26 @@
       await waitFrames();
       maintainAnchor("anchor-after-canonical-replace");
 
+      const fixedAnchorTop = 56;
+      const fixedTopSteps = [];
+      const anchorVisualTop = () => {
+        const transcriptRect = transcript.getBoundingClientRect();
+        const anchorRect = sent.getBoundingClientRect();
+        return Math.round(anchorRect.top - transcriptRect.top);
+      };
+      const maintainFixedAnchor = (name) => {
+        const beforeTop = anchorVisualTop();
+        scrollResponseToTurnAnchor(transcript, sent, anchorTargetRatio, fixedAnchorTop);
+        fixedTopSteps.push({ name, beforeTop, afterTop: anchorVisualTop(), expectedTop: fixedAnchorTop, ...metrics() });
+      };
+      maintainFixedAnchor("fixed-top-initial");
+      document.querySelector(".banner").classList.remove("visible");
+      await waitFrames();
+      maintainFixedAnchor("fixed-top-after-height-grow");
+      document.querySelector(".banner").classList.add("visible");
+      await waitFrames();
+      maintainFixedAnchor("fixed-top-after-height-shrink");
+
       const resumeProfileId = "resume-fixture";
       const resumeLocked = new Map();
       const resumeTimers = new Map();
@@ -151,12 +171,14 @@
           && pinEvents.some((event) => event.cause.includes("mutation"))
           && pinEvents.every((event) => event.after.distanceFromBottom <= 1)
           && anchorSteps.every((step) => Math.abs(step.afterCenter - step.expectedCenter) <= 1)
+          && fixedTopSteps.every((step) => Math.abs(step.afterTop - step.expectedTop) <= 1)
           && noDelayedResumeTimer && stayedReaderOwnedAfterIdle && canceledResume,
         order: [...transcript.children].map((node) => node.textContent),
         oldMessageHeights: [...transcript.children].slice(0, 3).map((node) => Math.round(node.getBoundingClientRect().height)),
         steps,
         pinEvents,
         anchorSteps,
+        fixedTopSteps,
         autoResume: { noDelayedResumeTimer, stayedReaderOwnedAfterIdle, canceledResume, resumeEvents }
       };
     </script>

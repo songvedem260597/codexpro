@@ -13,19 +13,22 @@ export function responseScrollMetrics(container) {
   };
 }
 
-export function responseTurnAnchorScrollTop(container, anchor, viewportRatio = 0.42) {
+export function responseTurnAnchorScrollTop(container, anchor, viewportRatio = 0.42, viewportTopPx = null) {
   if (!container || !anchor) return 0;
   const containerRect = container.getBoundingClientRect();
   const anchorRect = anchor.getBoundingClientRect();
   const anchorCenterInContent = anchorRect.top - containerRect.top + container.scrollTop + (anchorRect.height / 2);
-  const desiredCenter = container.clientHeight * Math.max(0.2, Math.min(0.7, viewportRatio));
+  const fixedTop = Number.isFinite(viewportTopPx) ? Math.max(0, Number(viewportTopPx)) : null;
+  const desiredCenter = fixedTop === null
+    ? container.clientHeight * Math.max(0.2, Math.min(0.7, viewportRatio))
+    : Math.min(container.clientHeight, fixedTop + (anchorRect.height / 2));
   const maximum = Math.max(0, container.scrollHeight - container.clientHeight);
   return Math.max(0, Math.min(maximum, Math.round(anchorCenterInContent - desiredCenter)));
 }
 
-export function scrollResponseToTurnAnchor(container, anchor, viewportRatio = 0.42) {
+export function scrollResponseToTurnAnchor(container, anchor, viewportRatio = 0.42, viewportTopPx = null) {
   if (!container || !anchor) return null;
-  container.scrollTop = responseTurnAnchorScrollTop(container, anchor, viewportRatio);
+  container.scrollTop = responseTurnAnchorScrollTop(container, anchor, viewportRatio, viewportTopPx);
   return responseScrollMetrics(container);
 }
 

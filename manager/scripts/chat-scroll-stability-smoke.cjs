@@ -44,6 +44,7 @@ app.whenReady().then(async () => {
     fs.writeFileSync(screenshotPath, (await window.webContents.capturePage()).toPNG());
     console.log(`✓ Chat scroll stability Electron smoke passed: ${JSON.stringify(result.steps)}`);
     console.log(`  Turn anchor: ${JSON.stringify(result.anchorSteps)}`);
+    console.log(`  Fixed top anchor: ${JSON.stringify(result.fixedTopSteps)}`);
     console.log(`  Manual scroll resume: ${JSON.stringify(result.autoResume)}`);
     console.log(`  Visual fixture: ${screenshotPath}`);
     server.close();
