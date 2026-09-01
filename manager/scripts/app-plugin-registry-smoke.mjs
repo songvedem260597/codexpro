@@ -150,6 +150,8 @@ try {
   assert.match(center, /sendWorkerRequest/, "plugin tasks must support API workers");
   assert.match(center, /sendProfileRequest/, "plugin tasks must support Chrome workers");
   assert.match(center, /prepareAppPluginTask/, "plugin tasks must materialize selected skills as a verified attachment");
+  assert.match(center, /Xóa.*khỏi dự án/, "each selected skill must have an explicit per-project remove action");
+  assert.match(center, /Xóa tất cả/, "the project assignment flow must also clear every selected skill");
   assert.match(preload, /prepareAppPluginTask/);
 
   const normalizedSkills = normalizePluginSkills([

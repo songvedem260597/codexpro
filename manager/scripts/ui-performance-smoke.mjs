@@ -101,5 +101,7 @@ assert.match(rendererSource, /loadResponseMarkdownModule\(\)[\s\S]{0,80}\}, 120\
 assert.match(mainProcessSource, /let managerChatCacheIndex = null;/, "main process must keep a chat-cache lookup index");
 assert.match(mainProcessSource, /if \(managerChatCacheEntries && managerChatCacheIndex\) return managerChatCacheEntries;/, "main process must avoid rereading the cache file after warmup");
 assert.match(mainProcessSource, /setImmediate\(\(\) => readManagerChatCache\(\)\)/, "main process must warm the persistent chat cache after window creation");
+assert.match(mainProcessSource, /insideRepository: true/, "project discovery must inspect direct child folders of a Git repo for nested projects");
+assert.match(mainProcessSource, /if \(item\.insideRepository\) continue;/, "nested project discovery must stop after one bounded child level");
 
 console.log("UI performance smoke OK");

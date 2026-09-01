@@ -52,7 +52,11 @@
 .app-plugin-task-summary > div { display: flex; align-items: center; gap: 8px; }
 .app-plugin-task-summary span { color: #7f9b89; font-size: var(--font-micro); font-weight: var(--weight-semibold); letter-spacing: .08em; }
 .app-plugin-task-summary strong { padding: 2px 7px; color: #87e5ab; border: 1px solid #326345; border-radius: 999px; background: #10271a; font-size: var(--font-micro); }
-.app-plugin-task-summary p { min-width: 0; margin: 0; overflow: hidden; color: #dce6df; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-description); }
+.app-plugin-task-skill-list { min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.app-plugin-task-skill-list > span { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 3px 4px 3px 9px; color: #dce6df; border: 1px solid #354b3d; border-radius: 999px; background: #121d17; font-size: var(--font-description); }
+.app-plugin-task-skill-list button { width: 22px; height: 22px; display: grid; place-items: center; padding: 0; color: #e5b4b4; border: 0; border-radius: 50%; background: #3b1d21; font-size: 16px; line-height: 1; cursor: pointer; }
+.app-plugin-task-skill-list button:hover { color: #fff; background: #713039; }
+.app-plugin-task-skill-list button:disabled { cursor: default; opacity: .45; }
 .app-plugin-task-summary > button { grid-column: 2; grid-row: 1 / span 2; padding: 7px 10px; color: #aeb9c9; border: 1px solid #394352; border-radius: var(--radius-control); background: #151b24; }
 .app-plugin-task-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .app-plugin-task-fields label { min-width: 0; display: grid; gap: 6px; }
