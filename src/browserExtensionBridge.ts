@@ -16,6 +16,7 @@ const COMMAND_TIMEOUT_MS = 25_000;
 const CHECK_COMMAND_TIMEOUT_MS = 60_000;
 const SETUP_COMMAND_TIMEOUT_MS = 300_000;
 const SEND_COMMAND_TIMEOUT_MS = 180_000;
+const LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS = 125_000;
 const COMMAND_EXPIRY_HEADROOM_MS = 5_000;
 const READ_RESPONSE_TIMEOUT_MS = 75_000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -71,6 +72,8 @@ export interface ExtensionProfileSummary {
     message_delivery_timed_out: boolean;
     renderer_unresponsive: boolean;
     renderer_error: string;
+    long_task_watchdog_hung: boolean;
+    long_task_watchdog_attempt_key: string;
   }>;
   recent_conversations: Array<{
     id: string;
@@ -79,6 +82,8 @@ export interface ExtensionProfileSummary {
     updated_at: number;
     open: boolean;
     active: boolean;
+    long_task_watchdog_hung: boolean;
+    long_task_watchdog_attempt_key: string;
   }>;
 }
 
@@ -739,6 +744,8 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
           message_delivery_timed_out: tab.message_delivery_timed_out === true,
           renderer_unresponsive: tab.renderer_unresponsive === true,
           renderer_error: String(tab.renderer_error ?? "").trim().slice(0, 300),
+          long_task_watchdog_hung: tab.long_task_watchdog_hung === true,
+          long_task_watchdog_attempt_key: String(tab.long_task_watchdog_attempt_key ?? "").trim().slice(0, 300),
           network_recent_posts: Array.isArray(tab.network_recent_posts) ? tab.network_recent_posts.slice(-12) : []
         }))
         .filter((tab) => Number.isInteger(tab.id) && tab.id >= 0);
@@ -759,7 +766,9 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
             url: `https://chatgpt.com/c/${id}`,
             updated_at: Number(conversation.updated_at) || 0,
             open: Boolean(openTab),
-            active: openTab?.active === true
+            active: openTab?.active === true,
+            long_task_watchdog_hung: openTab?.long_task_watchdog_hung === true || conversation.long_task_watchdog_hung === true,
+            long_task_watchdog_attempt_key: String(openTab?.long_task_watchdog_attempt_key ?? conversation.long_task_watchdog_attempt_key ?? "").trim().slice(0, 300)
           };
         })
         .filter((conversation) => /^[A-Za-z0-9-]{8,160}$/.test(conversation.id))
@@ -963,6 +972,8 @@ async function runBrowserExtensionCommandCore(
       ? CHECK_COMMAND_TIMEOUT_MS
       : action === "send_chat_request"
         ? SEND_COMMAND_TIMEOUT_MS
+        : action === "audit_long_running_chat"
+          ? LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS
         : action === "get_chat_response"
           ? READ_RESPONSE_TIMEOUT_MS
       : COMMAND_TIMEOUT_MS;

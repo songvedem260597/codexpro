@@ -265,7 +265,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.94";
+const WORKER_EXTENSION_VERSION = "0.5.95";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -3147,6 +3147,29 @@ async function recoverProfileChatTab(payload) {
   const windowFocus = silent ? { ok: false, skipped: true, source: "auto-recovery" } : await focusChromeWindow(title);
   return { ...result, window_focus: windowFocus };
 }
+async function auditLongRunningProfileChat(payload) {
+  const profileId = String(payload?.profileId || "").trim();
+  const conversationId = String(payload?.conversationId || "").trim();
+  const targetId = String(payload?.targetId ?? "").trim();
+  const taskId = String(payload?.taskId || "").trim().slice(0, 160);
+  const startedAt = String(payload?.startedAt || "").trim().slice(0, 80);
+  const attemptKey = String(payload?.attemptKey || "").trim().slice(0, 300);
+  if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
+  if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat cần kiểm tra không hợp lệ.");
+  if (!targetId || !/^\d+$/.test(targetId)) throw new Error("Không tìm thấy tab Chrome cần kiểm tra.");
+  if (!attemptKey) throw new Error("Thiếu khóa audit task chạy lâu.");
+  const base = await runtimeConnectionForSend();
+  if (!base?.config?.port || !base?.token) throw new Error("Local MCP chưa sẵn sàng.");
+  return await localMcpTool(base.config, base.token, "browser_control", {
+    action: "audit_long_running_chat",
+    profile_id: profileId,
+    conversation_id: conversationId,
+    target_id: targetId,
+    task_id: taskId || undefined,
+    started_at: startedAt || undefined,
+    attempt_key: attemptKey
+  }, 135000);
+}
 async function stopProfileTask(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
@@ -3984,6 +4007,20 @@ diagnosticIpcHandle("codexpro:recover-profile-chat", {
   if ((result?.window_focused || result?.window_focus?.ok) && owner && !owner.isDestroyed()) owner.minimize();
   return result;
 });
+diagnosticIpcHandle("codexpro:audit-long-running-profile-chat", {
+  category: "chat",
+  action: "audit-long-running-profile-chat",
+  logSuccess: true,
+  successMessage: "Kiểm tra task ChatGPT chạy quá 30 phút hoàn tất",
+  failureMessage: "Kiểm tra task ChatGPT chạy lâu thất bại",
+  details: (payload) => ({ profile_id: String(payload?.profileId || ""), task_id: String(payload?.taskId || ""), conversation_id: String(payload?.conversationId || ""), target_id: String(payload?.targetId || ""), attempt_key: String(payload?.attemptKey || "") }),
+  resultDetails: (result) => ({ status: String(result?.status || ""), already_attempted: Boolean(result?.already_attempted), renderer_unresponsive: Boolean(result?.renderer_unresponsive), retry_allowed: result?.retry_allowed !== false, replaced_tab_id: String(result?.replaced_tab_id || ""), recovery_tab_id: String(result?.recovery_tab_id || "") }),
+  resultDiagnostic: (result) => result?.renderer_unresponsive
+    ? { level: "error", message: "Task chạy lâu vẫn treo sau một lần reload và thay tab" }
+    : result?.status === "responsive_after_replace"
+      ? { level: "warn", message: "Task chạy lâu cần thay tab nhưng renderer mới đã phản hồi" }
+      : null
+}, (_event, payload) => auditLongRunningProfileChat(payload));
 diagnosticIpcHandle("codexpro:stop-profile-task", {
   category: "chat",
   action: "stop-profile-task",

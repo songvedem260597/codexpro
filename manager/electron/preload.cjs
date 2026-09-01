@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   setupProfile: (profileId) => invoke("codexpro:setup-profile", profileId),
   openProfileChat: (payload) => invoke("codexpro:open-profile-chat", payload),
   recoverProfileChat: (payload) => invoke("codexpro:recover-profile-chat", payload),
+  auditLongRunningProfileChat: (payload) => invoke("codexpro:audit-long-running-profile-chat", payload),
   stopProfileTask: (payload) => invoke("codexpro:stop-profile-task", payload),
   reloadProfiles: () => invoke("codexpro:reload-profiles"),
   getManagerSettings: () => invoke("codexpro:get-manager-settings"),

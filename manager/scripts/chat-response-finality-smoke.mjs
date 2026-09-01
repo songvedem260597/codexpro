@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { confirmChatResponseFinality } from "../src/chat-response-finality.js";
 import { canAcceptNextChatMessage, shouldShowChatSettling } from "../src/chat-status.js";
+import { replaceCanonicalTranscript } from "../src/chat-transcript.js";
 
 const fragmentSignature = JSON.stringify(["user:1", "assistant:1", "52:fragment", ""]);
 const fullSignature = JSON.stringify(["user:1", "assistant:1", "1755:full", ""]);
@@ -96,6 +97,28 @@ assert.equal(canAcceptNextChatMessage({
   canonicalBusy: false,
   streamBusy: false
 }), false, "the composer must stay locked while DOM finality is being confirmed for the fresh turn");
+
+const canonicalMessages = [
+  { id: "user-1", role: "user", text: "push" },
+  { id: "assistant-1", role: "assistant", text: "pushed" }
+];
+const uncertainCreatedAt = "2026-08-31T19:50:39.409Z";
+const staleUncertainMessages = [
+  ...canonicalMessages,
+  { id: "optimistic-user-1788205839409", role: "user", text: "do it", uncertain: true, submissionState: "uncertain", createdAt: uncertainCreatedAt }
+];
+const recentNowMs = Date.parse("2026-08-31T19:55:00.000Z");
+const staleNowMs = Date.parse("2026-09-01T07:42:49.000Z");
+assert.equal(
+  replaceCanonicalTranscript(staleUncertainMessages, canonicalMessages, { nowMs: recentNowMs }).some((message) => message.id === "optimistic-user-1788205839409"),
+  true,
+  "a recently uncertain submission should remain visible briefly while delivery evidence may still arrive"
+);
+assert.equal(
+  replaceCanonicalTranscript(staleUncertainMessages, canonicalMessages, { nowMs: staleNowMs }).some((message) => message.id === "optimistic-user-1788205839409"),
+  false,
+  "an old uncertain submission absent from canonical ChatGPT must not survive indefinitely"
+);
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const mainSource = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");

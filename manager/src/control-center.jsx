@@ -160,7 +160,7 @@ export function ControlCenter({
   const tasks = useMemo(() => profiles
     .filter((profile) => {
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-      return profile.activity === "working" || profile.activity === "settling" || Number(profile.busy_request_count || 0) > 0 || tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
+      return profile.activity === "working" || profile.activity === "settling" || Number(profile.busy_request_count || 0) > 0 || tabs.some((tab) => tab?.busy || tab?.settling || tab?.long_task_watchdog_hung || String(tab?.network_state || "") === "generating");
     })
     .map((profile) => {
       const tab = activeProfileTab(profile);
