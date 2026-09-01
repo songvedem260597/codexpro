@@ -33,6 +33,7 @@ import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.
 import { ControlCenter } from "./control-center.jsx";
 import { LatestMessagePanel } from "./latest-message-panel.jsx";
 import { WorkerRunningDuration } from "./worker-running-duration.jsx";
+import { playTaskCompletionSound } from "./task-completion-sound.js";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
 const api = window.codexpro;
@@ -1315,7 +1316,8 @@ function App() {
       const previous = operationsNotificationState.current.get(profile.profile_id);
       if (managerSettings.taskNotifications !== false && previous) {
         if (previous.working && !working && previous.taskId) {
-          void api.showNotification?.({ title: "CodexPro · Task hoàn tất", body: `${previous.title} · ${profile.label || profile.profile_id.slice(0, 8)}` });
+          void api.showNotification?.({ title: "CodexPro · Task hoàn tất", body: `${previous.title} · ${profile.label || profile.profile_id.slice(0, 8)}`, silent: true });
+          playTaskCompletionSound();
         } else if (!previous.failed && failed) {
           void api.showNotification?.({ title: "CodexPro · Task bị gián đoạn", body: `“${title}” gặp lỗi hoặc profile bị treo. Code có thể đang sửa dở/chưa commit.` });
         }
