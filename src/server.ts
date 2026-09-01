@@ -4055,13 +4055,15 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       description:
         "Fast browser-agent control for the Chrome profile explicitly marked ACTIVE, with dedicated port-9223 Chrome as fallback. Supports persistent CDP/debugger sessions, trusted input, batch actions, wait_for, inspect_element, evaluate, hover/scroll, screenshots, and existing ChatGPT-specific actions.",
       inputSchema: {
-        action: z.enum(["status", "list_profiles", "select_workspace", "check_chatgpt", "setup_chatgpt", "reload_extension", "stop_chat_generation", "recover_chat_tab", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch", "screenshot"]),
+        action: z.enum(["status", "list_profiles", "select_workspace", "check_chatgpt", "setup_chatgpt", "reload_extension", "stop_chat_generation", "audit_long_running_chat", "recover_chat_tab", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch", "screenshot"]),
         profile_id: z.string().optional().describe("Optional extension profile id. Omit to use the profile marked ACTIVE. Ignored for the dedicated fallback browser."),
         root: z.string().optional().describe("Workspace root for select_workspace. The selected profile is locked to this root until changed by CodexPro Manager."),
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
         target_id: z.string().optional().describe("Tab id from list_tabs. Omit to use the first page tab."),
-        conversation_id: z.string().optional().describe("Exact ChatGPT conversation id for send_chat_request, rename_chat, or get_chat_response."),
+        conversation_id: z.string().optional().describe("Exact ChatGPT conversation id for send_chat_request, rename_chat, get_chat_response, recovery, or a long-task audit."),
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional().describe("Exact Manager task id to finalize when a ChatGPT response reaches a terminal state."),
+        started_at: z.string().max(80).optional().describe("Stable task start timestamp for a one-shot long-task audit."),
+        attempt_key: z.string().max(300).optional().describe("Persistent deduplication key for a one-shot long-task audit."),
         read_dom: z.boolean().optional().describe("For get_chat_response, read transcript text from the page DOM. Set false to return network state only."),
         canonical_only: z.boolean().optional().describe("For get_chat_response, read the authenticated canonical conversation without querying the rendered DOM."),
         recover_stale_dom: z.boolean().optional().describe("For get_chat_response after network completion, compare the live DOM with the canonical ChatGPT conversation and reload the exact tab when the rendered stream is stale."),
@@ -4150,7 +4152,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
       let result: Record<string, any>;
       const selectedProfile = args.profile_id || profiles.find((profile) => profile.active && profile.connected)?.profile_id;
-      if ((args.action === "select_workspace" || args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "stop_chat_generation" || args.action === "send_chat_request" || args.action === "rename_chat" || args.action === "hide_chat" || args.action === "get_chat_response") && !selectedProfile) {
+      if ((args.action === "select_workspace" || args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "stop_chat_generation" || args.action === "audit_long_running_chat" || args.action === "send_chat_request" || args.action === "rename_chat" || args.action === "hide_chat" || args.action === "get_chat_response") && !selectedProfile) {
         throw new CodexProError("Choose an online Chrome extension profile before setting up CodexPro in ChatGPT.");
       }
       if (args.action === "select_workspace") {
@@ -4170,6 +4172,9 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         result = await runBrowserExtensionCommand(args.action, {
           target_id: args.target_id,
           conversation_id: args.conversation_id,
+          task_id: args.task_id,
+          started_at: args.started_at,
+          attempt_key: args.attempt_key,
           read_dom: args.read_dom,
           recover_stale_dom: args.recover_stale_dom,
           new_chat: args.new_chat,

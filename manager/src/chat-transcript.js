@@ -49,11 +49,11 @@ function optimisticSubmissionState(message) {
 function optimisticSubmissionIsCurrent(message, nowMs = Date.now()) {
   const state = optimisticSubmissionState(message);
   if (!state) return Boolean(message?.pending || message?.uncertain);
-  if (state === "uncertain") return true;
-  if (state !== "pending" && state !== "submitted") return false;
+  if (state !== "pending" && state !== "submitted" && state !== "uncertain") return false;
   const createdAtMs = Date.parse(String(message?.createdAt || ""));
   return Number.isFinite(createdAtMs) && nowMs - createdAtMs <= OPTIMISTIC_SUBMISSION_TTL_MS;
 }
+
 
 export function cacheableTranscriptMessages(messages) {
   return trimRecentTranscriptMessages(messages).filter((message) => {

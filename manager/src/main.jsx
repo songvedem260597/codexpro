@@ -24,6 +24,7 @@ import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discard
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shouldRolloverConversation } from "./conversation-message-limit.js";
+import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
 import { mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList } from "./ui-performance.js";
@@ -383,7 +384,7 @@ function compactToolActivityMessages(messages, { collapseArgumentPayloads = fals
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.94";
+const WORKER_EXTENSION_VERSION = "0.5.95";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -538,7 +539,7 @@ function profileRequestChats(profile, preferredId = "") {
   const recent = Array.isArray(profile?.recent_conversations) ? profile.recent_conversations : [];
   const tabs = (profile?.conversation_tabs || []).map((tab) => {
     const id = conversationIdFromTab(tab);
-    return id ? { id, title: tab.title, url: tab.url, open: true, active: tab.active, busy: tab.busy, settling: tab.settling, network_state: tab.network_state } : null;
+    return id ? { id, title: tab.title, url: tab.url, open: true, active: tab.active, busy: tab.busy, settling: tab.settling, network_state: tab.network_state, long_task_watchdog_hung: Boolean(tab.long_task_watchdog_hung), long_task_watchdog_attempt_key: String(tab.long_task_watchdog_attempt_key || "") } : null;
   }).filter(Boolean);
   const tabById = new Map(tabs.map((chat) => [chat.id, chat]));
   const conversations = [...recent.map((chat) => ({ ...chat, ...(tabById.get(String(chat.id)) || {}) })), ...tabs]
@@ -1117,6 +1118,7 @@ function App() {
   const responseFinalCandidates = useRef(new Map());
   const operationsRecoveryTimes = useRef(new Map());
   const operationsNotificationState = useRef(new Map());
+  const operationsLongTaskAudits = useRef(new Set());
   const operationsAutoUpdateAt = useRef(0);
 
   const projectPageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE));
@@ -1434,6 +1436,73 @@ function App() {
       operationsNotificationState.current.set(profile.profile_id, { working, failed, taskId, title });
     }
   }, [managerSettings.taskNotifications, status?.browserProfiles]);
+
+  useEffect(() => {
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
+    for (const profile of profiles) {
+      const candidate = longRunningChatWatchdogCandidate(profile, jobs);
+      if (!candidate || operationsLongTaskAudits.current.has(candidate.attemptKey)) continue;
+      operationsLongTaskAudits.current.add(candidate.attemptKey);
+      logRendererDiagnostic(api, "warn", "chat", "Task ChatGPT chạy quá 30 phút; bắt đầu kiểm tra tab một lần", {
+        action: "long-task-watchdog-start",
+        profile_id: candidate.profileId,
+        task_id: candidate.taskId,
+        conversation_id: candidate.conversationId,
+        target_id: candidate.targetId,
+        started_at: candidate.startedAt,
+        age_ms: candidate.ageMs,
+        attempt_key: candidate.attemptKey
+      });
+      void api.auditLongRunningProfileChat({
+        profileId: candidate.profileId,
+        taskId: candidate.taskId,
+        conversationId: candidate.conversationId,
+        targetId: candidate.targetId,
+        startedAt: candidate.startedAt,
+        attemptKey: candidate.attemptKey
+      }).then((result) => {
+        if (result?.already_attempted) {
+          logRendererDiagnostic(api, "info", "chat", "Bỏ qua audit task chạy lâu đã thực hiện trước đó", { action: "long-task-watchdog-deduplicated", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, status: String(result?.status || "") });
+          return;
+        }
+        if (result?.renderer_unresponsive || result?.status === "hung") {
+          logRendererDiagnostic(api, "error", "chat", "Tab task chạy lâu bị treo sau một lần reload và một lần thay tab; đã dừng retry", {
+            action: "long-task-watchdog-hung",
+            profile_id: candidate.profileId,
+            task_id: candidate.taskId,
+            conversation_id: candidate.conversationId,
+            target_id: String(result?.recovery_tab_id || result?.target_id || candidate.targetId),
+            attempt_key: candidate.attemptKey,
+            retry_allowed: false
+          });
+          requestTargetsRef.current = { ...requestTargetsRef.current, [candidate.profileId]: NEW_CHAT_TARGET };
+          requestTargetReasons.current.set(candidate.profileId, "long_task_watchdog_hung");
+          setRequestTargets((current) => ({ ...current, [candidate.profileId]: NEW_CHAT_TARGET }));
+          setRequestResponses((current) => ({ ...current, [candidate.profileId]: { visible: true, loading: false, transcriptLoading: false, error: "", conversationId: NEW_CHAT_TARGET, text: "", messages: [], busy: false, abandonedConversationId: candidate.conversationId } }));
+          setStatus((current) => current ? {
+            ...current,
+            browserProfiles: (current.browserProfiles || []).map((item) => item.profile_id !== candidate.profileId ? item : {
+              ...item,
+              activity: "idle",
+              conversation_tabs: (item.conversation_tabs || []).map((tab) => String(tab.url || "").includes(`/c/${candidate.conversationId}`) ? { ...tab, busy: false, settling: false, renderer_unresponsive: true, long_task_watchdog_hung: true, renderer_error: "LONG_TASK_WATCHDOG_UNRESPONSIVE", activity_text: "Tab bị treo · watchdog đã dừng retry" } : tab)
+            })
+          } : current);
+          setRequestSendErrors((current) => ({ ...current, [candidate.profileId]: "Tab cũ bị treo sau kiểm tra một lần. Task tiếp theo sẽ mở conversation mới." }));
+          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Tab task bị treo", body: `“${candidate.title}” không phản hồi sau reload và thay tab. Task tiếp theo sẽ dùng chat mới.` });
+          return;
+        }
+        const statusLabel = result?.status === "responsive_after_replace" ? "tab thay thế đã phản hồi" : "tab đã phản hồi sau reload";
+        logRendererDiagnostic(api, "info", "chat", `Task chạy lâu đã được kiểm tra: ${statusLabel}`, { action: "long-task-watchdog-responsive", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, status: String(result?.status || ""), busy: Boolean(result?.reload_probe?.busy || result?.replacement_probe?.busy), response_ready: Boolean(result?.reload_probe?.response_ready || result?.replacement_probe?.response_ready), retry_allowed: false });
+        if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã kiểm tra task chạy lâu", body: `“${candidate.title}” · ${statusLabel}. Watchdog sẽ không reload lại task này.` });
+      }).catch((err) => {
+        logRendererDiagnostic(api, "error", "chat", `Không hoàn tất được audit task chạy lâu: ${err?.message || String(err)}`, { action: "long-task-watchdog-failed", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, retry_allowed: false, error: err });
+        if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Không kiểm tra được task chạy lâu", body: `“${candidate.title}” · đã dừng thử lại tự động để tránh reload liên tục.` });
+      }).finally(() => {
+        window.setTimeout(() => void refresh(false), 1200);
+      });
+    }
+  }, [managerSettings.taskNotifications, status?.browserProfiles, status?.workerJobs]);
 
   useEffect(() => {
     if (!managerSettings.autoRecovery) return;
@@ -2950,12 +3019,22 @@ function App() {
   async function sendRequest(profile, draftOverride = null) {
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
-    const conversationId = String(requestTargets[profile.profile_id] ?? defaultTarget ?? NEW_CHAT_TARGET);
+    const requestedConversationId = String(requestTargets[profile.profile_id] ?? defaultTarget ?? NEW_CHAT_TARGET);
+    const requestedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${requestedConversationId}`));
+    const requestedConversation = conversations.find((chat) => String(chat.id) === requestedConversationId);
+    const forcedNewChat = Boolean(requestedTab?.long_task_watchdog_hung || requestedConversation?.long_task_watchdog_hung);
+    const conversationId = forcedNewChat ? NEW_CHAT_TARGET : requestedConversationId;
     const newChat = conversationId === NEW_CHAT_TARGET;
     const text = String(draftOverride !== null ? draftOverride : (requestDraftsRef.current[profile.profile_id] || "")).trim();
     const attachments = requestFiles[profile.profile_id] || [];
     const projectRoot = projectRootForProfile(profile);
     const currentResponse = requestResponses[profile.profile_id] || {};
+    if (forcedNewChat) {
+      requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: NEW_CHAT_TARGET };
+      requestTargetReasons.current.set(profile.profile_id, "long_task_watchdog_hung_send_guard");
+      setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
+      logRendererDiagnostic(api, "warn", "chat", "Không gửi task mới vào conversation đã bị watchdog đánh dấu treo", { action: "long-task-watchdog-force-new-chat", profile_id: profile.profile_id, abandoned_conversation_id: requestedConversationId, target_id: String(requestedTab?.id || "") });
+    }
     if (!text && !attachments.length) return false;
     if (!projectRoot) {
       setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có workspace nào được chọn." }));

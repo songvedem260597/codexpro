@@ -7,6 +7,7 @@ import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discard
 import { projectSelectionChanged } from "../manager/src/chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "../manager/src/chat-response-audit.js";
 import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shouldRolloverConversation } from "../manager/src/conversation-message-limit.js";
+import { LONG_TASK_WATCHDOG_AFTER_MS, longRunningChatWatchdogCandidate } from "../manager/src/long-task-watchdog.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -16,6 +17,30 @@ assert.equal(conversationTotalMessageCount({ messageCount: 9, messages: [{ role:
 assert.equal(shouldRolloverConversation({ totalMessageCount: 17 }), false, "a conversation below the safety limit must stay on the current ChatGPT tab");
 assert.equal(shouldRolloverConversation({ totalMessageCount: 18 }), true, "a conversation at the safety limit must move the next request to a new ChatGPT tab");
 assert.equal(shouldRolloverConversation({ totalMessageCount: 18 }, 0), false, "an invalid disabled limit must never create rollover loops");
+
+const longTaskProfile = {
+  profile_id: "chrome-long-task",
+  connected: true,
+  activity: "working",
+  current_task_id: "cpt_1234567890abcdef12345678",
+  current_task_title: "Build dự án rất lâu",
+  conversation_tabs: [{ id: 77, active: true, busy: true, network_state: "generating", network_last_started_at: "2026-09-01T00:00:00.000Z", url: "https://chatgpt.com/c/12345678-abcd-1234-abcd-1234567890ab" }]
+};
+const longTaskJobs = [{ job_id: longTaskProfile.current_task_id, worker_id: longTaskProfile.profile_id, status: "running", started_at: "2026-09-01T00:00:00.000Z" }];
+assert.equal(LONG_TASK_WATCHDOG_AFTER_MS, 30 * 60 * 1000, "long ChatGPT task checks must start only after 30 minutes");
+assert.equal(longRunningChatWatchdogCandidate(longTaskProfile, longTaskJobs, Date.parse("2026-09-01T00:29:59.000Z")), null, "a 29-minute task must never be reloaded");
+assert.deepEqual(longRunningChatWatchdogCandidate(longTaskProfile, longTaskJobs, Date.parse("2026-09-01T00:30:00.000Z")), {
+  profileId: "chrome-long-task",
+  taskId: "cpt_1234567890abcdef12345678",
+  title: "Build dự án rất lâu",
+  conversationId: "12345678-abcd-1234-abcd-1234567890ab",
+  targetId: 77,
+  startedAt: "2026-09-01T00:00:00.000Z",
+  attemptKey: "chrome-long-task:cpt_1234567890abcdef12345678:2026-09-01T00:00:00.000Z",
+  ageMs: LONG_TASK_WATCHDOG_AFTER_MS
+}, "a 30-minute running task must produce one stable audit identity");
+assert.equal(longRunningChatWatchdogCandidate({ ...longTaskProfile, activity: "idle" }, [{ ...longTaskJobs[0], status: "completed" }], Date.parse("2026-09-01T01:00:00.000Z")), null, "a completed task must never be reloaded by the long-task watchdog");
+assert.equal(longRunningChatWatchdogCandidate({ ...longTaskProfile, conversation_tabs: [{ ...longTaskProfile.conversation_tabs[0], long_task_watchdog_hung: true }] }, longTaskJobs, Date.parse("2026-09-01T01:00:00.000Z")), null, "a watchdog-hung conversation must remain terminal and never be audited again");
 
 assert.equal(shouldShowChatSettling({ networkState: "completed", tabSettling: false, responseCurrent: true, responseIncomplete: true }), false, "completed network state must clear stale DOM settling");
 assert.equal(shouldShowChatSettling({ networkState: "failed", tabSettling: true, responseCurrent: true, responseIncomplete: true }), true, "fresh tab settling must override a terminal network request");
@@ -331,6 +356,7 @@ assert.match(bridge, /profile-task-events\.jsonl/, "missing task titles must lea
 assert.match(bridge, /connector_profile_bound:[\s\S]*?connector_update_required:/, "Manager profile summaries must expose connector/profile identity state");
 assert.match(bridge, /loadBrowserProfileTasks\(\)/, "profile task titles must load when the bridge starts");
 assert.match(bridge, /persistBrowserProfileTasks\(\)/, "AI task titles must persist after begin_repo_task");
+assert.match(bridge, /LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS = 125_000[\s\S]*?action === "audit_long_running_chat"[\s\S]*?LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS/, "the extension bridge must allow the bounded reload, replacement, and probe sequence to finish");
 assert.ok(managerUi.includes('working || settling ? "Task hi\\u1ec7n t\\u1ea1i" : "Task g\\u1ea7n nh\\u1ea5t"'), "Manager must retain the last AI task title after completion");
 assert.match(managerMain, /const MANAGER_VERSION = app\.getVersion\(\)/, "MCP client metadata must use the packaged Manager version");
 assert.match(managerUi, /CodexPro Manager \{managerPackage\.version\}/, "Manager footer must use package.json instead of a stale hard-coded version");
@@ -417,9 +443,9 @@ assert.match(connectorInstaller, /aria === 'thao tac voi plugin'/, "connector mi
 assert.match(connectorInstaller, /pageText\.includes\('connected'\)\s*\|\|\s*pageText\.includes\('da ket noi'\)/, "connector setup must recognize an already-connected Vietnamese plugin detail page");
 assert.match(worker, /testId==='stop-button'/, "DOM activity probe must recognize ChatGPT's stop control");
 assert.match(worker, /const domToolBusy=Boolean\(domActivity\.busy&&domActivity\.source==='dom_tool'\)/, "DOM tool calls must remain working after the initial network request completes");
-assert.match(worker, /busy:networkBusy\|\|domImageBusy\|\|domToolBusy\|\|canonicalBusy/, "profile status must treat image generation, canonical generation, and active DOM tool calls as working");
-assert.match(worker, /settling:!networkBusy&&!domImageBusy&&!domToolBusy&&!canonicalBusy&&domActivity\.busy/, "only non-image, non-tool, non-canonical DOM activity may use the finalizing state");
-assert.match(worker, /activity_text:streamBusy\?/, "active ChatGPT work must expose one concise network-or-DOM activity line");
+assert.match(worker, /busy:hungAudit\?false:networkBusy\|\|domImageBusy\|\|domToolBusy\|\|canonicalBusy/, "profile status must treat image generation, canonical generation, and active DOM tool calls as working unless the one-shot watchdog marked the tab hung");
+assert.match(worker, /settling:hungAudit\?false:!networkBusy&&!domImageBusy&&!domToolBusy&&!canonicalBusy&&domActivity\.busy/, "only non-image, non-tool, non-canonical DOM activity may use the finalizing state, and hung tabs must stop settling");
+assert.match(worker, /activity_text:hungAudit\?'Tab bị treo · watchdog đã dừng retry':streamBusy\?/, "active ChatGPT work must expose one concise network-or-DOM activity line while watchdog-hung tabs show a terminal warning");
 assert.match(worker, /connector_server_fingerprint:String\(stored\.connectorServerFingerprint\|\|''\)/, "worker heartbeats must report the connector URL fingerprint");
 assert.match(worker, /const token=endpoint\.searchParams\.get\('codexpro_token'\)[\s\S]*?headers\.authorization=`Bearer \$\{token\}`/, "connector verification must preserve token auth even when an intermediary drops the MCP query token");
 assert.match(worker, /Tool activity proves that some CodexPro definition is callable[\s\S]*?return false/, "tool activity alone must not falsely verify a profile-bound connector");
@@ -429,9 +455,19 @@ assert.match(worker, /const heartbeat=setInterval\([\s\S]*?profileInfo\(\)[\s\S]
 assert.match(worker, /const heartbeat=setInterval\([\s\S]*?tabInventory\(\)[\s\S]*?tab_inventory[\s\S]*?\/register/, "heartbeat must reconcile lightweight tab inventory even when the full poll loop is blocked");
 assert.match(worker, /chrome\.tabs\.onRemoved\.addListener\([\s\S]*?scheduleRealtimeProfilePush\(0\)/, "closing the last ChatGPT tab must immediately clear the Manager profile snapshot");
 assert.match(worker, /if\(action==='recover_chat_tab'\)[\s\S]*?WORKER_BUSY:[\s\S]*?replaceUnresponsiveChatTab/, "manual tab recovery must refuse active generations and replace only an idle renderer");
+const longTaskAuditSource = worker.slice(worker.indexOf("if(action==='audit_long_running_chat')"), worker.indexOf("if(action==='recover_chat_tab')"));
+assert.match(longTaskAuditSource, /claimLongTaskAudit[\s\S]*?chrome\.tabs\.reload\(tab\.id\)[\s\S]*?waitForLongTaskRenderer[\s\S]*?replaceUnresponsiveChatTab\(tab,`https:\/\/chatgpt\.com\/c\/\$\{conversationId\}`[\s\S]*?waitForLongTaskRenderer/, "the 30-minute audit must reload once, then replace the exact conversation tab once only when the renderer stays unresponsive");
+assert.equal((longTaskAuditSource.match(/chrome\.tabs\.reload\(/g) || []).length, 1, "a long-task audit must contain exactly one tab reload");
+assert.equal((longTaskAuditSource.match(/replaceUnresponsiveChatTab\(/g) || []).length, 1, "a long-task audit must contain exactly one replacement attempt");
+assert.match(longTaskAuditSource, /already_attempted:true[\s\S]*?status:'hung'[\s\S]*?retry_allowed:false/, "repeated audits must be deduplicated and a twice-unresponsive tab must be marked hung with retries disabled");
+assert.match(worker, /LONG_TASK_AUDIT_STORAGE_KEY[\s\S]*?chrome\.storage\.local/, "the one-shot audit marker must survive extension and Manager restarts");
+assert.match(worker, /long_task_watchdog_hung:Boolean\(hungAudit\)/, "profile snapshots must retain the watchdog's hung marker");
+assert.match(worker, /recentConversationCache=\{at:0,items:\[\]\}[\s\S]*?long_task_watchdog_hung:Boolean\(hungAudit\)/, "hung conversation markers must invalidate and repopulate the recent-conversation cache");
 assert.match(worker, /function stopChatGenerationPage[\s\S]*?testId==='stop-button'[\s\S]*?stopControl\.click\(\)/, "task stop must click only ChatGPT's visible stop-generation control");
 assert.match(worker, /if\(action==='stop_chat_generation'\)[\s\S]*?stopChatGenerationPage[\s\S]*?stopped:Boolean\(result\.stopped\)/, "worker must expose a bounded stop-generation command");
 assert.match(server, /"stop_chat_generation"/, "browser_control schema must expose stop_chat_generation");
+assert.match(server, /"audit_long_running_chat"/, "browser_control schema must expose the one-shot long-task audit");
+assert.match(server, /task_id: args\.task_id[\s\S]*?started_at: args\.started_at[\s\S]*?attempt_key: args\.attempt_key/, "browser_control must forward the persistent one-shot audit identity to the extension");
 assert.match(worker, /async function replaceUnresponsiveChatTab[\s\S]*?chrome\.tabs\.create[\s\S]*?waitForTab[\s\S]*?chrome\.tabs\.remove\(replacedTabId\)/, "renderer recovery must load a replacement before closing the exact stuck tab");
 assert.match(worker, /dom_replaced=true[\s\S]*?recovery_tab_id/, "stale-response reload recovery must escalate to replacing a renderer that stays unresponsive");
 assert.match(worker, /conversation\|steer_turn/, "ChatGPT steer_turn must be tracked as a generation request");
@@ -477,6 +513,10 @@ assert.match(managerUi, /className="button primary profile-chat"[\s\S]*?disabled
 assert.match(managerUi, /const noChatGpt = profile\.connected && profile\.activity === "no_chatgpt"[\s\S]*?CHROME CHẠY NỀN[\s\S]*?CHƯA MỞ CHATGPT/, "a connected background profile without ChatGPT tabs must not be labeled idle");
 assert.match(managerUi, /profile\.chatgpt_tab_count[\s\S]*?tab ChatGPT/, "profile metadata must show ChatGPT tab count instead of every Chrome tab");
 assert.match(managerMain, /async function recoverProfileChatTab[\s\S]*?action: "recover_chat_tab"[\s\S]*?60000/, "Manager must expose the bounded replace-tab recovery command");
+assert.match(managerMain, /async function auditLongRunningProfileChat[\s\S]*?action: "audit_long_running_chat"[\s\S]*?attempt_key:[\s\S]*?135000/, "Manager must route one-shot 30-minute audits through a timeout that covers one reload, one replacement, and both bounded probes");
+assert.match(managerMain, /codexpro:audit-long-running-profile-chat[\s\S]*?auditLongRunningProfileChat\(payload\)/, "Manager IPC must expose long-task audits to the renderer");
+assert.match(managerPreload, /auditLongRunningProfileChat: \(payload\) => invoke\("codexpro:audit-long-running-profile-chat", payload\)/, "preload must expose auditLongRunningProfileChat");
+assert.match(managerUi, /longRunningChatWatchdogCandidate[\s\S]*?api\.auditLongRunningProfileChat[\s\S]*?long-task-watchdog-hung[\s\S]*?NEW_CHAT_TARGET/, "a hung long-running task must be warned once and force the next task onto a fresh conversation");
 assert.match(managerMain, /async function stopProfileTask[\s\S]*?action: "stop_chat_generation"[\s\S]*?15000/, "Manager must route task stop through the bounded MCP command");
 assert.match(managerMain, /codexpro:stop-profile-task[\s\S]*?stopProfileTask\(payload\)/, "Manager IPC must expose task stop to the renderer");
 assert.match(managerPreload, /stopProfileTask: \(payload\) => invoke\("codexpro:stop-profile-task", payload\)/, "preload must expose stopProfileTask");
@@ -551,6 +591,7 @@ assert.match(managerSendUiSource, /scope: allAllowedScope \? "all_allowed" : "wo
 assert.match(managerSendUiSource, /restoreSubmittedInputs\(\)[\s\S]*?Trạng thái gửi chưa chắc chắn[\s\S]*?return false/, "an uncertain submission must preserve the local composer draft instead of silently clearing it");
 assert.match(managerSendUiSource, /shouldRolloverConversation\(currentResponse\)[\s\S]*?continuation_reason: "message_limit"[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a settled conversation at the 18-message safety limit must roll the pending request and attachments into a fresh ChatGPT tab");
 assert.match(managerSendUiSource, /conversation-message-limit-rollover[\s\S]*?message_limit:[\s\S]*?message_count:/, "automatic message-limit rollover must leave a diagnostic trail with the configured and observed counts");
+assert.match(managerSendUiSource, /requestedTab\?\.long_task_watchdog_hung \|\| requestedConversation\?\.long_task_watchdog_hung[\s\S]*?conversationId = forcedNewChat \? NEW_CHAT_TARGET[\s\S]*?long-task-watchdog-force-new-chat/, "new work must never be sent back into a conversation marked hung by the one-shot watchdog, even after its tab was closed");
 assert.match(managerUi, /totalMessageCount: contentAvailable[\s\S]*?result\.total_message_count/, "Manager response state must retain ChatGPT's complete user-plus-assistant message count");
 assert.match(managerUi, /saveChatResponseCache\(\{[\s\S]*?totalMessageCount: Number\(response\?\.totalMessageCount\)/, "the complete conversation count must survive Manager cache hydration");
 assert.match(managerMain, /function normalizeChatCacheEntry[\s\S]*?totalMessageCount: Math\.max\(0, Math\.floor\(Number\(value\?\.totalMessageCount\)/, "the Electron cache must normalize the persisted complete conversation count");
@@ -693,7 +734,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.94");
+assert.equal(manifest.version, "0.5.95");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
