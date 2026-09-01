@@ -37,7 +37,7 @@ assert.match(source, /responseProfileId !== profile\.profile_id \|\| responseCon
 assert.match(source, /const cacheFresh = cachedResponseIsFresh[\s\S]*transcriptLoading: !cacheFresh/, "stale cached transcripts must remain visibly loading until refreshed");
 assert.match(source, /const activeTurn = sameConversation[\s\S]*transcriptLoading: !activeTurn/, "opening an idle existing chat must show transcript loading even when stale messages are already cached");
 assert.match(source, /transcriptLoading: Boolean\(previous\.transcriptLoading && needsDomFallback\)/, "a network-only read must preserve transcript loading while a DOM fallback is still required");
-assert.match(source, /responseCurrent && response\?\.transcriptLoading \? <div className="response-empty">[\s\S]*Đang tải tin nhắn…/, "transcript loading must hide stale cached messages behind an explicit loading state");
+assert.match(source, /responseCurrent && response\?\.transcriptLoading \? <div className="response-empty">[\s\S]*Đang tải tin nhắn<\/span>/, "transcript loading must hide stale cached messages behind an explicit loading state without duplicating animated dots in the text");
 assert.match(modal, /data-layout-transcript-loading=\{responseCurrent && response\?\.transcriptLoading \? "1" : "0"\}/, "chat modal must expose transcript loading for runtime UI verification");
 
 console.log("chat-composer-isolation-smoke: ok");
