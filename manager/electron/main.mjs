@@ -11,6 +11,7 @@ import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiag
 import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
 import { syncUnpackedCodexProExtensions } from "./extension-sync.mjs";
+import { collectTunnelOfflineEvidence } from "./tunnel-offline-diagnostic.mjs";
 import { createInterruptionAlertTracker } from "./interruption-alert.mjs";
 import { taskUnfinalizedIncidents, TASK_UNFINALIZED_REPEAT_MS } from "./task-unfinalized-diagnostic.mjs";
 import { classifyUserReportedError } from "./user-reported-error.mjs";
@@ -2279,6 +2280,9 @@ async function health(base, token, attempts = 1) {
         ok: response.ok && body.ok === true,
         status: response.status,
         latency: Date.now() - started,
+        response_server: String(response.headers.get("server") || ""),
+        cf_ray: String(response.headers.get("cf-ray") || ""),
+        content_type: String(response.headers.get("content-type") || ""),
         data: body,
         timeout_ms: RUNTIME_HEALTH_TIMEOUT_MS,
         timed_out: false,
@@ -2302,6 +2306,50 @@ async function health(base, token, attempts = 1) {
     await new Promise((resolve) => setTimeout(resolve, 350));
   }
   return lastResult;
+}
+
+async function recordRuntimeHealthDiagnostics({ healthCycleId, localBase, publicBase, local, tunnel, processSummaries }) {
+  const localHealthEvent = runtimeHealthDiagnosticTracker.observe({
+    target: "local",
+    label: "Local MCP",
+    base: localBase,
+    result: local,
+    healthCycleId,
+    processes: processSummaries,
+    slowMs: 1_000
+  });
+  const tunnelHealthEvent = runtimeHealthDiagnosticTracker.observe({
+    target: "tunnel",
+    label: "Public tunnel",
+    base: publicBase,
+    configured: Boolean(publicBase),
+    result: tunnel,
+    healthCycleId,
+    processes: processSummaries,
+    slowMs: 2_500
+  });
+  if (tunnelHealthEvent && publicBase && !tunnel.ok) {
+    try {
+      const offlineEvidence = await collectTunnelOfflineEvidence({
+        home: codexProHome,
+        publicBase,
+        local,
+        tunnel,
+        processes: processSummaries,
+        timeoutMs: 1_500
+      });
+      Object.assign(tunnelHealthEvent.details, offlineEvidence);
+      tunnel.offline_diagnostic = offlineEvidence;
+    } catch (error) {
+      tunnelHealthEvent.details.offline_diagnostic_error = String(error?.message || error).slice(0, 500);
+    }
+  }
+  for (const event of [localHealthEvent, tunnelHealthEvent]) {
+    if (!event) continue;
+    diagnostic(event.level, event.source, event.category, event.message, event.details);
+    const interruptionAlert = interruptionAlertTracker.observeRuntimeHealth(event, activeBrowserTaskSummaries());
+    if (interruptionAlert && readManagerSettings().taskNotifications !== false) showManagerNotification(interruptionAlert);
+  }
 }
 
 function connectorLink(config, token) {
@@ -2464,6 +2512,8 @@ async function runtimeBaseStatus(options = {}) {
         { pid: runtime?.runtimePid, name: "node" },
         { pid: runtime?.tunnelPid, name: "cloudflared" }
       ].filter((item) => processAlive(item.pid));
+      const processSummaries = processCandidates.map((item) => ({ pid: Number(item.pid), name: item.name }));
+      await recordRuntimeHealthDiagnostics({ healthCycleId, localBase, publicBase, local, tunnel, processSummaries });
       const fallbackAllowedRoots = [...new Set([
         root,
         ...processOptions(processCommand, "allow-root"),
@@ -2485,7 +2535,7 @@ async function runtimeBaseStatus(options = {}) {
         token,
         local,
         tunnel,
-        processes: processCandidates.map((item) => ({ pid: Number(item.pid), name: item.name })),
+        processes: processSummaries,
         mcpLink: endpoint ? connectorLinkFromEndpoint(endpoint, token) : connectorLink(config, token),
         tokenConfigured: Boolean(token),
         autoStart: app.getLoginItemSettings().openAtLogin
@@ -2513,33 +2563,7 @@ async function runtimeBaseStatus(options = {}) {
       processes = [];
     }
     const processSummaries = processes.map((item) => ({ pid: item.ProcessId, name: item.Name }));
-    const healthDiagnostics = [
-      runtimeHealthDiagnosticTracker.observe({
-        target: "local",
-        label: "Local MCP",
-        base: localBase,
-        result: local,
-        healthCycleId,
-        processes: processSummaries,
-        slowMs: 1_000
-      }),
-      runtimeHealthDiagnosticTracker.observe({
-        target: "tunnel",
-        label: "Public tunnel",
-        base: publicBase,
-        configured: Boolean(publicBase),
-        result: tunnel,
-        healthCycleId,
-        processes: processSummaries,
-        slowMs: 2_500
-      })
-    ];
-    for (const event of healthDiagnostics) {
-      if (!event) continue;
-      diagnostic(event.level, event.source, event.category, event.message, event.details);
-      const interruptionAlert = interruptionAlertTracker.observeRuntimeHealth(event, activeBrowserTaskSummaries());
-      if (interruptionAlert && readManagerSettings().taskNotifications !== false) showManagerNotification(interruptionAlert);
-    }
+    await recordRuntimeHealthDiagnostics({ healthCycleId, localBase, publicBase, local, tunnel, processSummaries });
     const value = {
       task,
       config,
