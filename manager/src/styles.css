@@ -443,7 +443,7 @@ section { margin-bottom: 38px; }
 .request-card-actions { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .chat-response { position: relative; margin-top: 14px; border: 1px solid #2d3748; border-radius: var(--radius-panel); background: #0b0f15; overflow: hidden; }
 .chat-response.is-inline { height: 260px; min-height: 260px; max-height: 260px; margin-top: 0; display: flex; flex-direction: column; }
-.chat-response.is-streaming { border-color: #3f5690; box-shadow: 0 0 0 1px #668cff19; }
+.chat-response.is-sending, .chat-response.is-streaming { border-color: #3f5690; box-shadow: 0 0 0 1px #668cff19; }
 .chat-response.is-streaming::before { content: ""; position: absolute; z-index: 4; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none; background: conic-gradient(from var(--profile-border-shine-angle), transparent 0deg 225deg, #f4a340 244deg, #ffb13c 270deg, #ffe0a3 295deg, #fff8e9 315deg, #ffd37a 330deg, #ff9f1c 346deg, transparent 360deg); mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0) border-box; mask-composite: exclude; filter: drop-shadow(0 0 4px #ffe0a3cc) drop-shadow(0 0 8px #ff9f1c99); animation: profile-border-shine 2.75s linear infinite; }
 .chat-response.is-incomplete { border-color: #745326; box-shadow: 0 0 0 1px #d99a3f18; }
 .chat-response-head { min-height: 52px; flex: 0 0 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-bottom: 1px solid #252d3a; background: #111620; }

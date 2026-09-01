@@ -19,6 +19,9 @@ assert.doesNotMatch(styles, /\.app-shell\s*\{[^}]*animation:\s*profile-border-sh
 assert.match(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working::before,[\s\S]*?animation:\s*profile-border-shine/, "shine animation must be scoped to the pseudo-elements that actually render it");
 assert.match(styles, /@property --profile-border-shine-angle[\s\S]*?inherits:\s*false/, "shine angle must not inherit through the renderer tree");
 assert.match(styles, /\.chat-response\.is-streaming::before[^}]*animation:\s*profile-border-shine/, "streaming chat shine must remain animated on its own paint layer");
+assert.match(renderer, /chat-response is-inline \$\{sending \? "is-sending" : selectedBusy \? "is-streaming" : ""\}/, "submission must use a stable sending border instead of restarting the streaming shine before ACK");
+assert.match(styles, /\.chat-response\.is-sending,\s*\.chat-response\.is-streaming\s*\{[^}]*border-color:/, "sending and streaming states must keep the same static border geometry");
+assert.doesNotMatch(styles, /\.chat-response\.is-sending::before/, "the pre-ACK sending state must not create an animated border paint layer");
 assert.match(styles, /working-border-beam[\s\S]*?mask:[\s\S]*?offset-path:\s*rect\(/, "Border Beam must be clipped to the card ring and follow its perimeter");
 assert.match(styles, /width:\s*44px[\s\S]*?animation:\s*worker-border-beam-move\s+4\.4s/, "worker Border Beam must use the compact segment and gentle speed");
 assert.match(styles, /prefers-reduced-motion:\s*reduce[\s\S]*?worker-active-border::before[\s\S]*?animation:\s*none/, "Border Beam must honor reduced-motion preferences");
