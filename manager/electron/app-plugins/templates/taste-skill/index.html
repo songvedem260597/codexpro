@@ -15,10 +15,15 @@
         <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Tìm frontend, redesign, minimalist…" autocomplete="off" /></label>
       </header>
       <section class="workspace">
-        <aside><div class="aside-head"><b>Skill</b><span id="count">0</span></div><div id="skills" class="skills"></div></aside>
+        <aside><div class="aside-head"><b>Skill</b><span><i id="selected-count">0 đã chọn</i><i id="count">0</i></span></div><div id="skills" class="skills"></div></aside>
         <article class="detail">
           <div class="detail-head"><div><span id="folder" class="kicker"></span><h2 id="name">Đang tải…</h2><p id="description"></p></div><button id="copy" type="button">Copy skill</button></div>
           <pre id="content"></pre>
+          <div class="selection-bar">
+            <div><strong id="selection-summary">Chưa chọn skill</strong><span id="selection-help">Chọn một hoặc nhiều skill rồi áp dụng cho dự án.</span></div>
+            <button id="clear-selection" class="quiet" type="button">Bỏ chọn hết</button>
+            <button id="use-selection" type="button">Áp dụng cho dự án</button>
+          </div>
         </article>
       </section>
       <footer><span id="commit"></span><span>MIT · nguồn leonxlnx/taste-skill</span></footer>

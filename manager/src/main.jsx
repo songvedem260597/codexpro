@@ -4616,8 +4616,11 @@ function App() {
         <div className="app-plugin-page" hidden={activePage !== "plugins"}>
           <AppPluginCenter
             api={api}
+            status={status}
+            projects={projects}
             notify={notify}
             onError={(pluginError) => setError(pluginError?.message || String(pluginError))}
+            onRefresh={() => void refresh(false)}
           />
         </div>
 

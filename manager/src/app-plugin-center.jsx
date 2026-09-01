@@ -1,13 +1,51 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AppDropdown } from "./app-dropdown.jsx";
+import { buildPluginTaskPrompt, normalizePluginSkills } from "./plugin-task-prompt.js";
 import "./app-plugin-center.css";
 
-export function AppPluginCenter({ api, notify, onError }) {
+function pluginTaskId() {
+  const bytes = new Uint8Array(12);
+  window.crypto.getRandomValues(bytes);
+  return `cpt_${[...bytes].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function unwrap(value) {
+  if (value?.ok === false) throw new Error(String(value?.error?.message || "Không thực hiện được thao tác."));
+  return value?.ok === true ? value.value : value;
+}
+
+function pluginWorkerOptions(status) {
+  const apiWorkers = (status?.workers || []).filter((worker) => worker.worker_type === "api").map((worker) => ({
+    key: `api|${worker.worker_id}`,
+    type: "api",
+    id: worker.worker_id,
+    label: `${worker.label || worker.worker_id} · API`,
+    ready: Boolean(worker.connected) && worker.activity !== "working",
+    reason: !worker.connected ? "thiếu kết nối" : worker.activity === "working" ? "đang làm việc" : "sẵn sàng"
+  }));
+  const chromeWorkers = (status?.browserProfiles || []).map((profile) => ({
+    key: `chrome|${profile.profile_id}`,
+    type: "chrome",
+    id: profile.profile_id,
+    label: `${profile.email || profile.label || profile.profile_id} · Chrome`,
+    ready: Boolean(profile.connected && profile.connector_installed && profile.connector_profile_bound !== false && profile.activity !== "working" && profile.activity !== "settling"),
+    reason: !profile.connected ? "mất kết nối" : !profile.connector_installed ? "chưa có CodexPro" : profile.activity === "working" || profile.activity === "settling" ? "đang làm việc" : "sẵn sàng"
+  }));
+  return [...apiWorkers, ...chromeWorkers];
+}
+
+export function AppPluginCenter({ api, status, projects = [], notify, onError, onRefresh }) {
   const [plugins, setPlugins] = useState([]);
   const [catalog, setCatalog] = useState([]);
   const [selectedId, setSelectedId] = useState("");
   const [busy, setBusy] = useState("");
   const [removeArmed, setRemoveArmed] = useState("");
   const [frameRevision, setFrameRevision] = useState(0);
+  const [skillSelection, setSkillSelection] = useState([]);
+  const [workerKey, setWorkerKey] = useState("");
+  const [workspaceRoot, setWorkspaceRoot] = useState("");
+  const [requirement, setRequirement] = useState("");
+  const [launching, setLaunching] = useState(false);
   const pluginFrameRef = useRef(null);
 
   const reportError = useCallback((error) => {
@@ -35,19 +73,42 @@ export function AppPluginCenter({ api, notify, onError }) {
 
   const selected = useMemo(() => plugins.find((plugin) => plugin.id === selectedId) || null, [plugins, selectedId]);
   const tasteSkill = useMemo(() => catalog.find((plugin) => plugin.id === "taste-skill") || null, [catalog]);
+  const workers = useMemo(() => pluginWorkerOptions(status), [status]);
+  const selectedWorker = useMemo(() => workers.find((worker) => worker.key === workerKey) || null, [workerKey, workers]);
+
+  useEffect(() => {
+    if (workers.some((worker) => worker.key === workerKey && worker.ready)) return;
+    setWorkerKey(workers.find((worker) => worker.ready)?.key || "");
+  }, [workerKey, workers]);
+
+  useEffect(() => {
+    if (projects.some((project) => project.root === workspaceRoot)) return;
+    setWorkspaceRoot(projects[0]?.root || "");
+  }, [projects, workspaceRoot]);
 
   useEffect(() => {
     const receivePluginMessage = (event) => {
       if (!pluginFrameRef.current || event.source !== pluginFrameRef.current.contentWindow) return;
-      if (event.data?.type !== "codexpro:copy-text") return;
-      const text = String(event.data?.text || "");
-      if (!text || text.length > 250_000) {
-        reportError(new Error("Plugin gửi nội dung copy không hợp lệ."));
+      if (event.data?.type === "codexpro:use-skills") {
+        try {
+          const skills = normalizePluginSkills(event.data?.skills);
+          setSkillSelection(skills);
+          notify?.(`Đã chọn ${skills.length} skill · tiếp tục chọn dự án và worker`);
+        } catch (error) {
+          reportError(error);
+        }
         return;
       }
-      void api.copyText(text)
-        .then(() => notify?.(`Đã copy skill “${String(event.data?.label || selected?.name || "plugin").slice(0, 80)}”`))
-        .catch(reportError);
+      if (event.data?.type === "codexpro:copy-text") {
+        const text = String(event.data?.text || "");
+        if (!text || text.length > 250_000) {
+          reportError(new Error("Plugin gửi nội dung copy không hợp lệ."));
+          return;
+        }
+        void api.copyText(text)
+          .then(() => notify?.(`Đã copy skill “${String(event.data?.label || selected?.name || "plugin").slice(0, 80)}”`))
+          .catch(reportError);
+      }
     };
     window.addEventListener("message", receivePluginMessage);
     return () => window.removeEventListener("message", receivePluginMessage);
@@ -126,6 +187,51 @@ export function AppPluginCenter({ api, notify, onError }) {
       reportError(error);
     } finally {
       setBusy("");
+    }
+  }
+
+  async function launchPluginTask() {
+    if (!selectedWorker?.ready || !workspaceRoot || launching) return;
+    setLaunching(true);
+    try {
+      const text = buildPluginTaskPrompt(requirement, skillSelection);
+      const prepared = unwrap(await api.prepareAppPluginTask({
+        pluginId: selected?.id,
+        skillIds: skillSelection.map((skill) => skill.id)
+      }));
+      if (!prepared?.attachment?.path) throw new Error("Manager chưa tạo được file skill đính kèm.");
+      const attachments = [prepared.attachment];
+      if (selectedWorker.type === "api") {
+        unwrap(await api.sendWorkerRequest({
+          workerId: selectedWorker.id,
+          task_id: pluginTaskId(),
+          task_kind: "code",
+          scope: "workspace",
+          root: workspaceRoot,
+          workspaceCandidates: [],
+          text,
+          attachments
+        }));
+      } else {
+        const result = unwrap(await api.sendProfileRequest({
+          profileId: selectedWorker.id,
+          conversationId: "",
+          newChat: true,
+          scope: "workspace",
+          projectRoot: workspaceRoot,
+          workspaceCandidates: [],
+          text,
+          attachments
+        })) || {};
+        if (!String(result.conversation_id || "")) throw new Error("Chrome worker chưa trả conversation id cho task plugin.");
+      }
+      setRequirement("");
+      notify?.(`Đã giao ${skillSelection.length} skill cho ${selectedWorker.label}`);
+      onRefresh?.();
+    } catch (error) {
+      reportError(error);
+    } finally {
+      setLaunching(false);
     }
   }
 
@@ -216,6 +322,21 @@ export function AppPluginCenter({ api, notify, onError }) {
                 </div>
               </div>
               <div className="app-plugin-preserve-note"><b>Không xóa repo.</b> Gỡ plugin chỉ bỏ đăng ký khỏi Manager.</div>
+              {skillSelection.length > 0 && (
+                <section className="app-plugin-task-launcher" aria-label="Áp dụng skill cho dự án">
+                  <div className="app-plugin-task-summary">
+                    <div><span>BƯỚC 1 · SKILL ĐÃ CHỌN</span><strong>{skillSelection.length} skill</strong></div>
+                    <p>{skillSelection.map((skill) => skill.name).join(" · ")}</p>
+                    <button type="button" onClick={() => setSkillSelection([])} disabled={launching}>Chọn lại</button>
+                  </div>
+                  <div className="app-plugin-task-fields">
+                    <label><span>Bước 2 · Chọn dự án</span><AppDropdown value={workspaceRoot} options={projects.map((project) => ({ value: project.root, label: project.name, hint: project.root }))} onChange={setWorkspaceRoot} disabled={launching} ariaLabel="Chọn dự án áp dụng skill" searchable={projects.length > 5} placeholder="Chưa có dự án" /></label>
+                    <label><span>Bước 3 · Chọn worker</span><AppDropdown value={workerKey} options={[{ value: "", label: "Chưa có worker rảnh", disabled: true }, ...workers.map((worker) => ({ value: worker.key, label: worker.label, hint: worker.reason, disabled: !worker.ready }))]} onChange={setWorkerKey} disabled={launching} ariaLabel="Chọn worker thực hiện skill" searchable={workers.length > 6} /></label>
+                    <label className="is-wide"><span>Bước 4 · Nhập yêu cầu</span><textarea value={requirement} onChange={(event) => setRequirement(event.target.value)} disabled={launching} placeholder="Ví dụ: redesign trang dashboard, giữ nguyên chức năng và chạy regression test." /></label>
+                  </div>
+                  <div className="app-plugin-task-actions"><small>Worker nhận một gói đính kèm chứa đầy đủ {skillSelection.length} skill trong task mới.</small><button className="button primary" type="button" onClick={() => void launchPluginTask()} disabled={!selectedWorker?.ready || !workspaceRoot || !requirement.trim() || launching}>{launching ? "Đang giao…" : "Giao worker"}</button></div>
+                </section>
+              )}
               {selected.status === "ready" ? (
                 <iframe
                   ref={pluginFrameRef}

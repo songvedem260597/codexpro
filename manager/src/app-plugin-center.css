@@ -47,7 +47,23 @@
 .app-plugin-actions .danger-quiet.is-armed { color: #fff; border-color: #d65261; background: #7a2430; }
 .app-plugin-preserve-note { padding: 7px 16px; color: #8e9aac; border-bottom: 1px solid #252d38; background: #0d1117; font-size: var(--font-micro); }
 .app-plugin-preserve-note b { color: #a8d9bc; }
-.app-plugin-frame { width: 100%; min-height: 0; flex: 1; border: 0; background: #fff; }
+.app-plugin-task-launcher { display: grid; gap: 12px; padding: 14px 16px; border-bottom: 1px solid #3f4932; background: linear-gradient(135deg, #121a16, #10141b); }
+.app-plugin-task-summary { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; }
+.app-plugin-task-summary > div { display: flex; align-items: center; gap: 8px; }
+.app-plugin-task-summary span { color: #7f9b89; font-size: var(--font-micro); font-weight: var(--weight-semibold); letter-spacing: .08em; }
+.app-plugin-task-summary strong { padding: 2px 7px; color: #87e5ab; border: 1px solid #326345; border-radius: 999px; background: #10271a; font-size: var(--font-micro); }
+.app-plugin-task-summary p { min-width: 0; margin: 0; overflow: hidden; color: #dce6df; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-description); }
+.app-plugin-task-summary > button { grid-column: 2; grid-row: 1 / span 2; padding: 7px 10px; color: #aeb9c9; border: 1px solid #394352; border-radius: var(--radius-control); background: #151b24; }
+.app-plugin-task-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.app-plugin-task-fields label { min-width: 0; display: grid; gap: 6px; }
+.app-plugin-task-fields label > span { color: #9aa7b8; font-size: var(--font-micro); font-weight: var(--weight-semibold); }
+.app-plugin-task-fields label.is-wide { grid-column: 1 / -1; }
+.app-plugin-task-fields textarea { min-height: 84px; resize: vertical; padding: 10px 12px; color: #edf1f6; border: 1px solid #354052; border-radius: var(--radius-control); outline: 0; background: #0d1117; font: inherit; line-height: 1.5; }
+.app-plugin-task-fields textarea:focus { border-color: #5f82bf; box-shadow: 0 0 0 3px #4772b31f; }
+.app-plugin-task-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.app-plugin-task-actions small { color: #7f8b9d; font-size: var(--font-micro); }
+.app-plugin-task-actions .button { min-width: 132px; }
+.app-plugin-frame { width: 100%; min-height: 560px; flex: 1; border: 0; background: #fff; }
 .app-plugin-stage-empty, .app-plugin-broken-panel { min-height: 420px; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 32px; text-align: center; }
 .app-plugin-stage-empty > span { color: #6d8cd7; font-size: 52px; line-height: 1; }
 .app-plugin-stage-empty strong, .app-plugin-broken-panel strong { color: #e3e8ef; font-size: var(--font-title); }
@@ -68,4 +84,7 @@
   .app-plugin-catalog-card > .button { grid-column: 1 / -1; width: 100%; }
   .app-plugin-list { grid-template-columns: 1fr; }
   .app-plugin-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .app-plugin-task-fields { grid-template-columns: 1fr; }
+  .app-plugin-task-fields label.is-wide { grid-column: auto; }
+  .app-plugin-task-actions { align-items: stretch; flex-direction: column; }
 }
