@@ -26,7 +26,7 @@ import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./ch
 import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shouldRolloverConversation } from "./conversation-message-limit.js";
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
-import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
+import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
 import { mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList } from "./ui-performance.js";
 import { createApiWorkerDraft, normalizeApiWorkerModels, switchApiWorkerProvider, validateApiWorkerDraft } from "./api-worker-form.js";
 import { AppDropdown } from "./app-dropdown.jsx";
@@ -448,7 +448,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.95";
+const WORKER_EXTENSION_VERSION = "0.5.96";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -1383,15 +1383,32 @@ function App() {
       const candidate = longRunningChatWatchdogCandidate(profile, jobs);
       if (!candidate || operationsLongTaskAudits.current.has(candidate.attemptKey)) continue;
       operationsLongTaskAudits.current.add(candidate.attemptKey);
-      logRendererDiagnostic(api, "warn", "chat", "Task ChatGPT chạy quá 30 phút; bắt đầu kiểm tra tab một lần", {
-        action: "long-task-watchdog-start",
+      const recoveryIncidentFingerprint = candidate.connectionInterrupted
+        ? `long-task-connection-interrupted:${candidate.profileId}:${candidate.conversationId}`
+        : `long-task-${candidate.failureReason || "health"}:${candidate.profileId}:${candidate.conversationId}`;
+      logRendererDiagnostic(api, candidate.hardFailure ? "error" : "info", "chat", candidate.connectionInterrupted
+        ? "Phát hiện Connection interrupted ở task chạy lâu; bắt đầu phục hồi đúng một lần"
+        : candidate.hardFailure
+          ? "Phát hiện task chạy lâu có lỗi; bắt đầu phục hồi đúng một lần"
+          : "Task ChatGPT chạy quá 30 phút; kiểm tra sức khỏe không reload tab đang hoạt động", {
+        action: candidate.connectionInterrupted ? "long-task-watchdog-connection-interrupted" : "long-task-watchdog-start",
         profile_id: candidate.profileId,
         task_id: candidate.taskId,
+        task_title: candidate.title,
         conversation_id: candidate.conversationId,
         target_id: candidate.targetId,
         started_at: candidate.startedAt,
         age_ms: candidate.ageMs,
-        attempt_key: candidate.attemptKey
+        attempt_key: candidate.attemptKey,
+        incident_fingerprint: recoveryIncidentFingerprint,
+        watchdog_phase: candidate.phase,
+        hard_failure: candidate.hardFailure,
+        failure_reason: candidate.failureReason,
+        network_state: candidate.networkState,
+        network_error: candidate.networkError,
+        connection_interrupted: candidate.connectionInterrupted,
+        message_delivery_timed_out: candidate.messageDeliveryTimedOut,
+        renderer_unresponsive: candidate.rendererUnresponsive
       });
       void api.auditLongRunningProfileChat({
         profileId: candidate.profileId,
@@ -1400,19 +1417,123 @@ function App() {
         targetId: candidate.targetId,
         startedAt: candidate.startedAt,
         attemptKey: candidate.attemptKey
-      }).then((result) => {
-        if (result?.already_attempted) {
+      }).then(async (result) => {
+        if (result?.already_attempted && result?.status !== "hung") {
           logRendererDiagnostic(api, "info", "chat", "Bỏ qua audit task chạy lâu đã thực hiện trước đó", { action: "long-task-watchdog-deduplicated", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, status: String(result?.status || "") });
           return;
         }
+        if (result?.status === "active_without_reload" || result?.status === "completed_without_reload") {
+          const completed = result.status === "completed_without_reload";
+          logRendererDiagnostic(api, "info", "chat", completed ? "Task chạy lâu đã hoàn tất; watchdog không reload tab" : "Task chạy lâu vẫn hoạt động; watchdog không reload tab", {
+            action: completed ? "long-task-watchdog-completed-no-reload" : "long-task-watchdog-active-no-reload",
+            profile_id: candidate.profileId,
+            task_id: candidate.taskId,
+            conversation_id: candidate.conversationId,
+            target_id: String(result?.recovery_tab_id || result?.target_id || candidate.targetId),
+            attempt_key: candidate.attemptKey,
+            busy: Boolean(result?.preflight?.busy),
+            response_ready: Boolean(result?.preflight?.response_ready),
+            network_state: String(result?.preflight?.network_state || candidate.networkState || ""),
+            network_error: String(result?.preflight?.network_error || ""),
+            reloaded: false,
+            retry_allowed: true
+          });
+          return;
+        }
+        if (candidate.hardFailure && result?.status === "responsive_after_reload") {
+          const recoveryTaskId = /^cpt_[a-f0-9]{24}$/.test(candidate.taskId) ? candidate.taskId : "";
+          if (!recoveryTaskId) throw new Error("Không thể gửi ‘tiếp tục’ vì task bị gián đoạn không có Task ID hợp lệ.");
+          const targetTab = (profile.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(result?.recovery_tab_id || candidate.targetId));
+          const snapshot = await recoveryContinuationSnapshot(profile, candidate.conversationId, targetTab);
+          const resumeProjectRoot = snapshot?.projectRoot || projectRootForProfile(profile);
+          const resumeAllAllowed = snapshot?.repoTaskScope === "all_allowed" || resumeProjectRoot === ALL_ALLOWED_WORKSPACES;
+          logRendererDiagnostic(api, "warn", "chat", "Tab đã phản hồi sau reload; gửi ‘tiếp tục’ đúng một lần trong conversation cũ", {
+            action: "long-task-watchdog-resume-start",
+            profile_id: candidate.profileId,
+            task_id: recoveryTaskId,
+            conversation_id: candidate.conversationId,
+            target_id: String(result?.recovery_tab_id || candidate.targetId),
+            attempt_key: candidate.attemptKey,
+            recovery_incident_fingerprint: recoveryIncidentFingerprint,
+            reload_probe: result?.reload_probe || null,
+            resume_text: "tiếp tục",
+            retry_allowed: false
+          });
+          const resumed = await api.sendProfileRequest({
+            profileId: candidate.profileId,
+            conversationId: candidate.conversationId,
+            newChat: false,
+            scope: resumeAllAllowed ? "all_allowed" : "workspace",
+            projectRoot: resumeAllAllowed ? "" : resumeProjectRoot,
+            workspaceCandidates: resumeAllAllowed ? projects.map((project) => project.root) : [],
+            text: "tiếp tục",
+            attachments: [],
+            toolRetry: false,
+            previousTaskId: recoveryTaskId,
+            oneShotRecovery: true,
+            user_report_logging: false
+          });
+          if (String(resumed?.submission_state || "") === "uncertain") throw new Error("Lệnh ‘tiếp tục’ có trạng thái gửi không chắc chắn; watchdog đã dừng để tránh gửi trùng.");
+          if (String(resumed?.repo_task_id || "") !== recoveryTaskId) throw new Error("Task ID đổi khi gửi ‘tiếp tục’; watchdog đã dừng để tránh duplicate.");
+          requestTargetsRef.current = { ...requestTargetsRef.current, [candidate.profileId]: candidate.conversationId };
+          setRequestTargets((current) => ({ ...current, [candidate.profileId]: candidate.conversationId }));
+          setRequestResponses((current) => {
+            const previous = current[candidate.profileId] || {};
+            return {
+              ...current,
+              [candidate.profileId]: {
+                ...previous,
+                visible: true,
+                loading: true,
+                error: "",
+                conversationId: candidate.conversationId,
+                busy: true,
+                submissionState: "submitted",
+                sendUncertain: false,
+                networkState: String(resumed?.generation_state || resumed?.network_state || "generating"),
+                networkError: String(resumed?.network_error || ""),
+                repoTaskId: recoveryTaskId,
+                repoTaskDispatchedAt: String(resumed?.repo_task_dispatched_at || ""),
+                repoTaskScope: String(resumed?.repo_task_scope || (resumeAllAllowed ? "all_allowed" : "workspace")),
+                repoTaskStatus: "waiting",
+                repoTaskVerified: false,
+                repoTaskRequest: snapshot?.repoTaskRequest || previous.repoTaskRequest || null
+              }
+            };
+          });
+          logRendererDiagnostic(api, "warn", "chat", "Đã gửi ‘tiếp tục’ trong conversation cũ sau Connection interrupted", {
+            action: "long-task-watchdog-resume-done",
+            profile_id: candidate.profileId,
+            task_id: recoveryTaskId,
+            conversation_id: candidate.conversationId,
+            target_id: String(resumed?.target_id || result?.recovery_tab_id || candidate.targetId),
+            attempt_key: candidate.attemptKey,
+            recovery_incident_fingerprint: recoveryIncidentFingerprint,
+            request_id: String(resumed?.request_id || resumed?.generation_request_id || ""),
+            submission_state: String(resumed?.submission_state || ""),
+            network_state: String(resumed?.generation_state || resumed?.network_state || ""),
+            network_error: String(resumed?.network_error || ""),
+            task_id_preserved: true,
+            retry_allowed: false
+          });
+          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã tiếp tục task", body: `“${candidate.title}” đã được reload và gửi “tiếp tục” trong chat cũ.` });
+          return;
+        }
         if (result?.renderer_unresponsive || result?.status === "hung") {
-          logRendererDiagnostic(api, "error", "chat", "Tab task chạy lâu bị treo sau một lần reload và một lần thay tab; đã dừng retry", {
+          logRendererDiagnostic(api, "error", "chat", "Tab task chạy lâu vẫn bị treo sau một lần reload; đã dừng phục hồi", {
             action: "long-task-watchdog-hung",
             profile_id: candidate.profileId,
             task_id: candidate.taskId,
             conversation_id: candidate.conversationId,
             target_id: String(result?.recovery_tab_id || result?.target_id || candidate.targetId),
             attempt_key: candidate.attemptKey,
+            recovery_incident_fingerprint: recoveryIncidentFingerprint,
+            failure_reason: candidate.failureReason,
+            network_state: candidate.networkState,
+            network_error: candidate.networkError,
+            connection_interrupted: candidate.connectionInterrupted,
+            preflight_probe: result?.preflight || null,
+            reload_probe: result?.reload_probe || null,
             retry_allowed: false
           });
           requestTargetsRef.current = { ...requestTargetsRef.current, [candidate.profileId]: NEW_CHAT_TARGET };
@@ -1427,15 +1548,15 @@ function App() {
               conversation_tabs: (item.conversation_tabs || []).map((tab) => String(tab.url || "").includes(`/c/${candidate.conversationId}`) ? { ...tab, busy: false, settling: false, renderer_unresponsive: true, long_task_watchdog_hung: true, renderer_error: "LONG_TASK_WATCHDOG_UNRESPONSIVE", activity_text: "Tab bị treo · watchdog đã dừng retry" } : tab)
             })
           } : current);
-          setRequestSendErrors((current) => ({ ...current, [candidate.profileId]: "Tab cũ bị treo sau kiểm tra một lần. Task tiếp theo sẽ mở conversation mới." }));
-          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Tab task bị treo", body: `“${candidate.title}” không phản hồi sau reload và thay tab. Task tiếp theo sẽ dùng chat mới.` });
+          setRequestSendErrors((current) => ({ ...current, [candidate.profileId]: "Tab cũ vẫn bị treo sau một lần reload. Watchdog đã dừng và sẽ không retry thêm." }));
+          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Tab task bị treo", body: `“${candidate.title}” không phản hồi sau một lần reload. Watchdog đã dừng, không retry thêm.` });
           return;
         }
-        const statusLabel = result?.status === "responsive_after_replace" ? "tab thay thế đã phản hồi" : "tab đã phản hồi sau reload";
-        logRendererDiagnostic(api, "info", "chat", `Task chạy lâu đã được kiểm tra: ${statusLabel}`, { action: "long-task-watchdog-responsive", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, status: String(result?.status || ""), busy: Boolean(result?.reload_probe?.busy || result?.replacement_probe?.busy), response_ready: Boolean(result?.reload_probe?.response_ready || result?.replacement_probe?.response_ready), retry_allowed: false });
+        const statusLabel = "tab đã phản hồi sau reload";
+        logRendererDiagnostic(api, "info", "chat", `Task chạy lâu đã được kiểm tra: ${statusLabel}`, { action: "long-task-watchdog-responsive", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, status: String(result?.status || ""), busy: Boolean(result?.reload_probe?.busy), response_ready: Boolean(result?.reload_probe?.response_ready), retry_allowed: false });
         if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã kiểm tra task chạy lâu", body: `“${candidate.title}” · ${statusLabel}. Watchdog sẽ không reload lại task này.` });
       }).catch((err) => {
-        logRendererDiagnostic(api, "error", "chat", `Không hoàn tất được audit task chạy lâu: ${err?.message || String(err)}`, { action: "long-task-watchdog-failed", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, retry_allowed: false, error: err });
+        logRendererDiagnostic(api, "error", "chat", `Không hoàn tất được phục hồi task chạy lâu: ${err?.message || String(err)}`, { action: "long-task-watchdog-failed", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, target_id: candidate.targetId, attempt_key: candidate.attemptKey, recovery_incident_fingerprint: recoveryIncidentFingerprint, failure_reason: candidate.failureReason, network_state: candidate.networkState, network_error: candidate.networkError, connection_interrupted: candidate.connectionInterrupted, retry_allowed: false, error: err });
         if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Không kiểm tra được task chạy lâu", body: `“${candidate.title}” · đã dừng thử lại tự động để tránh reload liên tục.` });
       }).finally(() => {
         window.setTimeout(() => void refresh(false), 1200);
@@ -1446,10 +1567,12 @@ function App() {
   useEffect(() => {
     if (!managerSettings.autoRecovery) return;
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
     for (const profile of profiles) {
       if (!profile?.connected) continue;
+      if (longRunningChatWatchdogCandidate(profile, jobs)) continue;
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-      const targetTab = tabs.find((tab) => tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error);
+      const targetTab = tabs.find((tab) => !tab?.long_task_watchdog_hung && (tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error));
       if (!targetTab?.id) continue;
       const conversationId = String(targetTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
       if (!conversationId) continue;
@@ -1460,7 +1583,7 @@ function App() {
       operationsRecoveryTimes.current.set(key, Date.now());
       void recoverProfileTab(profile, { targetTab, silent: true, automatic: true, hardFailure });
     }
-  }, [managerSettings.autoRecovery, status?.browserProfiles]);
+  }, [managerSettings.autoRecovery, status?.browserProfiles, status?.workerJobs]);
 
   useEffect(() => {
     if (!managerSettings.autoUpdateWorkers || busy || !status?.local?.ok || status?.workerSnapshotStale) return;
@@ -4199,7 +4322,8 @@ function App() {
               const working = profile.connected && profile.activity === "working";
               const profileTabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
               const liveTab = profileTabs.find((tab) => tab.active) || profileTabs.find((tab) => tab.busy || tab.settling) || profileTabs[0];
-              const rendererUnresponsive = Boolean(profile.connected && (liveTab?.renderer_unresponsive || liveTab?.message_delivery_timed_out || String(liveTab?.network_state || "").toLowerCase() === "failed" || liveTab?.network_error));
+              const tabFailureState = profileTabFailureState({ connected: profile.connected, working, settling, tab: liveTab });
+              const rendererUnresponsive = tabFailureState.rendererUnresponsive;
               const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
               const connectorInstalled = Boolean(profile.connector_installed && profile.connector_profile_bound !== false);
               const connectorUpdateRequired = Boolean(profile.connector_update_required);
@@ -4218,7 +4342,7 @@ function App() {
                 rendererError: String(liveTab?.renderer_error || ""),
                 connectionInterrupted: Boolean(liveTab?.connection_interrupted)
               });
-              const chromeAction = profileChromeActionState({ profile, busy, rendererUnresponsive });
+              const chromeAction = profileChromeActionState({ profile, busy, rendererUnresponsive: tabFailureState.recoveryRequired });
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
               const profileProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const profileRepoLabel = String(profile.current_workspace_repo || profileProject?.githubRepo || profileProject?.name || "").trim();

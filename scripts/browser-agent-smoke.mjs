@@ -36,9 +36,24 @@ assert.deepEqual(longRunningChatWatchdogCandidate(longTaskProfile, longTaskJobs,
   conversationId: "12345678-abcd-1234-abcd-1234567890ab",
   targetId: 77,
   startedAt: "2026-09-01T00:00:00.000Z",
-  attemptKey: "chrome-long-task:cpt_1234567890abcdef12345678:2026-09-01T00:00:00.000Z",
+  phase: "health",
+  hardFailure: false,
+  failureReason: "",
+  networkState: "generating",
+  networkError: "",
+  connectionInterrupted: false,
+  messageDeliveryTimedOut: false,
+  rendererUnresponsive: false,
+  attemptKey: "chrome-long-task:cpt_1234567890abcdef12345678:2026-09-01T00:00:00.000Z:health",
   ageMs: LONG_TASK_WATCHDOG_AFTER_MS
 }, "a 30-minute running task must produce one stable audit identity");
+const interruptedLongTask = longRunningChatWatchdogCandidate({
+  ...longTaskProfile,
+  conversation_tabs: [{ ...longTaskProfile.conversation_tabs[0], busy: false, network_state: "failed", network_error: "net::ERR_FAILED", connection_interrupted: true }]
+}, longTaskJobs, Date.parse("2026-09-01T00:40:00.000Z"));
+assert.equal(interruptedLongTask?.phase, "recovery", "a later interrupted transport must get a distinct one-shot recovery phase");
+assert.equal(interruptedLongTask?.hardFailure, true, "an interrupted long task must require recovery even when the renderer still answers");
+assert.match(interruptedLongTask?.attemptKey || "", /:recovery$/, "the recovery attempt must not be deduplicated by the earlier healthy 30-minute check");
 assert.equal(longRunningChatWatchdogCandidate({ ...longTaskProfile, activity: "idle" }, [{ ...longTaskJobs[0], status: "completed" }], Date.parse("2026-09-01T01:00:00.000Z")), null, "a completed task must never be reloaded by the long-task watchdog");
 assert.equal(longRunningChatWatchdogCandidate({ ...longTaskProfile, conversation_tabs: [{ ...longTaskProfile.conversation_tabs[0], long_task_watchdog_hung: true }] }, longTaskJobs, Date.parse("2026-09-01T01:00:00.000Z")), null, "a watchdog-hung conversation must remain terminal and never be audited again");
 
@@ -450,10 +465,10 @@ assert.match(worker, /const heartbeat=setInterval\([\s\S]*?tabInventory\(\)[\s\S
 assert.match(worker, /chrome\.tabs\.onRemoved\.addListener\([\s\S]*?scheduleRealtimeProfilePush\(0\)/, "closing the last ChatGPT tab must immediately clear the Manager profile snapshot");
 assert.match(worker, /if\(action==='recover_chat_tab'\)[\s\S]*?WORKER_BUSY:[\s\S]*?replaceUnresponsiveChatTab/, "manual tab recovery must refuse active generations and replace only an idle renderer");
 const longTaskAuditSource = worker.slice(worker.indexOf("if(action==='audit_long_running_chat')"), worker.indexOf("if(action==='recover_chat_tab')"));
-assert.match(longTaskAuditSource, /claimLongTaskAudit[\s\S]*?chrome\.tabs\.reload\(tab\.id\)[\s\S]*?waitForLongTaskRenderer[\s\S]*?replaceUnresponsiveChatTab\(tab,`https:\/\/chatgpt\.com\/c\/\$\{conversationId\}`[\s\S]*?waitForLongTaskRenderer/, "the 30-minute audit must reload once, then replace the exact conversation tab once only when the renderer stays unresponsive");
+assert.match(longTaskAuditSource, /claimLongTaskAudit[\s\S]*?preflight[\s\S]*?chrome\.tabs\.reload\(tab\.id\)[\s\S]*?waitForLongTaskRenderer[\s\S]*?status=reloadProbe\.responsive\?'responsive_after_reload':'hung'/, "the 30-minute audit must reload exactly once and then stop when the renderer stays unresponsive");
 assert.equal((longTaskAuditSource.match(/chrome\.tabs\.reload\(/g) || []).length, 1, "a long-task audit must contain exactly one tab reload");
-assert.equal((longTaskAuditSource.match(/replaceUnresponsiveChatTab\(/g) || []).length, 1, "a long-task audit must contain exactly one replacement attempt");
-assert.match(longTaskAuditSource, /already_attempted:true[\s\S]*?status:'hung'[\s\S]*?retry_allowed:false/, "repeated audits must be deduplicated and a twice-unresponsive tab must be marked hung with retries disabled");
+assert.equal((longTaskAuditSource.match(/replaceUnresponsiveChatTab\(/g) || []).length, 0, "a watchdog-detected hung renderer must stop instead of opening replacement tabs");
+assert.match(longTaskAuditSource, /already_attempted:true[\s\S]*?status:'hung'[\s\S]*?retry_allowed:false/, "repeated audits must be deduplicated and an unresponsive tab must be marked hung with retries disabled");
 assert.match(worker, /LONG_TASK_AUDIT_STORAGE_KEY[\s\S]*?chrome\.storage\.local/, "the one-shot audit marker must survive extension and Manager restarts");
 assert.match(worker, /long_task_watchdog_hung:Boolean\(hungAudit\)/, "profile snapshots must retain the watchdog's hung marker");
 assert.match(worker, /recentConversationCache=\{at:0,items:\[\]\}[\s\S]*?long_task_watchdog_hung:Boolean\(hungAudit\)/, "hung conversation markers must invalidate and repopulate the recent-conversation cache");
@@ -644,6 +659,17 @@ assert.match(managerUi, /tab\.connection_interrupted[\s\S]*?connectionRecoveryRe
 assert.match(worker, /connection_interrupted:Boolean\(domActivity\.connection_interrupted\)/, "profile status must expose interrupted ChatGPT renderers to Manager");
 assert.match(worker, /const reloadAllowed=shouldReloadChatRecovery\([\s\S]*?if\(stale&&reloadAllowed\)[\s\S]*?chrome\.tabs\.reload\(tab\.id\)/, "response reload must pass through the guarded recovery decision");
 assert.match(worker, /if\(networkBusy\)return false/, "active generation or tool traffic must block an early response reload");
+assert.match(longTaskAuditSource, /preflight[\s\S]*?active_without_reload[\s\S]*?chrome\.tabs\.reload/, "the 30-minute watchdog must probe a healthy active task without reloading it");
+assert.match(worker, /waitForLongTaskRenderer[\s\S]*?network_state==='failed'[\s\S]*?connection_interrupted/, "a living DOM with an interrupted or failed transport must not count as recovered");
+assert.match(worker, /rendererHealthy=Boolean\(\(activity\.available\|\|canonical\.ok\|\|networkState\.busy\)&&!hardFailure\)/, "live generation network traffic must prevent a destructive reload even when DOM and canonical probes are temporarily unavailable");
+assert.match(managerUi, /responsive_after_reload[\s\S]*?text: "tiếp tục"[\s\S]*?previousTaskId: recoveryTaskId[\s\S]*?long-task-watchdog-resume-done/, "an interrupted task must reload once and send one continuation in the original conversation while preserving its Task ID");
+assert.match(managerUi, /text: "tiếp tục"[\s\S]*?oneShotRecovery: true/, "the synthetic continuation send must disable the generic send path's renderer replacement retry");
+assert.match(managerMain, /action: "send_chat_request"[\s\S]*?one_shot_recovery: payload\?\.oneShotRecovery === true/, "Manager must forward the one-shot recovery boundary to browser_control");
+assert.match(server, /one_shot_recovery: z\.boolean\(\)\.optional\(\)[\s\S]*?one_shot_recovery: args\.one_shot_recovery/, "browser_control must preserve the one-shot recovery flag through its schema and extension bridge");
+assert.match(worker, /const oneShotRecovery=Boolean\(args\.one_shot_recovery\)[\s\S]*?for\(let prepareAttempt=0;prepareAttempt<\(oneShotRecovery\?1:2\);prepareAttempt\+=1\)/, "one-shot continuation must stop after the first renderer preparation failure");
+assert.match(managerUi, /long-task-watchdog-hung[\s\S]*?long_task_watchdog_hung: true[\s\S]*?Watchdog đã dừng, không retry thêm/, "a renderer that stays hung after reload must stop and warn instead of retrying or opening a tab");
+assert.match(managerUi, /if \(!managerSettings\.autoRecovery\) return;[\s\S]*?longRunningChatWatchdogCandidate\(profile, jobs\)[\s\S]*?continue;/, "generic auto-recovery must not race the one-shot watchdog for tasks running over 30 minutes");
+assert.match(managerMain, /ChatGPT báo Connection interrupted[\s\S]*?incident_fingerprint: `chat-connection-interrupted:/, "Connection interrupted transitions must be persisted with a repeat-count fingerprint");
 assert.match(worker, /dom_reload_deferred=true/, "unsafe reload attempts must keep the checkpoint and wait for a later poll");
 assert.match(worker, /mergeChatRecoveryResponse\(recoveryCheckpoint,domResult\)/, "a reloaded response must merge into the pre-reload checkpoint");
 assert.match(worker, /!rendererRefreshed\|\|domResult\.connection_interrupted[\s\S]*?replaceUnresponsiveChatTab\(tab,`https:\/\/chatgpt\.com\/c\/\$\{conversationId\}`\)/, "a chat that remains interrupted after reload must be replaced at the same conversation URL");
@@ -728,7 +754,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.95");
+assert.equal(manifest.version, "0.5.96");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");

@@ -1678,7 +1678,8 @@ async function reconcileChatNetworkCompletion(tabId,conversationId,source='canon
   const current=chatNetworkStateByTab.get(tabId);
   if(!current)return false;
   const trackerTimeoutFailure=current.state==='failed'&&/CDP generation tracker exceeded maximum lifetime/i.test(String(current.error||''));
-  if(current.state!=='generating'&&!trackerTimeoutFailure)return false;
+  const recoverableTransportFailure=current.state==='failed'&&/(?:net::ERR_(?:FAILED|ABORTED)|connection interrupted)/i.test(String(current.error||''));
+  if(current.state!=='generating'&&!trackerTimeoutFailure&&!recoverableTransportFailure)return false;
   const currentConversation=String(current.conversation_id||'');
   if(conversationId&&currentConversation&&currentConversation!==conversationId)return false;
   const now=Date.now();
@@ -1891,18 +1892,32 @@ function hasBrowserLocator(args={}) {
 async function waitForLongTaskRenderer(tabId,conversationId,timeoutMs=12000) {
   const deadline=Date.now()+Math.max(1000,Number(timeoutMs)||12000);
   let lastError='';
+  let lastNetworkState={busy:false,network_state:'idle',network_error:''};
   while(Date.now()<deadline){
     try{
       const tab=await chrome.tabs.get(tabId);
       if(conversationIdFromUrl(tab.url)!==conversationId)throw new Error('Conversation sau reload không khớp task đang kiểm tra.');
       chatDomActivityByTab.delete(tabId);
       const activity=await chatDomActivityState(tabId,conversationId,{fresh:true,maxAgeMs:0});
-      if(activity.available)return {responsive:true,busy:Boolean(activity.busy),response_ready:Boolean(activity.response_ready),activity_text:String(activity.activity_text||''),target_id:tabId,conversation_id:conversationId};
+      let networkState=await chatRequestState(tabId,conversationId);
+      lastNetworkState=networkState;
+      let canonical={ok:false,busy:false,response_ready:false,error:''};
+      try{canonical=await probeCanonicalActivity(tabId,conversationId,true);}catch(error){canonical={ok:false,busy:false,response_ready:false,error:String(error?.message||error)};}
+      const canonicalBusy=Boolean(canonical.ok&&canonical.busy);
+      const canonicalReady=Boolean(canonical.ok&&canonical.response_ready&&!canonical.busy);
+      if((activity.response_ready&&!activity.busy||canonicalReady)&&networkState.network_state==='failed'){
+        await reconcileChatNetworkCompletion(tabId,conversationId,canonicalReady?'long_task_canonical':'long_task_dom');
+        networkState=await chatRequestState(tabId,conversationId);
+        lastNetworkState=networkState;
+      }
+      const hardFailure=Boolean(activity.connection_interrupted||activity.message_delivery_timed_out||networkState.network_state==='failed'||networkState.network_error);
+      const rendererHealthy=Boolean((activity.available||canonical.ok||networkState.busy)&&!hardFailure);
+      if(activity.available||canonical.ok||networkState.busy||hardFailure)return {responsive:rendererHealthy,renderer_responsive:Boolean(activity.available),hard_failure:hardFailure,busy:Boolean(activity.busy||canonicalBusy||networkState.busy),response_ready:Boolean(activity.response_ready||canonicalReady),canonical_busy:canonicalBusy,canonical_response_ready:canonicalReady,connection_interrupted:Boolean(activity.connection_interrupted),message_delivery_timed_out:Boolean(activity.message_delivery_timed_out),network_busy:Boolean(networkState.busy),network_state:String(networkState.network_state||'idle'),network_error:String(networkState.network_error||''),activity_text:String(activity.activity_text||''),target_id:tabId,conversation_id:conversationId,error:hardFailure?String(networkState.network_error||activity.activity_text||'ChatGPT connection interrupted.'):''};
       lastError=String(activity.error||'Chrome renderer không phản hồi.');
     }catch(error){lastError=String(error?.message||error);}
     await new Promise(resolve=>setTimeout(resolve,600));
   }
-  return {responsive:false,busy:false,response_ready:false,activity_text:'',target_id:tabId,conversation_id:conversationId,error:lastError||'Chrome renderer không phản hồi sau thời gian chờ.'};
+  return {responsive:false,renderer_responsive:false,hard_failure:true,busy:Boolean(lastNetworkState.busy),response_ready:false,canonical_busy:false,canonical_response_ready:false,connection_interrupted:false,message_delivery_timed_out:false,network_busy:Boolean(lastNetworkState.busy),network_state:String(lastNetworkState.network_state||'idle'),network_error:String(lastNetworkState.network_error||''),activity_text:'',target_id:tabId,conversation_id:conversationId,error:lastError||lastNetworkState.network_error||'Chrome renderer không phản hồi sau thời gian chờ.'};
 }
 
 async function execute(command) {
@@ -1944,26 +1959,27 @@ async function execute(command) {
       const record=await finishLongTaskAudit(claim.key,{status:'hung',attempt_key:attemptKey,conversation_id:conversationId,target_id:Number.isInteger(requestedId)?requestedId:0,retry_allowed:false,error:'Không còn tab ChatGPT của task chạy lâu.'});
       return {action,ok:true,renderer_unresponsive:true,retry_allowed:false,...record};
     }
+    const preflight=await waitForLongTaskRenderer(tab.id,conversationId,4000);
+    if(preflight.responsive&&!preflight.hard_failure){
+      const status=preflight.response_ready?'completed_without_reload':'active_without_reload';
+      const record=await finishLongTaskAudit(claim.key,{status,attempt_key:attemptKey,conversation_id:conversationId,target_id:tab.id,recovery_tab_id:tab.id,retry_allowed:true,preflight});
+      scheduleRealtimeProfilePush(0);
+      return {action,ok:true,renderer_unresponsive:false,retry_allowed:true,...record};
+    }
     let reloadProbe={responsive:false,error:''};
     try{
+      await ensureChatNetworkStateLoaded();
+      const failedState=chatNetworkStateByTab.get(tab.id);
+      if(failedState?.state==='failed'){
+        chatNetworkStateByTab.delete(tab.id);
+        await persistChatNetworkState();
+      }
       await chrome.tabs.reload(tab.id);
       await waitForTab(tab.id,45000);
       reloadProbe=await waitForLongTaskRenderer(tab.id,conversationId,12000);
     }catch(error){reloadProbe={responsive:false,error:String(error?.message||error),target_id:tab.id,conversation_id:conversationId};}
-    if(reloadProbe.responsive){
-      const record=await finishLongTaskAudit(claim.key,{status:'responsive_after_reload',attempt_key:attemptKey,conversation_id:conversationId,target_id:tab.id,recovery_tab_id:tab.id,retry_allowed:false,reload_probe:reloadProbe});
-      scheduleRealtimeProfilePush(0);
-      return {action,ok:true,renderer_unresponsive:false,retry_allowed:false,...record};
-    }
-    let replacement=null;
-    let replacementProbe={responsive:false,error:''};
-    try{
-      replacement=await replaceUnresponsiveChatTab(tab,`https://chatgpt.com/c/${conversationId}`,45000,{carryState:true});
-      tab=replacement.tab;
-      replacementProbe=await waitForLongTaskRenderer(tab.id,conversationId,12000);
-    }catch(error){replacementProbe={responsive:false,error:String(error?.message||error),target_id:Number(replacement?.tab?.id||tab.id),conversation_id:conversationId};}
-    const status=replacementProbe.responsive?'responsive_after_replace':'hung';
-    const record=await finishLongTaskAudit(claim.key,{status,attempt_key:attemptKey,conversation_id:conversationId,target_id:Number(requestedId)||Number(tab.id),replaced_tab_id:Number(replacement?.replaced_tab_id)||0,recovery_tab_id:Number(replacement?.recovery_tab_id||tab.id)||0,retry_allowed:false,reload_probe:reloadProbe,replacement_probe:replacementProbe,error:replacementProbe.responsive?'':String(replacementProbe.error||'Tab thay thế vẫn không phản hồi.')});
+    const status=reloadProbe.responsive?'responsive_after_reload':'hung';
+    const record=await finishLongTaskAudit(claim.key,{status,attempt_key:attemptKey,conversation_id:conversationId,target_id:Number(requestedId)||Number(tab.id),recovery_tab_id:Number(tab.id)||0,retry_allowed:false,reload_probe:reloadProbe,error:reloadProbe.responsive?'':String(reloadProbe.error||'Tab vẫn không phản hồi sau một lần reload.')});
     scheduleRealtimeProfilePush(0);
     return {action,ok:true,renderer_unresponsive:status==='hung',retry_allowed:false,...record};
   }
@@ -2025,6 +2041,7 @@ async function execute(command) {
     const text=String(args.text||'').trim();
     const attachments=Array.isArray(args.attachments)?args.attachments.slice(0,4).map(file=>({name:String(file?.name||'').trim().slice(0,255),mime_type:String(file?.mime_type||'application/octet-stream').trim().slice(0,160),data_base64:String(file?.data_base64||'')})):[];
     const newChat=Boolean(args.new_chat);
+    const oneShotRecovery=Boolean(args.one_shot_recovery);
     if(!text&&!attachments.length)throw new Error('Yêu cầu và file đính kèm không được cùng để trống.');
     if(text.length>20000)throw new Error('Yêu cầu dài quá 20.000 ký tự.');
     if(attachments.some(file=>!file.name||!file.data_base64))throw new Error('File đính kèm không hợp lệ.');
@@ -2136,7 +2153,7 @@ async function execute(command) {
     let injected;
     let preparationRecovery={prepare_attempts:1,renderer_reloaded:false,renderer_replaced:false,prepare_waited:false};
     const prepareErrors=[];
-    for(let prepareAttempt=0;prepareAttempt<2;prepareAttempt+=1){
+    for(let prepareAttempt=0;prepareAttempt<(oneShotRecovery?1:2);prepareAttempt+=1){
       try{
         const currentPrepareTimeoutMs=Math.max(1000,Math.min(prepareTimeoutMs,remainingCommandMs()-1500));
         deadlineAt=Math.min(Date.now()+currentPrepareTimeoutMs-500,commandDeadlineAt-1000);
@@ -2158,7 +2175,7 @@ async function execute(command) {
         try{if(remainingCommandMs()>500)networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100,Math.max(100,Math.min(5000,remainingCommandMs()-500)));}catch{}
         if(networkAck)return await resultForNetwork(networkAck,{dom_timeout:true,dom_error:prepareError,prepare_attempts:prepareAttempt+1});
         if(!hardRendererHang)await cleanupAttempt();
-        if(prepareAttempt===0){
+        if(prepareAttempt===0&&!oneShotRecovery){
           try{
             if(hardRendererHang){
               const hungTabId=tab.id;

@@ -272,7 +272,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.95";
+const WORKER_EXTENSION_VERSION = "0.5.96";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -1148,7 +1148,11 @@ function recordBrowserProfileTransitions(profiles, checkedAt) {
         diagnostic("info", "browser", "profile", "Chrome renderer đã phản hồi lại", details);
       }
       if (!previous.connection_interrupted && current.connection_interrupted) {
-        diagnostic("warn", "browser", "chat", "ChatGPT báo Connection interrupted", details);
+        diagnostic("warn", "browser", "chat", "ChatGPT báo Connection interrupted", {
+          ...details,
+          action: "chat-connection-interrupted",
+          incident_fingerprint: `chat-connection-interrupted:${profileId}:${current.incident_conversation_id || "unknown"}`
+        });
       } else if (previous.connection_interrupted && !current.connection_interrupted) {
         diagnostic("info", "browser", "chat", "ChatGPT đã hết trạng thái Connection interrupted", details);
       }
@@ -3538,7 +3542,8 @@ async function sendProfileRequestUnlocked(payload) {
     conversation_id: newChat ? undefined : conversationId,
     new_chat: newChat,
     text: taskText,
-    attachments
+    attachments,
+    one_shot_recovery: payload?.oneShotRecovery === true
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
   if (taskWorkflow) {
@@ -4062,11 +4067,11 @@ diagnosticIpcHandle("codexpro:audit-long-running-profile-chat", {
   successMessage: "Kiểm tra task ChatGPT chạy quá 30 phút hoàn tất",
   failureMessage: "Kiểm tra task ChatGPT chạy lâu thất bại",
   details: (payload) => ({ profile_id: String(payload?.profileId || ""), task_id: String(payload?.taskId || ""), conversation_id: String(payload?.conversationId || ""), target_id: String(payload?.targetId || ""), attempt_key: String(payload?.attemptKey || "") }),
-  resultDetails: (result) => ({ status: String(result?.status || ""), already_attempted: Boolean(result?.already_attempted), renderer_unresponsive: Boolean(result?.renderer_unresponsive), retry_allowed: result?.retry_allowed !== false, replaced_tab_id: String(result?.replaced_tab_id || ""), recovery_tab_id: String(result?.recovery_tab_id || "") }),
+  resultDetails: (result) => ({ status: String(result?.status || ""), already_attempted: Boolean(result?.already_attempted), renderer_unresponsive: Boolean(result?.renderer_unresponsive), retry_allowed: result?.retry_allowed !== false, recovery_tab_id: String(result?.recovery_tab_id || ""), preflight: result?.preflight || null, reload_probe: result?.reload_probe || null }),
   resultDiagnostic: (result) => result?.renderer_unresponsive
-    ? { level: "error", message: "Task chạy lâu vẫn treo sau một lần reload và thay tab" }
-    : result?.status === "responsive_after_replace"
-      ? { level: "warn", message: "Task chạy lâu cần thay tab nhưng renderer mới đã phản hồi" }
+    ? { level: "error", message: "Task chạy lâu vẫn treo sau một lần reload; watchdog đã dừng" }
+    : result?.status === "active_without_reload"
+      ? { level: "info", message: "Task chạy lâu vẫn hoạt động; watchdog không reload" }
       : null
 }, (_event, payload) => auditLongRunningProfileChat(payload));
 diagnosticIpcHandle("codexpro:stop-profile-task", {
