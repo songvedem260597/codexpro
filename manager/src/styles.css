@@ -1025,12 +1025,19 @@ h6.response-heading { font-size: var(--font-body); font-weight: var(--weight-tit
 .diagnostic-summary-grid article.is-warn > strong { color: #f1cb73; }
 .diagnostic-summary-grid article.is-info { border-color: #29465a; background: #0f151b; }
 .diagnostic-summary-grid article.is-info > strong { color: #8fc9ef; }
-.diagnostic-panel { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--panel); overflow: hidden; }
-.diagnostic-toolbar { display: grid; grid-template-columns: minmax(240px, 1fr) auto; gap: 10px 12px; align-items: center; padding: 12px; border-bottom: 1px solid var(--border); background: #0d1016; }
+.diagnostic-panel { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--panel); overflow: visible; }
+.diagnostic-toolbar { position: relative; z-index: 4; display: grid; grid-template-columns: minmax(240px, 1fr) auto; gap: 10px 12px; align-items: center; padding: 12px; border-bottom: 1px solid var(--border); border-radius: var(--radius-panel) var(--radius-panel) 0 0; background: #0d1016; }
 .diagnostic-toolbar input { height: 40px; min-width: 0; padding-top: 8px; padding-bottom: 8px; }
 .diagnostic-toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .diagnostic-toolbar .button { min-height: 40px; white-space: nowrap; }
 .diagnostic-filter-row { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.diagnostic-filter-row .app-dropdown.is-open { z-index: 120; }
+.app-dropdown.is-diagnostic .app-dropdown-menu { max-height: min(430px, 60vh); gap: 8px; padding: 8px; }
+.app-dropdown.is-diagnostic .app-dropdown-options { max-height: min(360px, 50vh); gap: 5px; }
+.app-dropdown.is-diagnostic .app-dropdown-option { min-height: 56px; padding: 9px 11px; }
+.app-dropdown.is-diagnostic .app-dropdown-option-copy { display: grid; gap: 4px; }
+.app-dropdown.is-diagnostic .app-dropdown-option-copy strong { line-height: 1.3; }
+.app-dropdown.is-diagnostic .app-dropdown-option-copy small { margin-top: 0; line-height: 1.35; }
 .diagnostic-filter { position: relative; min-width: 0; }
 .diagnostic-filter.is-open { z-index: 40; }
 .diagnostic-filter-trigger { width: 100%; height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 10px; color: #cfd6e2; border: 1px solid #303947; border-radius: 7px; background: linear-gradient(145deg, #121720, #0e1219); box-shadow: inset 0 1px 0 #ffffff05; text-align: left; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
