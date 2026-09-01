@@ -3783,7 +3783,7 @@ function App() {
       responseCurrent,
       responseBusy: response?.busy,
       responseReady: responseVerifiedComplete,
-      responseLoading: response?.loading,
+      responseLoading: response?.loading || response?.transcriptLoading,
       responseIncomplete: response?.incomplete,
       awaitingAssistant: responseCurrent && transcriptAwaitingAssistant(materializeTranscriptMessages(response, selectedTarget)),
       finalityPending: responseCurrent && response?.finalityPending,
@@ -3802,6 +3802,8 @@ function App() {
       ? "Chat đã được dọn"
       : isNewChat
       ? "Chat mới"
+      : responseCurrent && response?.transcriptLoading
+        ? "Đang tải tin nhắn…"
       : selectedRecoveringNetworkAbort
         ? "AI vẫn đang xử lý · đang xác minh sau khi transport bị hủy"
         : selectedBusy || selectedSettling
