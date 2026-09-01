@@ -1,4 +1,9 @@
 import {
+  PROJECT_PERFORMANCE_WORKFLOW_ID,
+  detectProjectPerformanceWorkflow,
+  projectPerformanceWorkflow
+} from "./project-performance-workflow.mjs";
+import {
   SYSTEM_MAINTENANCE_WORKFLOW_ID,
   detectSystemMaintenanceWorkflow,
   systemMaintenanceWorkflow
@@ -9,6 +14,11 @@ const WORKFLOW_DEFINITIONS = Object.freeze([
     id: SYSTEM_MAINTENANCE_WORKFLOW_ID,
     create: systemMaintenanceWorkflow,
     detect: detectSystemMaintenanceWorkflow
+  }),
+  Object.freeze({
+    id: PROJECT_PERFORMANCE_WORKFLOW_ID,
+    create: projectPerformanceWorkflow,
+    detect: detectProjectPerformanceWorkflow
   })
 ]);
 
@@ -48,6 +58,7 @@ export function buildTaskWorkflowPrompt(workflowId) {
   return [
     `# CHECKLIST ${workflow.label.toLocaleUpperCase("vi-VN")} · ${workflow.version}`,
     "",
+    ...(workflow.summary ? [`TRỌNG TÂM: ${workflow.summary}`, ""] : []),
     "Đây là task theo quy trình có sẵn. Thực hiện đúng thứ tự; không tự bỏ bước hoặc đổi thành một task phát triển chung.",
     "Đây là task_kind=code: phải kích hoạt đầy đủ Rules, AGENTS, CodexGraph và dùng tool MCP để kiểm tra bằng chứng thật.",
     "Nếu một bước không áp dụng, vẫn phải đánh dấu [-] và ghi lý do. Nếu phát hiện lỗi ngoài phạm vi, ghi nhận để điều tra thay vì tự mở rộng sửa chữa.",
