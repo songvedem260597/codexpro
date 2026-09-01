@@ -530,34 +530,39 @@ section { margin-bottom: 38px; }
 .chat-generated-image:hover { border-color: #52688f; box-shadow: 0 12px 32px #0007; }
 .chat-generated-image:focus-visible { outline: 2px solid #718de0; outline-offset: 2px; }
 .chat-generated-image img { width: 100%; max-height: 460px; display: block; object-fit: contain; background: #05070b; }
-.response-rich-text { white-space: normal; }
-.response-rich-text p { margin: 0 0 10px; white-space: pre-wrap; }
-.response-rich-text p:last-child { margin-bottom: 0; }
-.response-rich-text strong { color: inherit; font-weight: var(--response-weight); }
+.response-rich-text { max-width: min(100%, 1060px); white-space: normal; }
+.chat-message-text.response-rich-text { line-height: 1.72; }
+.response-markdown-frozen, .response-markdown-tail { min-width: 0; }
+.response-rich-text p { margin: 0 0 14px; white-space: pre-wrap; }
+.response-rich-text > p:last-child,
+.response-markdown-tail:last-child > p:last-child { margin-bottom: 0; }
+.response-rich-text strong { color: inherit; font-weight: var(--weight-semibold); }
 .response-rich-text em { color: #d9e1ef; }
 .response-rich-text del { color: #8794a8; text-decoration-thickness: 1px; }
 .response-rich-text a { color: #91adff; text-decoration: underline; text-decoration-color: #91adff66; text-underline-offset: 2px; }
 .response-rich-text a:hover { color: #b8c8ff; text-decoration-color: currentColor; }
 .response-inline-code { display: inline; padding: 1px 5px 2px; border: 1px solid #354057; border-radius: 4px; background: #161e2a; color: #e3e9f4; font-family: var(--mono-font-family, "Cascadia Code", "SFMono-Regular", Consolas, monospace); font-size: .92em; white-space: break-spaces; }
-.response-code-block { position: relative; margin: 8px 0 12px; padding: 12px 13px; overflow: auto; border: 1px solid #303a4e; border-radius: var(--radius-control); background: #0d121a; color: #dce5f2; white-space: pre; font-size: 12px; line-height: 1.6; font-family: var(--mono-font-family, "Cascadia Code", "SFMono-Regular", Consolas, monospace); }
+.response-code-block { position: relative; margin: 11px 0 16px; padding: 12px 13px; overflow: auto; border: 1px solid #303a4e; border-radius: var(--radius-control); background: #0d121a; color: #dce5f2; white-space: pre; font-size: 12px; line-height: 1.6; font-family: var(--mono-font-family, "Cascadia Code", "SFMono-Regular", Consolas, monospace); }
 .response-code-block[data-language]::before { content: attr(data-language); display: block; margin-bottom: 7px; color: #74849b; font: var(--response-weight) 9px/1.2 Inter, system-ui, sans-serif; letter-spacing: .55px; text-transform: uppercase; }
 .response-code-block .response-inline-code { padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; white-space: inherit; }
-.response-heading { margin: 14px 0 7px; color: #eef3fb; font-weight: var(--response-weight); line-height: 1.35; }
+.response-heading { margin: 20px 0 9px; color: #eef3fb; font-weight: var(--weight-semibold); line-height: 1.35; }
 h1.response-heading { font-size: 18px; }
 h2.response-heading { font-size: 16px; }
 h3.response-heading { font-size: 14px; }
 h4.response-heading, h5.response-heading, h6.response-heading { font-size: 13px; }
-.response-rich-text > .response-heading:first-child { margin-top: 0; }
-.response-quote { margin: 8px 0 12px; padding: 4px 0 4px 12px; border-left: 3px solid #526a9f; color: #aeb9ca; white-space: pre-wrap; }
-.response-list { margin: 5px 0 11px; padding: 0; }
+.response-rich-text > .response-heading:first-child,
+.response-markdown-frozen:first-child > .response-heading:first-child,
+.response-markdown-tail:first-child > .response-heading:first-child { margin-top: 0; }
+.response-quote { margin: 11px 0 16px; padding: 5px 0 5px 12px; border-left: 3px solid #526a9f; color: #aeb9ca; white-space: pre-wrap; }
+.response-list { margin: 8px 0 14px; padding: 0; }
 .response-list:last-child { margin-bottom: 0; }
-.response-list li { margin: 4px 0; padding-left: 2px; }
+.response-list li { margin: 6px 0; padding-left: 2px; }
 .response-bullets { list-style: none; }
 .response-bullets li { position: relative; padding-left: 20px; }
 .response-bullets li::before { content: "•"; position: absolute; left: 2px; top: -1px; color: #d8e0ed; font-size: 17px; line-height: 1.35; }
 .response-numbered { padding-left: 25px; }
 .response-numbered li { padding-left: 2px; }
-.response-list .response-list { margin: 4px 0 2px; }
+.response-list .response-list { margin: 5px 0 3px; }
 .response-list li > p { margin: 0; }
 .response-bullets .task-list-item { padding-left: 24px; list-style: none; }
 .response-bullets .task-list-item::before { content: none; }
