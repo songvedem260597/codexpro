@@ -19,7 +19,7 @@ The MCP server is authoritative. A manifest can advertise a capability, but it c
 
 Code jobs fail closed unless MCP confirms all of the following:
 
-- a valid 2–6 word job title;
+- a valid, clear 4–6 word job title;
 - the exact selected workspace;
 - global rules hash;
 - repository `AGENTS.md` chain hash;

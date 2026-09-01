@@ -89,6 +89,7 @@ function Empty({ children }) {
 
 function terminalStateLabel(status) {
   if (status === "completed") return "Hoàn thành";
+  if (status === "running") return "Chưa hoàn thành";
   if (status === "cancelled") return "Đã dừng";
   if (status === "blocked") return "Bị chặn";
   return "Thất bại";
@@ -102,11 +103,14 @@ function terminalWorkerLabel(job, profiles, workers) {
   return worker?.label || (workerId.startsWith("api:") ? workerId.slice(4) : "Worker CodexPro");
 }
 
-function TerminalTaskSection({ jobs, profiles, workers, projects, failed = false }) {
-  const title = failed ? "Task thất bại" : "Task hoàn thành";
+function TerminalTaskSection({ jobs, profiles, workers, projects, mode = "completed" }) {
+  const failed = mode === "failed";
+  const unfinished = mode === "unfinished";
+  const title = unfinished ? "Task chưa hoàn thành" : failed ? "Task thất bại" : "Task hoàn thành";
+  const eyebrow = unfinished ? "UNFINISHED TASKS" : failed ? "FAILED TASKS" : "COMPLETED TASKS";
   return (
-    <section className={`control-section control-terminal-section ${failed ? "is-failed" : "is-completed"}`}>
-      <div className="control-section-head"><div><p className="eyebrow">{failed ? "FAILED TASKS" : "COMPLETED TASKS"}</p><h2>{title}</h2></div><span className="control-section-count">{jobs.length} task</span></div>
+    <section className={`control-section control-terminal-section is-${mode}`}>
+      <div className="control-section-head"><div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div><span className="control-section-count">{jobs.length} task</span></div>
       {!jobs.length ? <Empty>Chưa có {title.toLocaleLowerCase("vi-VN")}.</Empty> : <div className="control-terminal-list">
         {jobs.map((job) => {
           const project = projects.find((item) => String(item.root || "").toLowerCase() === String(job.root || "").toLowerCase());
@@ -118,7 +122,7 @@ function TerminalTaskSection({ jobs, profiles, workers, projects, failed = false
               {job.error && <p>{job.error}</p>}
             </div>
             <div className="control-terminal-time">
-              <WorkerRunningDuration startedAt={job.started_at || job.prepared_at} finishedAt={job.finished_at || job.updated_at} />
+              <WorkerRunningDuration startedAt={job.started_at || job.prepared_at} finishedAt={job.finished_at || job.updated_at} prefix={job.status === "completed" ? "Hoàn thành trong" : "Hoạt động trong"} />
               <small>{relativeTime(job.finished_at || job.updated_at)}</small>
             </div>
           </article>;
@@ -170,6 +174,11 @@ export function ControlCenter({
         startedAt: String(profile.busy_since || tab?.network_last_started_at || "")
       };
     }), [profiles]);
+  const liveTaskIds = new Set([
+    ...tasks.map((task) => task.taskId),
+    ...workers.filter((worker) => worker?.activity === "working").map((worker) => String(worker.current_task_id || ""))
+  ].filter(Boolean));
+  const unfinishedTasks = workerJobs.filter((job) => job?.status === "running" && !liveTaskIds.has(String(job?.job_id || "")));
 
   const taskProjects = useMemo(() => new Map(tasks.map((task) => [task.profile.profile_id, projectForTask(task, projects)])), [tasks, projects]);
   const rootUsage = useMemo(() => {
@@ -247,7 +256,8 @@ export function ControlCenter({
 
       <div className="control-two-column control-task-history-grid">
         <TerminalTaskSection jobs={completedTasks} profiles={profiles} workers={workers} projects={projects} />
-        <TerminalTaskSection jobs={failedTasks} profiles={profiles} workers={workers} projects={projects} failed />
+        <TerminalTaskSection jobs={failedTasks} profiles={profiles} workers={workers} projects={projects} mode="failed" />
+        <TerminalTaskSection jobs={unfinishedTasks} profiles={profiles} workers={workers} projects={projects} mode="unfinished" />
       </div>
 
       <div className="control-two-column">

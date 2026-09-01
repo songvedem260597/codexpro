@@ -32,7 +32,7 @@ const result = await registry.list({
     activity: "working",
     extension_version: "0.5.85",
     current_task_id: "cpt_test",
-    current_task_title: "Worker plugin test",
+    current_task_title: "Worker plugin smoke test",
     conversation_tabs: []
   }]
 });

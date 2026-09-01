@@ -959,7 +959,7 @@ function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChoo
           </div>
 
           <div className="request-card-foot">
-            <span>AI tự đặt title 2–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP.</span>
+            <span>AI tự đặt title 4–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP.</span>
             <div className="request-card-actions">
               <button type="button" className="button secondary" onClick={onClose}>Đóng</button>
               <button type="button" className="button primary" disabled={!valid} onClick={() => void submit()}>{working ? "Đang xử lý…" : attachments.length ? "Tải file + gửi" : "Gửi yêu cầu"}</button>
@@ -1317,7 +1317,7 @@ function App() {
         if (previous.working && !working && previous.taskId) {
           void api.showNotification?.({ title: "CodexPro · Task hoàn tất", body: `${previous.title} · ${profile.label || profile.profile_id.slice(0, 8)}` });
         } else if (!previous.failed && failed) {
-          void api.showNotification?.({ title: "CodexPro · Cần chú ý", body: `${title} gặp lỗi hoặc profile bị treo.` });
+          void api.showNotification?.({ title: "CodexPro · Task bị gián đoạn", body: `“${title}” gặp lỗi hoặc profile bị treo. Code có thể đang sửa dở/chưa commit.` });
         }
       }
       operationsNotificationState.current.set(profile.profile_id, { working, failed, taskId, title });

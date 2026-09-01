@@ -98,7 +98,7 @@ function parseTitleSelection(value) {
 function titleBootstrapMessage({ jobId, kind, scope, root, workspaceCandidates }) {
   const lines = [
     "Before doing anything else, you must create the task title through CodexPro MCP.",
-    "Choose a clear task_title of 2-6 words from the user's request. The user must never be asked to provide this title.",
+    "Choose a clear, natural, easy-to-understand task_title of 4-6 words from the user's request. The user must never be asked to provide this title.",
     `Call ${BEGIN_TASK_TOOL} now with task_id=${jobId}, task_kind=${kind}, scope=${scope}${root ? `, root=${root}` : ""}.`,
   ];
   if (kind === "code" && scope === "all_allowed" && !root) {
@@ -193,10 +193,10 @@ export async function runMcpAgentJob(input = {}) {
         } : {})
       };
       messages.push(assistantMessage);
-      if (!call || titleWordCount(requestedTitle) < 2 || titleWordCount(requestedTitle) > 6 || (kind === "code" && !selectedCandidate)) {
-        if (call) messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: kind === "code" && !selectedCandidate ? "root must exactly match one allowed workspace candidate" : "task_title must contain 2-6 words chosen by the AI" }) });
+      if (!call || titleWordCount(requestedTitle) < 4 || titleWordCount(requestedTitle) > 6 || (kind === "code" && !selectedCandidate)) {
+        if (call) messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: kind === "code" && !selectedCandidate ? "root must exactly match one allowed workspace candidate" : "task_title must contain 4-6 clear words chosen by the AI" }) });
         if (attempt < 2) {
-          messages.push({ role: "system", content: `Retry: call ${BEGIN_TASK_TOOL} exactly once with a task_title containing 2-6 words${kind === "code" && !root ? " and an exact root from the allowed workspace list" : ""}.` });
+          messages.push({ role: "system", content: `Retry: call ${BEGIN_TASK_TOOL} exactly once with a clear, easy-to-understand task_title containing 4-6 words${kind === "code" && !root ? " and an exact root from the allowed workspace list" : ""}.` });
           continue;
         }
         break;
@@ -207,7 +207,7 @@ export async function runMcpAgentJob(input = {}) {
       bootstrap = await input.jobMcp.callTool(BEGIN_TASK_TOOL, beginArgs, { signal: input.signal });
       messages.push({ role: "tool", tool_call_id: call.id, content: toolResultText(bootstrap, limits.maxToolResultChars) });
       title = clean(bootstrap?.task_title || requestedTitle, 56);
-      if (titleWordCount(title) < 2 || titleWordCount(title) > 6) throw new Error("CodexPro MCP returned an invalid AI task title.");
+      if (titleWordCount(title) < 4 || titleWordCount(title) > 6) throw new Error("CodexPro MCP returned an invalid AI task title.");
       break;
     }
     if (!bootstrap) {
@@ -216,7 +216,7 @@ export async function runMcpAgentJob(input = {}) {
         ? ` Include \"root\" using exactly one of these values: ${JSON.stringify(workspaceCandidates)}.`
         : root ? ` Include \"root\": ${JSON.stringify(root)}.` : " Do not include root.";
       const fallbackCompletion = await completeProviderWithRetry(input.provider, {
-        messages: [...messages, { role: "system", content: `Tool calling was not emitted. Return only one JSON object with \"task_title\" containing 2-6 words.${rootInstruction} Do not add Markdown or explanation.` }],
+        messages: [...messages, { role: "system", content: `Tool calling was not emitted. Return only one JSON object with a clear, easy-to-understand \"task_title\" containing 4-6 words.${rootInstruction} Do not add Markdown or explanation.` }],
         tools: [],
         signal: input.signal
       }, (retry) => emit("provider_retry", { phase: "title_fallback", ...retry }));
@@ -229,8 +229,8 @@ export async function runMcpAgentJob(input = {}) {
       const selectedCandidate = scope === "all_allowed" && kind === "code" && !root
         ? matchingWorkspaceRoot(selection.root, workspaceCandidates)
         : root;
-      if (titleWordCount(requestedTitle) < 2 || titleWordCount(requestedTitle) > 6) {
-        throw new Error("API worker AI did not return a valid 2-6 word task title in its MCP bootstrap fallback.");
+      if (titleWordCount(requestedTitle) < 4 || titleWordCount(requestedTitle) > 6) {
+        throw new Error("API worker AI did not return a valid 4-6 word task title in its MCP bootstrap fallback.");
       }
       if (kind === "code" && !selectedCandidate) {
         throw new Error("API worker AI did not select an allowed workspace root in its MCP bootstrap fallback.");
@@ -241,7 +241,7 @@ export async function runMcpAgentJob(input = {}) {
       bootstrap = await input.jobMcp.callTool(BEGIN_TASK_TOOL, beginArgs, { signal: input.signal });
       messages.push({ role: "assistant", content: JSON.stringify({ task_title: requestedTitle, ...(root ? { root } : {}) }) });
       title = clean(bootstrap?.task_title || requestedTitle, 56);
-      if (titleWordCount(title) < 2 || titleWordCount(title) > 6) throw new Error("CodexPro MCP returned an invalid AI task title.");
+      if (titleWordCount(title) < 4 || titleWordCount(title) > 6) throw new Error("CodexPro MCP returned an invalid AI task title.");
     }
     if (!bootstrap?.verified) throw new Error("CodexPro MCP did not verify the worker job bootstrap.");
     if (kind === "code" && (!bootstrap.gate_active || !bootstrap.global_rules_loaded || !bootstrap.agents_loaded || !bootstrap.codexgraph_active)) {
