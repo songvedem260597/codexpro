@@ -1653,11 +1653,13 @@ function App() {
       ? userMessages.findLast((node) => node.dataset.auditFingerprint === anchorState.fingerprint)
       : userMessages.at(-1);
     if (!anchor) return false;
+    const anchorRect = anchor.getBoundingClientRect();
+    const anchorViewportTop = 56;
     container.classList.add("has-turn-anchor");
-    container.style.setProperty("--chat-turn-anchor-space", `${Math.max(240, Math.round(container.clientHeight * 0.58))}px`);
+    container.style.setProperty("--chat-turn-anchor-space", `${Math.max(240, Math.round(container.clientHeight - anchorViewportTop - anchorRect.height + 24))}px`);
     const before = responseScrollMetrics(container);
-    const beforeAnchorTop = Math.round(anchor.getBoundingClientRect().top - container.getBoundingClientRect().top);
-    const after = applyResponseTurnAnchor(container, anchor, 0.42);
+    const beforeAnchorTop = Math.round(anchorRect.top - container.getBoundingClientRect().top);
+    const after = applyResponseTurnAnchor(container, anchor, 0.42, anchorViewportTop);
     const afterAnchorTop = Math.round(anchor.getBoundingClientRect().top - container.getBoundingClientRect().top);
     responseScrollPositions.current.set(profileId, container.scrollTop);
     logResponseScrollAdjustment(profileId, container, before, after, cause, "turn-anchor", {
