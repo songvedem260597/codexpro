@@ -26,10 +26,14 @@ export function shouldShowChatBusy({ networkState, tabBusy, responseCurrent, res
   return networkState === "generating" || Boolean(responseCurrent && responseBusy);
 }
 
-export function shouldShowChatSettling({ networkState, tabSettling, responseCurrent, responseIncomplete, responseReady = false, awaitingAssistant = false, finalityPending = false }) {
+export function shouldShowChatSettling({ networkState, networkCompletedAt = "", tabSettling, responseCurrent, responseIncomplete, responseReady = false, awaitingAssistant = false, finalityPending = false, nowMs = Date.now(), completionGraceMs = 15000 }) {
   if (tabSettling) return true;
-  if (responseCurrent && finalityPending) return true;
-  if (networkState === "completed" && responseCurrent && !responseReady && awaitingAssistant) return true;
+  const completedAtMs = Date.parse(String(networkCompletedAt || ""));
+  const recentCompletedTurn = networkState === "completed"
+    && Number.isFinite(completedAtMs)
+    && Math.max(0, Number(nowMs) - completedAtMs) <= Math.max(1000, Number(completionGraceMs) || 15000);
+  if (responseCurrent && finalityPending) return !isTerminalChatNetworkState(networkState) || recentCompletedTurn;
+  if (networkState === "completed" && responseCurrent && !responseReady && awaitingAssistant) return recentCompletedTurn;
   if (isTerminalChatNetworkState(networkState)) return false;
   return Boolean(responseCurrent && responseIncomplete);
 }

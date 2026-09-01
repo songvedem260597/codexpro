@@ -2790,6 +2790,7 @@ function App() {
       });
       const turnReady = !selectedRecoveringNetworkAbort && canAcceptNextChatMessage({
         networkState,
+        networkCompletedAt: currentResponse?.networkCompletedAt || selectedTab?.network_last_completed_at || "",
         tabBusy: selectedTab?.busy,
         tabSettling: selectedTab?.settling,
         responseCurrent: currentResponse?.conversationId === conversationId,
@@ -3560,6 +3561,7 @@ function App() {
     });
     const selectedSettling = !(responseCurrent && response?.networkStreamInProgress) && shouldShowChatSettling({
       networkState: selectedNetworkState,
+      networkCompletedAt: (responseCurrent && response?.networkCompletedAt) || selectedTab?.network_last_completed_at || "",
       tabSettling: selectedTab?.settling,
       responseCurrent,
       responseIncomplete: response?.incomplete,
@@ -3572,6 +3574,7 @@ function App() {
     const showSyntheticThinking = Boolean(responseTurnActive && !(response?.networkStreamAvailable && hasResponseContent) && !latestTurnProvisionalAssistant);
     const turnReady = !selectedRecoveringNetworkAbort && canAcceptNextChatMessage({
       networkState: selectedNetworkState,
+      networkCompletedAt: (responseCurrent && response?.networkCompletedAt) || selectedTab?.network_last_completed_at || "",
       tabBusy: selectedTab?.busy,
       tabSettling: selectedTab?.settling,
       responseCurrent,

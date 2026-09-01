@@ -58,16 +58,32 @@ assert.equal(authoritative.confirmed, true, "authoritative response sources must
 
 assert.equal(shouldShowChatSettling({
   networkState: "completed",
+  networkCompletedAt: "2026-08-30T10:37:30.000Z",
+  nowMs: Date.parse("2026-08-30T10:37:35.000Z"),
   tabSettling: false,
   responseCurrent: true,
   responseIncomplete: false,
   responseReady: false,
   awaitingAssistant: false,
   finalityPending: true
-}), true, "a provisional DOM final must remain visibly settling");
+}), true, "a provisional DOM final from a freshly completed turn must remain visibly settling");
+
+assert.equal(shouldShowChatSettling({
+  networkState: "completed",
+  networkCompletedAt: "2026-08-30T10:37:30.000Z",
+  nowMs: Date.parse("2026-08-30T10:38:00.000Z"),
+  tabSettling: false,
+  responseCurrent: true,
+  responseIncomplete: false,
+  responseReady: false,
+  awaitingAssistant: false,
+  finalityPending: true
+}), false, "an old idle chat must not be shown as settling just because DOM finality is being rechecked");
 
 assert.equal(canAcceptNextChatMessage({
   networkState: "completed",
+  networkCompletedAt: "2026-08-30T10:37:30.000Z",
+  nowMs: Date.parse("2026-08-30T10:37:35.000Z"),
   tabBusy: false,
   tabSettling: false,
   responseCurrent: true,
@@ -79,7 +95,7 @@ assert.equal(canAcceptNextChatMessage({
   finalityPending: true,
   canonicalBusy: false,
   streamBusy: false
-}), false, "the composer must stay locked while DOM finality is being confirmed");
+}), false, "the composer must stay locked while DOM finality is being confirmed for the fresh turn");
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const mainSource = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
