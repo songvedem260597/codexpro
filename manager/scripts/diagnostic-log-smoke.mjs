@@ -127,6 +127,32 @@ try {
   assert.equal(routedTask.entries[0].action, "repo_task_profile_rerouted");
   assert.equal(routedTask.entries[0].details.task_owner_profile_id, "profile-owner");
 
+  for (const [incidentFingerprint, message] of [
+    ["same-user-incident", "Người dùng báo lỗi lần đầu"],
+    ["same-user-incident", "Người dùng báo lỗi lặp lại"],
+    ["different-user-incident", "Người dùng báo lỗi khác"]
+  ]) {
+    await appendDiagnosticLog(root, {
+      level: "error",
+      source: "user",
+      category: "user-reported-error",
+      action: "user-reported-error",
+      message,
+      details: {
+        classification: "user_discovered_error",
+        incident_fingerprint: incidentFingerprint,
+        report_origin: "chat_request"
+      }
+    });
+  }
+  const userReported = await readDiagnosticLogs(root, { hours: 24, source: "user", category: "user-reported-error" });
+  assert.equal(userReported.entries.length, 3);
+  assert.equal(userReported.summary.user_reported_error, 3, "summary must separate user-discovered errors from automatic system errors");
+  const repeatedIncident = userReported.entries.filter((entry) => entry.details?.incident_fingerprint === "same-user-incident");
+  assert.equal(repeatedIncident.length, 2);
+  assert.ok(repeatedIncident.every((entry) => entry.details?.occurrence_count === 2), "every repeated incident row must expose the total occurrence count in the selected window");
+  assert.ok(repeatedIncident.every((entry) => entry.details?.first_seen_at && entry.details?.last_seen_at), "repeated incidents must expose their investigation window");
+
   const burstRoot = path.join(root, "burst");
   const burstWrites = [];
   for (let index = 0; index < 22_500; index += 1) {
