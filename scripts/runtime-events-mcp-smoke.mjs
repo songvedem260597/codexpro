@@ -87,7 +87,7 @@ try {
   client.notify('notifications/initialized');
 
   const taskId = 'cpt_bbbbbbbbbbbbbbbbbbbbbbbb';
-  const taskTitle = 'Runtime event integration';
+  const taskTitle = 'Runtime event integration smoke';
   const prepared = await client.request('tools/call', {
     name: 'prepare_repo_task',
     arguments: { profile_id: 'runtime-events-smoke', task_id: taskId, root, scope: 'workspace' }
