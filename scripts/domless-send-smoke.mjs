@@ -59,7 +59,9 @@ function extractFunction(name) {
 }
 
 const generationSource = extractFunction("isChatGenerationRequest");
-const isChatGenerationRequest = Function(`${generationSource}; return isChatGenerationRequest;`)();
+const pendingConversationByTab = new Map([[9, { at: Date.now() }]]);
+const chatNetworkStateByTab = new Map();
+const isChatGenerationRequest = Function("pendingConversationByTab", "chatNetworkStateByTab", "PENDING_CONVERSATION_TTL_MS", `${generationSource}; return isChatGenerationRequest;`)(pendingConversationByTab, chatNetworkStateByTab, 60_000);
 
 const attachmentUploadStageSource = extractFunction("attachmentUploadStage");
 const isAttachmentUploadEndpointSource = extractFunction("isAttachmentUploadEndpoint");
@@ -96,6 +98,26 @@ assert.equal(isChatGenerationRequest({
   method: "POST",
   url: "https://chatgpt.com/unauth-mweb/conversation/prepare"
 }), true, "guest headless prepare is the generation request");
+pendingConversationByTab.delete(9);
+assert.equal(isChatGenerationRequest({
+  tabId: 9,
+  method: "POST",
+  url: "https://chatgpt.com/unauth-mweb/conversation/prepare"
+}), false, "guest page bootstrap prepare must not create a phantom generation without a pending send");
+chatNetworkStateByTab.set(9, { request_id: "tracked-request", generation_endpoint: "/unauth-mweb/conversation/prepare" });
+assert.equal(isChatGenerationRequest({
+  tabId: 9,
+  requestId: "tracked-request",
+  method: "POST",
+  url: "https://chatgpt.com/unauth-mweb/conversation/prepare"
+}), true, "guest completion must remain matched after the pending submit marker is cleared");
+assert.equal(isChatGenerationRequest({
+  tabId: 9,
+  requestId: "unrelated-request",
+  method: "POST",
+  url: "https://chatgpt.com/unauth-mweb/conversation/prepare"
+}), false, "an unrelated guest prepare must not inherit another request's generation state");
+chatNetworkStateByTab.clear();
 assert.equal(isChatGenerationRequest({
   tabId: 9,
   method: "POST",
@@ -253,7 +275,8 @@ const submitLifecycleWaitSource = extractFunction("waitForChatSubmitLifecycle");
 assert.match(submitLifecycleWaitSource, /filter\(isChatSubmissionAckEvidence\)/, "fast send ACK must require strict conversation/responses evidence, not generic sentinel preparation traffic");
 const strictSubmitAckSource = extractFunction("isChatSubmissionAckEvidence");
 const strictSubmitAck = Function(`${strictSubmitAckSource}; return isChatSubmissionAckEvidence;`)();
-assert.equal(strictSubmitAck({ endpoint: "/unauth-mweb/conversation/prepare" }), true, "guest headless prepare must acknowledge submission");
+assert.equal(strictSubmitAck({ endpoint: "/unauth-mweb/conversation/prepare", matched_generation: true }), true, "a pending guest headless prepare must acknowledge submission");
+assert.equal(strictSubmitAck({ endpoint: "/unauth-mweb/conversation/prepare" }), false, "an unrelated guest prepare must not acknowledge submission");
 assert.equal(strictSubmitAck({ endpoint: "/unauth-mweb/conversation/updates" }), false, "guest update polling must not acknowledge submission");
 assert.doesNotMatch(strictSubmitAckSource, /sentinel/, "sentinel chat-requirements traffic must not be treated as proof that the user message was submitted");
 assert.match(sendBlock, /lateLifecycleEvidence=recentChatPostEvidence\(tab\.id,submitStartedAt-100\)\.filter\(isChatSubmissionAckEvidence\)/, "late send ACK must reject sentinel preparation traffic just like the early ACK path");

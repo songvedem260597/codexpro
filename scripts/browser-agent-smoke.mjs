@@ -435,7 +435,9 @@ assert.match(worker, /probeCanonicalCompletion/, "tracker timeout must verify ca
 assert.match(worker, /function probeChatActivityPage/, "profile status must supplement network state with a lightweight DOM activity probe");
 assert.match(worker, /if\(!Number\.isInteger\(tabId\)\)return \{available:false,busy:false,source:'',activity_text:''\};/, "DOM activity probing must also run for ChatGPT tabs that have not received a /c/ conversation URL yet");
 assert.doesNotMatch(worker, /if\(!Number\.isInteger\(tabId\)\|\|!conversationId\)/, "a new/root ChatGPT tab must not be forced idle just because it has no conversation id yet");
-assert.match(worker, /const shouldProbeDom=Boolean\(conversationId&&\(tab\.active\|\|networkState\.busy\|\|canonicalActivity\.busy\|\|cachedDomActivity\?\.busy/, "idle background ChatGPT tabs must not receive unconditional DOM probes");
+assert.match(worker, /const domActivityRelevant=Boolean\(conversationId\|\|networkState\.busy\|\|canonicalActivity\.busy\|\|cachedDomActivity\?\.busy\|\|networkObservedAt>0&&Date\.now\(\)-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS\)/, "guest chats without a /c/ id must receive DOM probes only while recent or busy");
+assert.match(worker, /const shouldProbeDom=Boolean\(domActivityRelevant&&\(tab\.active\|\|networkState\.busy\|\|canonicalActivity\.busy\|\|cachedDomActivity\?\.busy/, "idle background ChatGPT tabs must not receive unconditional DOM probes");
+assert.match(worker, /if\(generationEndpoint==='\/unauth-mweb\/conversation\/prepare'\)chatCanonicalActivityByTab\.delete\(details\.tabId\)/, "completed guest prepares must release the canonical busy flag and defer continuing activity to the DOM probe");
 assert.match(worker, /for\(const tabId of chatDomActivityByTab\.keys\(\)\)if\(!liveTabIds\.has\(tabId\)\)chatDomActivityByTab\.delete\(tabId\)/, "closed tabs must be pruned from the DOM activity cache");
 assert.match(worker, /value\.includes\('settings'\)\|\|value\.includes\('cai dat'\)/, "connector setup must recognize Vietnamese Settings");
 assert.match(worker, /value\.includes\('connection'\)\|\|value\.includes\('ket noi'\)/, "connector setup must recognize Vietnamese Connection");
@@ -734,7 +736,7 @@ assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'
 assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
-assert.equal(manifest.version, "0.5.97");
+assert.equal(manifest.version, "0.5.99");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");

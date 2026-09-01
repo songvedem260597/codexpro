@@ -200,9 +200,14 @@ function isChatGenerationRequest(details) {
     const url=new URL(details.url);
     const path=url.pathname.replace(/\/+$/,'');
     if(url.hostname!=='chatgpt.com'&&!url.hostname.endsWith('.chatgpt.com'))return false;
+    if(path==='/unauth-mweb/conversation/prepare'){
+      const tracked=chatNetworkStateByTab.get(details.tabId);
+      if(tracked?.request_id&&String(tracked.request_id)===String(details.requestId||'')&&String(tracked.generation_endpoint||'')===path)return true;
+      const pending=pendingConversationByTab.get(details.tabId);
+      return Boolean(pending&&Date.now()-Number(pending.at||0)<PENDING_CONVERSATION_TTL_MS);
+    }
     return /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|steer_turn)$/.test(path)
-      || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(path)
-      || path==='/unauth-mweb/conversation/prepare';
+      || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(path);
   }catch{return false;}
 }
 
@@ -289,17 +294,14 @@ function rejectChatNetworkWaiters(tabId,error) {
 
 function isChatSubmitLifecycleEvidence(item) {
   const endpoint=String(item?.endpoint||'');
-  return Boolean(item?.matched_generation)
-    || /\/(?:backend-api|backend-anon)\/(?:sentinel\/|(?:f\/)?(?:conversation|steer_turn)|(?:f\/)?(?:codex\/)?responses)/.test(endpoint)
-    || endpoint.replace(/\/+$/,'')==='/unauth-mweb/conversation/prepare';
+  return Boolean(item?.matched_generation)||/\/(?:backend-api|backend-anon)\/(?:sentinel\/|(?:f\/)?(?:conversation|steer_turn)|(?:f\/)?(?:codex\/)?responses)/.test(endpoint);
 }
 
 function isChatSubmissionAckEvidence(item) {
   const endpoint=String(item?.endpoint||'').replace(/\/+$/,'');
   return Boolean(item?.matched_generation)
     || /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|steer_turn)$/.test(endpoint)
-    || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(endpoint)
-    || endpoint==='/unauth-mweb/conversation/prepare';
+    || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(endpoint);
 }
 
 function attachmentUploadStage(endpoint) {
@@ -522,6 +524,7 @@ function finishChatRequest(details,state) {
       return;
     }
     const failed=state==='failed'||statusCode>=400;
+    const generationEndpoint=String(current?.generation_endpoint||safeChatRequestEndpoint(details.url)||'');
     chatNetworkStateByTab.set(details.tabId,{
       ...(current||{}),
       state:failed?'failed':'completed',
@@ -530,10 +533,11 @@ function finishChatRequest(details,state) {
       completed_at_ms:now,
       conversation_id:String(current?.conversation_id||conversationIdFromUrl(details.documentUrl)||''),
       source:String(current?.source||'page'),
-      generation_endpoint:String(current?.generation_endpoint||safeChatRequestEndpoint(details.url)||''),
+      generation_endpoint:generationEndpoint,
       status_code:statusCode,
       error:failed?String(details.error||`HTTP ${statusCode||'error'}`).slice(0,300):''
     });
+    if(generationEndpoint==='/unauth-mweb/conversation/prepare')chatCanonicalActivityByTab.delete(details.tabId);
     notifyChatNetworkWaiters(details.tabId);
     await persistChatNetworkState();
     scheduleRealtimeProfilePush();
@@ -857,7 +861,8 @@ async function tabList() {
     let canonicalActivity=canonicalActivityState(tab.id,conversationId);
     const shouldProbeCanonical=Boolean(conversationId&&(networkState.busy||canonicalActivity.busy||Date.now()-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS));
     if(shouldProbeCanonical)canonicalActivity=await probeCanonicalActivity(tab.id,conversationId);
-    const shouldProbeDom=Boolean(conversationId&&(tab.active||networkState.busy||canonicalActivity.busy||cachedDomActivity?.busy||Date.now()-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS));
+    const domActivityRelevant=Boolean(conversationId||networkState.busy||canonicalActivity.busy||cachedDomActivity?.busy||networkObservedAt>0&&Date.now()-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS);
+    const shouldProbeDom=Boolean(domActivityRelevant&&(tab.active||networkState.busy||canonicalActivity.busy||cachedDomActivity?.busy||networkObservedAt>0&&Date.now()-networkObservedAt<DOM_ACTIVITY_RECENT_NETWORK_MS));
     const domActivity=shouldProbeDom?await chatDomActivityState(tab.id,conversationId):{available:false,busy:false,response_ready:false,source:'',activity_text:'',image_generation_in_progress:false,image_response_ready:false};
     if(domActivity.response_ready){
       if(canonicalActivity.busy){
