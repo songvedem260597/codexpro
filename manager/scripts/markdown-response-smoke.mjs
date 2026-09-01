@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import React from "react";
@@ -62,6 +63,12 @@ $$\\int_0^1 x^2 dx = \\frac{1}{3}$$
     "append-only growth must retain stable source keys for frozen Markdown blocks"
   );
   assert.equal(secondPartition.tail.text.endsWith("Live tail keeps growing"), true, "only the live Markdown tail should absorb appended text");
+
+  const styles = fs.readFileSync(path.join(managerRoot, "src", "styles.css"), "utf8");
+  assert.match(styles, /\.chat-message-text\.response-rich-text \{ line-height: 1\.72; \}/, "long responses must use a relaxed reading line-height");
+  assert.match(styles, /\.response-rich-text \{ max-width: min\(100%, 1060px\)/, "long responses must cap prose width for readable line length");
+  assert.doesNotMatch(styles, /\.response-rich-text p:last-child \{ margin-bottom: 0; \}/, "streaming Markdown wrappers must not collapse paragraph spacing at every frozen block boundary");
+  assert.match(styles, /\.response-markdown-tail:last-child > p:last-child \{ margin-bottom: 0; \}/, "only the final streaming paragraph should drop trailing paragraph space");
   console.log("✓ ChatGPT rich response Markdown/GFM/math smoke test passed");
 } finally {
   await vite.close();
