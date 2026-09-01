@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   appendRuntimeLifecycleLog,
+  cloudflaredOutputLevel,
   createRuntimeLifecycleLogger,
   runtimeLifecycleLogPaths
 } from './runtime-lifecycle-log.mjs';
@@ -11,6 +12,14 @@ import {
 const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-runtime-lifecycle-'));
 
 try {
+  assert.equal(cloudflaredOutputLevel('ERR failed to serve incoming request error="Failed to proxy HTTP: context canceled"'), null);
+  assert.equal(cloudflaredOutputLevel('ERR tunnel connection failed: authentication failure'), 'error');
+  assert.equal(cloudflaredOutputLevel('WRN reconnect retry after timeout'), 'warn');
+  assert.equal(cloudflaredOutputLevel('INF registered tunnel connection'), 'info');
+  const launcherSource = await fs.readFile(new URL('./codexpro.mjs', import.meta.url), 'utf8');
+  assert.match(launcherSource, /const level = cloudflaredOutputLevel\(line\);\s*if \(!level\) continue;/, 'launcher must suppress benign cloudflared context-cancel noise');
+  assert.match(launcherSource, /await waitForHealth\(`\$\{localBase\}\/healthz`, token, 30000\);/, 'local MCP startup must allow slow-but-valid boots beyond the old 15 second boundary');
+
   const logger = createRuntimeLifecycleLogger({ home, runId: 'run-fixture', pid: 4321 });
   logger.append('launcher-start', 'launcher started', {
     root: 'C:/fixture',

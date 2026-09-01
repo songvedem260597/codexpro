@@ -12,6 +12,15 @@ export function runtimeLifecycleLogPaths(home = path.join(os.homedir(), '.codexp
   return [`${current}.1`, current];
 }
 
+export function cloudflaredOutputLevel(line) {
+  const text = String(line ?? '').trim();
+  if (!text) return 'info';
+  if (/\bcontext cancel(?:l)?ed\b/i.test(text)) return null;
+  if (/\b(error|failed|failure|unable|fatal|panic)\b/i.test(text)) return 'error';
+  if (/\b(warn|warning|timeout|reconnect|retry|closed|disconnect)\b/i.test(text)) return 'warn';
+  return 'info';
+}
+
 function scrubString(value) {
   return String(value ?? '')
     .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s,;]+/gi, '$1[REDACTED]')
