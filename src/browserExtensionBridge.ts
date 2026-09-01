@@ -25,6 +25,11 @@ const MAX_PERSISTED_PROFILE_TASKS = 200;
 const PROFILE_TASK_EVENT_LOG_MAX_BYTES = 2 * 1024 * 1024;
 const PROFILE_TASK_EVENT_THROTTLE_MS = 30_000;
 
+export function browserProfileDisplayLabel(value: unknown, headless = false): string {
+  const label = String(value ?? "").trim();
+  return headless ? label.replace(/^Headless\s*·\s*/i, "").trim() : label;
+}
+
 export interface ExtensionProfileSummary {
   profile_id: string;
   email: string;
@@ -438,9 +443,12 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   }
   if (!profile.enabled && state.activeProfileId === id) state.activeProfileId = undefined;
   profile.email = String(source.email ?? profile.email ?? "").trim().slice(0, 320);
-  profile.label = String(source.label ?? profile.label ?? profile.email ?? `Chrome ${id.slice(0, 8)}`).trim().slice(0, 320);
-  profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
   profile.headless = source.headless === true;
+  profile.label = browserProfileDisplayLabel(
+    source.label ?? profile.label ?? profile.email ?? `Chrome ${id.slice(0, 8)}`,
+    profile.headless
+  ).slice(0, 320);
+  profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
   profile.sourceProfileId = String(source.source_profile_id ?? profile.sourceProfileId ?? "").trim().slice(0, 160);
   profile.connectorServerFingerprint = String(source.connector_server_fingerprint ?? profile.connectorServerFingerprint ?? "").trim().slice(0, 128);
   if (source.connector_install && typeof source.connector_install === "object") {

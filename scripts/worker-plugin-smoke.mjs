@@ -3,6 +3,10 @@ import { WorkerPluginRegistry } from "../manager/electron/worker-core/plugin-reg
 import { createChromeWorkerPlugin } from "../manager/electron/worker-plugins/chrome-worker-plugin.mjs";
 import { normalizeWorkerPluginManifest, splitWorkerId } from "../manager/electron/worker-core/plugin-contract.mjs";
 import { workerChromeActionsVisible, workerNeedsExtensionUpdate, workerSupports, workerVisualState } from "../manager/src/worker-state.js";
+import { browserProfileDisplayLabel } from "../dist/browserExtensionBridge.js";
+
+assert.equal(browserProfileDisplayLabel("Headless · CHATGPT 4", true), "CHATGPT 4");
+assert.equal(browserProfileDisplayLabel("Headless · CHATGPT 4", false), "Headless · CHATGPT 4");
 
 const sent = [];
 const registry = new WorkerPluginRegistry();
