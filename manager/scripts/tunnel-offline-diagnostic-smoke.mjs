@@ -95,5 +95,6 @@ const managerMain = await fs.readFile(new URL("../electron/main.mjs", import.met
 assert.match(launcher, /record\(process\.stdout, 'stdout', chunk\)/, "cloudflared stdout must retain its stream name and actual output chunk");
 assert.match(launcher, /record\(process\.stderr, 'stderr', chunk\)/, "cloudflared stderr must retain its stream name and actual output chunk");
 assert.match(managerMain, /collectTunnelOfflineEvidence\([\s\S]*?Object\.assign\(tunnelHealthEvent\.details, offlineEvidence\)/, "Manager must attach correlated tunnel evidence to the first offline transition log");
+assert.match(managerMain, /if \(!isWindows\)[\s\S]*?const processSummaries = processCandidates\.map[\s\S]*?await recordRuntimeHealthDiagnostics\(\{ healthCycleId, localBase, publicBase, local, tunnel, processSummaries \}\)/, "macOS and other portable runtimes must record the same tunnel outage evidence as Windows");
 
 console.log("tunnel offline diagnostic smoke: ok");
