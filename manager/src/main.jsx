@@ -4131,12 +4131,6 @@ function App() {
               >
                 {busy === "reload-profiles" ? "Đang update extension…" : "Update extension"}
               </button>
-              <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>
-                {busy === "start" ? "Đang khởi động..." : "Khởi động"}
-              </button>
-              <button className="button secondary" onClick={() => control("restart")} disabled={Boolean(busy)}>
-                {busy === "restart" ? "Đang restart..." : "Restart server"}
-              </button>
             </div>
           )}
         </header>
