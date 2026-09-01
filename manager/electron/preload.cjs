@@ -67,6 +67,13 @@ contextBridge.exposeInMainWorld("codexpro", {
   getChatResponseCache: (payload) => invoke("codexpro:get-chat-response-cache", payload),
   saveChatResponseCache: (payload) => invoke("codexpro:save-chat-response-cache", payload),
   getRepoTaskStatus: (payload) => invoke("codexpro:get-repo-task-status", payload),
+  listAppPlugins: () => invoke("codexpro:list-app-plugins"),
+  listAppPluginCatalog: () => invoke("codexpro:list-app-plugin-catalog"),
+  installCatalogAppPlugin: (id) => invoke("codexpro:install-catalog-app-plugin", id),
+  updateCatalogAppPlugin: (id) => invoke("codexpro:update-catalog-app-plugin", id),
+  installAppPlugin: () => invoke("codexpro:install-app-plugin"),
+  reloadAppPlugin: (id) => invoke("codexpro:reload-app-plugin", id),
+  uninstallAppPlugin: (id) => invoke("codexpro:uninstall-app-plugin", id),
   chooseProject: () => invoke("codexpro:choose-project"),
 
   addProject: (root) => invoke("codexpro:add-project", root),

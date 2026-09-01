@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, Notification, safeStorage, shell } from "electron";
+import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, Notification, protocol, safeStorage, shell } from "electron";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -23,6 +23,18 @@ import { create9RouterProvider, createOpenAICompatibleProvider, createOpenRouter
 import { createApiWorkerPlugin } from "./worker-plugins/api-worker-plugin.mjs";
 import { createChromeWorkerPlugin } from "./worker-plugins/chrome-worker-plugin.mjs";
 import { buildTaskWorkflowPrompt, resolveTaskWorkflow } from "./task-workflow-registry.mjs";
+import { createAppPluginRegistry } from "./app-plugins/app-plugin-registry.mjs";
+import { createManagedAppPluginInstaller } from "./app-plugins/managed-app-plugin-installer.mjs";
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: "codexpro-plugin",
+  privileges: {
+    standard: true,
+    secure: true,
+    supportFetchAPI: true,
+    corsEnabled: true
+  }
+}]);
 
 const execFileAsync = promisify(execFile);
 const workerPluginRegistry = new WorkerPluginRegistry();
@@ -92,6 +104,12 @@ const MANAGER_RUN_ID = `mgr_${Date.now().toString(36)}_${randomBytes(4).toString
 const codexProHome = process.env.CODEXPRO_HOME
   ? path.resolve(process.env.CODEXPRO_HOME)
   : path.join(os.homedir(), ".codexpro");
+const appPluginRegistry = createAppPluginRegistry({ home: codexProHome });
+const managedAppPluginInstaller = createManagedAppPluginInstaller({
+  home: codexProHome,
+  registry: appPluginRegistry,
+  templateRoot: path.join(here, "app-plugins", "templates", "taste-skill")
+});
 const diagnostic = (level, source, category, message, details = {}) => {
   void appendDiagnosticLog(codexProHome, {
     level,
@@ -207,6 +225,42 @@ function diagnosticIpcHandle(channel, options, handler) {
       throw error;
     }
   });
+}
+
+async function handleAppPluginProtocol(request) {
+  try {
+    const url = new URL(request.url);
+    const resource = appPluginRegistry.resolveResource(url.hostname, url.pathname);
+    const body = await fs.promises.readFile(resource.path);
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "access-control-allow-origin": "*",
+        "cache-control": "no-store",
+        "content-security-policy": [
+          "default-src 'none'",
+          "script-src codexpro-plugin: 'unsafe-inline' 'unsafe-eval'",
+          "style-src codexpro-plugin: https: 'unsafe-inline'",
+          "img-src codexpro-plugin: data: blob: https:",
+          "font-src codexpro-plugin: data: https:",
+          "connect-src codexpro-plugin: http: https: ws: wss:",
+          "media-src codexpro-plugin: data: blob: https:",
+          "worker-src codexpro-plugin: blob:"
+        ].join("; "),
+        "content-type": resource.mime_type,
+        "x-content-type-options": "nosniff"
+      }
+    });
+  } catch (error) {
+    return new Response(`Không tải được plugin: ${error?.message || error}`, {
+      status: 404,
+      headers: {
+        "cache-control": "no-store",
+        "content-type": "text/plain; charset=utf-8",
+        "x-content-type-options": "nosniff"
+      }
+    });
+  }
 }
 void pruneDiagnosticLogs(codexProHome).catch((error) => console.error("[manager-diagnostic-prune]", error?.message || error));
 const tokenFileDefault = path.join(codexProHome, "http-token");
@@ -4339,6 +4393,78 @@ diagnosticIpcHandle("codexpro:get-repo-task-status", {
     ? { level: "warn", message: result?.verified === false ? "Task CodexPro chưa được xác minh" : "Task CodexPro đã verified nhưng thiếu task title" }
     : null
 }, (_event, payload) => getRepoTaskStatus(payload));
+diagnosticIpcHandle("codexpro:list-app-plugins", {
+  category: "app-plugin",
+  action: "list-app-plugins"
+}, () => appPluginRegistry.list());
+diagnosticIpcHandle("codexpro:list-app-plugin-catalog", {
+  category: "app-plugin",
+  action: "list-app-plugin-catalog"
+}, () => managedAppPluginInstaller.listCatalog());
+diagnosticIpcHandle("codexpro:install-catalog-app-plugin", {
+  category: "app-plugin",
+  action: "install-catalog-app-plugin",
+  logSuccess: true,
+  successMessage: "Đã cài plugin từ catalog",
+  failureMessage: "Cài plugin từ catalog thất bại",
+  details: (id) => ({ plugin_id: String(id || "") }),
+  resultDetails: (result) => ({ plugin_id: result?.plugin?.id || "", skill_count: Number(result?.skill_count) || 0, source_commit: result?.source_commit || "" })
+}, async (_event, id) => {
+  const result = await managedAppPluginInstaller.install(id);
+  return { ...result, plugins: appPluginRegistry.list(), catalog: managedAppPluginInstaller.listCatalog() };
+});
+diagnosticIpcHandle("codexpro:update-catalog-app-plugin", {
+  category: "app-plugin",
+  action: "update-catalog-app-plugin",
+  logSuccess: true,
+  successMessage: "Đã cập nhật plugin từ catalog",
+  failureMessage: "Cập nhật plugin từ catalog thất bại",
+  details: (id) => ({ plugin_id: String(id || "") }),
+  resultDetails: (result) => ({ plugin_id: result?.plugin?.id || "", skill_count: Number(result?.skill_count) || 0, source_commit: result?.source_commit || "" })
+}, async (_event, id) => {
+  const result = await managedAppPluginInstaller.update(id);
+  return { ...result, plugins: appPluginRegistry.list(), catalog: managedAppPluginInstaller.listCatalog() };
+});
+diagnosticIpcHandle("codexpro:install-app-plugin", {
+  category: "app-plugin",
+  action: "install-app-plugin",
+  logSuccess: true,
+  successMessage: "Đã cài app plugin",
+  failureMessage: "Cài app plugin thất bại",
+  resultDetails: (result) => ({ plugin_id: result?.plugin?.id || "", repo_root: result?.plugin?.repo_root || "", cancelled: result?.cancelled === true })
+}, async (event) => {
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const options = {
+    title: "Chọn repo có .codexpro-plugin/plugin.json",
+    properties: ["openDirectory"]
+  };
+  const selection = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+  if (selection.canceled || !selection.filePaths[0]) return { cancelled: true, plugins: appPluginRegistry.list() };
+  const plugin = appPluginRegistry.install(selection.filePaths[0]);
+  return { cancelled: false, plugin, plugins: appPluginRegistry.list() };
+});
+diagnosticIpcHandle("codexpro:reload-app-plugin", {
+  category: "app-plugin",
+  action: "reload-app-plugin",
+  logSuccess: true,
+  successMessage: "Đã reload app plugin",
+  failureMessage: "Reload app plugin thất bại",
+  details: (id) => ({ plugin_id: String(id || "") })
+}, (_event, id) => {
+  const plugin = appPluginRegistry.reload(id);
+  return { plugin, plugins: appPluginRegistry.list() };
+});
+diagnosticIpcHandle("codexpro:uninstall-app-plugin", {
+  category: "app-plugin",
+  action: "uninstall-app-plugin",
+  logSuccess: true,
+  successMessage: "Đã gỡ app plugin khỏi Manager",
+  failureMessage: "Gỡ app plugin thất bại",
+  details: (id) => ({ plugin_id: String(id || "") })
+}, (_event, id) => {
+  const plugin = appPluginRegistry.uninstall(id);
+  return { plugin, plugins: appPluginRegistry.list() };
+});
 diagnosticIpcHandle("codexpro:choose-project", { category: "projects", action: "choose-project", failureMessage: "Mở hộp chọn dự án thất bại" }, async () => {
   const result = await dialog.showOpenDialog({ properties: ["openDirectory"], title: "Chọn repo hoặc dự án" });
   return result.canceled ? null : result.filePaths[0];
@@ -4436,6 +4562,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
+    protocol.handle("codexpro-plugin", handleAppPluginProtocol);
     diagnostic("info", "electron", "runtime", "CodexPro Manager đã khởi động", {
       action: "manager-started",
       platform: process.platform,

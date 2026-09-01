@@ -1,6 +1,6 @@
 {
   "name": "codexpro-manager",
-  "version": "0.2.123",
+  "version": "0.2.124",
   "private": true,
   "description": "Windows desktop manager for a local CodexPro MCP server.",
   "author": "CodexPro contributors",
@@ -26,6 +26,8 @@
     "test:system-maintenance": "node scripts/system-maintenance-workflow-smoke.mjs",
     "test:project-performance": "node scripts/project-performance-workflow-smoke.mjs",
     "test:task-workflows": "node scripts/task-workflow-center-smoke.mjs",
+    "test:app-plugins": "node scripts/app-plugin-registry-smoke.mjs",
+    "app-plugin:install": "node scripts/install-catalog-app-plugin.mjs",
     "test:api-worker-job-modal": "node scripts/api-worker-job-modal-smoke.mjs",
     "test:api-worker-streaming": "node scripts/api-worker-streaming-smoke.mjs",
     "test:dropdowns": "node scripts/app-dropdown-smoke.mjs",
