@@ -15,6 +15,7 @@ export function createMcpResponseQueue(options = {}) {
   const onEvent = typeof options.onEvent === "function" ? options.onEvent : () => {};
   const entries = new Map();
   const queued = [];
+  const activeLanes = new Set();
   let active = 0;
   let backgroundActive = 0;
   let sequence = 0;
@@ -23,6 +24,7 @@ export function createMcpResponseQueue(options = {}) {
     return {
       active,
       backgroundActive,
+      activeLanes: activeLanes.size,
       queued: queued.length,
       interactiveQueued: queued.filter((entry) => entry.priority === "interactive").length,
       backgroundQueued: queued.filter((entry) => entry.priority === "background").length
@@ -34,6 +36,7 @@ export function createMcpResponseQueue(options = {}) {
       onEvent({
         type,
         key: entry?.key || "",
+        lane: entry?.lane || "",
         priority: entry?.priority || "background",
         coalesced: Number(entry?.coalesced) || 0,
         ...snapshot(),
@@ -42,16 +45,21 @@ export function createMcpResponseQueue(options = {}) {
     } catch {}
   }
 
+  function laneAvailable(entry) {
+    return !entry.lane || !activeLanes.has(entry.lane);
+  }
+
   function nextQueuedIndex() {
-    const interactiveIndex = queued.findIndex((entry) => entry.priority === "interactive");
+    const interactiveIndex = queued.findIndex((entry) => entry.priority === "interactive" && laneAvailable(entry));
     if (interactiveIndex >= 0) return interactiveIndex;
     if (backgroundActive >= maxBackgroundConcurrent) return -1;
-    return queued.length ? 0 : -1;
+    return queued.findIndex((entry) => laneAvailable(entry));
   }
 
   function finish(entry, error, value) {
     active = Math.max(0, active - 1);
     if (entry.slotPriority === "background") backgroundActive = Math.max(0, backgroundActive - 1);
+    if (entry.lane) activeLanes.delete(entry.lane);
     if (entries.get(entry.key) === entry) entries.delete(entry.key);
     emit(error ? "failed" : "completed", entry, {
       queue_wait_ms: Math.max(0, entry.startedAt - entry.queuedAt),
@@ -72,8 +80,10 @@ export function createMcpResponseQueue(options = {}) {
       entry.startedAt = now();
       active += 1;
       if (entry.slotPriority === "background") backgroundActive += 1;
+      if (entry.lane) activeLanes.add(entry.lane);
       const context = {
         key: entry.key,
+        lane: entry.lane,
         priority: entry.priority,
         queuedAt: entry.queuedAt,
         startedAt: entry.startedAt,
@@ -96,6 +106,7 @@ export function createMcpResponseQueue(options = {}) {
     if (!normalizedKey) throw new Error("MCP response queue key is required.");
     if (typeof task !== "function") throw new TypeError("MCP response queue task must be a function.");
     const priority = normalizedPriority(runOptions.priority);
+    const lane = String(runOptions.lane || "").trim();
     const existing = entries.get(normalizedKey);
     if (existing) {
       existing.coalesced += 1;
@@ -109,7 +120,7 @@ export function createMcpResponseQueue(options = {}) {
     if (queued.length >= maxQueued) {
       const error = new Error("MCP response queue is full; retry after the current reads finish.");
       error.code = "MCP_RESPONSE_QUEUE_FULL";
-      emit("rejected", { key: normalizedKey, priority, coalesced: 0 }, { error_code: error.code });
+      emit("rejected", { key: normalizedKey, lane, priority, coalesced: 0 }, { error_code: error.code });
       return Promise.reject(error);
     }
 
@@ -121,6 +132,7 @@ export function createMcpResponseQueue(options = {}) {
     });
     const entry = {
       key: normalizedKey,
+      lane,
       task,
       priority,
       promise,

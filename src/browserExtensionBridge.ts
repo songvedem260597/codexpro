@@ -143,6 +143,7 @@ interface BridgeState {
   connectorInfo?: (profileId: string) => BrowserExtensionConnectorInfo;
   profileListeners: Set<(profiles: ExtensionProfileSummary[]) => void>;
   profileNotifyTimer?: NodeJS.Timeout;
+  profileNotifySignature?: string;
   profileExpiryTimer?: NodeJS.Timeout;
 }
 
@@ -292,11 +293,18 @@ function persistBrowserProfileTasks(): void {
 
 loadBrowserProfileTasks();
 
+export function browserProfileNotificationSignature(profiles: ExtensionProfileSummary[]): string {
+  return JSON.stringify((Array.isArray(profiles) ? profiles : []).map(({ last_seen: _lastSeen, ...profile }) => profile));
+}
+
 function scheduleProfileNotification(state: BridgeState): void {
   if (state.profileNotifyTimer) return;
   state.profileNotifyTimer = setTimeout(() => {
     state.profileNotifyTimer = undefined;
     const profiles = listBrowserExtensionProfiles();
+    const signature = browserProfileNotificationSignature(profiles);
+    if (signature === state.profileNotifySignature) return;
+    state.profileNotifySignature = signature;
     for (const listener of state.profileListeners) {
       try { listener(profiles); } catch {}
     }

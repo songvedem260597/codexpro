@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createRoot } from "react-dom/client";
 import managerPackage from "../package.json";
 import "./styles.css";
-import "./control-center.css";
 import "@fontsource/be-vietnam-pro/400.css";
 import "@fontsource/be-vietnam-pro/500.css";
 import "@fontsource/be-vietnam-pro/600.css";
@@ -31,14 +30,15 @@ import { profileCardBorderState, profileChromeActionState, profileChromeTarget }
 import { mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList } from "./ui-performance.js";
 import { createApiWorkerDraft, normalizeApiWorkerModels, switchApiWorkerProvider, validateApiWorkerDraft } from "./api-worker-form.js";
 import { AppDropdown } from "./app-dropdown.jsx";
-import { CodeGraphView } from "./code-graph-view.jsx";
 import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
-import { ControlCenter } from "./control-center.jsx";
 import { LatestMessagePanel } from "./latest-message-panel.jsx";
 import { WorkerRunningDuration } from "./worker-running-duration.jsx";
 import { playTaskCompletionSound } from "./task-completion-sound.js";
+import { pruneTimestampMap, trimMapEntries, trimSetEntries } from "./performance-retention.js";
 
 const ResponseText = React.lazy(() => import("./response-markdown.jsx").then((module) => ({ default: module.ResponseText })));
+const CodeGraphView = React.lazy(() => import("./code-graph-view.jsx").then((module) => ({ default: module.CodeGraphView })));
+const ControlCenter = React.lazy(() => import("./control-center.jsx").then((module) => ({ default: module.ControlCenter })));
 const api = window.codexpro;
 const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
@@ -1059,6 +1059,37 @@ function App() {
   const operationsLongTaskAudits = useRef(new Set());
   const operationsAutoUpdateAt = useRef(0);
 
+  useEffect(() => {
+    const sweepRetentionCaches = () => {
+      const timedMaps = [
+        profileCheckTimes.current,
+        connectorAutoMigrationAttempts.current,
+        networkStreamReads.current,
+        networkCompletionReads.current,
+        connectionRecoveryReads.current,
+        repoTaskVerificationReads.current,
+        operationsRecoveryTimes.current
+      ];
+      for (const map of timedMaps) pruneTimestampMap(map, { maxEntries: 96, maxAgeMs: 60 * 60_000 });
+      for (const map of [
+        responseCacheSaveSignatures.current,
+        conversationRollovers.current,
+        requestTargetReasons.current,
+        requestTargetDiagnostics.current,
+        responseScrollPositions.current,
+        responseScrollDiagnostics.current,
+        responseTurnAnchors.current,
+        responseAuditSignatures.current,
+        responseFinalCandidates.current,
+        operationsNotificationState.current
+      ]) trimMapEntries(map, 96);
+      trimSetEntries(operationsLongTaskAudits.current, 128);
+    };
+    sweepRetentionCaches();
+    const timer = window.setInterval(sweepRetentionCaches, 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const projectPageCount = Math.max(1, Math.ceil(projects.length / PROJECTS_PER_PAGE));
   const visibleProjects = useMemo(() => projects.slice(projectPage * PROJECTS_PER_PAGE, (projectPage + 1) * PROJECTS_PER_PAGE), [projects, projectPage]);
   const openChatResponse = chatProfileId ? requestResponses[chatProfileId] : null;
@@ -1204,7 +1235,7 @@ function App() {
       }
     };
     void loadOperations();
-    const timer = window.setInterval(() => void loadOperations(), 5000);
+    const timer = window.setInterval(() => void loadOperations(), 10_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -4272,26 +4303,30 @@ function App() {
         </div>
 
         <div className="control-page" hidden={activePage !== "control"}>
-          <ControlCenter
-            status={status}
-            projects={projects}
-            performance={operationsPerformance}
-            uiPerformance={uiPerformance}
-            diagnosticEntries={operationsLogs}
-            settings={managerSettings}
-            managerVersion={managerPackage.version}
-            workerVersion={WORKER_EXTENSION_VERSION}
-            profileSummary={profileSummary}
-            busy={busy}
-            onOpenChat={setChatProfileId}
-            onOpenChrome={(profile) => void openProfile(profile, { focusOnly: true })}
-            onRecover={(profile) => void recoverProfileTab(profile)}
-            onStop={(task) => void stopControlTask(task)}
-            onOpenRepo={(root) => void api.openFolder(root)}
-            onToggleSetting={(key, value) => void saveManagerSetting({ [key]: value }, value ? "Đã bật tự động hóa" : "Đã tắt tự động hóa")}
-            onUpdateWorkers={() => void reloadProfiles()}
-            onRestartServer={() => void control("restart")}
-          />
+          {activePage === "control" ? (
+            <React.Suspense fallback={<div className="section-note">Đang tải Control Center…</div>}>
+              <ControlCenter
+                status={status}
+                projects={projects}
+                performance={operationsPerformance}
+                uiPerformance={uiPerformance}
+                diagnosticEntries={operationsLogs}
+                settings={managerSettings}
+                managerVersion={managerPackage.version}
+                workerVersion={WORKER_EXTENSION_VERSION}
+                profileSummary={profileSummary}
+                busy={busy}
+                onOpenChat={setChatProfileId}
+                onOpenChrome={(profile) => void openProfile(profile, { focusOnly: true })}
+                onRecover={(profile) => void recoverProfileTab(profile)}
+                onStop={(task) => void stopControlTask(task)}
+                onOpenRepo={(root) => void api.openFolder(root)}
+                onToggleSetting={(key, value) => void saveManagerSetting({ [key]: value }, value ? "Đã bật tự động hóa" : "Đã tắt tự động hóa")}
+                onUpdateWorkers={() => void reloadProfiles()}
+                onRestartServer={() => void control("restart")}
+              />
+            </React.Suspense>
+          ) : null}
         </div>
 
         <div className="task-workflow-page" hidden={activePage !== "workflows"}>
@@ -4852,7 +4887,9 @@ function App() {
               <div><small>Workspace ID</small><code>{inspection.result.workspace_id || "—"}</code></div>
               <div><small>Root</small><code>{inspection.result.root || inspection.project.root}</code></div>
             </div>
-            <CodeGraphView graphData={inspection.result.codexgraph} />
+            <React.Suspense fallback={<div className="codexgraph-loading">Đang tải Code Graph…</div>}>
+              <CodeGraphView graphData={inspection.result.codexgraph} />
+            </React.Suspense>
             <details className="codexgraph-raw-details">
               <summary>Chi tiết workspace / Git / cây dự án</summary>
               <h3>Git status</h3>

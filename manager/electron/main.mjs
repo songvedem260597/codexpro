@@ -290,8 +290,8 @@ let scheduledTaskPromise = null;
 const runtimeHealthDiagnosticTracker = createRuntimeHealthDiagnosticTracker();
 const runtimeRestartGuard = createRuntimeRestartGuard({ sendCooldownMs: 30_000 });
 const responseQueue = createMcpResponseQueue({
-  maxConcurrent: 2,
-  maxBackgroundConcurrent: 1,
+  maxConcurrent: 3,
+  maxBackgroundConcurrent: 2,
   maxQueued: 64,
   onEvent: (event) => {
     if (event.type === "started" && Number(event.queue_wait_ms) >= 1_000) {
@@ -3641,7 +3641,7 @@ async function getProfileResponse(payload) {
         manager_total_ms: Math.max(0, Date.now() - managerStartedAt)
       }
     };
-  }, { priority });
+  }, { priority, lane: profileId });
 }
 
 async function inspectThroughMcp(root) {

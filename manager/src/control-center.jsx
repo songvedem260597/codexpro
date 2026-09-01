@@ -1,4 +1,5 @@
 import React, { useMemo } from "react";
+import "./control-center.css";
 import { WorkerRunningDuration } from "./worker-running-duration.jsx";
 
 function bytes(value) {
