@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppDropdown } from "./app-dropdown.jsx";
+import { classifyChromeTaskDispatch } from "./chrome-task-dispatch.js";
 import { buildPluginTaskPrompt, normalizePluginSkills } from "./plugin-task-prompt.js";
 import "./app-plugin-center.css";
 
@@ -201,6 +202,7 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
       }));
       if (!prepared?.attachment?.path) throw new Error("Manager chưa tạo được file skill đính kèm.");
       const attachments = [prepared.attachment];
+      let conversationPending = false;
       if (selectedWorker.type === "api") {
         unwrap(await api.sendWorkerRequest({
           workerId: selectedWorker.id,
@@ -223,10 +225,12 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
           text,
           attachments
         })) || {};
-        if (!String(result.conversation_id || "")) throw new Error("Chrome worker chưa trả conversation id cho task plugin.");
+        const dispatch = classifyChromeTaskDispatch(result);
+        if (!dispatch.accepted) throw new Error(dispatch.error);
+        conversationPending = dispatch.pending;
       }
       setRequirement("");
-      notify?.(`Đã giao ${skillSelection.length} skill cho ${selectedWorker.label}`);
+      notify?.(`Đã giao ${skillSelection.length} skill cho ${selectedWorker.label}${conversationPending ? " · chat đang đồng bộ" : ""}`);
       onRefresh?.();
     } catch (error) {
       reportError(error);

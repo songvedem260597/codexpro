@@ -7,6 +7,7 @@ import path from "node:path";
 import { createAppPluginRegistry } from "../electron/app-plugins/app-plugin-registry.mjs";
 import { createManagedAppPluginInstaller } from "../electron/app-plugins/managed-app-plugin-installer.mjs";
 import { createPluginSkillBundle } from "../electron/app-plugins/plugin-skill-bundle.mjs";
+import { classifyChromeTaskDispatch } from "../src/chrome-task-dispatch.js";
 import { buildPluginTaskPrompt, normalizePluginSkills } from "../src/plugin-task-prompt.js";
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-app-plugin-"));
@@ -149,6 +150,13 @@ try {
   assert.match(center, /Bước 2 · Chọn dự án/, "selected skills must open the project assignment flow");
   assert.match(center, /sendWorkerRequest/, "plugin tasks must support API workers");
   assert.match(center, /sendProfileRequest/, "plugin tasks must support Chrome workers");
+  assert.match(center, /classifyChromeTaskDispatch/, "plugin tasks must classify Chrome submission evidence instead of requiring an immediate conversation id");
+  assert.doesNotMatch(center, /Chrome worker chưa trả conversation id cho task plugin/, "a submitted new chat may legitimately return conversation_pending before its URL is assigned");
+  const pendingDispatch = classifyChromeTaskDispatch({ submission_state: "submitted", submitted: true, network_acknowledged: true, conversation_id: "", conversation_pending: true });
+  assert.equal(pendingDispatch.accepted, true, "network-acknowledged plugin tasks must be accepted while conversation id is still pending");
+  assert.equal(pendingDispatch.pending, true, "pending conversation state must stay visible to the Plugin UI");
+  assert.equal(classifyChromeTaskDispatch({ submission_state: "failed", submitted: false, error: "prepare failed" }).accepted, false, "failed Chrome submissions must still surface as errors");
+  assert.equal(classifyChromeTaskDispatch({ submission_state: "uncertain", send_uncertain: true }).accepted, false, "uncertain Chrome submissions must not be reported as safely accepted");
   assert.match(center, /prepareAppPluginTask/, "plugin tasks must materialize selected skills as a verified attachment");
   assert.match(center, /Xóa.*khỏi dự án/, "each selected skill must have an explicit per-project remove action");
   assert.match(center, /Xóa tất cả/, "the project assignment flow must also clear every selected skill");
