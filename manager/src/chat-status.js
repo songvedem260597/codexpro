@@ -26,8 +26,9 @@ export function shouldShowChatBusy({ networkState, tabBusy, responseCurrent, res
   return networkState === "generating" || Boolean(responseCurrent && responseBusy);
 }
 
-export function shouldShowChatSettling({ networkState, networkCompletedAt = "", tabSettling, responseCurrent, responseIncomplete, responseReady = false, awaitingAssistant = false, finalityPending = false, nowMs = Date.now(), completionGraceMs = 15000 }) {
+export function shouldShowChatSettling({ networkState, networkCompletedAt = "", tabSettling, responseCurrent, responseIncomplete, responseReady = false, awaitingAssistant = false, finalityPending = false, responseEvidencePending = false, nowMs = Date.now(), completionGraceMs = 15000 }) {
   if (tabSettling) return true;
+  if (responseCurrent && responseEvidencePending) return true;
   const completedAtMs = Date.parse(String(networkCompletedAt || ""));
   const recentCompletedTurn = networkState === "completed"
     && Number.isFinite(completedAtMs)

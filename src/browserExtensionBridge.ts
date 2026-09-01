@@ -178,6 +178,36 @@ function browserProfileTaskEventLogPath(): string {
   return path.join(path.dirname(browserProfileTaskStatePath()), "profile-task-events.jsonl");
 }
 
+function headlessWorkerStatePath(): string {
+  return path.join(path.dirname(browserProfileTaskStatePath()), "headless-workers.json");
+}
+
+function processAlive(pid: unknown): boolean {
+  const value = Number(pid);
+  if (!Number.isInteger(value) || value <= 0) return false;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+function headlessExclusiveLock(profileId: string, workerId = ""): { locked: boolean; worker_id: string } {
+  try {
+    const state = JSON.parse(fs.readFileSync(headlessWorkerStatePath(), "utf8"));
+    const workers = Array.isArray(state?.workers) ? state.workers : [];
+    const worker = workers.find((item: any) => {
+      if (!item || !processAlive(item.pid)) return false;
+      if (workerId && String(item.id || "") !== workerId) return false;
+      return String(item.sourceProfileId || "") === profileId;
+    });
+    return { locked: Boolean(worker), worker_id: String(worker?.id || "") };
+  } catch {
+    return { locked: false, worker_id: "" };
+  }
+}
+
 export function recordBrowserProfileTaskEvent(event: string, details: Record<string, unknown> = {}): void {
   try {
     const logPath = browserProfileTaskEventLogPath();
@@ -618,6 +648,19 @@ function pruneExpiredHeadlessProfiles(state: BridgeState, now = Date.now()): voi
 
 async function handleRequest(state: BridgeState, req: IncomingMessage, res: ServerResponse): Promise<void> {
   setCors(req, res);
+  if (req.method === "GET" && String(req.url || "").startsWith("/headless-lock")) {
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      res.statusCode = 403;
+      res.end("Forbidden");
+      return;
+    }
+    const url = new URL(String(req.url || "/headless-lock"), `http://${BRIDGE_HOST}:${BROWSER_EXTENSION_BRIDGE_PORT}`);
+    const profileId = String(url.searchParams.get("profile_id") || "").trim().slice(0, 160);
+    const workerId = String(url.searchParams.get("worker_id") || "").trim().slice(0, 160);
+    const lock = profileId ? headlessExclusiveLock(profileId, workerId) : { locked: false, worker_id: "" };
+    sendJson(req, res, 200, { ok: true, profile_id: profileId, ...lock });
+    return;
+  }
   if (req.method === "GET" && String(req.url || "").startsWith("/headless-bootstrap")) {
     if (!isLoopbackAddress(req.socket.remoteAddress)) {
       res.statusCode = 403;

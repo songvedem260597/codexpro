@@ -211,6 +211,21 @@ export function ControlCenter({
 
   return (
     <div className="control-center">
+      <section className="control-section">
+        <div className="control-section-head">
+          <div><p className="eyebrow">UPDATE CENTER</p><h2>Phiên bản</h2></div>
+          <div className="control-section-actions">
+            <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={onRestartServer}>Restart MCP</button>
+            <button className="button secondary" type="button" disabled={Boolean(busy) || !profileSummary?.reload} onClick={onUpdateWorkers}>Update worker</button>
+          </div>
+        </div>
+        <div className="update-center-list">
+          <div><span>CodexPro Manager</span><strong>v{managerVersion}</strong><small>Desktop app</small></div>
+          <div><span>MCP runtime</span><strong>{status?.local?.ok ? "Online" : "Offline"}</strong><small>{String(status?.local?.data?.runtimeBuildId || "build chưa xác định").slice(0, 26)}</small></div>
+          <div><span>Worker extension</span><strong>Target v{workerVersion}</strong><small>{profileSummary?.reload || 0} cần update · {profileSummary?.deferredUpdate || 0} đang bận</small></div>
+        </div>
+      </section>
+
       <section className="control-section control-task-section">
         <div className="control-section-head"><div><p className="eyebrow">TASK CENTER</p><h2>Task đang chạy</h2></div><span className="control-section-count">{tasks.length} task</span></div>
         {!tasks.length ? <Empty>Không có task nào đang chạy.</Empty> : (
@@ -286,35 +301,18 @@ export function ControlCenter({
         </section>
       </div>
 
-      <div className="control-two-column">
-        <section className="control-section">
-          <div className="control-section-head"><div><p className="eyebrow">PROFILE HEALTH</p><h2>Health Score</h2></div><span className="control-section-count">{profiles.length} profile</span></div>
-          <div className="health-list">
-            {health.map(({ profile, score, issues, state }) => (
-              <div className="health-row" key={profile.profile_id}>
-                <div className={`health-score is-${state}`}>{score}</div>
-                <div><strong>{profile.label || `Chrome ${profile.profile_id.slice(0, 8)}`}</strong><small>{issues.length ? issues.join(" · ") : "Kết nối và MCP bình thường"}</small></div>
-                <span>{profile.extension_version || "—"}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-
-        <section className="control-section">
-          <div className="control-section-head">
-            <div><p className="eyebrow">UPDATE CENTER</p><h2>Phiên bản</h2></div>
-            <div className="control-section-actions">
-              <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={onRestartServer}>Restart MCP</button>
-              <button className="button secondary" type="button" disabled={Boolean(busy) || !profileSummary?.reload} onClick={onUpdateWorkers}>Update worker</button>
+      <section className="control-section">
+        <div className="control-section-head"><div><p className="eyebrow">PROFILE HEALTH</p><h2>Health Score</h2></div><span className="control-section-count">{profiles.length} profile</span></div>
+        <div className="health-list">
+          {health.map(({ profile, score, issues, state }) => (
+            <div className="health-row" key={profile.profile_id}>
+              <div className={`health-score is-${state}`}>{score}</div>
+              <div><strong>{profile.label || `Chrome ${profile.profile_id.slice(0, 8)}`}</strong><small>{issues.length ? issues.join(" · ") : "Kết nối và MCP bình thường"}</small></div>
+              <span>{profile.extension_version || "—"}</span>
             </div>
-          </div>
-          <div className="update-center-list">
-            <div><span>CodexPro Manager</span><strong>v{managerVersion}</strong><small>Desktop app</small></div>
-            <div><span>MCP runtime</span><strong>{status?.local?.ok ? "Online" : "Offline"}</strong><small>{String(status?.local?.data?.runtimeBuildId || "build chưa xác định").slice(0, 26)}</small></div>
-            <div><span>Worker extension</span><strong>Target v{workerVersion}</strong><small>{profileSummary?.reload || 0} cần update · {profileSummary?.deferredUpdate || 0} đang bận</small></div>
-          </div>
-        </section>
-      </div>
+          ))}
+        </div>
+      </section>
 
       <div className="control-two-column control-lower-grid">
         <section className="control-section">

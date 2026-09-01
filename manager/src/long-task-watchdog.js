@@ -30,6 +30,28 @@ export function longRunningChatWatchdogCandidate(profile, jobs = [], nowMs = Dat
   if (ageMs < LONG_TASK_WATCHDOG_AFTER_MS) return null;
 
   const stableTaskId = taskId || String(job?.job_id || "") || conversationId;
+  const networkState = String(tab?.network_state || "").toLowerCase();
+  const networkError = String(tab?.network_error || "").trim();
+  const connectionInterrupted = tab?.connection_interrupted === true;
+  const messageDeliveryTimedOut = tab?.message_delivery_timed_out === true;
+  const rendererUnresponsive = tab?.renderer_unresponsive === true;
+  const hardFailure = Boolean(
+    rendererUnresponsive
+    || connectionInterrupted
+    || messageDeliveryTimedOut
+    || networkState === "failed"
+    || networkError
+  );
+  const phase = hardFailure ? "recovery" : "health";
+  const failureReason = connectionInterrupted
+    ? "connection_interrupted"
+    : messageDeliveryTimedOut
+      ? "message_delivery_timeout"
+      : rendererUnresponsive
+        ? "renderer_unresponsive"
+        : networkState === "failed" || networkError
+          ? "network_failed"
+          : "";
   return {
     profileId,
     taskId: stableTaskId,
@@ -37,7 +59,15 @@ export function longRunningChatWatchdogCandidate(profile, jobs = [], nowMs = Dat
     conversationId,
     targetId: Number(tab.id),
     startedAt,
-    attemptKey: `${profileId}:${stableTaskId}:${startedAt}`,
+    phase,
+    hardFailure,
+    failureReason,
+    networkState,
+    networkError,
+    connectionInterrupted,
+    messageDeliveryTimedOut,
+    rendererUnresponsive,
+    attemptKey: `${profileId}:${stableTaskId}:${startedAt}:${phase}`,
     ageMs
   };
 }

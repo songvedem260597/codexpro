@@ -164,6 +164,16 @@ function createWindow() {
   else mainWindow.loadFile(path.join(currentDir, "..", "dist", "index.html"));
 }
 
+function applyDockIcon() {
+  if (process.platform !== "darwin" || !app.dock) return;
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, "dock-icon.png")
+    : path.join(currentDir, "..", "build", "icon-1024.png");
+  if (!fs.existsSync(iconPath)) return;
+  const dockIcon = nativeImage.createFromPath(iconPath);
+  if (!dockIcon.isEmpty()) app.dock.setIcon(dockIcon);
+}
+
 ipcMain.handle("background-remover:choose", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Chọn ảnh cần xóa nền",
@@ -196,6 +206,7 @@ app.on("open-file", (event, filePath) => {
 
 app.whenReady().then(() => {
   app.setName("CodexPro Xóa Nền");
+  applyDockIcon();
   const commandLineImage = process.argv.find((argument) => {
     try {
       return supportedExtensions.has(path.extname(argument).toLowerCase()) && fs.statSync(argument).isFile();

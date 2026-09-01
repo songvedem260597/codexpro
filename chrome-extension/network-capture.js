@@ -1,7 +1,7 @@
 (() => {
   const GLOBAL_KEY = "__codexproNetworkStreamCaptureV1";
   const current = globalThis[GLOBAL_KEY];
-  if (current?.version === 3 && typeof current.read === "function") return;
+  if (current?.version === 4 && typeof current.read === "function") return;
 
   const originalFetch = (current?.originalFetch || globalThis.fetch)?.bind(globalThis);
   if (typeof originalFetch !== "function") return;
@@ -19,6 +19,14 @@
     if (String(method || "GET").toUpperCase() !== "POST") return false;
     const endpoint = endpointOf(url);
     return /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|(?:codex\/)?responses)(?:\/|$)/.test(endpoint);
+  };
+  const sourceHeadlessLock = () => {
+    const root = globalThis.document?.documentElement;
+    if (!root || root.dataset?.codexproHeadlessLocked !== "1") return null;
+    return {
+      locked: true,
+      workerId: bounded(root.dataset?.codexproHeadlessWorkerId || "", 180)
+    };
   };
   const requestConversationId = (body) => {
     if (typeof body !== "string" || !body.trim()) return "";
@@ -224,6 +232,13 @@
 
   const capturedFetch = async function (...args) {
     const details = requestDetails(args[0], args[1]);
+    if (isGenerationEndpoint(details.url, details.method)) {
+      const lock = sourceHeadlessLock();
+      if (lock?.locked) {
+        const worker = lock.workerId ? ` (${lock.workerId})` : "";
+        throw new Error(`CodexPro đã khóa gửi ChatGPT trên Chrome profile nguồn vì headless worker đang chạy${worker}.`);
+      }
+    }
     const response = await originalFetch(...args);
     if (isGenerationEndpoint(details.url, details.method)) {
       const record = createRecord(details.url, details.conversationId);
@@ -233,7 +248,7 @@
   };
 
   const api = {
-    version: 3,
+    version: 4,
     installedAt: Date.now(),
     originalFetch,
     records,

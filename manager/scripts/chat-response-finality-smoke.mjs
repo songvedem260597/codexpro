@@ -122,9 +122,11 @@ assert.equal(
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const mainSource = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
-assert.match(mainSource, /if \(currentResponse\?\.finalityPending\)[\s\S]*?loadResponse\(profile, conversationId, true, true, false, false\)/, "finality polling must re-read the DOM rather than canonical-only state");
+const managerMainSource = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
+assert.match(mainSource, /if \(currentResponse\?\.finalityPending\)[\s\S]*?const canonical = await loadResponse\(profile, conversationId, true, false, false, true\)[\s\S]*?completedResponseNeedsDomFallback\(canonical\)[\s\S]*?loadResponse\(profile, conversationId, true, true, false, false\)/, "finality polling must retry canonical first and only fall back to the DOM when canonical is still unavailable");
 assert.match(mainSource, /finalityPending: currentResponse\?\.finalityPending/, "the send guard must receive finalityPending");
 assert.match(mainSource, /shouldShowChatSettling\(\{[\s\S]*?finalityPending: responseCurrent && response\?\.finalityPending/, "the visible settling state must receive finalityPending");
 assert.match(mainSource, /canAcceptNextChatMessage\(\{[\s\S]*?finalityPending: responseCurrent && response\?\.finalityPending/, "turn readiness must receive finalityPending");
+assert.match(managerMainSource, /selectedConversationTab\?\.connection_interrupted[\s\S]*?action: "get_chat_response"[\s\S]*?recover_stale_dom: true[\s\S]*?action: "list_profiles"/, "send preflight must recover and refresh an interrupted ChatGPT turn before dispatching the next message");
 
 console.log(`chat response finality smoke passed (${here})`);

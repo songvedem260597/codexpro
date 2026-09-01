@@ -32,6 +32,12 @@
       "electron/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "build/icon-1024.png",
+        "to": "dock-icon.png"
+      }
+    ],
     "fileAssociations": [
       {
         "ext": ["png", "jpg", "jpeg", "gif", "webp"],
@@ -45,6 +51,7 @@
     ],
     "mac": {
       "category": "public.app-category.graphics-design",
+      "icon": "build/icon.icns",
       "target": "dir"
     }
   }

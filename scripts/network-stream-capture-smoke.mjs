@@ -33,6 +33,7 @@ const context = {
   Response,
   ReadableStream,
   TextDecoder,
+  document: { documentElement: { dataset: {} } },
   location: { href: "https://chatgpt.com/" },
   console,
   setTimeout,
@@ -56,7 +57,7 @@ const context = {
 context.globalThis = context;
 
 vm.runInNewContext(source, context, { filename: "network-capture.js" });
-assert.equal(context.__codexproNetworkStreamCaptureV1?.version, 3);
+assert.equal(context.__codexproNetworkStreamCaptureV1?.version, 4);
 
 const legacyResponse = await context.fetch("https://chatgpt.com/backend-api/f/conversation", { method: "POST" });
 await legacyResponse.text();
@@ -108,6 +109,22 @@ assert.equal(toolActivity.in_progress, true, "the UI must keep showing tool acti
 await toolResponse.text();
 await new Promise((resolve) => setTimeout(resolve, 0));
 assert.equal(context.__codexproNetworkStreamCaptureV1.read("conversation-tools-3456").in_progress, false);
+
+const callsBeforeLock = call;
+context.document.documentElement.dataset.codexproHeadlessLocked = "1";
+context.document.documentElement.dataset.codexproHeadlessWorkerId = "headless-test-worker";
+await assert.rejects(
+  context.fetch("https://chatgpt.com/backend-api/f/conversation", {
+    method: "POST",
+    body: JSON.stringify({ conversation_id: "conversation-blocked-7890" })
+  }),
+  /khóa gửi ChatGPT.*headless-test-worker/,
+  "source profile generation must be blocked while its headless worker owns the session"
+);
+assert.equal(call, callsBeforeLock, "blocked source generation must never reach the original fetch");
+
+context.document.documentElement.dataset.codexproHeadlessLocked = "0";
+delete context.document.documentElement.dataset.codexproHeadlessWorkerId;
 
 assert.equal(context.__codexproNetworkStreamCaptureV1.read("missing-conversation").available, false);
 console.log("✓ ChatGPT live network stream capture smoke test passed");

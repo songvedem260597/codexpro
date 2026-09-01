@@ -7,11 +7,21 @@ assert.match(source, /Hãy kết nối API worker và Chrome profile của bạn
 
 assert.match(source, /<h2>Worker đã kết nối<\/h2>/, "overview must use the unified connected worker heading");
 assert.doesNotMatch(source, /<h2>Profile đã kết nối<\/h2>/, "legacy Chrome-only heading must be removed");
-assert.match(source, /<ApiWorkerCards[\s\S]*?workers=\{\(status\?\.workers \|\| \[\]\)\.filter[\s\S]*?customImages=\{managerSettings\.workerImageDataUrls\}/, "saved API workers must render in the connected worker list with the configured GIF pack");
+assert.match(source, /header-server-actions[\s\S]*?profile-count[\s\S]*?profileSummary\.working[\s\S]*?profileSummary\.idle[\s\S]*?profileSummary\.hung[\s\S]*?profileSummary\.missing/, "overview must retain the worker state summary");
+assert.doesNotMatch(source, /header-action-row/, "overview header must not reserve vertical space for extension and runtime action buttons");
+const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+assert.match(styles, /\.page-overview #overview \.status-card \{ min-height: 92px;/, "overview runtime status cards must stay compact");
+assert.match(styles, /\.page-overview #profiles \.profile-list\.is-card-layout \.profile-worker \{ width: 120px; height: 132px;/, "overview worker images must leave enough vertical room for the complete cards");
+assert.match(styles, /\.page-overview \.header-server-actions \{ width: auto;[\s\S]*?\.profile-count \{ min-height: 34px;/, "overview worker totals must stay compact instead of stretching to the heading height");
+assert.match(styles, /@media \(max-height: 820px\)[\s\S]*?\.profile-list\.is-card-layout \.profile-worker \{ width: 88px; height: 96px;/, "short overview windows must compact worker cards so all three remain fully visible");
+assert.match(source, /<ApiWorkerCards[\s\S]*?workers=\{\(status\?\.workers \|\| \[\]\)\.filter[\s\S]*?customImages=\{activeWorkerImages\}/, "saved API workers must render in the connected worker list with the active built-in or custom GIF pack");
 assert.match(source, /function ApiWorkerCards[\s\S]*?<WorkerIcon state=\{workerState\} customImages=\{customImages\}/, "API worker cards must use the animated worker icon");
 assert.match(source, /const apiWorkers = \(status\?\.workers \|\| \[\]\)\.filter[\s\S]*?working:[\s\S]*?apiWorkers\.filter[\s\S]*?idle:[\s\S]*?apiWorkers\.filter/, "overview summary must count connected API workers");
 assert.match(source, /function profileVisibleInWorkerList\(profile\)[\s\S]*?tab_count[\s\S]*?> 0 \|\| Boolean\(profile\?\.connector_installed\)/, "only a zero-tab profile without the CodexPro connector must be hidden from connected workers");
 assert.match(source, /status\?\.browserProfiles \|\| \[\][\s\S]*?\.filter\(profileVisibleInWorkerList\)[\s\S]*?\.map\(\(profile\)/, "the connected worker cards must exclude background profiles with no tabs");
+assert.match(source, /headlessWorker = profile\.headless[\s\S]*?headlessState\?\.workers[\s\S]*?sourceProfileDirectory/, "headless connected worker cards must resolve their clone source from the headless worker registry");
+assert.match(source, /headlessSourceProfile = profile\.headless && profile\.source_profile_id[\s\S]*?headlessSourceLabel[\s\S]*?Clone từ <b>/, "headless connected worker cards must show which Chrome profile they were cloned from");
+assert.match(styles, /\.profile-meta > \.headless-clone-source[\s\S]*?\.profile-list\.is-card-layout \.headless-clone-source/, "headless clone-source metadata must stay readable in row and card layouts");
 assert.match(source, /function profileSafeForWorkerUpdate\(profile\)[\s\S]*?\["idle", "no_chatgpt"\]\.includes\(profile\?\.activity\)/, "a hidden background profile must remain safe to update while it has no work");
 assert.match(electronSource, /const safeToReload = \(profile\)[\s\S]*?\["idle", "no_chatgpt"\]\.includes\(profile\.activity\)/, "the backend must reload an outdated background profile that has no work");
 assert.match(source, /if \(refreshInFlight\.current\) \{[\s\S]*?refreshQueued\.current = true;[\s\S]*?void refresh\(queuedForeground\);/, "a refresh requested while saving must be queued instead of dropped");

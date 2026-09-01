@@ -18,6 +18,9 @@ import { TaskWorkflowCenter } from "./task-workflow-center.jsx";
 import workerHung from "./assets/worker-packs/y-ta-dam-dang-pixel/hung.gif";
 import workerIdle from "./assets/worker-packs/y-ta-dam-dang-pixel/idle.gif";
 import workerWorking from "./assets/worker-packs/y-ta-dam-dang-pixel/working.gif";
+import studentWorkerHung from "./assets/worker-packs/co-sinh-vien-dam-dang/hung.gif";
+import studentWorkerIdle from "./assets/worker-packs/co-sinh-vien-dam-dang/idle.gif";
+import studentWorkerWorking from "./assets/worker-packs/co-sinh-vien-dam-dang/working.gif";
 import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, recordResponseScroll, responseScrollMetrics, scheduleResponseAutoResume, scrollResponseToTurnAnchor as applyResponseTurnAnchor } from "./chat-scroll.js";
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, latestTurnHasProvisionalAssistant, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
@@ -25,8 +28,8 @@ import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shouldRolloverConversation } from "./conversation-message-limit.js";
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
-import { confirmChatResponseFinality } from "./chat-response-finality.js";
-import { profileCardBorderState, profileChromeActionState, profileChromeTarget } from "./profile-card-state.js";
+import { confirmChatResponseFinality, hasStrongerNetworkStreamEvidence } from "./chat-response-finality.js";
+import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
 import { mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList } from "./ui-performance.js";
 import { createApiWorkerDraft, normalizeApiWorkerModels, switchApiWorkerProvider, validateApiWorkerDraft } from "./api-worker-form.js";
 import { AppDropdown } from "./app-dropdown.jsx";
@@ -89,6 +92,20 @@ const workerIcons = {
   idle: { src: workerIdle, label: "CodexPro đang rảnh" },
   working: { src: workerWorking, label: "CodexPro đang làm việc" }
 };
+const BUILT_IN_WORKER_PACKS = [
+  {
+    id: "default",
+    name: "Y tá đảm đang Pixel",
+    hint: "Bộ mặc định đi kèm CodexPro",
+    images: { idle: workerIdle, working: workerWorking, hung: workerHung }
+  },
+  {
+    id: "co-sinh-vien-dam-dang",
+    name: "Cô sinh viên đảm đang",
+    hint: "Bộ GIF tích hợp sẵn",
+    images: { idle: studentWorkerIdle, working: studentWorkerWorking, hung: studentWorkerHung }
+  }
+];
 
 const FONT_OPTIONS = [
   { value: "system", label: "System / mặc định", css: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif' },
@@ -386,7 +403,7 @@ function compactToolActivityMessages(messages, { collapseArgumentPayloads = fals
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.99";
+const WORKER_EXTENSION_VERSION = "0.5.103";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function dateMs(value) {
@@ -1047,7 +1064,7 @@ function App() {
   const [settingsBusy, setSettingsBusy] = useState("");
   const [headlessState, setHeadlessState] = useState({ supported: false, chromePath: "", chromeUserDataRoot: "", sourceProfiles: [], workers: [] });
   const [headlessBusy, setHeadlessBusy] = useState("");
-  const [headlessSourceProfile, setHeadlessSourceProfile] = useState("");
+  const [headlessSelectedProfiles, setHeadlessSelectedProfiles] = useState([]);
   const [workerPackDraft, setWorkerPackDraft] = useState("");
   const [showWorkerPackCreator, setShowWorkerPackCreator] = useState(false);
   const [workerPackDeleteArmed, setWorkerPackDeleteArmed] = useState("");
@@ -1100,6 +1117,7 @@ function App() {
   const responseCacheLoads = useRef(new Map());
   const responseMemoryCache = useRef(new Map());
   const responseCacheSaveSignatures = useRef(new Map());
+  const authoritativeResponseSnapshots = useRef(new Map());
   const networkStreamReads = useRef(new Map());
   const networkCompletionReads = useRef(new Map());
   const connectionRecoveryReads = useRef(new Map());
@@ -1145,6 +1163,7 @@ function App() {
       for (const map of timedMaps) pruneTimestampMap(map, { maxEntries: 96, maxAgeMs: 60 * 60_000 });
       for (const map of [
         responseCacheSaveSignatures.current,
+        authoritativeResponseSnapshots.current,
         conversationRollovers.current,
         requestTargetReasons.current,
         requestTargetDiagnostics.current,
@@ -1408,10 +1427,12 @@ function App() {
     try {
       const next = await api.getHeadlessWorkers();
       setHeadlessState(next || { supported: false, chromePath: "", chromeUserDataRoot: "", sourceProfiles: [], workers: [] });
-      setHeadlessSourceProfile((current) => {
+      setHeadlessSelectedProfiles((current) => {
         const eligible = (next?.sourceProfiles || []).filter((profile) => profile.codexProInstalled);
-        if (current && eligible.some((profile) => profile.profileDirectory === current)) return current;
-        return eligible[0]?.profileDirectory || "";
+        const eligibleIds = new Set(eligible.map((profile) => profile.profileDirectory));
+        const kept = current.filter((profileDirectory) => eligibleIds.has(profileDirectory)).slice(0, 3);
+        if (kept.length > 0) return kept;
+        return eligible[0]?.profileDirectory ? [eligible[0].profileDirectory] : [];
       });
       return next;
     } catch (err) {
@@ -1485,15 +1506,32 @@ function App() {
       const candidate = longRunningChatWatchdogCandidate(profile, jobs);
       if (!candidate || operationsLongTaskAudits.current.has(candidate.attemptKey)) continue;
       operationsLongTaskAudits.current.add(candidate.attemptKey);
-      logRendererDiagnostic(api, "warn", "chat", "Task ChatGPT chạy quá 30 phút; bắt đầu kiểm tra tab một lần", {
-        action: "long-task-watchdog-start",
+      const recoveryIncidentFingerprint = candidate.connectionInterrupted
+        ? `long-task-connection-interrupted:${candidate.profileId}:${candidate.conversationId}`
+        : `long-task-${candidate.failureReason || "health"}:${candidate.profileId}:${candidate.conversationId}`;
+      logRendererDiagnostic(api, candidate.hardFailure ? "error" : "info", "chat", candidate.connectionInterrupted
+        ? "Phát hiện Connection interrupted ở task chạy lâu; bắt đầu phục hồi đúng một lần"
+        : candidate.hardFailure
+          ? "Phát hiện task chạy lâu có lỗi; bắt đầu phục hồi đúng một lần"
+          : "Task ChatGPT chạy quá 30 phút; kiểm tra sức khỏe không reload tab đang hoạt động", {
+        action: candidate.connectionInterrupted ? "long-task-watchdog-connection-interrupted" : "long-task-watchdog-start",
         profile_id: candidate.profileId,
         task_id: candidate.taskId,
+        task_title: candidate.title,
         conversation_id: candidate.conversationId,
         target_id: candidate.targetId,
         started_at: candidate.startedAt,
         age_ms: candidate.ageMs,
-        attempt_key: candidate.attemptKey
+        attempt_key: candidate.attemptKey,
+        incident_fingerprint: recoveryIncidentFingerprint,
+        watchdog_phase: candidate.phase,
+        hard_failure: candidate.hardFailure,
+        failure_reason: candidate.failureReason,
+        network_state: candidate.networkState,
+        network_error: candidate.networkError,
+        connection_interrupted: candidate.connectionInterrupted,
+        message_delivery_timed_out: candidate.messageDeliveryTimedOut,
+        renderer_unresponsive: candidate.rendererUnresponsive
       });
       void api.auditLongRunningProfileChat({
         profileId: candidate.profileId,
@@ -1502,19 +1540,123 @@ function App() {
         targetId: candidate.targetId,
         startedAt: candidate.startedAt,
         attemptKey: candidate.attemptKey
-      }).then((result) => {
-        if (result?.already_attempted) {
+      }).then(async (result) => {
+        if (result?.already_attempted && result?.status !== "hung") {
           logRendererDiagnostic(api, "info", "chat", "Bỏ qua audit task chạy lâu đã thực hiện trước đó", { action: "long-task-watchdog-deduplicated", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, status: String(result?.status || "") });
           return;
         }
+        if (result?.status === "active_without_reload" || result?.status === "completed_without_reload") {
+          const completed = result.status === "completed_without_reload";
+          logRendererDiagnostic(api, "info", "chat", completed ? "Task chạy lâu đã hoàn tất; watchdog không reload tab" : "Task chạy lâu vẫn hoạt động; watchdog không reload tab", {
+            action: completed ? "long-task-watchdog-completed-no-reload" : "long-task-watchdog-active-no-reload",
+            profile_id: candidate.profileId,
+            task_id: candidate.taskId,
+            conversation_id: candidate.conversationId,
+            target_id: String(result?.recovery_tab_id || result?.target_id || candidate.targetId),
+            attempt_key: candidate.attemptKey,
+            busy: Boolean(result?.preflight?.busy),
+            response_ready: Boolean(result?.preflight?.response_ready),
+            network_state: String(result?.preflight?.network_state || candidate.networkState || ""),
+            network_error: String(result?.preflight?.network_error || ""),
+            reloaded: false,
+            retry_allowed: true
+          });
+          return;
+        }
+        if (candidate.hardFailure && result?.status === "responsive_after_reload") {
+          const recoveryTaskId = /^cpt_[a-f0-9]{24}$/.test(candidate.taskId) ? candidate.taskId : "";
+          if (!recoveryTaskId) throw new Error("Không thể gửi ‘tiếp tục’ vì task bị gián đoạn không có Task ID hợp lệ.");
+          const targetTab = (profile.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(result?.recovery_tab_id || candidate.targetId));
+          const snapshot = await recoveryContinuationSnapshot(profile, candidate.conversationId, targetTab);
+          const resumeProjectRoot = snapshot?.projectRoot || projectRootForProfile(profile);
+          const resumeAllAllowed = snapshot?.repoTaskScope === "all_allowed" || resumeProjectRoot === ALL_ALLOWED_WORKSPACES;
+          logRendererDiagnostic(api, "warn", "chat", "Tab đã phản hồi sau reload; gửi ‘tiếp tục’ đúng một lần trong conversation cũ", {
+            action: "long-task-watchdog-resume-start",
+            profile_id: candidate.profileId,
+            task_id: recoveryTaskId,
+            conversation_id: candidate.conversationId,
+            target_id: String(result?.recovery_tab_id || candidate.targetId),
+            attempt_key: candidate.attemptKey,
+            recovery_incident_fingerprint: recoveryIncidentFingerprint,
+            reload_probe: result?.reload_probe || null,
+            resume_text: "tiếp tục",
+            retry_allowed: false
+          });
+          const resumed = await api.sendProfileRequest({
+            profileId: candidate.profileId,
+            conversationId: candidate.conversationId,
+            newChat: false,
+            scope: resumeAllAllowed ? "all_allowed" : "workspace",
+            projectRoot: resumeAllAllowed ? "" : resumeProjectRoot,
+            workspaceCandidates: resumeAllAllowed ? projects.map((project) => project.root) : [],
+            text: "tiếp tục",
+            attachments: [],
+            toolRetry: false,
+            previousTaskId: recoveryTaskId,
+            oneShotRecovery: true,
+            user_report_logging: false
+          });
+          if (String(resumed?.submission_state || "") === "uncertain") throw new Error("Lệnh ‘tiếp tục’ có trạng thái gửi không chắc chắn; watchdog đã dừng để tránh gửi trùng.");
+          if (String(resumed?.repo_task_id || "") !== recoveryTaskId) throw new Error("Task ID đổi khi gửi ‘tiếp tục’; watchdog đã dừng để tránh duplicate.");
+          requestTargetsRef.current = { ...requestTargetsRef.current, [candidate.profileId]: candidate.conversationId };
+          setRequestTargets((current) => ({ ...current, [candidate.profileId]: candidate.conversationId }));
+          setRequestResponses((current) => {
+            const previous = current[candidate.profileId] || {};
+            return {
+              ...current,
+              [candidate.profileId]: {
+                ...previous,
+                visible: true,
+                loading: true,
+                error: "",
+                conversationId: candidate.conversationId,
+                busy: true,
+                submissionState: "submitted",
+                sendUncertain: false,
+                networkState: String(resumed?.generation_state || resumed?.network_state || "generating"),
+                networkError: String(resumed?.network_error || ""),
+                repoTaskId: recoveryTaskId,
+                repoTaskDispatchedAt: String(resumed?.repo_task_dispatched_at || ""),
+                repoTaskScope: String(resumed?.repo_task_scope || (resumeAllAllowed ? "all_allowed" : "workspace")),
+                repoTaskStatus: "waiting",
+                repoTaskVerified: false,
+                repoTaskRequest: snapshot?.repoTaskRequest || previous.repoTaskRequest || null
+              }
+            };
+          });
+          logRendererDiagnostic(api, "warn", "chat", "Đã gửi ‘tiếp tục’ trong conversation cũ sau Connection interrupted", {
+            action: "long-task-watchdog-resume-done",
+            profile_id: candidate.profileId,
+            task_id: recoveryTaskId,
+            conversation_id: candidate.conversationId,
+            target_id: String(resumed?.target_id || result?.recovery_tab_id || candidate.targetId),
+            attempt_key: candidate.attemptKey,
+            recovery_incident_fingerprint: recoveryIncidentFingerprint,
+            request_id: String(resumed?.request_id || resumed?.generation_request_id || ""),
+            submission_state: String(resumed?.submission_state || ""),
+            network_state: String(resumed?.generation_state || resumed?.network_state || ""),
+            network_error: String(resumed?.network_error || ""),
+            task_id_preserved: true,
+            retry_allowed: false
+          });
+          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã tiếp tục task", body: `“${candidate.title}” đã được reload và gửi “tiếp tục” trong chat cũ.` });
+          return;
+        }
         if (result?.renderer_unresponsive || result?.status === "hung") {
-          logRendererDiagnostic(api, "error", "chat", "Tab task chạy lâu bị treo sau một lần reload và một lần thay tab; đã dừng retry", {
+          logRendererDiagnostic(api, "error", "chat", "Tab task chạy lâu vẫn bị treo sau một lần reload; đã dừng phục hồi", {
             action: "long-task-watchdog-hung",
             profile_id: candidate.profileId,
             task_id: candidate.taskId,
             conversation_id: candidate.conversationId,
             target_id: String(result?.recovery_tab_id || result?.target_id || candidate.targetId),
             attempt_key: candidate.attemptKey,
+            recovery_incident_fingerprint: recoveryIncidentFingerprint,
+            failure_reason: candidate.failureReason,
+            network_state: candidate.networkState,
+            network_error: candidate.networkError,
+            connection_interrupted: candidate.connectionInterrupted,
+            preflight_probe: result?.preflight || null,
+            reload_probe: result?.reload_probe || null,
             retry_allowed: false
           });
           requestTargetsRef.current = { ...requestTargetsRef.current, [candidate.profileId]: NEW_CHAT_TARGET };
@@ -1529,15 +1671,15 @@ function App() {
               conversation_tabs: (item.conversation_tabs || []).map((tab) => String(tab.url || "").includes(`/c/${candidate.conversationId}`) ? { ...tab, busy: false, settling: false, renderer_unresponsive: true, long_task_watchdog_hung: true, renderer_error: "LONG_TASK_WATCHDOG_UNRESPONSIVE", activity_text: "Tab bị treo · watchdog đã dừng retry" } : tab)
             })
           } : current);
-          setRequestSendErrors((current) => ({ ...current, [candidate.profileId]: "Tab cũ bị treo sau kiểm tra một lần. Task tiếp theo sẽ mở conversation mới." }));
-          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Tab task bị treo", body: `“${candidate.title}” không phản hồi sau reload và thay tab. Task tiếp theo sẽ dùng chat mới.` });
+          setRequestSendErrors((current) => ({ ...current, [candidate.profileId]: "Tab cũ vẫn bị treo sau một lần reload. Watchdog đã dừng và sẽ không retry thêm." }));
+          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Tab task bị treo", body: `“${candidate.title}” không phản hồi sau một lần reload. Watchdog đã dừng, không retry thêm.` });
           return;
         }
-        const statusLabel = result?.status === "responsive_after_replace" ? "tab thay thế đã phản hồi" : "tab đã phản hồi sau reload";
-        logRendererDiagnostic(api, "info", "chat", `Task chạy lâu đã được kiểm tra: ${statusLabel}`, { action: "long-task-watchdog-responsive", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, status: String(result?.status || ""), busy: Boolean(result?.reload_probe?.busy || result?.replacement_probe?.busy), response_ready: Boolean(result?.reload_probe?.response_ready || result?.replacement_probe?.response_ready), retry_allowed: false });
+        const statusLabel = "tab đã phản hồi sau reload";
+        logRendererDiagnostic(api, "info", "chat", `Task chạy lâu đã được kiểm tra: ${statusLabel}`, { action: "long-task-watchdog-responsive", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, status: String(result?.status || ""), busy: Boolean(result?.reload_probe?.busy), response_ready: Boolean(result?.reload_probe?.response_ready), retry_allowed: false });
         if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã kiểm tra task chạy lâu", body: `“${candidate.title}” · ${statusLabel}. Watchdog sẽ không reload lại task này.` });
       }).catch((err) => {
-        logRendererDiagnostic(api, "error", "chat", `Không hoàn tất được audit task chạy lâu: ${err?.message || String(err)}`, { action: "long-task-watchdog-failed", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, retry_allowed: false, error: err });
+        logRendererDiagnostic(api, "error", "chat", `Không hoàn tất được phục hồi task chạy lâu: ${err?.message || String(err)}`, { action: "long-task-watchdog-failed", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, target_id: candidate.targetId, attempt_key: candidate.attemptKey, recovery_incident_fingerprint: recoveryIncidentFingerprint, failure_reason: candidate.failureReason, network_state: candidate.networkState, network_error: candidate.networkError, connection_interrupted: candidate.connectionInterrupted, retry_allowed: false, error: err });
         if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Không kiểm tra được task chạy lâu", body: `“${candidate.title}” · đã dừng thử lại tự động để tránh reload liên tục.` });
       }).finally(() => {
         window.setTimeout(() => void refresh(false), 1200);
@@ -1548,10 +1690,12 @@ function App() {
   useEffect(() => {
     if (!managerSettings.autoRecovery) return;
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
     for (const profile of profiles) {
       if (!profile?.connected) continue;
+      if (longRunningChatWatchdogCandidate(profile, jobs)) continue;
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-      const targetTab = tabs.find((tab) => tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error);
+      const targetTab = tabs.find((tab) => !tab?.long_task_watchdog_hung && (tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error));
       if (!targetTab?.id) continue;
       const conversationId = String(targetTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
       if (!conversationId) continue;
@@ -1562,7 +1706,7 @@ function App() {
       operationsRecoveryTimes.current.set(key, Date.now());
       void recoverProfileTab(profile, { targetTab, silent: true, automatic: true, hardFailure });
     }
-  }, [managerSettings.autoRecovery, status?.browserProfiles]);
+  }, [managerSettings.autoRecovery, status?.browserProfiles, status?.workerJobs]);
 
   useEffect(() => {
     if (!managerSettings.autoUpdateWorkers || busy || !status?.local?.ok || status?.workerSnapshotStale) return;
@@ -1662,8 +1806,9 @@ function App() {
       const next = await api.selectWorkerImagePack(packId);
       applyManagerSettings(next);
       setWorkerPackDeleteArmed("");
-      const selected = next.workerImagePacks?.find((pack) => pack.id === packId);
-      notify(`Đang dùng ${selected ? `bộ “${selected.name}”` : "bộ mặc định"}`);
+      const selected = BUILT_IN_WORKER_PACKS.find((pack) => pack.id === packId)
+        || next.workerImagePacks?.find((pack) => pack.id === packId);
+      notify(selected ? `Đang dùng bộ “${selected.name}”` : "Đã đổi bộ ảnh worker");
     } catch (err) {
       setError(err?.message || String(err));
     } finally {
@@ -2131,7 +2276,12 @@ function App() {
           const lastFinalityRead = Number(connectionRecoveryReads.current.get(finalityPollKey) || 0);
           if (Date.now() - lastFinalityRead >= LATEST_RESPONSE_RECOVERY_POLL_MS) {
             connectionRecoveryReads.current.set(finalityPollKey, Date.now());
-            void loadResponse(profile, conversationId, true, true, false, false);
+            void (async () => {
+              const canonical = await loadResponse(profile, conversationId, true, false, false, true);
+              if (completedResponseNeedsDomFallback(canonical)) {
+                await loadResponse(profile, conversationId, true, true, false, false);
+              }
+            })();
           }
           continue;
         }
@@ -3139,6 +3289,7 @@ function App() {
         responseIncomplete: currentResponse?.incomplete,
         awaitingAssistant: currentResponse?.conversationId === conversationId && transcriptAwaitingAssistant(materializeTranscriptMessages(currentResponse, conversationId)),
         finalityPending: currentResponse?.finalityPending,
+        responseEvidencePending: currentResponse?.responseEvidencePending,
         canonicalBusy: currentResponse?.canonicalBusy,
         streamBusy: currentResponse?.networkStreamInProgress
       });
@@ -3676,6 +3827,37 @@ function App() {
       const needsDomFallback = completedResponseNeedsDomFallback(result);
       const responseAuditFetchMode = canonicalOnly ? "canonical_only" : readDom ? (recoverStaleDom ? "dom_recovery" : "dom") : "network_only";
       const responseAuditKey = responseAudit ? JSON.stringify([responseAuditFetchMode, responseAudit]) : "";
+      const incomingMessages = Array.isArray(result.messages)
+        ? trimRecentTranscriptMessages(result.messages.map((message, index) => ({
+            id: String(message?.id || `${message?.role || "message"}-${index}`),
+            role: message?.role === "user" ? "user" : "assistant",
+            text: message?.role === "user" ? visibleUserMessageText(message?.text) : String(message?.text || ""),
+            images: message?.role === "assistant" && Array.isArray(message?.images) ? message.images.slice(0, 4).map((image, imageIndex) => ({ id: String(image?.id || `${message?.id || "assistant"}-image-${imageIndex}`), name: String(image?.name || "Ảnh tạo bởi ChatGPT"), alt: String(image?.alt || "Ảnh tạo bởi ChatGPT"), mimeType: String(image?.mime_type || image?.mimeType || "image/jpeg"), width: Number(image?.width) || 0, height: Number(image?.height) || 0, sourceWidth: Number(image?.source_width) || Number(image?.sourceWidth) || 0, sourceHeight: Number(image?.source_height) || Number(image?.sourceHeight) || 0, size: Number(image?.size) || 0, dataUrl: String(image?.data_url || image?.dataUrl || "") })).filter((image) => image.dataUrl.startsWith("data:image/")) : [],
+            truncated: Boolean(message?.truncated),
+            provisional: message?.role === "assistant" && (message?.provisional === true || message?.end_turn === false),
+            endTurn: message?.role === "assistant" ? (message?.end_turn === true ? true : message?.end_turn === false ? false : null) : null
+          })).filter((message) => message.text || message.images?.length))
+        : [];
+      const resultResponseSource = String(result.response_source || "");
+      const resultNetworkCompletedAt = String(result.network_last_completed_at || "");
+      if (canonicalAvailable && resultResponseSource === "canonical_api" && result.response_ready === true && incomingMessages.length) {
+        authoritativeResponseSnapshots.current.set(fetchKey, {
+          messages: incomingMessages,
+          text: String(result.text || "").trim(),
+          networkCompletedAt: resultNetworkCompletedAt,
+          messageCount: Number(result.message_count) || incomingMessages.length,
+          totalMessageCount: Number(result.total_message_count) || Number(result.message_count) || incomingMessages.length,
+          responseReady: true
+        });
+      }
+      const authoritativeSnapshot = authoritativeResponseSnapshots.current.get(fetchKey);
+      const protectAuthoritativeSnapshot = Boolean(
+        authoritativeSnapshot?.responseReady
+        && resultResponseSource === "chatgpt_dom"
+        && result.canonical_available !== true
+        && resultNetworkCompletedAt
+        && resultNetworkCompletedAt === String(authoritativeSnapshot.networkCompletedAt || "")
+      );
       setRequestResponses((current) => {
         if (!responseTargetStillCurrent()) return current;
         const previous = current[profile.profile_id] || {};
@@ -3692,18 +3874,7 @@ function App() {
         const canonicalBusyFromSource = Object.prototype.hasOwnProperty.call(result, "canonical_busy")
           ? Boolean(result.canonical_busy)
           : Boolean(sameConversation && previous.canonicalBusy);
-        const canonicalBusy = domResponseVerified ? false : canonicalBusyFromSource;
-        const incomingMessages = Array.isArray(result.messages)
-          ? trimRecentTranscriptMessages(result.messages.map((message, index) => ({
-              id: String(message?.id || `${message?.role || "message"}-${index}`),
-              role: message?.role === "user" ? "user" : "assistant",
-              text: message?.role === "user" ? visibleUserMessageText(message?.text) : String(message?.text || ""),
-              images: message?.role === "assistant" && Array.isArray(message?.images) ? message.images.slice(0, 4).map((image, imageIndex) => ({ id: String(image?.id || `${message?.id || "assistant"}-image-${imageIndex}`), name: String(image?.name || "Ảnh tạo bởi ChatGPT"), alt: String(image?.alt || "Ảnh tạo bởi ChatGPT"), mimeType: String(image?.mime_type || image?.mimeType || "image/jpeg"), width: Number(image?.width) || 0, height: Number(image?.height) || 0, sourceWidth: Number(image?.source_width) || Number(image?.sourceWidth) || 0, sourceHeight: Number(image?.source_height) || Number(image?.sourceHeight) || 0, size: Number(image?.size) || 0, dataUrl: String(image?.data_url || image?.dataUrl || "") })).filter((image) => image.dataUrl.startsWith("data:image/")) : [],
-              truncated: Boolean(message?.truncated),
-              provisional: message?.role === "assistant" && (message?.provisional === true || message?.end_turn === false),
-              endTurn: message?.role === "assistant" ? (message?.end_turn === true ? true : message?.end_turn === false ? false : null) : null
-            })).filter((message) => message.text || message.images?.length))
-          : [];
+        const canonicalBusy = protectAuthoritativeSnapshot || domResponseVerified ? false : canonicalBusyFromSource;
         let nextMessages = sameConversation ? materializeTranscriptMessages(previous, conversationId) : [];
         if (contentAvailable) nextMessages = replaceCanonicalTranscript(nextMessages, incomingMessages);
         else if (networkStreamAvailable) nextMessages = mergeNetworkStreamTranscript(nextMessages, {
@@ -3711,13 +3882,24 @@ function App() {
           text: result.text,
             truncated: result.truncated
         });
+        if (protectAuthoritativeSnapshot) {
+          nextMessages = replaceCanonicalTranscript(nextMessages, authoritativeSnapshot.messages);
+        }
         const terminalAwaitingFinal = Boolean(networkTerminal && !networkStreamInProgress && !canonicalBusy && result.response_ready !== true);
         if (terminalAwaitingFinal) {
           nextMessages = discardProvisionalAssistantAfterLatestUser(nextMessages, { includeUnverified: true });
         }
         const nextAssistantText = String([...nextMessages].reverse().find((message) => message?.role === "assistant")?.text || "").trim();
-        const rawResponseReady = Boolean(!canonicalBusy && result.response_ready && !networkStreamInProgress);
-        const incomingResponseSource = terminalAwaitingFinal ? "network_state" : String(result.response_source || previous.responseSource || "");
+        const rawResponseReady = protectAuthoritativeSnapshot
+          ? true
+          : Boolean(!canonicalBusy && result.response_ready && !networkStreamInProgress);
+        const incomingResponseSource = protectAuthoritativeSnapshot
+          ? "canonical_api"
+          : terminalAwaitingFinal
+            ? "network_state"
+            : contentAvailable || networkStreamAvailable
+              ? String(result.response_source || previous.responseSource || "")
+              : String(previous.responseSource || result.response_source || "");
         const latestUserIndex = nextMessages.findLastIndex((message) => message?.role === "user");
         const latestUserMessage = latestUserIndex >= 0 ? nextMessages[latestUserIndex] : null;
         const latestAssistantAfterUser = latestUserIndex >= 0
@@ -3741,8 +3923,12 @@ function App() {
         });
         if (finality.candidate) responseFinalCandidates.current.set(finalityKey, finality.candidate);
         else responseFinalCandidates.current.delete(finalityKey);
-        const responseReady = Boolean(rawResponseReady && finality.confirmed);
-        const finalityPending = Boolean(rawResponseReady && !finality.confirmed);
+        const responseEvidencePending = hasStrongerNetworkStreamEvidence(responseAudit, {
+          networkStartedAt: result.network_last_started_at || previous.networkStartedAt || "",
+          streamUpdatedAt: result.network_stream_updated_at || previous.networkStreamUpdatedAt || ""
+        });
+        const responseReady = Boolean(rawResponseReady && finality.confirmed && !responseEvidencePending);
+        const finalityPending = Boolean(rawResponseReady && (!finality.confirmed || responseEvidencePending));
         return {
           ...current,
           [profile.profile_id]: {
@@ -3767,7 +3953,7 @@ function App() {
             conversationLimitMessage: previous.conversationLimitMessage || "",
             domAvailable,
             domSkipped: Boolean(result.dom_skipped),
-            canonicalAvailable,
+            canonicalAvailable: Boolean(canonicalAvailable || protectAuthoritativeSnapshot),
             networkStreamAvailable,
             networkStreamEndpoint: String(result.network_stream_endpoint || previous.networkStreamEndpoint || ""),
             networkStreamEventCount: Number(result.network_stream_event_count) || Number(previous.networkStreamEventCount) || 0,
@@ -3792,15 +3978,22 @@ function App() {
             networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
             responseReady,
             finalityPending,
-            finalityReason: finality.reason,
+            responseEvidencePending,
+            finalityReason: responseEvidencePending ? "network_stream_ahead_of_dom" : finality.reason,
             responseSource: incomingResponseSource,
             responseAudit,
             responseAuditFetchMode,
             responseAuditKey,
-            messageCount: contentAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
-            totalMessageCount: contentAvailable
-              ? Number(result.total_message_count) || Number(result.message_count) || nextMessages.length
-              : Number(previous.totalMessageCount) || 0,
+            messageCount: protectAuthoritativeSnapshot
+              ? Number(authoritativeSnapshot.messageCount) || nextMessages.length
+              : contentAvailable || networkStreamAvailable
+                ? Number(result.message_count) || nextMessages.length
+                : Number(previous.messageCount) || 0,
+            totalMessageCount: protectAuthoritativeSnapshot
+              ? Number(authoritativeSnapshot.totalMessageCount) || Number(authoritativeSnapshot.messageCount) || nextMessages.length
+              : contentAvailable
+                ? Number(result.total_message_count) || Number(result.message_count) || nextMessages.length
+                : Number(previous.totalMessageCount) || 0,
             awaitingAssistant: transcriptAwaitingAssistant(nextMessages),
             updatedAt: result.updated_at || new Date().toISOString()
           }
@@ -3970,7 +4163,8 @@ function App() {
       responseIncomplete: response?.incomplete,
       responseReady: responseVerifiedComplete,
       awaitingAssistant: responseCurrent && transcriptAwaitingAssistant(materializeTranscriptMessages(response, selectedTarget)),
-      finalityPending: responseCurrent && response?.finalityPending
+      finalityPending: responseCurrent && response?.finalityPending,
+      responseEvidencePending: responseCurrent && response?.responseEvidencePending
     });
     const responseTurnActive = selectedRecoveringNetworkAbort || Boolean(sending || selectedBusy || selectedSettling || (responseCurrent && (response?.busy || response?.loading)));
     const latestTurnProvisionalAssistant = latestTurnHasProvisionalAssistant(displayResponseMessages);
@@ -3987,6 +4181,7 @@ function App() {
       responseIncomplete: response?.incomplete,
       awaitingAssistant: responseCurrent && transcriptAwaitingAssistant(materializeTranscriptMessages(response, selectedTarget)),
       finalityPending: responseCurrent && response?.finalityPending,
+      responseEvidencePending: responseCurrent && response?.responseEvidencePending,
       canonicalBusy: responseCurrent && response?.canonicalBusy,
       streamBusy: responseCurrent && response?.networkStreamInProgress
     });
@@ -4027,7 +4222,7 @@ function App() {
         <div className="modal chat-modal" ref={chatModalRef} onWheelCapture={(event) => holdOpenChatAutoScroll(profile.profile_id, event.deltaY)} onTouchMoveCapture={() => holdOpenChatAutoScroll(profile.profile_id, -1)}>
           <div className="modal-head chat-modal-head">
             <div className="chat-modal-profile">
-              <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
+              <WorkerIcon state={workerState} customImages={activeWorkerImages} />
               <div>
                 <p className="eyebrow">CHATGPT · {profile.label}</p>
                 <div className="profile-title"><strong>{profile.email || profile.label}</strong>{selectedSettling ? <span className="badge profile-settling">ĐANG HOÀN TẤT</span> : working ? <WorkingBadge /> : profile.connected ? <span className="badge connected">ĐANG RẢNH</span> : <span className="badge profile-hung">MẤT KẾT NỐI</span>}</div>
@@ -4057,7 +4252,7 @@ function App() {
             )}
             <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => selectRequestConversation(profile, id)} disabled={!profile.connected || !conversations.length || sending} />
             <label className="request-label">Tin nhắn gần nhất</label>
-            <div className={`chat-response is-inline ${sending || selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-transcript-loading={responseCurrent && response?.transcriptLoading ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
+            <div className={`chat-response is-inline ${sending ? "is-sending" : selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-transcript-loading={responseCurrent && response?.transcriptLoading ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
               <div className="chat-response-head">
                 <div><span className="response-status-dot" /><strong title={responseHeadline}>{responseHeadline}</strong>{sending && <span className="chat-response-send-state"><span>Đang gửi tin nhắn</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span>}{!sending && !isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
                 <div className="response-head-actions">
@@ -4101,7 +4296,7 @@ function App() {
                       <div className={`chat-transcript-message is-${message.role} ${responseSpaceClass}`} key={message.id} data-message-id={message.id} data-audit-role={message.role} data-audit-fingerprint={responseAuditTextFingerprint(message.text)} data-audit-length={String(message.text || "").length}>
                         <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
                         <div className={`latest-response-content ${inlineLiveStatus ? "is-inline-live-status" : ""}`} onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
-                          <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
+                          <span className="chat-message-role">{message.role === "user" ? "Bạn" : showLiveStreamTail ? "ChatGPT · đang phản hồi" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
                           {message.role === "assistant" ? <>
                             {message.text && <React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>}
                             {Boolean(message.images?.length) && <div className={`chat-message-images ${message.images.length === 1 ? "is-single" : "is-grid"}`}>{message.images.map((image, imageIndex) => <button type="button" className="chat-generated-image" key={image.id || `${message.id}-image-${imageIndex}`} title="Mở ảnh" aria-label={`Mở ${image.alt || image.name || "ảnh tạo bởi ChatGPT"}`} onClick={() => setAttachmentPreview({ loading: false, name: image.name || "Ảnh tạo bởi ChatGPT", size: Number(image.size) || 0, mimeType: image.mimeType || "image/jpeg", kind: "image", dataUrl: image.dataUrl, generated: true })}><img src={image.dataUrl} alt={image.alt || image.name || "Ảnh tạo bởi ChatGPT"} /></button>)}</div>}
@@ -4192,8 +4387,14 @@ function App() {
     { state: "hung", title: "Mất kết nối", description: "Hiện khi extension/profile mất heartbeat." }
   ];
   const selectedWorkerPack = managerSettings.workerImagePacks.find((pack) => pack.id === managerSettings.selectedWorkerPackId) || null;
+  const selectedBuiltInWorkerPack = BUILT_IN_WORKER_PACKS.find((pack) => pack.id === managerSettings.selectedWorkerPackId) || BUILT_IN_WORKER_PACKS[0];
+  const activeWorkerImages = selectedWorkerPack ? managerSettings.workerImageDataUrls : selectedBuiltInWorkerPack.images;
   const workerPackOptions = [
-    { value: "default", label: "Bộ mặc định", hint: "Ảnh worker đi kèm CodexPro" },
+    ...BUILT_IN_WORKER_PACKS.map((pack) => ({
+      value: pack.id,
+      label: pack.name,
+      hint: pack.hint
+    })),
     ...managerSettings.workerImagePacks.map((pack) => ({
       value: pack.id,
       label: pack.name,
@@ -4238,28 +4439,6 @@ function App() {
                 {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
                 {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
               </div>
-              <div className="header-action-row">
-                <button
-                  className={`button ${profileSummary.reload ? "worker-update-action" : "secondary"} reload-all`}
-                  onClick={() => setWorkerUpdateConfirmOpen(true)}
-                  disabled={Boolean(busy) || profileSummary.reload === 0}
-                  title={profileSummary.reload
-                    ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${WORKER_EXTENSION_VERSION}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
-                    : profileSummary.deferredUpdate
-                      ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
-                      : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
-                >
-                  {busy === "reload-profiles" ? "Đang update extension…" : "Update extension"}
-                </button>
-                <div className="runtime-action-group">
-                  <button className="button primary" onClick={() => control("start")} disabled={Boolean(busy)}>
-                    {busy === "start" ? "Đang khởi động..." : "Khởi động"}
-                  </button>
-                  <button className="button secondary" onClick={() => control("restart")} disabled={Boolean(busy)}>
-                    {busy === "restart" ? "Đang restart..." : "Restart server"}
-                  </button>
-                </div>
-              </div>
             </div>
           )}
         </header>
@@ -4296,7 +4475,7 @@ function App() {
             )}
             <ApiWorkerCards
               workers={(status?.workers || []).filter((worker) => worker.worker_type === "api")}
-              customImages={managerSettings.workerImageDataUrls}
+              customImages={activeWorkerImages}
               onRun={setApiJobWorker}
               onStop={async (workerId) => {
                 try { await api.stopWorkerTask({ workerId }); await refresh(false); notify("Đã dừng API worker"); }
@@ -4328,7 +4507,8 @@ function App() {
               const working = profile.connected && profile.activity === "working";
               const profileTabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
               const liveTab = profileTabs.find((tab) => tab.active) || profileTabs.find((tab) => tab.busy || tab.settling) || profileTabs[0];
-              const rendererUnresponsive = Boolean(profile.connected && (liveTab?.renderer_unresponsive || liveTab?.message_delivery_timed_out || String(liveTab?.network_state || "").toLowerCase() === "failed" || liveTab?.network_error));
+              const tabFailureState = profileTabFailureState({ connected: profile.connected, working, settling, tab: liveTab });
+              const rendererUnresponsive = tabFailureState.rendererUnresponsive;
               const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
               const connectorInstalled = Boolean(profile.connector_installed && profile.connector_profile_bound !== false);
               const connectorUpdateRequired = Boolean(profile.connector_update_required);
@@ -4347,7 +4527,7 @@ function App() {
                 rendererError: String(liveTab?.renderer_error || ""),
                 connectionInterrupted: Boolean(liveTab?.connection_interrupted)
               });
-              const chromeAction = profileChromeActionState({ profile, busy, rendererUnresponsive });
+              const chromeAction = profileChromeActionState({ profile, busy, rendererUnresponsive: tabFailureState.recoveryRequired });
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
               const directProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const fallbackProject = profileRepoProject(profile, projects, profileRepoRoots[profile.profile_id]);
@@ -4355,10 +4535,31 @@ function App() {
               const repoLabel = String(profile.current_workspace_repo || repoProject?.githubRepo || (repoProject ? `Local · ${repoProject.name}` : "")).trim();
               const repoTitle = repoProject?.githubUrl || repoProject?.remoteUrl || workspaceRoot || repoProject?.root || "Worker chưa xác định được repo GitHub";
               const profileTaskLabel = String(profile.current_task_title || profileTaskLabels[profile.profile_id] || "").trim();
+              const headlessWorker = profile.headless
+                ? (headlessState?.workers || []).find((worker) => worker.id === profile.profile_id)
+                : null;
+              const headlessSourceProfile = profile.headless && profile.source_profile_id
+                ? (status?.browserProfiles || []).find((item) => item.profile_id === profile.source_profile_id && !item.headless)
+                : null;
+              const headlessSourceLabel = String(
+                headlessWorker?.sourceProfileName
+                || headlessSourceProfile?.label
+                || headlessWorker?.sourceUserName
+                || headlessSourceProfile?.email
+                || headlessWorker?.sourceProfileDirectory
+                || ""
+              ).trim();
+              const headlessSourceDirectory = String(headlessWorker?.sourceProfileDirectory || "").trim();
+              const headlessSourceTitle = [
+                headlessWorker?.sourceProfileName ? `Tên Chrome: ${headlessWorker.sourceProfileName}` : "",
+                headlessWorker?.sourceUserName ? `Tài khoản: ${headlessWorker.sourceUserName}` : "",
+                headlessSourceDirectory ? `Thư mục: ${headlessSourceDirectory}` : "",
+                profile.source_profile_id ? `Profile ID: ${profile.source_profile_id}` : ""
+              ].filter(Boolean).join(" · ");
               return (
                 <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`} key={profile.profile_id}>
                   <span className="worker-active-border" aria-hidden="true" />
-                  <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
+                  <WorkerIcon state={workerState} customImages={activeWorkerImages} />
                   <div className="profile-main">
                     <div className="profile-title">
                       <strong>{profile.email || profile.label}</strong>
@@ -4384,6 +4585,12 @@ function App() {
                       <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Mất heartbeat extension"}</span>
                       <span>v{profile.extension_version || "cũ"}</span>
                       <span>{chatGptTabCount} tab ChatGPT</span>
+                      {profile.headless && (headlessSourceLabel || headlessSourceDirectory) && (
+                        <span className="headless-clone-source" title={headlessSourceTitle || undefined}>
+                          Clone từ <b>{headlessSourceLabel || headlessSourceDirectory}</b>
+                          {headlessSourceDirectory && headlessSourceDirectory !== headlessSourceLabel && <code>{headlessSourceDirectory}</code>}
+                        </span>
+                      )}
                       {connectorMessage && <span className={connectorInstalled ? "ready-text" : "profile-warning"}>{connectorMessage}</span>}
                     </div>
                     {profileTaskLabel && (
@@ -4563,29 +4770,67 @@ function App() {
             </div>
             <div className="headless-create-row">
               <div className="headless-source-select">
-                <label>Chrome profile nguồn</label>
-                <SettingsDropdown
-                  value={headlessSourceProfile}
-                  options={(headlessState.sourceProfiles || []).filter((profile) => profile.codexProInstalled).map((profile) => ({
-                    value: profile.profileDirectory,
-                    label: profile.userName || profile.name || profile.profileDirectory,
-                    hint: `${profile.name || profile.profileDirectory} · ${profile.profileDirectory} · CodexPro ✓`
-                  }))}
-                  disabled={Boolean(headlessBusy) || !(headlessState.sourceProfiles || []).some((profile) => profile.codexProInstalled)}
-                  ariaLabel="Chọn Chrome profile để clone session"
-                  onChange={setHeadlessSourceProfile}
-                />
+                <div className="headless-source-label-row">
+                  <label>Chrome profile nguồn</label>
+                  <span>{headlessSelectedProfiles.length}/3 đã chọn</span>
+                </div>
+                <div className="headless-source-options" role="group" aria-label="Chọn tối đa 3 Chrome profile để tạo headless worker">
+                  {(headlessState.sourceProfiles || []).filter((profile) => profile.codexProInstalled).map((profile) => {
+                    const checked = headlessSelectedProfiles.includes(profile.profileDirectory);
+                    const selectionFull = headlessSelectedProfiles.length >= 3 && !checked;
+                    return (
+                      <label className={`headless-source-option ${checked ? "is-selected" : ""}`} key={profile.profileDirectory}>
+                        <input
+                          className="headless-source-checkbox"
+                          type="checkbox"
+                          checked={checked}
+                          disabled={Boolean(headlessBusy) || selectionFull}
+                          onChange={(event) => setHeadlessSelectedProfiles((current) => {
+                            if (event.target.checked) {
+                              if (current.includes(profile.profileDirectory) || current.length >= 3) return current;
+                              return [...current, profile.profileDirectory];
+                            }
+                            return current.filter((profileDirectory) => profileDirectory !== profile.profileDirectory);
+                          })}
+                        />
+                        <span className="headless-source-checkmark" aria-hidden="true" />
+                        <span className="headless-source-option-copy">
+                          <strong>{profile.userName || profile.name || profile.profileDirectory}</strong>
+                          <small>{profile.name || profile.profileDirectory} · {profile.profileDirectory}</small>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
               <button
                 type="button"
                 className="button primary headless-create-button"
-                disabled={Boolean(headlessBusy) || !headlessState.supported || !headlessSourceProfile}
-                onClick={() => void runHeadlessAction(
-                  "create",
-                  () => api.createHeadlessWorker({ sourceProfileDirectory: headlessSourceProfile, autoStart: true }),
-                  "Đã tạo headless worker và clone session"
-                )}
-              >{headlessBusy === "create" ? "Đang tạo…" : "＋ Tạo headless worker"}</button>
+                disabled={Boolean(headlessBusy) || !headlessState.supported || headlessSelectedProfiles.length === 0}
+                onClick={() => {
+                  const selectedProfiles = [...headlessSelectedProfiles];
+                  void runHeadlessAction(
+                    "create",
+                    async () => {
+                      const results = [];
+                      const failures = [];
+                      for (const sourceProfileDirectory of selectedProfiles) {
+                        try {
+                          results.push(await api.createHeadlessWorker({ sourceProfileDirectory, autoStart: true }));
+                        } catch (error) {
+                          failures.push(`${sourceProfileDirectory}: ${error?.message || String(error)}`);
+                        }
+                      }
+                      const warnings = results.map((result) => result?.warning).filter(Boolean);
+                      if (failures.length > 0) {
+                        warnings.unshift(`Đã tạo ${results.length}/${selectedProfiles.length} worker. Lỗi: ${failures.join(" · ")}`);
+                      }
+                      return { workers: results, warning: warnings.join(" · ") };
+                    },
+                    `Đã tạo ${selectedProfiles.length} headless worker và clone session`
+                  );
+                }}
+              >{headlessBusy === "create" ? `Đang tạo ${headlessSelectedProfiles.length}…` : `＋ Tạo ${headlessSelectedProfiles.length} headless worker`}</button>
             </div>
             <div className="headless-runtime-meta">
               <span><b>Chrome</b> {headlessState.chromePath || "Không tìm thấy"}</span>
@@ -4817,7 +5062,7 @@ function App() {
 
           <section className="settings-panel">
             <div className="settings-panel-head profile-layout-setting-head">
-              <div>
+              <div className="profile-layout-setting-copy">
                 <p className="eyebrow">PROFILE LAYOUT</p>
                 <h2>Bố cục profile đã kết nối</h2>
                 <p className="section-note">Chọn danh sách ngang gọn gàng hoặc thẻ dọc với ảnh worker lớn. Thẻ dọc hiển thị tối đa 4 profile mỗi hàng.</p>
@@ -4885,7 +5130,7 @@ function App() {
               {["idle", "working", "idle", "hung"].map((state, index) => (
                 <span className={`profile-layout-preview-item is-${state}`} key={`${state}-${index}`}>
                   <span className="worker-active-border" />
-                  <WorkerIcon state={state} customImages={managerSettings.workerImageDataUrls} />
+                  <WorkerIcon state={state} customImages={activeWorkerImages} />
                   <i />
                 </span>
               ))}
@@ -5020,7 +5265,7 @@ function App() {
                 />
               </div>
               <div className="worker-pack-preview-strip" aria-label="Xem trước bộ ảnh đang dùng">
-                {workerSettingItems.map((item) => <WorkerIcon key={item.state} state={item.state} customImages={managerSettings.workerImageDataUrls} />)}
+                {workerSettingItems.map((item) => <WorkerIcon key={item.state} state={item.state} customImages={activeWorkerImages} />)}
               </div>
               <div className="worker-pack-actions">
                 <button type="button" className="button secondary" onClick={() => { setWorkerPackDraft(`Bộ worker ${managerSettings.workerImagePacks.length + 1}`); setShowWorkerPackCreator(true); }} disabled={Boolean(settingsBusy)}>＋ Tạo bộ mới</button>
@@ -5044,14 +5289,14 @@ function App() {
                 <button type="button" className="button ghost" onClick={() => { setShowWorkerPackCreator(false); setWorkerPackDraft(""); }} disabled={Boolean(settingsBusy)}>Hủy</button>
               </div>
             )}
-            {!selectedWorkerPack && <p className="worker-pack-help">Bộ mặc định chỉ để sử dụng. Hãy bấm <strong>Tạo bộ mới</strong> để upload ảnh riêng.</p>}
+            {!selectedWorkerPack && <p className="worker-pack-help">Bộ tích hợp sẵn chỉ để sử dụng. Hãy bấm <strong>Tạo bộ mới</strong> để upload ảnh riêng.</p>}
             <div className="worker-settings-grid">
               {workerSettingItems.map((item) => {
                 const customized = Boolean(selectedWorkerPack?.imageDataUrls?.[item.state]);
                 const loading = settingsBusy === `worker:${item.state}`;
                 return (
                   <article className="worker-setting-card" key={item.state}>
-                    <WorkerIcon state={item.state} customImages={managerSettings.workerImageDataUrls} />
+                    <WorkerIcon state={item.state} customImages={activeWorkerImages} />
                     <div className="worker-setting-copy">
                       <div><strong>{item.title}</strong>{customized && <span className="customized-badge">TÙY CHỈNH</span>}</div>
                       <p>{item.description}</p>
@@ -5074,7 +5319,7 @@ function App() {
         <ApiWorkerJobModal
           worker={(status?.workers || []).find((worker) => worker.worker_id === apiJobWorker?.worker_id) || apiJobWorker}
           projects={projects}
-          customImages={managerSettings.workerImageDataUrls}
+          customImages={activeWorkerImages}
           attachments={requestFiles[apiJobWorker?.worker_id] || []}
           onChooseAttachments={() => void chooseRequestAttachments(apiJobWorker?.worker_id)}
           onOpenAttachmentPreview={(file) => openAttachmentPreview(file)}

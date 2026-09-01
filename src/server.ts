@@ -44,6 +44,67 @@ const DEFAULT_CODEXPRO_GLOBAL_RULES = `# CodexPro Global Rules
 - Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
 `;
 
+type HeadlessWorkerStateRecord = {
+  id?: string;
+  label?: string;
+  sourceProfileId?: string;
+  sourceProfileDirectory?: string;
+  pid?: number;
+};
+
+function processIdAlive(pid: unknown): boolean {
+  const value = Number(pid);
+  if (!Number.isInteger(value) || value <= 0) return false;
+  try {
+    process.kill(value, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+function runningHeadlessWorkerState(): HeadlessWorkerStateRecord[] {
+  try {
+    const state = JSON.parse(fs.readFileSync(path.join(codexProHome(), "headless-workers.json"), "utf8"));
+    return (Array.isArray(state?.workers) ? state.workers : [])
+      .filter((worker: HeadlessWorkerStateRecord) => worker && processIdAlive(worker.pid));
+  } catch {
+    return [];
+  }
+}
+
+function browserProfileOwnsActiveTask(profile: any): boolean {
+  if (!profile) return false;
+  if (String(profile.current_task_id || "").trim()) return true;
+  if (profile.activity === "working" || profile.activity === "settling") return true;
+  if (Math.max(0, Number(profile.busy_request_count) || 0) > 0) return true;
+  return (Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : []).some((tab: any) =>
+    tab?.busy === true || tab?.settling === true || String(tab?.network_state || "") === "generating"
+  );
+}
+
+async function assertBrowserControlHeadlessExclusive(profileId: string): Promise<void> {
+  const id = String(profileId || "").trim();
+  if (!id) return;
+  const running = runningHeadlessWorkerState();
+  const sourceLockedBy = running.find((worker) => String(worker.sourceProfileId || "").trim() === id);
+  if (sourceLockedBy) {
+    throw new CodexProError(`HEADLESS_EXCLUSIVE_SOURCE_LOCK: Chrome vẫn dùng bình thường, nhưng ChatGPT và task CodexPro trên profile nguồn đang bị khóa bởi headless ${sourceLockedBy.label || sourceLockedBy.id || "worker"}. Hãy dừng headless trước khi dùng ChatGPT.`);
+  }
+  const targetHeadless = running.find((worker) => String(worker.id || "").trim() === id);
+  if (!targetHeadless) return;
+  const sourceProfileId = String(targetHeadless.sourceProfileId || "").trim();
+  if (!sourceProfileId) {
+    throw new CodexProError("HEADLESS_SOURCE_UNBOUND: Headless đang chạy nhưng chưa có source_profile_id xác minh; từ chối thao tác để tránh chạy song song.");
+  }
+  const sourceProfile = listBrowserExtensionProfiles().find((profile) => profile.profile_id === sourceProfileId && !profile.headless);
+  if (!sourceProfile?.connected) return;
+  if (browserProfileOwnsActiveTask(sourceProfile)) {
+    const taskLabel = String(sourceProfile.current_task_title || sourceProfile.current_task_id || "task hiện tại").trim();
+    throw new CodexProError(`WORKER_BUSY: ${sourceProfile.label} đang làm ${taskLabel}; chưa được giao thao tác cho headless.`);
+  }
+}
+
 type GlobalRulesSnapshot = {
   path: string;
   text: string;
@@ -1439,6 +1500,26 @@ type RepoTaskProof = {
 
 const repoTaskProofs = new Map<string, RepoTaskProof>();
 
+function responseHasStrongerNetworkStreamEvidence(result: Record<string, any>): boolean {
+  const audit = result?.response_audit;
+  const dom = audit?.chatgpt_dom;
+  const stream = audit?.network_stream;
+  if (!dom?.available || !stream?.available) return false;
+  const domAssistant = dom.assistant_after_latest_user || dom.latest_assistant;
+  const streamAssistant = stream.assistant_after_latest_user || stream.latest_assistant;
+  const domLength = Math.max(0, Number(domAssistant?.length) || 0);
+  const streamLength = Math.max(0, Number(streamAssistant?.length) || 0);
+  if (!streamLength || streamLength <= domLength) return false;
+
+  const generationStartedMs = Date.parse(String(result?.network_last_started_at || ""));
+  if (Number.isFinite(generationStartedMs)) {
+    const streamUpdatedMs = Date.parse(String(result?.network_stream_updated_at || ""));
+    if (!Number.isFinite(streamUpdatedMs) || streamUpdatedMs < generationStartedMs) return false;
+  }
+
+  return streamLength >= Math.max(domLength + 24, Math.ceil(domLength * 1.5)) && domLength < 160;
+}
+
 function rememberRepoTaskProof(proof: RepoTaskProof): void {
   repoTaskProofs.set(proof.taskId, proof);
   if (repoTaskProofs.size <= 500) return;
@@ -2177,6 +2258,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         );
       }
       const scope: "workspace" | "all_allowed" = managerPrepared && args.scope === "all_allowed" ? "all_allowed" : "workspace";
+      if (gateProfileId) await assertBrowserControlHeadlessExclusive(gateProfileId);
       if (requireRepoTask) {
         if (!gateProfileId) {
           throw new CodexProError(
@@ -4055,19 +4137,21 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       description:
         "Fast browser-agent control for the Chrome profile explicitly marked ACTIVE, with dedicated port-9223 Chrome as fallback. Supports persistent CDP/debugger sessions, trusted input, batch actions, wait_for, inspect_element, evaluate, hover/scroll, screenshots, and existing ChatGPT-specific actions.",
       inputSchema: {
-        action: z.enum(["status", "list_profiles", "select_workspace", "check_chatgpt", "setup_chatgpt", "reload_extension", "stop_chat_generation", "audit_long_running_chat", "recover_chat_tab", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch", "screenshot"]),
+        action: z.enum(["status", "list_profiles", "select_workspace", "check_chatgpt", "setup_chatgpt", "reload_extension", "set_headless_lock", "clear_headless_lock", "close_profile", "stop_chat_generation", "audit_long_running_chat", "recover_chat_tab", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch", "screenshot"]),
         profile_id: z.string().optional().describe("Optional extension profile id. Omit to use the profile marked ACTIVE. Ignored for the dedicated fallback browser."),
         root: z.string().optional().describe("Workspace root for select_workspace. The selected profile is locked to this root until changed by CodexPro Manager."),
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
         target_id: z.string().optional().describe("Tab id from list_tabs. Omit to use the first page tab."),
         conversation_id: z.string().optional().describe("Exact ChatGPT conversation id for send_chat_request, rename_chat, get_chat_response, recovery, or a long-task audit."),
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional().describe("Exact Manager task id to finalize when a ChatGPT response reaches a terminal state."),
+        headless_worker_id: z.string().max(160).optional().describe("Owning headless worker id for source-profile ChatGPT exclusivity locks."),
         started_at: z.string().max(80).optional().describe("Stable task start timestamp for a one-shot long-task audit."),
         attempt_key: z.string().max(300).optional().describe("Persistent deduplication key for a one-shot long-task audit."),
         read_dom: z.boolean().optional().describe("For get_chat_response, read transcript text from the page DOM. Set false to return network state only."),
         canonical_only: z.boolean().optional().describe("For get_chat_response, read the authenticated canonical conversation without querying the rendered DOM."),
         recover_stale_dom: z.boolean().optional().describe("For get_chat_response after network completion, compare the live DOM with the canonical ChatGPT conversation and reload the exact tab when the rendered stream is stale."),
         new_chat: z.boolean().optional().describe("For send_chat_request, create a new ChatGPT conversation in a background tab without focusing the profile."),
+        one_shot_recovery: z.boolean().optional().describe("For an interrupted-task continuation, disable renderer replacement and stop after the first send preparation failure."),
         title: z.string().max(120).optional().describe("New conversation title for rename_chat."),
         attachments: z.array(z.object({
           name: z.string().min(1).max(255),
@@ -4152,7 +4236,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
       let result: Record<string, any>;
       const selectedProfile = args.profile_id || profiles.find((profile) => profile.active && profile.connected)?.profile_id;
-      if ((args.action === "select_workspace" || args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "stop_chat_generation" || args.action === "audit_long_running_chat" || args.action === "send_chat_request" || args.action === "rename_chat" || args.action === "hide_chat" || args.action === "get_chat_response") && !selectedProfile) {
+      if ((args.action === "select_workspace" || args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "set_headless_lock" || args.action === "clear_headless_lock" || args.action === "close_profile" || args.action === "stop_chat_generation" || args.action === "audit_long_running_chat" || args.action === "send_chat_request" || args.action === "rename_chat" || args.action === "hide_chat" || args.action === "get_chat_response") && !selectedProfile) {
         throw new CodexProError("Choose an online Chrome extension profile before setting up CodexPro in ChatGPT.");
       }
       if (args.action === "select_workspace") {
@@ -4167,17 +4251,34 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           locked: true
         });
       }
+      if (args.action === "close_profile") {
+        const closingProfile = profiles.find((profile) => profile.profile_id === selectedProfile);
+        if (!closingProfile) throw new CodexProError("Chrome profile cần đóng không còn kết nối.");
+        const busy = Boolean(String(closingProfile.current_task_id || "").trim())
+          || closingProfile.activity === "working"
+          || closingProfile.activity === "settling"
+          || Math.max(0, Number(closingProfile.busy_request_count) || 0) > 0
+          || closingProfile.conversation_tabs.some((tab) => tab.busy || tab.settling || tab.network_state === "generating");
+        if (busy) {
+          const taskLabel = String(closingProfile.current_task_title || closingProfile.current_task_id || "task hiện tại").trim();
+          throw new CodexProError(`WORKER_BUSY: ${closingProfile.label} đang làm ${taskLabel}; không được đóng profile trước khi task hoàn tất.`);
+        }
+      }
       const useExtension = args.browser !== "dedicated" && Boolean(selectedProfile);
       if (useExtension) {
+        if (!["close_profile", "set_headless_lock", "clear_headless_lock"].includes(args.action)) await assertBrowserControlHeadlessExclusive(selectedProfile!);
         result = await runBrowserExtensionCommand(args.action, {
           target_id: args.target_id,
           conversation_id: args.conversation_id,
           task_id: args.task_id,
+          headless_worker_id: args.headless_worker_id,
           started_at: args.started_at,
           attempt_key: args.attempt_key,
           read_dom: args.read_dom,
+          canonical_only: args.canonical_only,
           recover_stale_dom: args.recover_stale_dom,
           new_chat: args.new_chat,
+          one_shot_recovery: args.one_shot_recovery,
           title: args.title,
           attachments: args.attachments,
           expression: args.expression,
@@ -4261,7 +4362,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           ? "cancelled"
           : String(result.network_state || "").toLowerCase() === "failed" || result.network_error
             ? "failed"
-            : result.response_ready === true && result.busy !== true && result.network_stream_in_progress !== true
+            : result.response_ready === true && result.busy !== true && result.network_stream_in_progress !== true && !responseHasStrongerNetworkStreamEvidence(result)
               ? "completed"
               : null;
         if (workerJob?.status === "running" && workerJob.workerId === selectedProfile && terminalOutcome) {

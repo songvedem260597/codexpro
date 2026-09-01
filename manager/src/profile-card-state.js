@@ -5,6 +5,20 @@ export function profileCardBorderState({ connected, working, settling, rendererU
   return "idle";
 }
 
+export function profileTabFailureState({ connected, working, settling, tab }) {
+  const networkState = String(tab?.network_state || "").toLowerCase();
+  const rendererUnresponsive = Boolean(connected && tab?.renderer_unresponsive);
+  const transportFailure = Boolean(
+    tab?.message_delivery_timed_out
+    || networkState === "failed"
+    || tab?.network_error
+  );
+  return {
+    rendererUnresponsive,
+    recoveryRequired: Boolean(rendererUnresponsive || (connected && !working && !settling && transportFailure))
+  };
+}
+
 export function profileChromeTarget(profile) {
   const chatgptTabs = Array.isArray(profile?.chatgpt_tabs) ? profile.chatgpt_tabs : [];
   const conversationTabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];

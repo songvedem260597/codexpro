@@ -277,7 +277,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.99";
+const WORKER_EXTENSION_VERSION = "0.5.103";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -340,7 +340,33 @@ let repoScanPromise = null;
 const headlessExtensionRoot = app.isPackaged
   ? path.join(process.resourcesPath, "chrome-extension")
   : path.resolve(here, "..", "..", "chrome-extension");
-const headlessWorkers = createHeadlessWorkerManager({ codexProHome, extensionRoot: headlessExtensionRoot });
+const headlessWorkers = createHeadlessWorkerManager({
+  codexProHome,
+  extensionRoot: headlessExtensionRoot,
+  getBrowserProfiles: async () => {
+    const base = await runtimeBaseStatus();
+    if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng để kiểm tra Chrome profile nguồn.");
+    return await listBrowserProfilesThroughMcp(base.config, base.token);
+  },
+  setSourceProfileLock: async (profileId, headlessWorkerId = "") => {
+    const base = await runtimeBaseStatus();
+    if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng để khóa ChatGPT trên profile nguồn.");
+    return await localMcpTool(base.config, base.token, "browser_control", {
+      action: "set_headless_lock",
+      profile_id: profileId,
+      headless_worker_id: String(headlessWorkerId || "").trim()
+    }, 10000);
+  },
+  clearSourceProfileLock: async (profileId, headlessWorkerId = "") => {
+    const base = await runtimeBaseStatus();
+    if (!base.local.ok) return { ok: false, locked: true };
+    return await localMcpTool(base.config, base.token, "browser_control", {
+      action: "clear_headless_lock",
+      profile_id: profileId,
+      headless_worker_id: String(headlessWorkerId || "").trim()
+    }, 10000);
+  }
+});
 
 async function syncInstalledWorkerExtension() {
   try {
@@ -635,6 +661,7 @@ const WORKER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp
 const MAX_WORKER_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_WORKER_IMAGE_PACKS = 20;
 const DEFAULT_WORKER_PACK_ID = "default";
+const BUILT_IN_WORKER_PACK_IDS = new Set([DEFAULT_WORKER_PACK_ID, "co-sinh-vien-dam-dang"]);
 
 function emptyWorkerImages() {
   return { idle: "", working: "", hung: "" };
@@ -654,7 +681,7 @@ function normalizeWorkerPacks(value) {
   return value.flatMap((pack) => {
     const id = String(pack?.id || "").trim();
     const name = String(pack?.name || "").trim().slice(0, 60);
-    if (!/^[A-Za-z0-9._-]{1,80}$/.test(id) || id === DEFAULT_WORKER_PACK_ID || !name || seen.has(id)) return [];
+    if (!/^[A-Za-z0-9._-]{1,80}$/.test(id) || BUILT_IN_WORKER_PACK_IDS.has(id) || !name || seen.has(id)) return [];
     seen.add(id);
     return [{ id, name, images: normalizeWorkerImages(pack?.images) }];
   }).slice(0, MAX_WORKER_IMAGE_PACKS);
@@ -719,7 +746,7 @@ function readManagerSettings() {
       workerImagePacks.push({ id: "legacy-custom", name: "Bộ tùy chỉnh hiện tại", images: legacyImages });
     }
     const requestedPackId = String(parsed?.selectedWorkerPackId || "");
-    const selectedWorkerPackId = requestedPackId === DEFAULT_WORKER_PACK_ID || workerImagePacks.some((pack) => pack.id === requestedPackId)
+    const selectedWorkerPackId = BUILT_IN_WORKER_PACK_IDS.has(requestedPackId) || workerImagePacks.some((pack) => pack.id === requestedPackId)
       ? requestedPackId
       : (workerImagePacks[0]?.id || DEFAULT_WORKER_PACK_ID);
     const selectedPack = workerImagePacks.find((pack) => pack.id === selectedWorkerPackId);
@@ -948,7 +975,7 @@ function saveManagerSettingsPatch(patch = {}) {
 
 function findWorkerPack(settings, packId) {
   const normalizedPackId = String(packId || "");
-  if (normalizedPackId === DEFAULT_WORKER_PACK_ID) throw new Error("Hãy tạo một bộ ảnh riêng trước khi tải ảnh lên.");
+  if (BUILT_IN_WORKER_PACK_IDS.has(normalizedPackId)) throw new Error("Hãy tạo một bộ ảnh riêng trước khi tải ảnh lên.");
   const pack = settings.workerImagePacks.find((item) => item.id === normalizedPackId);
   if (!pack) throw new Error("Không tìm thấy bộ ảnh worker.");
   return pack;
@@ -970,10 +997,11 @@ function createWorkerImagePack(name) {
 function selectWorkerImagePack(packId) {
   const settings = readManagerSettings();
   const normalizedPackId = String(packId || "");
-  const pack = normalizedPackId === DEFAULT_WORKER_PACK_ID
+  const builtIn = BUILT_IN_WORKER_PACK_IDS.has(normalizedPackId);
+  const pack = builtIn
     ? null
     : settings.workerImagePacks.find((item) => item.id === normalizedPackId);
-  if (normalizedPackId !== DEFAULT_WORKER_PACK_ID && !pack) throw new Error("Không tìm thấy bộ ảnh worker.");
+  if (!builtIn && !pack) throw new Error("Không tìm thấy bộ ảnh worker.");
   settings.selectedWorkerPackId = normalizedPackId;
   settings.workerImages = pack ? { ...pack.images } : emptyWorkerImages();
   writeManagerSettings(settings);
@@ -1186,7 +1214,11 @@ function recordBrowserProfileTransitions(profiles, checkedAt) {
         diagnostic("info", "browser", "profile", "Chrome renderer đã phản hồi lại", details);
       }
       if (!previous.connection_interrupted && current.connection_interrupted) {
-        diagnostic("warn", "browser", "chat", "ChatGPT báo Connection interrupted", details);
+        diagnostic("warn", "browser", "chat", "ChatGPT báo Connection interrupted", {
+          ...details,
+          action: "chat-connection-interrupted",
+          incident_fingerprint: `chat-connection-interrupted:${profileId}:${current.incident_conversation_id || "unknown"}`
+        });
       } else if (previous.connection_interrupted && !current.connection_interrupted) {
         diagnostic("info", "browser", "chat", "ChatGPT đã hết trạng thái Connection interrupted", details);
       }
@@ -1283,6 +1315,14 @@ function startBrowserProfileEventStream(win) {
             if (Array.isArray(payload?.profiles)) {
               latestBrowserProfileStream = { connected: true, checkedAt: String(payload.checked_at || ""), profiles: payload.profiles };
               recordBrowserProfileTransitions(payload.profiles, payload.checked_at);
+              void headlessWorkers.enforceExclusiveUse(payload.profiles).catch((error) => {
+                if (diagnosticAllowed(`headless-exclusive-stream:${String(error?.message || error).slice(0, 160)}`, 30_000)) {
+                  diagnostic("warn", "manager", "worker", `Luồng realtime không áp được khóa độc quyền headless: ${error?.message || String(error)}`, {
+                    action: "headless-exclusive-stream",
+                    error
+                  });
+                }
+              });
             }
             if (!win.isDestroyed()) win.webContents.send("codexpro:browser-profiles", payload);
           }
@@ -1474,11 +1514,14 @@ function createWindow() {
               const created = await window.codexpro.createWorkerImagePack('CodexPro smoke pack');
               const pack = created.workerImagePacks.find((item) => item.name === 'CodexPro smoke pack');
               if (!pack || created.selectedWorkerPackId !== pack.id) throw new Error('Không tạo/chọn được worker pack');
+              const selectedBuiltIn = await window.codexpro.selectWorkerImagePack('co-sinh-vien-dam-dang');
+              if (selectedBuiltIn.selectedWorkerPackId !== 'co-sinh-vien-dam-dang') throw new Error('Không đổi được sang worker pack sinh viên tích hợp');
               const selectedDefault = await window.codexpro.selectWorkerImagePack('default');
               if (selectedDefault.selectedWorkerPackId !== 'default') throw new Error('Không đổi về worker pack mặc định');
               const removed = await window.codexpro.deleteWorkerImagePack(pack.id);
               return {
                 ok: removed.selectedWorkerPackId === 'default' && !removed.workerImagePacks.some((item) => item.id === pack.id),
+                builtInSelected: selectedBuiltIn.selectedWorkerPackId,
                 createdId: pack.id,
                 finalCount: removed.workerImagePacks.length
               };
@@ -1927,6 +1970,21 @@ function createWindow() {
         let openProfileProbe = null;
         const openProfilePrefix = String(process.env.CODEXPRO_MANAGER_SMOKE_OPEN_PROFILE || "").trim();
         if (openProfilePrefix) {
+          const fullscreenRequested = isMac && process.env.CODEXPRO_MANAGER_SMOKE_OPEN_PROFILE_FULLSCREEN === "1";
+          let fullscreenBeforeOpen = false;
+          if (fullscreenRequested) {
+            win.show();
+            app.focus({ steal: true });
+            win.focus();
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            win.setFullScreen(true);
+            const fullscreenDeadline = Date.now() + 5000;
+            while (!win.isFullScreen() && Date.now() < fullscreenDeadline) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+            fullscreenBeforeOpen = win.isFullScreen();
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
           const beforeProfile = status.browserProfiles?.find((item) => item.profile_id.startsWith(openProfilePrefix));
           const beforeActiveTab = beforeProfile?.conversation_tabs?.find((item) => item.active) || beforeProfile?.conversation_tabs?.[0];
           const expectedConversationId = String(beforeActiveTab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
@@ -1938,13 +1996,13 @@ function createWindow() {
             chatButton.click();
             await new Promise((resolve) => setTimeout(resolve, 500));
             const modal = document.querySelector('.chat-modal');
-            const button = modal?.querySelector('.request-card-actions .button.secondary');
+            const button = [...(modal?.querySelectorAll('.request-card-actions .button.secondary') || [])].find((item) => /Mở Chrome/i.test(item.textContent || ''));
             if (!button) return { ok: false, error: 'Không tìm thấy nút Mở Chrome trong popup.' };
             const disabledBefore = button.disabled;
             const textBefore = button.textContent?.trim() || '';
             button.click();
             await new Promise((resolve) => setTimeout(resolve, 7000));
-            const currentButton = document.querySelector('.chat-modal .request-card-actions .button.secondary');
+            const currentButton = [...document.querySelectorAll('.chat-modal .request-card-actions .button.secondary')].find((item) => /Mở Chrome/i.test(item.textContent || ''));
             return { ok: true, disabledBefore, textBefore, disabledAfter: currentButton?.disabled ?? null, textAfter: currentButton?.textContent?.trim() || '', error: document.querySelector('.alert')?.textContent?.trim() || '' };
           })()`, true);
           const afterStatus = await win.webContents.executeJavaScript("window.codexpro.getStatus().then((value) => JSON.parse(JSON.stringify(value)))", true);
@@ -1952,8 +2010,9 @@ function createWindow() {
           const afterActiveTab = afterProfile?.conversation_tabs?.find((item) => item.active) || afterProfile?.conversation_tabs?.[0];
           const afterConversationId = String(afterActiveTab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
           let foreground = null;
-          try {
-            foreground = JSON.parse(await runPowerShell(`
+          if (isWindows) {
+            try {
+              foreground = JSON.parse(await runPowerShell(`
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -1967,14 +2026,25 @@ $h=[CodexProSmokeForeground]::GetForegroundWindow()
 [CodexProSmokeForeground]::GetWindowThreadProcessId($h,[ref]$processId)|Out-Null
 if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.ProcessName;title=$p.MainWindowTitle;processId=$p.Id}|ConvertTo-Json -Compress}else{[pscustomobject]@{process='';title='';processId=0}|ConvertTo-Json -Compress}
 `));
-          } catch {}
+            } catch {}
+          } else if (isMac) {
+            try {
+              const bundleId = await macFrontmostBundleId();
+              foreground = { process: bundleId === "com.google.Chrome" ? "chrome" : "", bundleId };
+            } catch {}
+          }
+          const chromeForeground = isMac
+            ? foreground?.bundleId === "com.google.Chrome"
+            : String(foreground?.process || "").toLowerCase() === "chrome";
           openProfileProbe = {
-            ok: Boolean(ui?.ok) && !ui?.error && !ui?.disabledBefore && String(foreground?.process || '').toLowerCase() === 'chrome' && beforeProfile?.tab_count === afterProfile?.tab_count && (!expectedConversationId || expectedConversationId === afterConversationId),
+            ok: Boolean(ui?.ok) && !ui?.error && !ui?.disabledBefore && chromeForeground && (!fullscreenRequested || fullscreenBeforeOpen) && beforeProfile?.tab_count === afterProfile?.tab_count && (!expectedConversationId || expectedConversationId === afterConversationId),
             beforeTabCount: beforeProfile?.tab_count ?? null,
             afterTabCount: afterProfile?.tab_count ?? null,
             expectedConversationId,
             afterConversationId,
             expectedTitle,
+            fullscreenRequested,
+            fullscreenBeforeOpen,
             foreground,
             ui
           };
@@ -2626,6 +2696,33 @@ async function runtimeStatus(options = {}) {
     ])
     : [{ available: false, profiles: [] }, { available: false, jobs: [] }];
   const browserProfilesRaw = browserProfileSnapshot.profiles;
+  const exclusivity = await headlessWorkers.enforceExclusiveUse(browserProfilesRaw).catch((error) => {
+    if (diagnosticAllowed(`headless-exclusive:${String(error?.message || error).slice(0, 160)}`, 30_000)) {
+      diagnostic("warn", "manager", "worker", `Không kiểm tra được độc quyền headless/profile nguồn: ${error?.message || String(error)}`, {
+        action: "headless-exclusive-check",
+        error
+      });
+    }
+    return { stopped: [], lockedSources: [], deferred: [] };
+  });
+  if (exclusivity.stopped.length) {
+    diagnostic("warn", "manager", "worker", "Đã tự dừng headless vì profile nguồn đã có task trước khi khóa ChatGPT kịp áp dụng", {
+      action: "headless-exclusive-stop",
+      stopped: exclusivity.stopped
+    });
+  }
+  if (exclusivity.lockedSources?.length) {
+    diagnostic("info", "manager", "worker", "Chrome profile nguồn vẫn hoạt động bình thường; chỉ ChatGPT và task CodexPro bị khóa khi headless đang chạy", {
+      action: "headless-exclusive-source-locked",
+      locked_sources: exclusivity.lockedSources
+    });
+  }
+  if (exclusivity.deferred?.length) {
+    diagnostic("warn", "manager", "worker", "Tạm hoãn cưỡng chế độc quyền để không cắt task đang chạy", {
+      action: "headless-exclusive-deferred",
+      deferred: exclusivity.deferred
+    });
+  }
   const workerJobs = workerJobSnapshot.jobs;
   const browserProfilesVisible = browserProfilesRaw.filter((profile) => {
     const headless = profile.headless === true || String(profile.profile_id || "").startsWith("headless-");
@@ -3420,6 +3517,7 @@ async function openProfileChat(payload) {
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (conversationId && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (targetId && !/^\d+$/.test(targetId)) throw new Error("Tab Chrome đích không hợp lệ.");
+  await headlessWorkers.assertProfileTaskExclusive(profileId);
 
   let resolvedTargetId = targetId;
   let createdTab = null;
@@ -3756,6 +3854,7 @@ async function sendProfileRequestUnlocked(payload) {
   if (!text && !requestedFiles.length) throw new Error("Hãy nhập yêu cầu hoặc chọn ít nhất một file.");
   if (requestedScope === "workspace" && !requestedProjectRoot) throw new Error("Hãy chọn thư mục hoặc dự án cần làm trước khi gửi yêu cầu.");
   if (text.length > 20000) throw new Error("Yêu cầu dài quá 20.000 ký tự.");
+  await headlessWorkers.assertProfileTaskExclusive(profileId);
   const sendStartedAt = Date.now();
   const files = requestedFiles.map((file) => requestFileSummary(file?.path));
   if (files.some((file) => file.size > MAX_REQUEST_ATTACHMENT_BYTES)) throw new Error("Mỗi file được tối đa 8 MB.");
@@ -3870,7 +3969,23 @@ async function sendProfileRequestUnlocked(payload) {
       throw new Error("CodexPro connector chưa được gắn đúng profile Chrome. Hãy cập nhật connector rồi gửi lại.");
     }
   }
-  const selectedConversationTab = newChat ? null : (profile.conversation_tabs || []).find((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] === conversationId);
+  let selectedConversationTab = newChat ? null : (profile.conversation_tabs || []).find((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] === conversationId);
+  if (!newChat && (selectedConversationTab?.connection_interrupted || selectedConversationTab?.message_delivery_timed_out)) {
+    await localMcpToolInSession(session, "browser_control", {
+      action: "get_chat_response",
+      profile_id: profileId,
+      conversation_id: conversationId,
+      target_id: selectedConversationTab.id,
+      read_dom: true,
+      recover_stale_dom: true
+    }, 75000);
+    const recoveredProfiles = await localMcpToolInSession(session, "browser_control", { action: "list_profiles" });
+    profile = (Array.isArray(recoveredProfiles.profiles) ? recoveredProfiles.profiles : []).find((item) => item.profile_id === profileId) || profile;
+    selectedConversationTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] === conversationId) || null;
+    if (selectedConversationTab?.connection_interrupted || selectedConversationTab?.message_delivery_timed_out) {
+      throw new Error("ChatGPT vẫn đang phục hồi lượt trả lời bị gián đoạn. Hãy thử gửi lại sau vài giây.");
+    }
+  }
   const selectedNetworkState = String(selectedConversationTab?.network_state || "");
   if (selectedConversationTab?.busy || selectedNetworkState === "generating") throw new Error("Đoạn chat này đang xử lý yêu cầu khác. Hãy chờ trạng thái về ĐANG RẢNH.");
   if (!newChat) {
@@ -3950,7 +4065,8 @@ async function sendProfileRequestUnlocked(payload) {
     conversation_id: newChat ? undefined : conversationId,
     new_chat: newChat,
     text: taskText,
-    attachments
+    attachments,
+    one_shot_recovery: payload?.oneShotRecovery === true
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
   if (taskWorkflow) {
@@ -4523,11 +4639,11 @@ diagnosticIpcHandle("codexpro:audit-long-running-profile-chat", {
   successMessage: "Kiểm tra task ChatGPT chạy quá 30 phút hoàn tất",
   failureMessage: "Kiểm tra task ChatGPT chạy lâu thất bại",
   details: (payload) => ({ profile_id: String(payload?.profileId || ""), task_id: String(payload?.taskId || ""), conversation_id: String(payload?.conversationId || ""), target_id: String(payload?.targetId || ""), attempt_key: String(payload?.attemptKey || "") }),
-  resultDetails: (result) => ({ status: String(result?.status || ""), already_attempted: Boolean(result?.already_attempted), renderer_unresponsive: Boolean(result?.renderer_unresponsive), retry_allowed: result?.retry_allowed !== false, replaced_tab_id: String(result?.replaced_tab_id || ""), recovery_tab_id: String(result?.recovery_tab_id || "") }),
+  resultDetails: (result) => ({ status: String(result?.status || ""), already_attempted: Boolean(result?.already_attempted), renderer_unresponsive: Boolean(result?.renderer_unresponsive), retry_allowed: result?.retry_allowed !== false, recovery_tab_id: String(result?.recovery_tab_id || ""), preflight: result?.preflight || null, reload_probe: result?.reload_probe || null }),
   resultDiagnostic: (result) => result?.renderer_unresponsive
-    ? { level: "error", message: "Task chạy lâu vẫn treo sau một lần reload và thay tab" }
-    : result?.status === "responsive_after_replace"
-      ? { level: "warn", message: "Task chạy lâu cần thay tab nhưng renderer mới đã phản hồi" }
+    ? { level: "error", message: "Task chạy lâu vẫn treo sau một lần reload; watchdog đã dừng" }
+    : result?.status === "active_without_reload"
+      ? { level: "info", message: "Task chạy lâu vẫn hoạt động; watchdog không reload" }
       : null
 }, (_event, payload) => auditLongRunningProfileChat(payload));
 diagnosticIpcHandle("codexpro:stop-profile-task", {

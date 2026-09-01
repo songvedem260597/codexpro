@@ -44,11 +44,55 @@ function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
+function extensionStorageProfileId(profilePath) {
+  const storageRoot = path.join(profilePath, "Local Extension Settings", CODEXPRO_EXTENSION_ID);
+  if (!fs.existsSync(storageRoot)) return "";
+  let entries = [];
+  try {
+    entries = fs.readdirSync(storageRoot, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /\.(?:log|ldb)$/i.test(entry.name))
+      .map((entry) => {
+        const filePath = path.join(storageRoot, entry.name);
+        let mtimeMs = 0;
+        try { mtimeMs = fs.statSync(filePath).mtimeMs; } catch {}
+        return { filePath, mtimeMs };
+      })
+      .sort((left, right) => right.mtimeMs - left.mtimeMs);
+  } catch {
+    return "";
+  }
+  const uuidPattern = /profileId[^0-9a-f]{0,96}["']?([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/gi;
+  for (const entry of entries.slice(0, 8)) {
+    try {
+      const buffer = fs.readFileSync(entry.filePath);
+      const text = buffer.toString("latin1");
+      let match;
+      let latest = "";
+      while ((match = uuidPattern.exec(text))) latest = String(match[1] || "").toLowerCase();
+      uuidPattern.lastIndex = 0;
+      if (latest) return latest;
+    } catch {}
+  }
+  return "";
+}
+
 export function createHeadlessWorkerManager(options = {}) {
   const codexProHome = path.resolve(options.codexProHome || path.join(os.homedir(), ".codexpro"));
   const extensionRoot = path.resolve(options.extensionRoot || "");
+  const getBrowserProfiles = typeof options.getBrowserProfiles === "function"
+    ? options.getBrowserProfiles
+    : async () => [];
+  const setSourceProfileLock = typeof options.setSourceProfileLock === "function"
+    ? options.setSourceProfileLock
+    : async () => ({ ok: true, locked: true });
+  const clearSourceProfileLock = typeof options.clearSourceProfileLock === "function"
+    ? options.clearSourceProfileLock
+    : async () => ({ ok: true, locked: false });
   const stateFile = path.join(codexProHome, "headless-workers.json");
   const workersRoot = path.join(codexProHome, "headless-workers");
+  const startingWorkers = new Set();
+  const creatingSourceProfiles = new Set();
+  let exclusiveEnforcementTail = Promise.resolve();
 
   function chromeUserDataRoot() {
     if (process.env.CODEXPRO_CHROME_USER_DATA_DIR) return path.resolve(process.env.CODEXPRO_CHROME_USER_DATA_DIR);
@@ -180,6 +224,7 @@ export function createHeadlessWorkerManager(options = {}) {
           path: profilePath,
           name: String(meta.name || profileDirectory),
           userName: String(meta.user_name || ""),
+          profileId: extensionStorageProfileId(profilePath),
           gaiaName: String(meta.gaia_name || ""),
           avatarIcon: String(meta.avatar_icon || ""),
           isUsingDefaultName: Boolean(meta.is_using_default_name),
@@ -201,11 +246,87 @@ export function createHeadlessWorkerManager(options = {}) {
     };
   }
 
+  function sourceProfileMatch(worker, profile) {
+    if (!profile || profile.headless === true) return false;
+    const exactSourceId = String(worker.sourceProfileId || "").trim();
+    if (exactSourceId && String(profile.profile_id || "").trim() === exactSourceId) return true;
+    const sourceUserName = String(worker.sourceUserName || "").trim().toLowerCase();
+    const profileEmail = String(profile.email || "").trim().toLowerCase();
+    return Boolean(sourceUserName && profileEmail && sourceUserName === profileEmail);
+  }
+
+  function refreshWorkerSourceProfileId(worker) {
+    if (!worker) return "";
+    const current = String(worker.sourceProfileId || "").trim();
+    if (current) return current;
+    const source = listChromeProfiles().profiles.find((profile) => profile.profileDirectory === worker.sourceProfileDirectory);
+    const discovered = String(source?.profileId || "").trim();
+    if (discovered) worker.sourceProfileId = discovered;
+    return discovered;
+  }
+
+  function conflictingRunningWorker(worker, state = readState()) {
+    const sourceProfileId = refreshWorkerSourceProfileId(worker);
+    return state.workers.find((candidate) => {
+      if (!candidate || candidate.id === worker.id || !processAlive(Number(candidate.pid) || 0)) return false;
+      const candidateSourceId = refreshWorkerSourceProfileId(candidate);
+      if (sourceProfileId && candidateSourceId && sourceProfileId === candidateSourceId) return true;
+      return Boolean(worker.sourceProfileDirectory && candidate.sourceProfileDirectory === worker.sourceProfileDirectory);
+    }) || null;
+  }
+
+  function findSourceProfile(worker, profiles) {
+    return (Array.isArray(profiles) ? profiles : []).find((profile) => sourceProfileMatch(worker, profile)) || null;
+  }
+
+  function profileHasActiveTask(profile) {
+    if (!profile) return false;
+    if (String(profile.current_task_id || "").trim()) return true;
+    if (Math.max(0, Number(profile.busy_request_count) || 0) > 0) return true;
+    if (profile.activity === "working" || profile.activity === "settling") return true;
+    return (Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : []).some((tab) =>
+      tab?.busy === true || tab?.settling === true || String(tab?.network_state || "") === "generating"
+    );
+  }
+
+  async function prepareSourceProfileForHeadless(worker, { lockSource = false } = {}) {
+    const expectedSourceProfileId = refreshWorkerSourceProfileId(worker);
+    let profiles;
+    try {
+      profiles = await getBrowserProfiles();
+    } catch (error) {
+      throw new Error(`Không kiểm tra được trạng thái Chrome profile nguồn nên chưa bật headless để đảm bảo an toàn: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const sourceProfile = findSourceProfile(worker, profiles);
+    if (!sourceProfile) {
+      if (!expectedSourceProfileId) {
+        throw new Error("Không xác định được profile_id của Chrome profile nguồn nên chưa thể bật headless an toàn. Hãy mở profile nguồn có CodexPro rồi thử lại.");
+      }
+      return { sourceProfile: null, sourceProfileId: expectedSourceProfileId, locked: false };
+    }
+    const label = String(sourceProfile.label || sourceProfile.email || worker.sourceProfileName || worker.sourceProfileDirectory || "profile nguồn");
+    if (profileHasActiveTask(sourceProfile)) {
+      const taskTitle = String(sourceProfile.current_task_title || sourceProfile.current_task_id || "task hiện tại").trim();
+      throw new Error(`${label} đang làm ${taskTitle}. Phải chờ task hoàn tất rồi mới được bật headless.`);
+    }
+    worker.sourceProfileId = String(sourceProfile.profile_id || worker.sourceProfileId || "").trim();
+    let locked = false;
+    if (lockSource && sourceProfile.connected !== false) {
+      const result = await setSourceProfileLock(sourceProfile.profile_id, worker.id || "");
+      if (result?.ok === false || result?.locked === false) {
+        throw new Error(`Không khóa được ChatGPT trên ${label}; headless chưa được bật.`);
+      }
+      locked = true;
+    }
+    return { sourceProfile, sourceProfileId: worker.sourceProfileId, locked };
+  }
+
   function listWorkers() {
     const source = listChromeProfiles();
     const state = readState();
     let dirty = false;
     for (const worker of state.workers) {
+      if (!String(worker.sourceProfileId || "").trim() && refreshWorkerSourceProfileId(worker)) dirty = true;
       const legacyDefaultLabel = worker.sourceProfileName ? `Headless · ${worker.sourceProfileName}` : "";
       if (legacyDefaultLabel && worker.label === legacyDefaultLabel) {
         worker.label = worker.sourceProfileName;
@@ -257,13 +378,31 @@ export function createHeadlessWorkerManager(options = {}) {
     };
   }
 
-  async function stopWorker(workerId) {
+  async function stopWorker(workerId, { force = false } = {}) {
     const id = safeId(workerId);
     const state = readState();
     const worker = state.workers.find((item) => item.id === id);
     if (!worker) throw new Error("Không tìm thấy headless worker.");
     const pid = Number(worker.pid) || 0;
     if (processAlive(pid)) {
+      if (!force) {
+        let profiles;
+        try {
+          profiles = await getBrowserProfiles();
+        } catch (error) {
+          throw new Error(`Không kiểm tra được task của headless worker nên chưa dừng để tránh cắt task đang chạy: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const headlessProfile = (Array.isArray(profiles) ? profiles : []).find((profile) =>
+          profile?.headless === true && String(profile.profile_id || "") === id
+        );
+        if (!headlessProfile) {
+          throw new Error("Headless worker vẫn đang chạy nhưng chưa xác minh được trạng thái task; chưa dừng để tránh cắt task đang làm dở.");
+        }
+        if (profileHasActiveTask(headlessProfile)) {
+          const taskTitle = String(headlessProfile.current_task_title || headlessProfile.current_task_id || "task hiện tại").trim();
+          throw new Error(`${worker.label || id} đang làm ${taskTitle}. Phải chờ task hoàn tất rồi mới được dừng, sync hoặc xóa headless.`);
+        }
+      }
       if (process.platform === "win32") {
         await execFileAsync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }).catch(() => {});
       } else {
@@ -300,10 +439,21 @@ export function createHeadlessWorkerManager(options = {}) {
 
   async function startWorker(workerId) {
     const id = safeId(workerId);
+    if (startingWorkers.has(id)) throw new Error("Headless worker này đang trong quá trình khởi động.");
+    startingWorkers.add(id);
+    let sourceLockProfileId = "";
+    try {
     const state = readState();
     const worker = state.workers.find((item) => item.id === id);
     if (!worker) throw new Error("Không tìm thấy headless worker.");
     if (processAlive(Number(worker.pid) || 0)) return workerPayload(worker);
+    const conflict = conflictingRunningWorker(worker, state);
+    if (conflict) throw new Error(`Không thể chạy song song hai headless worker cùng profile nguồn. ${conflict.label || conflict.id} đang chạy.`);
+    worker.startingAt = new Date().toISOString();
+    saveState(state);
+    const preparedSource = await prepareSourceProfileForHeadless(worker, { lockSource: true });
+    sourceLockProfileId = preparedSource.locked ? String(preparedSource.sourceProfileId || "") : "";
+    saveState(state);
     const chromePath = chromeExecutable();
     if (!chromePath) throw new Error("Không tìm thấy Google Chrome. Có thể đặt CODEXPRO_CHROME_PATH để chỉ định file Chrome.");
     if (!worker.sourceHasCodexProExtension) throw new Error("Chrome profile nguồn chưa có CodexPro extension. Hãy bật CodexPro trong profile nguồn rồi Sync session lại.");
@@ -340,10 +490,17 @@ export function createHeadlessWorkerManager(options = {}) {
     });
     child.unref();
     worker.pid = Number(child.pid) || 0;
+    worker.startingAt = "";
     worker.lastStartedAt = new Date().toISOString();
     worker.lastError = "";
     saveState(state);
     const debugPort = await waitForDevToolsPort(userDataDir);
+    try {
+      await prepareSourceProfileForHeadless(worker);
+    } catch (error) {
+      await stopWorker(id, { force: true }).catch(() => {});
+      throw error;
+    }
     await createDevToolsTarget(debugPort, bootstrap.toString());
     await new Promise((resolve) => setTimeout(resolve, 500));
     await createDevToolsTarget(debugPort, "https://chatgpt.com/");
@@ -357,24 +514,106 @@ export function createHeadlessWorkerManager(options = {}) {
       saveState(state);
       throw new Error(worker.lastError);
     }
+    sourceLockProfileId = "";
     return workerPayload(worker);
+    } catch (error) {
+      await stopWorker(id, { force: true }).catch(() => {});
+      const failedState = readState();
+      const failedWorker = failedState.workers.find((item) => item.id === id);
+      if (failedWorker?.startingAt) {
+        failedWorker.startingAt = "";
+        saveState(failedState);
+      }
+      if (sourceLockProfileId) await clearSourceProfileLock(sourceLockProfileId, id).catch(() => {});
+      throw error;
+    } finally {
+      startingWorkers.delete(id);
+    }
+  }
+
+  async function enforceExclusiveUseUnlocked(browserProfiles = []) {
+    const state = readState();
+    const stopped = [];
+    const lockedSources = [];
+    const deferred = [];
+    for (const worker of state.workers) {
+      if (!processAlive(Number(worker.pid) || 0)) continue;
+      const headlessProfile = (Array.isArray(browserProfiles) ? browserProfiles : []).find((profile) =>
+        profile?.headless === true && String(profile.profile_id || "") === worker.id
+      );
+      const sourceProfileId = String(headlessProfile?.source_profile_id || worker.sourceProfileId || "").trim();
+      if (sourceProfileId && sourceProfileId !== worker.sourceProfileId) {
+        const latestState = readState();
+        const latestWorker = latestState.workers.find((item) => item.id === worker.id);
+        if (latestWorker) {
+          latestWorker.sourceProfileId = sourceProfileId;
+          saveState(latestState);
+          worker.sourceProfileId = sourceProfileId;
+        }
+      }
+      const sourceProfile = findSourceProfile(worker, browserProfiles);
+      if (!sourceProfile || sourceProfile.connected === false) continue;
+      lockedSources.push({ workerId: worker.id, sourceProfileId: String(sourceProfile.profile_id || "") });
+      const sourceBusy = profileHasActiveTask(sourceProfile);
+      const headlessBusy = profileHasActiveTask(headlessProfile);
+      if (sourceBusy && headlessBusy) {
+        deferred.push({ workerId: worker.id, sourceProfileId: String(sourceProfile.profile_id || ""), reason: "both_busy" });
+        continue;
+      }
+      if (sourceBusy) {
+        await stopWorker(worker.id);
+        const latestState = readState();
+        const latestWorker = latestState.workers.find((item) => item.id === worker.id);
+        if (latestWorker) {
+          latestWorker.lastError = `Đã tự dừng headless vì Chrome profile nguồn ${sourceProfile.label || sourceProfile.email || worker.sourceProfileName || worker.sourceProfileDirectory} đã có task trước khi khóa ChatGPT kịp áp dụng.`;
+          saveState(latestState);
+        }
+        stopped.push({ workerId: worker.id, sourceProfileId: String(sourceProfile.profile_id || ""), reason: "source_busy" });
+      }
+    }
+    return { stopped, lockedSources, deferred };
+  }
+
+  function enforceExclusiveUse(browserProfiles = []) {
+    const snapshot = Array.isArray(browserProfiles) ? browserProfiles.map((profile) => ({ ...profile })) : [];
+    const run = exclusiveEnforcementTail.then(
+      () => enforceExclusiveUseUnlocked(snapshot),
+      () => enforceExclusiveUseUnlocked(snapshot)
+    );
+    exclusiveEnforcementTail = run.catch(() => {});
+    return run;
   }
 
   async function createWorker(payload = {}) {
     const sourceProfileDirectory = String(payload.sourceProfileDirectory || "").trim();
+    if (creatingSourceProfiles.has(sourceProfileDirectory)) throw new Error("Profile nguồn này đang được tạo headless worker.");
+    creatingSourceProfiles.add(sourceProfileDirectory);
+    try {
     const source = listChromeProfiles().profiles.find((profile) => profile.profileDirectory === sourceProfileDirectory);
     if (!source) throw new Error("Chrome profile nguồn không tồn tại.");
     if (!source.codexProInstalled) throw new Error("Chrome profile nguồn chưa có CodexPro extension. Hãy bật CodexPro trong profile này trước khi tạo headless worker.");
-    const state = readState();
+    const existing = readState().workers.find((worker) => worker.sourceProfileDirectory === sourceProfileDirectory);
+    if (existing) throw new Error(`Profile nguồn này đã có headless worker ${existing.label || existing.id}. Mỗi profile chỉ được có một headless worker.`);
+    const autoStart = payload.autoStart !== false;
     const id = `headless-${randomBytes(6).toString("hex")}`;
+    const preflightWorker = {
+      id,
+      sourceProfileDirectory,
+      sourceProfileName: source.name,
+      sourceUserName: source.userName,
+      sourceProfileId: source.profileId || ""
+    };
+    if (autoStart) await prepareSourceProfileForHeadless(preflightWorker);
+    const state = readState();
     const worker = {
       id,
       label: String(payload.label || source.name || source.userName || source.profileDirectory).trim().slice(0, 100),
       sourceProfileDirectory,
       sourceProfileName: source.name,
       sourceUserName: source.userName,
+      sourceProfileId: preflightWorker.sourceProfileId,
       sourceHasCodexProExtension: source.codexProInstalled,
-      autoStart: payload.autoStart !== false,
+      autoStart,
       pid: 0,
       createdAt: new Date().toISOString(),
       lastSyncedAt: "",
@@ -388,6 +627,30 @@ export function createHeadlessWorkerManager(options = {}) {
     await syncWorker(id);
     if (worker.autoStart) await startWorker(id);
     return workerPayload(readState().workers.find((item) => item.id === id));
+    } finally {
+      creatingSourceProfiles.delete(sourceProfileDirectory);
+    }
+  }
+
+  async function assertProfileTaskExclusive(profileId) {
+    const id = String(profileId || "").trim();
+    if (!id) return { ok: true };
+    const state = readState();
+    for (const worker of state.workers) refreshWorkerSourceProfileId(worker);
+    const running = state.workers.filter((worker) => processAlive(Number(worker.pid) || 0));
+    const sourceLockedBy = running.find((worker) => String(worker.sourceProfileId || "").trim() === id);
+    if (sourceLockedBy) {
+      throw new Error(`Chrome vẫn dùng bình thường, nhưng ChatGPT và task CodexPro trên profile nguồn đang bị khóa vì headless ${sourceLockedBy.label || sourceLockedBy.id} đang chạy. Hãy dừng headless trước khi dùng ChatGPT.`);
+    }
+    const targetHeadless = running.find((worker) => worker.id === id);
+    if (!targetHeadless) return { ok: true };
+    const profiles = await getBrowserProfiles();
+    const sourceProfile = findSourceProfile(targetHeadless, profiles);
+    if (!sourceProfile || sourceProfile.connected === false) return { ok: true };
+    if (profileHasActiveTask(sourceProfile)) {
+      throw new Error(`${sourceProfile.label || targetHeadless.sourceProfileName || "Chrome profile nguồn"} đang có task; chưa được phép giao task cho headless.`);
+    }
+    return { ok: true, sourceProfileId: sourceProfile.profile_id };
   }
 
   async function deleteWorker(workerId) {
@@ -438,6 +701,8 @@ export function createHeadlessWorkerManager(options = {}) {
     createWorker,
     syncWorker,
     startWorker,
+    enforceExclusiveUse,
+    assertProfileTaskExclusive,
     stopWorker,
     deleteWorker,
     setWorkerAutoStart,

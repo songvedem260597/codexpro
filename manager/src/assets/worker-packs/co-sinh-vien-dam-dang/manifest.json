@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "co-sinh-vien-dam-dang",
+  "name": "Cô sinh viên đảm đang",
+  "version": "1.0.0",
+  "states": {
+    "idle": {
+      "file": "idle.gif",
+      "bytes": 60966,
+      "sha256": "affef867947708144104d0abdcd0fcce86f359122a248fa06a2417155c0124ad",
+      "frames": 4,
+      "transparent": true
+    },
+    "working": {
+      "file": "working.gif",
+      "bytes": 80893,
+      "sha256": "4b6eddceba75103940e1c063b8b1350b0298a81764c4c841045b8d6bd8754a02",
+      "frames": 4,
+      "transparent": true
+    },
+    "hung": {
+      "file": "hung.gif",
+      "bytes": 58017,
+      "sha256": "53960cf727b401dc5f20cee2437ceef268492b080b75756207ccf446773906c7",
+      "frames": 4,
+      "transparent": true
+    }
+  }
+}
