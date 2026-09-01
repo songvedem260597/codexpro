@@ -4,15 +4,9 @@ function clean(value, max = 500) {
   return String(value ?? "").trim().slice(0, max);
 }
 
-function profileIsWorking(profile) {
-  const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-  return ["working", "settling"].includes(clean(profile?.activity, 40).toLowerCase())
-    || Number(profile?.busy_request_count || 0) > 0
-    || tabs.some((tab) => tab?.busy || tab?.settling || clean(tab?.network_state, 40).toLowerCase() === "generating");
-}
-
-function workerIsWorking(worker) {
-  return clean(worker?.activity, 40).toLowerCase() === "working";
+function workerOwnerKey(value) {
+  const workerId = clean(value, 180);
+  return workerId.startsWith("browser:") ? workerId.slice("browser:".length) : workerId;
 }
 
 export function taskUnfinalizedIncident(job, { profiles = [], workers = [], now = Date.now() } = {}) {
@@ -25,17 +19,17 @@ export function taskUnfinalizedIncident(job, { profiles = [], workers = [], now 
   const staleMs = Number.isFinite(updatedAtMs) ? Math.max(0, now - updatedAtMs) : 0;
   if (staleMs < RUNNING_STALE_MS) return null;
 
-  const profile = profiles.find((item) => clean(item?.profile_id, 180) === workerId);
-  const worker = workers.find((item) => clean(item?.worker_id || item?.local_worker_id, 180) === workerId || `api:${clean(item?.local_worker_id, 180)}` === workerId);
+  const ownerKey = workerOwnerKey(workerId);
+  const profile = profiles.find((item) => workerOwnerKey(item?.profile_id) === ownerKey);
+  const worker = workers.find((item) => workerOwnerKey(item?.worker_id || item?.local_worker_id) === ownerKey || `api:${clean(item?.local_worker_id, 180)}` === workerId);
   const currentTaskId = clean(profile?.current_task_id || worker?.current_task_id, 80);
-  const live = profile ? profileIsWorking(profile) && currentTaskId === jobId : worker ? workerIsWorking(worker) && currentTaskId === jobId : false;
+  const live = profile ? profile?.connected !== false && currentTaskId === jobId : worker ? worker?.connected !== false && currentTaskId === jobId : false;
   if (live) return null;
 
   let suspectedCause = "worker_missing_or_history_orphaned";
   if (profile) {
     if (profile?.connected === false) suspectedCause = "browser_profile_disconnected_before_finalize";
     else if (currentTaskId && currentTaskId !== jobId) suspectedCause = "browser_task_superseded_without_finalize";
-    else if (currentTaskId === jobId && !profileIsWorking(profile)) suspectedCause = "browser_task_became_idle_without_finalize";
     else suspectedCause = "browser_task_pointer_missing_without_finalize";
   } else if (worker) {
     if (currentTaskId && currentTaskId !== jobId) suspectedCause = "api_task_superseded_without_finalize";
