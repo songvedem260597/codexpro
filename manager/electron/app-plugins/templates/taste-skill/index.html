@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Taste Skill</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div class="brand"><img src="./logo.webp" alt="" onerror="this.hidden=true" /><span>TASTE SKILL</span></div>
+        <h1>Chọn gu trước khi viết giao diện.</h1>
+        <p>Thư viện skill thiết kế từ repo chính thức, được đóng gói thành plugin độc lập cho CodexPro.</p>
+        <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Tìm frontend, redesign, minimalist…" autocomplete="off" /></label>
+      </header>
+      <section class="workspace">
+        <aside><div class="aside-head"><b>Skill</b><span id="count">0</span></div><div id="skills" class="skills"></div></aside>
+        <article class="detail">
+          <div class="detail-head"><div><span id="folder" class="kicker"></span><h2 id="name">Đang tải…</h2><p id="description"></p></div><button id="copy" type="button">Copy skill</button></div>
+          <pre id="content"></pre>
+        </article>
+      </section>
+      <footer><span id="commit"></span><span>MIT · nguồn leonxlnx/taste-skill</span></footer>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

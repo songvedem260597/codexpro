@@ -15,6 +15,7 @@ import "@fontsource/jetbrains-mono/500.css";
 import "@fontsource/jetbrains-mono/600.css";
 import "@fontsource/jetbrains-mono/700.css";
 import { TaskWorkflowCenter } from "./task-workflow-center.jsx";
+import { AppPluginCenter } from "./app-plugin-center.jsx";
 import workerHung from "./assets/worker-packs/y-ta-dam-dang-pixel/hung.gif";
 import workerIdle from "./assets/worker-packs/y-ta-dam-dang-pixel/idle.gif";
 import workerWorking from "./assets/worker-packs/y-ta-dam-dang-pixel/working.gif";
@@ -4413,6 +4414,7 @@ function App() {
           <button type="button" className={activePage === "overview" ? "active" : ""} onClick={() => setActivePage("overview")}><Icon>⌁</Icon>Tổng quan</button>
           <button type="button" className={activePage === "control" ? "active" : ""} onClick={() => setActivePage("control")}><Icon>◫</Icon>Điều phối</button>
           <button type="button" className={activePage === "workflows" ? "active" : ""} onClick={() => setActivePage("workflows")}><Icon>✓</Icon>Quy trình</button>
+          <button type="button" className={activePage === "plugins" ? "active" : ""} onClick={() => setActivePage("plugins")}><Icon>◇</Icon>Plugin</button>
           <button type="button" className={activePage === "logs" ? "active" : ""} onClick={() => setActivePage("logs")}><Icon>≡</Icon>Nhật ký</button>
           <button type="button" className={activePage === "settings" ? "active" : ""} onClick={() => setActivePage("settings")}><Icon>⚙</Icon>Cài đặt</button>
         </nav>
@@ -4422,12 +4424,12 @@ function App() {
         </div>
       </aside>
 
-      <main className={activePage === "settings" ? "page-settings" : activePage === "logs" ? "page-logs" : activePage === "workflows" ? "page-workflows" : activePage === "control" ? "page-control" : "page-overview"}>
+      <main className={activePage === "settings" ? "page-settings" : activePage === "logs" ? "page-logs" : activePage === "plugins" ? "page-plugins" : activePage === "workflows" ? "page-workflows" : activePage === "control" ? "page-control" : "page-overview"}>
         <header>
           <div>
-            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : activePage === "workflows" ? "TASK WORKFLOWS" : activePage === "control" ? "AGENT OPERATIONS" : `${platform.toUpperCase()} CONTROL CENTER`}</p>
-            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "workflows" ? "Trung tâm quy trình" : activePage === "control" ? "Trung tâm điều phối" : "CodexPro của bạn"}</h1>
-            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : activePage === "workflows" ? "Giao task theo checklist có sẵn và theo dõi từng bước bằng bằng chứng của worker." : activePage === "control" ? "Theo dõi task, hiệu suất, tự phục hồi, phiên bản và an toàn repo trong một màn hình." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
+            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : activePage === "plugins" ? "APP PLUGINS" : activePage === "workflows" ? "TASK WORKFLOWS" : activePage === "control" ? "AGENT OPERATIONS" : `${platform.toUpperCase()} CONTROL CENTER`}</p>
+            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "plugins" ? "Plugin" : activePage === "workflows" ? "Trung tâm quy trình" : activePage === "control" ? "Trung tâm điều phối" : "CodexPro của bạn"}</h1>
+            <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : activePage === "plugins" ? "Tích hợp giao diện từ repo khác mà không đóng Manager hay gián đoạn worker." : activePage === "workflows" ? "Giao task theo checklist có sẵn và theo dõi từng bước bằng bằng chứng của worker." : activePage === "control" ? "Theo dõi task, hiệu suất, tự phục hồi, phiên bản và an toàn repo trong một màn hình." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
@@ -4721,6 +4723,14 @@ function App() {
             notify={notify}
             onError={(workflowError) => setError(workflowError?.message || String(workflowError))}
             onRefresh={() => void refresh(false)}
+          />
+        </div>
+
+        <div className="app-plugin-page" hidden={activePage !== "plugins"}>
+          <AppPluginCenter
+            api={api}
+            notify={notify}
+            onError={(pluginError) => setError(pluginError?.message || String(pluginError))}
           />
         </div>
 
