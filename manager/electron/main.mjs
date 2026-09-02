@@ -329,7 +329,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.108";
+const WORKER_EXTENSION_VERSION = "0.5.109";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -3838,6 +3838,7 @@ async function sendProfileRequestUnlocked(payload) {
     text: taskText,
     attachments,
     allow_busy_followup: allowBusyFollowup,
+    title: allowBusyFollowup ? "__codexpro_allow_busy_followup__" : undefined,
     one_shot_recovery: payload?.oneShotRecovery === true
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
