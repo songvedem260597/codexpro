@@ -1041,6 +1041,7 @@ function App() {
   const responseMemoryCache = useRef(new Map());
   const responseCacheSaveSignatures = useRef(new Map());
   const networkStreamReads = useRef(new Map());
+  const networkStreamPushTimes = useRef(new Map());
   const networkCompletionReads = useRef(new Map());
   const connectionRecoveryReads = useRef(new Map());
   const repoTaskVerificationReads = useRef(new Map());
@@ -1965,6 +1966,56 @@ function App() {
         return applyConversationTitleOverrides({ ...current, checkedAt: payload?.checked_at || new Date().toISOString(), browserProfiles }, conversationTitleOverridesRef.current);
       });
     });
+    const unsubscribeBrowserStream = api.onBrowserStream?.((payload) => {
+      for (const update of Array.isArray(payload?.updates) ? payload.updates : []) {
+        const profileId = String(update?.profile_id || "");
+        const conversationId = String(update?.conversation_id || "");
+        if (!profileId || !conversationId) continue;
+        const selectedTarget = String(requestTargetsRef.current[profileId] || "");
+        if (selectedTarget && selectedTarget !== conversationId) continue;
+        const streamKey = `${profileId}:${conversationId}`;
+        networkStreamPushTimes.current.set(streamKey, Date.now());
+        setRequestResponses((current) => {
+          const previous = current[profileId] || {};
+          if (previous.conversationId && previous.conversationId !== conversationId) return current;
+          const recordId = Math.max(0, Number(update?.record_id) || 0);
+          const revision = Math.max(0, Number(update?.revision) || 0);
+          const previousRecordId = Math.max(0, Number(previous.networkStreamPushRecordId) || 0);
+          const previousRevision = Math.max(0, Number(previous.networkStreamPushRevision) || 0);
+          if (previousRecordId === recordId && revision <= previousRevision) return current;
+          const streamUpdatedAt = String(update?.updated_at || "");
+          if (!isNetworkStreamCurrentGeneration({ networkStartedAt: previous.networkStartedAt, streamUpdatedAt })) return current;
+          const streamText = String(update?.text || "");
+          const messages = streamText
+            ? mergeNetworkStreamTranscript(previous.messages || [], { conversationId, text: streamText, truncated: false })
+            : previous.messages || [];
+          return {
+            ...current,
+            [profileId]: {
+              ...previous,
+              visible: true,
+              conversationId,
+              messages,
+              text: streamText || previous.text || "",
+              busy: update?.in_progress === true,
+              loading: false,
+              networkStreamAvailable: Boolean(streamText || update?.activity_text || previous.networkStreamAvailable),
+              networkStreamInProgress: update?.in_progress === true,
+              networkStreamUpdatedAt: streamUpdatedAt,
+              networkStreamEventCount: Math.max(0, Number(update?.event_count) || 0),
+              networkStreamError: String(update?.error || ""),
+              networkStreamActivityText: String(update?.activity_text || ""),
+              networkStreamPushRecordId: recordId,
+              networkStreamPushRevision: revision,
+              incomplete: update?.in_progress === true,
+              incompleteReason: update?.in_progress === true ? "network_stream_in_progress" : "",
+              contentNeedsRefresh: false,
+              updatedAt: streamUpdatedAt || previous.updatedAt
+            }
+          };
+        });
+      }
+    });
     const unsubscribeWorkers = api.onWorkerUpdate?.((payload) => {
       const workerId = String(payload?.worker_id || "");
       if (!workerId) return;
@@ -1981,6 +2032,7 @@ function App() {
     const projectsTimer = window.setInterval(() => void refreshProjects(), PROJECT_REFRESH_MS);
     return () => {
       unsubscribe?.();
+      unsubscribeBrowserStream?.();
       unsubscribeWorkers?.();
       window.clearInterval(statusTimer);
       window.clearInterval(projectsTimer);
@@ -2127,7 +2179,9 @@ function App() {
         if (networkState === "generating" || tab.busy || tab.settling) {
           const streamKey = `${profile.profile_id}:${conversationId}`;
           const lastStreamRead = Number(networkStreamReads.current.get(streamKey) || 0);
-          const activityPollMs = networkState === "generating" ? 850 : LATEST_RESPONSE_RECOVERY_POLL_MS;
+          const lastStreamPush = Number(networkStreamPushTimes.current.get(streamKey) || 0);
+          const realtimePushFresh = Date.now() - lastStreamPush < 1500;
+          const activityPollMs = realtimePushFresh ? LATEST_RESPONSE_RECOVERY_POLL_MS : networkState === "generating" ? 850 : LATEST_RESPONSE_RECOVERY_POLL_MS;
           if (Date.now() - lastStreamRead >= activityPollMs) {
             networkStreamReads.current.set(streamKey, Date.now());
             void loadResponse(profile, conversationId, true, false, false, networkState !== "generating");
@@ -4196,7 +4250,7 @@ function App() {
                         <div className={`latest-response-content ${inlineLiveStatus ? "is-inline-live-status" : ""}`} onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
                           <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
                           {message.role === "assistant" ? <>
-                            {message.text && <React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} /></React.Suspense>}
+                            {message.text && <React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} streaming={showLiveStreamTail} /></React.Suspense>}
                             {Boolean(message.images?.length) && <div className={`chat-message-images ${message.images.length === 1 ? "is-single" : "is-grid"}`}>{message.images.map((image, imageIndex) => <button type="button" className="chat-generated-image" key={image.id || `${message.id}-image-${imageIndex}`} title="Mở ảnh" aria-label={`Mở ${image.alt || image.name || "ảnh tạo bởi ChatGPT"}`} onClick={() => setAttachmentPreview({ loading: false, name: image.name || "Ảnh tạo bởi ChatGPT", size: Number(image.size) || 0, mimeType: image.mimeType || "image/jpeg", kind: "image", dataUrl: image.dataUrl, generated: true })}><img src={image.dataUrl} alt={image.alt || image.name || "Ảnh tạo bởi ChatGPT"} /></button>)}</div>}
                             {showLiveStreamTail && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}
                             {message.text && turnReady && (

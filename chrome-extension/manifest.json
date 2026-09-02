@@ -24,6 +24,11 @@
     },
     {
       "matches": ["https://chatgpt.com/*"],
+      "js": ["network-stream-bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://chatgpt.com/*"],
       "js": ["connector-installer.js"],
       "run_at": "document_idle"
     }

@@ -1301,6 +1301,10 @@ function startBrowserProfileEventStream(win) {
             const data = frame.split("\n").filter((line) => line.startsWith("data:" )).map((line) => line.slice(5).trim()).join("\n");
             if (!data) continue;
             const payload = JSON.parse(data);
+            if (payload?.type === "browser-stream" && Array.isArray(payload?.updates)) {
+              if (!win.isDestroyed()) win.webContents.send("codexpro:browser-stream", payload);
+              continue;
+            }
             if (Array.isArray(payload?.profiles)) {
               latestBrowserProfileStream = { connected: true, checkedAt: String(payload.checked_at || ""), profiles: payload.profiles };
               recordBrowserProfileTransitions(payload.profiles, payload.checked_at);

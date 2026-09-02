@@ -68,6 +68,14 @@ export interface ExtensionProfileSummary {
     network_status_code: number;
     network_error: string;
     network_duration_ms: number;
+    network_stream_text: string;
+    network_stream_revision: number;
+    network_stream_record_id: number;
+    network_stream_event_count: number;
+    network_stream_updated_at: string;
+    network_stream_in_progress: boolean;
+    network_stream_error: string;
+    network_stream_activity_text: string;
     connection_interrupted: boolean;
     message_delivery_timed_out: boolean;
     renderer_unresponsive: boolean;
@@ -85,6 +93,72 @@ export interface ExtensionProfileSummary {
     long_task_watchdog_hung: boolean;
     long_task_watchdog_attempt_key: string;
   }>;
+}
+
+export interface BrowserExtensionStreamUpdate {
+  profile_id: string;
+  tab_id: number;
+  conversation_id: string;
+  record_id: number;
+  revision: number;
+  text: string;
+  event_count: number;
+  updated_at: string;
+  in_progress: boolean;
+  error: string;
+  activity_text: string;
+}
+
+export function mergeBrowserExtensionStreamBatch(profileId: string, tabs: unknown[], streams: unknown[]): { changed: boolean; updates: BrowserExtensionStreamUpdate[] } {
+  const profile = String(profileId || "").trim().slice(0, 160);
+  const tabList = Array.isArray(tabs) ? tabs : [];
+  const streamList = Array.isArray(streams) ? streams.slice(0, 12) : [];
+  const updates: BrowserExtensionStreamUpdate[] = [];
+  for (const value of streamList) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const stream = value as Record<string, any>;
+    const tabId = Number(stream.tab_id);
+    if (!Number.isInteger(tabId) || tabId < 0) continue;
+    const tab = tabList.find((candidate: any) => Number(candidate?.id) === tabId) as Record<string, any> | undefined;
+    if (!tab) continue;
+    const recordId = Math.max(0, Number(stream.record_id) || 0);
+    const revision = Math.max(0, Number(stream.revision) || 0);
+    if (!recordId || !revision) continue;
+    const currentRecordId = Math.max(0, Number(tab.network_stream_record_id) || 0);
+    const currentRevision = Math.max(0, Number(tab.network_stream_revision) || 0);
+    if (currentRecordId === recordId && revision <= currentRevision) continue;
+    tab.network_stream_record_id = recordId;
+    tab.network_stream_revision = revision;
+    tab.network_stream_text = String(stream.text ?? "").slice(0, 200_000);
+    tab.network_stream_event_count = Math.max(0, Number(stream.event_count) || 0);
+    tab.network_stream_updated_at = String(stream.updated_at ?? "").slice(0, 64);
+    tab.network_stream_in_progress = stream.in_progress === true;
+    tab.network_stream_error = String(stream.error ?? "").slice(0, 500);
+    tab.network_stream_activity_text = String(stream.activity_text ?? "").trim().slice(0, 220);
+    if (stream.in_progress === true) {
+      tab.busy = true;
+      tab.network_state = "generating";
+      tab.busy_source = "network_stream_push";
+    } else if (String(tab.busy_source || "") === "network_stream_push") {
+      tab.busy = false;
+      if (tab.network_state === "generating") tab.network_state = "completed";
+      tab.busy_source = "";
+    }
+    updates.push({
+      profile_id: profile,
+      tab_id: tabId,
+      conversation_id: String(stream.conversation_id ?? "").slice(0, 180),
+      record_id: recordId,
+      revision,
+      text: String(tab.network_stream_text ?? ""),
+      event_count: Number(tab.network_stream_event_count) || 0,
+      updated_at: String(tab.network_stream_updated_at ?? ""),
+      in_progress: tab.network_stream_in_progress === true,
+      error: String(tab.network_stream_error ?? ""),
+      activity_text: String(tab.network_stream_activity_text ?? "")
+    });
+  }
+  return { changed: updates.length > 0, updates };
 }
 
 export interface BrowserExtensionConnectorInfo {
@@ -142,6 +216,7 @@ interface BridgeState {
   activeProfileId?: string;
   connectorInfo?: (profileId: string) => BrowserExtensionConnectorInfo;
   profileListeners: Set<(profiles: ExtensionProfileSummary[]) => void>;
+  streamListeners: Set<(updates: BrowserExtensionStreamUpdate[]) => void>;
   profileNotifyTimer?: NodeJS.Timeout;
   profileNotifySignature?: string;
   profileExpiryTimer?: NodeJS.Timeout;
@@ -597,6 +672,25 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     return;
   }
 
+  if (req.url === "/stream") {
+    const profileId = String(body.profile_id ?? "").trim().slice(0, 160);
+    const profile = profileId ? state.profiles.get(profileId) : undefined;
+    if (!profile) {
+      sendJson(req, res, 202, { ok: true, ignored: true, reason: "profile_not_registered" });
+      return;
+    }
+    const { changed, updates } = mergeBrowserExtensionStreamBatch(profile.id, profile.tabs, body.streams);
+    profile.lastSeen = Date.now();
+    if (updates.length) {
+      for (const listener of state.streamListeners) {
+        try { listener(updates); } catch {}
+      }
+    }
+    scheduleProfileExpiryNotification(state);
+    sendJson(req, res, 200, { ok: true, profile_id: profile.id, changed });
+    return;
+  }
+
   if (req.url === "/register") {
     const profile = profileFromBody(state, body);
     sendJson(req, res, 200, { ok: true, active_profile_id: state.activeProfileId ?? null, profile_id: profile.id });
@@ -675,6 +769,7 @@ export function ensureBrowserExtensionBridge(options: BrowserExtensionBridgeOpti
   state.profiles = new Map();
   state.pending = new Map();
   state.profileListeners = new Set();
+  state.streamListeners = new Set();
   state.connectorInfo = options.connectorInfo;
   state.server = http.createServer((req, res) => {
     handleRequest(state, req, res).catch((error) => {
@@ -748,6 +843,14 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
           network_status_code: Number(tab.network_status_code) || 0,
           network_error: String(tab.network_error ?? "").trim().slice(0, 500),
           network_duration_ms: Math.max(0, Number(tab.network_duration_ms) || 0),
+          network_stream_text: String(tab.network_stream_text ?? '').slice(0, 200_000),
+          network_stream_revision: Math.max(0, Number(tab.network_stream_revision) || 0),
+          network_stream_record_id: Math.max(0, Number(tab.network_stream_record_id) || 0),
+          network_stream_event_count: Math.max(0, Number(tab.network_stream_event_count) || 0),
+          network_stream_updated_at: String(tab.network_stream_updated_at ?? '').trim().slice(0, 64),
+          network_stream_in_progress: tab.network_stream_in_progress === true,
+          network_stream_error: String(tab.network_stream_error ?? '').trim().slice(0, 500),
+          network_stream_activity_text: String(tab.network_stream_activity_text ?? '').trim().slice(0, 220),
           connection_interrupted: tab.connection_interrupted === true,
           message_delivery_timed_out: tab.message_delivery_timed_out === true,
           renderer_unresponsive: tab.renderer_unresponsive === true,
@@ -833,6 +936,12 @@ export function subscribeBrowserExtensionProfiles(listener: (profiles: Extension
   const state = ensureBrowserExtensionBridge();
   state.profileListeners.add(listener);
   return () => state.profileListeners.delete(listener);
+}
+
+export function subscribeBrowserExtensionStreams(listener: (updates: BrowserExtensionStreamUpdate[]) => void): () => void {
+  const state = ensureBrowserExtensionBridge();
+  state.streamListeners.add(listener);
+  return () => state.streamListeners.delete(listener);
 }
 
 export function setBrowserExtensionProfileWorkspace(profileId: string, root: string): void {

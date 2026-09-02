@@ -27,6 +27,7 @@ const responses = [
   ]
 ];
 let call = 0;
+const postedMessages = [];
 
 const context = {
   URL,
@@ -37,6 +38,7 @@ const context = {
   console,
   setTimeout,
   clearTimeout,
+  postMessage: (payload) => postedMessages.push(payload),
   fetch: async (_input, init = {}) => {
     const events = responses[call++] || [];
     const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
@@ -75,6 +77,11 @@ assert.equal(modern.available, true);
 assert.equal(modern.text, "Xin chào");
 assert.equal(modern.messages.length, 1);
 assert.equal(modern.event_count, 2);
+const modernPushes = postedMessages.filter((message) => message?.event?.conversation_id === "conversation-new-5678").map((message) => message.event);
+const modernDeltas = modernPushes.filter((event) => event.kind === "delta");
+assert.equal(modernDeltas.length, 2, "modern response deltas should be pushed as they arrive");
+assert.equal(modernDeltas.at(-1)?.text_length, "Xin chào".length, "delta push should include the accumulated text length for gap detection");
+assert.ok(modernPushes.every((event, index) => index === 0 || event.revision > modernPushes[index - 1].revision), "realtime push revisions must be strictly increasing per record");
 
 const patchResponse = await context.fetch("https://chatgpt.com/backend-api/f/conversation", { method: "POST" });
 await patchResponse.text();
@@ -105,9 +112,18 @@ assert.equal(toolActivity.text, "", "raw tool-call JSON must never be exposed as
 assert.equal(toolActivity.messages.length, 0, "raw tool-call JSON must never be exposed in the visible transcript");
 assert.equal(toolActivity.activity_text, "Codex Pro đang sử dụng công cụ", "tool activity must stay generic and never expose paths or action names");
 assert.equal(toolActivity.in_progress, true, "the UI must keep showing tool activity while the stream is open");
+const liveToolPushes = postedMessages.filter((message) => message?.event?.conversation_id === "conversation-tools-3456").map((message) => message.event);
+assert.equal(liveToolPushes.at(-1)?.kind, "activity", "tool-only chunks should publish generic activity instead of raw assistant text");
+assert.equal(liveToolPushes.at(-1)?.activity_text, "Codex Pro đang sử dụng công cụ");
+assert.ok(!JSON.stringify(liveToolPushes).includes("/CodexPro/"), "realtime tool pushes must not leak CodexPro action paths");
+assert.ok(!JSON.stringify(liveToolPushes).includes("src/editor.js"), "realtime tool pushes must not leak tool arguments");
 await toolResponse.text();
 await new Promise((resolve) => setTimeout(resolve, 0));
 assert.equal(context.__codexproNetworkStreamCaptureV1.read("conversation-tools-3456").in_progress, false);
+const settledToolPush = postedMessages.filter((message) => message?.event?.conversation_id === "conversation-tools-3456").map((message) => message.event).at(-1);
+assert.equal(settledToolPush?.kind, "settled");
+assert.equal(settledToolPush?.text, "", "terminal tool-only events must not republish raw tool-call JSON");
+assert.equal(settledToolPush?.activity_text, "", "terminal tool-only events must clear the live activity label");
 
 assert.equal(context.__codexproNetworkStreamCaptureV1.read("missing-conversation").available, false);
 console.log("✓ ChatGPT live network stream capture smoke test passed");
