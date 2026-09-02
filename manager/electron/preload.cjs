@@ -70,6 +70,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   getChatResponseCache: (payload) => invoke("codexpro:get-chat-response-cache", payload),
   saveChatResponseCache: (payload) => invoke("codexpro:save-chat-response-cache", payload),
   getRepoTaskStatus: (payload) => invoke("codexpro:get-repo-task-status", payload),
+  getWorkspaceCoordination: (root) => invoke("codexpro:get-workspace-coordination", root),
   listAppPlugins: () => invoke("codexpro:list-app-plugins"),
   listAppPluginCatalog: () => invoke("codexpro:list-app-plugin-catalog"),
   prepareAppPluginTask: (payload) => invoke("codexpro:prepare-app-plugin-task", payload),

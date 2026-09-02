@@ -3792,6 +3792,14 @@ async function getRepoTaskStatus(payload) {
   return await localMcpTool(base.config, base.token, "repo_task_status", { task_id: taskId }, 15000);
 }
 
+async function getWorkspaceCoordination(root) {
+  const workspaceRoot = String(root || "").trim();
+  if (!workspaceRoot) throw new Error("Workspace root không hợp lệ.");
+  const base = await readyRuntimeBaseStatus();
+  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  return await localMcpTool(base.config, base.token, "workspace_coordination_status", { root: workspaceRoot }, 15000);
+}
+
 async function renameProfileChat(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
@@ -4456,6 +4464,19 @@ diagnosticIpcHandle("codexpro:get-repo-task-status", {
     ? { level: "warn", message: result?.verified === false ? "Task CodexPro chưa được xác minh" : "Task CodexPro đã verified nhưng thiếu task title" }
     : null
 }, (_event, payload) => getRepoTaskStatus(payload));
+diagnosticIpcHandle("codexpro:get-workspace-coordination", {
+  category: "tool",
+  action: "get-workspace-coordination",
+  slowMs: 5_000,
+  failureMessage: "Đọc trạng thái phối hợp workspace thất bại",
+  details: (root) => ({ workspace_root: String(root || "") }),
+  resultDetails: (result) => ({
+    active_tasks: Number(result?.active_task_count) || 0,
+    claims: Array.isArray(result?.claims) ? result.claims.length : 0,
+    queued: Array.isArray(result?.integration_queue) ? result.integration_queue.length : 0,
+    conflicts: Number(result?.conflict_count) || 0
+  })
+}, (_event, root) => getWorkspaceCoordination(root));
 diagnosticIpcHandle("codexpro:list-app-plugins", {
   category: "app-plugin",
   action: "list-app-plugins"

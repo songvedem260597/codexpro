@@ -7,7 +7,7 @@ import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { redactSensitiveText } from "./redact.js";
-import { acquireWorkspaceIntegrationLease, preflightWorkspaceCommit, preflightWorkspaceGitAdd, preflightWorkspacePush, recordWorkspaceCommit, type WorkspaceTaskContext } from "./workspaceCoordination.js";
+import { acquireWorkspaceIntegrationLease, preflightWorkspaceCommit, preflightWorkspaceGitAdd, preflightWorkspacePush, recordWorkspaceCommit, recordWorkspacePush, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 export interface BashResult {
   command: string;
@@ -336,16 +336,16 @@ function assertSafePushTarget(executable: string, branch: string, cwd: string, w
   }
 }
 
-function directGitInvocation(command: SafeGitWrite, cwd: string, workspaceRoot: string, taskId = ""): DirectInvocation {
+function directGitInvocation(command: SafeGitWrite, cwd: string, workspaceRoot: string, taskId = "", integrationFromHead = false, pushSafetyRoot = workspaceRoot): DirectInvocation {
   const executable = process.platform === "win32" ? "git.exe" : "git";
   if (command.kind === "add") {
     assertExplicitGitFiles(command.args, cwd, workspaceRoot);
     return { executable, args: ["add", ...command.args] };
   }
   if (command.kind === "push") {
-    assertSafePushTarget(executable, command.branch, cwd, workspaceRoot);
+    assertSafePushTarget(executable, command.branch, cwd, pushSafetyRoot);
     const hooksDir = emptyGitHooksDir();
-    return { executable, args: ["-c", `core.hooksPath=${hooksDir}`, "push", "origin", command.branch], cleanupDir: hooksDir };
+    return { executable, args: ["-c", `core.hooksPath=${hooksDir}`, "push", "origin", integrationFromHead ? `HEAD:${command.branch}` : command.branch], cleanupDir: hooksDir };
   }
 
   const hooksDir = emptyGitHooksDir();
@@ -627,7 +627,12 @@ export async function runBash(
   if (options.repoTask) {
     assertRepoTaskCommandPolicy(command, safeGitWrite);
     if (safeGitWrite) {
-      releaseIntegrationLease = await acquireWorkspaceIntegrationLease(options.repoTask);
+      const isolatedWorktree = Boolean(options.repoTask.worktreeRoot);
+      if (safeGitWrite.kind === "push") {
+        releaseIntegrationLease = await acquireWorkspaceIntegrationLease(options.repoTask, safeGitWrite.branch);
+      } else if (!isolatedWorktree) {
+        releaseIntegrationLease = await acquireWorkspaceIntegrationLease(options.repoTask);
+      }
       try {
         if (safeGitWrite.kind === "add") {
           await preflightWorkspaceGitAdd(options.repoTask, cwd, safeGitWrite.args);
@@ -637,7 +642,7 @@ export async function runBash(
           await preflightWorkspacePush(options.repoTask, safeGitWrite.branch);
         }
       } catch (error) {
-        await releaseIntegrationLease();
+        await releaseIntegrationLease?.();
         releaseIntegrationLease = undefined;
         throw error;
       }
@@ -648,7 +653,9 @@ export async function runBash(
 
   let directInvocation: DirectInvocation | undefined;
   try {
-    directInvocation = safeGitWrite ? directGitInvocation(safeGitWrite, cwd, workspace.root, options.repoTask?.taskId || "") : directPackageInvocation(command);
+    directInvocation = safeGitWrite
+      ? directGitInvocation(safeGitWrite, cwd, workspace.root, options.repoTask?.taskId || "", Boolean(options.repoTask?.worktreeRoot), options.repoTask?.root || workspace.root)
+      : directPackageInvocation(command);
   } catch (error) {
     await releaseIntegrationLease?.();
     throw error;
@@ -725,6 +732,9 @@ export async function runBash(
       try {
         if (exitCode === 0 && safeGitWrite?.kind === "commit" && options.repoTask) {
           await recordWorkspaceCommit(options.repoTask);
+        }
+        if (exitCode === 0 && safeGitWrite?.kind === "push" && options.repoTask) {
+          await recordWorkspacePush(options.repoTask, safeGitWrite.branch);
         }
       } catch (error) {
         coordinationError = error;

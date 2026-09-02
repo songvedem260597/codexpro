@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -12,6 +13,8 @@ const LOCK_ATTEMPTS = 200;
 const STALE_LOCK_MS = 30_000;
 const STALE_INTEGRATION_LEASE_MS = 10 * 60 * 1000;
 const STALE_TASK_MS = 6 * 60 * 60 * 1000;
+const INTEGRATION_QUEUE_WAIT_MS = 2 * 60 * 1000;
+const INTEGRATION_QUEUE_POLL_MS = 50;
 
 export type WorkspaceTaskStatus = "running" | "completed" | "failed" | "cancelled";
 
@@ -27,6 +30,15 @@ export type WorkspaceTaskRecord = {
   touchedPaths: string[];
   claimedPaths: string[];
   commitShas: string[];
+  worktreeRoot?: string;
+  worktreeBranch?: string;
+  integrationStatus?: "idle" | "queued" | "integrating" | "integrated" | "conflict" | "failed";
+  integrationBranch?: string;
+  integrationRequestedAt?: string;
+  integrationStartedAt?: string;
+  integrationFinishedAt?: string;
+  integratedHead?: string;
+  remoteHeadBeforeIntegration?: string;
   startedAt: string;
   updatedAt: string;
   finishedAt?: string;
@@ -43,12 +55,19 @@ type IntegrationLease = {
   acquiredAt: string;
 };
 
+type IntegrationQueueEntry = {
+  taskId: string;
+  branch: string;
+  enqueuedAt: string;
+};
+
 type WorkspaceCoordinationState = {
   version: 1;
   root: string;
   updatedAt: string;
   tasks: Record<string, WorkspaceTaskRecord>;
   claims: Record<string, WorkspaceClaim>;
+  integrationQueue: IntegrationQueueEntry[];
   integrationLease?: IntegrationLease;
 };
 
@@ -57,6 +76,7 @@ export type WorkspaceTaskContext = {
   workerId?: string;
   title?: string;
   root: string;
+  worktreeRoot?: string;
 };
 
 function canonicalRoot(root: string): string {
@@ -81,6 +101,14 @@ function workspaceKey(root: string): string {
 
 function coordinationDir(): string {
   return path.join(codexProHome(), "workspace-coordination");
+}
+
+function worktreeDir(root: string, taskId: string): string {
+  return path.join(codexProHome(), "workspace-worktrees", workspaceKey(root), taskId);
+}
+
+function worktreeBranch(taskId: string): string {
+  return `codexpro/task/${taskId.slice(4)}`;
 }
 
 function statePath(root: string): string {
@@ -117,6 +145,22 @@ function gitStatus(root: string, args: string[]): number {
     timeout: 12_000
   });
   return Number(result.status ?? 1);
+}
+
+function gitRun(root: string, args: string[], timeout = 30_000): { status: number; stdout: string; stderr: string } {
+  const executable = process.platform === "win32" ? "git.exe" : "git";
+  const result = spawnSync(executable, args, {
+    cwd: root,
+    encoding: "utf8",
+    windowsHide: true,
+    maxBuffer: 8 * 1024 * 1024,
+    timeout
+  });
+  return {
+    status: Number(result.status ?? 1),
+    stdout: String(result.stdout ?? "").trim(),
+    stderr: String(result.stderr ?? "").trim()
+  };
 }
 
 function nulPaths(text: string): string[] {
@@ -165,7 +209,8 @@ function emptyState(root: string): WorkspaceCoordinationState {
     root: canonicalRoot(root),
     updatedAt: nowIso(),
     tasks: {},
-    claims: {}
+    claims: {},
+    integrationQueue: []
   };
 }
 
@@ -186,6 +231,15 @@ function normalizeTask(value: unknown): WorkspaceTaskRecord | undefined {
     touchedPaths: uniquePaths(Array.isArray(source.touchedPaths) ? source.touchedPaths.map(String) : []),
     claimedPaths: uniquePaths(Array.isArray(source.claimedPaths) ? source.claimedPaths.map(String) : []),
     commitShas: [...new Set(Array.isArray(source.commitShas) ? source.commitShas.map((value) => String(value).trim()).filter(Boolean) : [])].slice(-200),
+    ...(source.worktreeRoot ? { worktreeRoot: String(source.worktreeRoot) } : {}),
+    ...(source.worktreeBranch ? { worktreeBranch: String(source.worktreeBranch) } : {}),
+    ...(source.integrationStatus ? { integrationStatus: source.integrationStatus } : {}),
+    ...(source.integrationBranch ? { integrationBranch: String(source.integrationBranch) } : {}),
+    ...(source.integrationRequestedAt ? { integrationRequestedAt: String(source.integrationRequestedAt) } : {}),
+    ...(source.integrationStartedAt ? { integrationStartedAt: String(source.integrationStartedAt) } : {}),
+    ...(source.integrationFinishedAt ? { integrationFinishedAt: String(source.integrationFinishedAt) } : {}),
+    ...(source.integratedHead ? { integratedHead: String(source.integratedHead) } : {}),
+    ...(source.remoteHeadBeforeIntegration ? { remoteHeadBeforeIntegration: String(source.remoteHeadBeforeIntegration) } : {}),
     startedAt: String(source.startedAt || nowIso()),
     updatedAt: String(source.updatedAt || nowIso()),
     ...(source.finishedAt ? { finishedAt: String(source.finishedAt) } : {})
@@ -212,6 +266,14 @@ function readState(root: string): WorkspaceCoordinationState {
         updatedAt: String(source.updatedAt || nowIso())
       };
     }
+    const integrationQueue: IntegrationQueueEntry[] = Array.isArray(parsed?.integrationQueue)
+      ? parsed.integrationQueue.flatMap((value: unknown) => {
+          const source = value && typeof value === "object" ? value as Partial<IntegrationQueueEntry> : {};
+          const taskId = String(source.taskId || "").trim();
+          if (!/^cpt_[a-f0-9]{24}$/.test(taskId)) return [];
+          return [{ taskId, branch: String(source.branch || "").trim().slice(0, 200), enqueuedAt: String(source.enqueuedAt || nowIso()) }];
+        })
+      : [];
     const leaseTaskId = String(parsed?.integrationLease?.taskId || "").trim();
     return {
       version: COORDINATION_VERSION,
@@ -219,6 +281,7 @@ function readState(root: string): WorkspaceCoordinationState {
       updatedAt: String(parsed?.updatedAt || nowIso()),
       tasks,
       claims,
+      integrationQueue,
       ...( /^cpt_[a-f0-9]{24}$/.test(leaseTaskId) ? { integrationLease: { taskId: leaseTaskId, acquiredAt: String(parsed?.integrationLease?.acquiredAt || nowIso()) } } : {})
     };
   } catch {
@@ -284,6 +347,10 @@ function cleanupStaleState(state: WorkspaceCoordinationState): void {
     const task = state.tasks[claim.taskId];
     if (!task || task.status !== "running" || staleTaskIds.has(claim.taskId)) delete state.claims[claimPath];
   }
+  state.integrationQueue = state.integrationQueue.filter((entry) => {
+    const task = state.tasks[entry.taskId];
+    return Boolean(task && task.status === "running" && !staleTaskIds.has(entry.taskId));
+  });
   if (state.integrationLease) {
     const leaseTask = state.tasks[state.integrationLease.taskId];
     const acquired = Date.parse(state.integrationLease.acquiredAt);
@@ -327,6 +394,43 @@ function claimOwner(state: WorkspaceCoordinationState, relPath: string): string 
   return state.claims[canonicalPathKey(relPath)]?.taskId;
 }
 
+function ensureTaskWorktree(root: string, taskId: string, baseHead: string): { root: string; branch: string } | undefined {
+  if (!baseHead) return undefined;
+  const target = worktreeDir(root, taskId);
+  const branch = worktreeBranch(taskId);
+  if (fs.existsSync(target)) {
+    const top = gitText(target, ["rev-parse", "--show-toplevel"]);
+    if (top && sameFsPath(top, target)) return { root: canonicalRoot(target), branch: currentBranch(target) || branch };
+    throw new CodexProError(`WORKSPACE_WORKTREE_PATH_BUSY: task worktree path already exists but is not a valid Git worktree: ${target}.`, {
+      code: "WORKSPACE_WORKTREE_PATH_BUSY",
+      details: { task_id: taskId, worktree_root: target }
+    });
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const branchExists = gitStatus(root, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]) === 0;
+  const result = branchExists
+    ? gitRun(root, ["worktree", "add", target, branch], 60_000)
+    : gitRun(root, ["worktree", "add", "-b", branch, target, baseHead], 60_000);
+  if (result.status !== 0) {
+    throw new CodexProError(`WORKSPACE_WORKTREE_CREATE_FAILED: ${result.stderr || result.stdout || "git worktree add failed"}`, {
+      code: "WORKSPACE_WORKTREE_CREATE_FAILED",
+      details: { task_id: taskId, worktree_root: target, branch, base_head: baseHead }
+    });
+  }
+  return { root: canonicalRoot(target), branch };
+}
+
+function sameFsPath(left: string, right: string): boolean {
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function taskGitRoot(context: WorkspaceTaskContext, task?: WorkspaceTaskRecord): string {
+  const candidate = context.worktreeRoot || task?.worktreeRoot;
+  return candidate && fs.existsSync(candidate) ? canonicalRoot(candidate) : canonicalRoot(context.root);
+}
+
 export async function registerWorkspaceTask(context: WorkspaceTaskContext): Promise<WorkspaceTaskRecord> {
   const root = canonicalRoot(context.root);
   return await withState(root, (state) => {
@@ -336,6 +440,13 @@ export async function registerWorkspaceTask(context: WorkspaceTaskContext): Prom
       existing.updatedAt = now;
       if (context.workerId) existing.workerId = String(context.workerId).slice(0, 160);
       if (context.title) existing.title = String(context.title).slice(0, 120);
+      if (!existing.worktreeRoot) {
+        const worktree = ensureTaskWorktree(root, existing.taskId, existing.baseHead);
+        if (worktree) {
+          existing.worktreeRoot = worktree.root;
+          existing.worktreeBranch = worktree.branch;
+        }
+      }
       return existing;
     }
 
@@ -349,22 +460,27 @@ export async function registerWorkspaceTask(context: WorkspaceTaskContext): Prom
         for (const [claimPath, claim] of Object.entries(state.claims)) {
           if (claim.taskId === task.taskId) delete state.claims[claimPath];
         }
+        state.integrationQueue = state.integrationQueue.filter((entry) => entry.taskId !== task.taskId);
         if (state.integrationLease?.taskId === task.taskId) delete state.integrationLease;
       }
     }
 
+    const baseHead = currentHead(root);
+    const worktree = ensureTaskWorktree(root, context.taskId, baseHead);
     const task: WorkspaceTaskRecord = {
       taskId: context.taskId,
       workerId,
       title: String(context.title || "").trim().slice(0, 120),
       status: "running",
-      baseHead: currentHead(root),
+      baseHead,
       baseBranch: currentBranch(root),
       baseRemoteHead: currentRemoteHead(root),
       initialDirtyPaths: currentDirtyPaths(root),
       touchedPaths: [],
       claimedPaths: [],
       commitShas: [],
+      ...(worktree ? { worktreeRoot: worktree.root, worktreeBranch: worktree.branch } : {}),
+      integrationStatus: "idle",
       startedAt: now,
       updatedAt: now
     };
@@ -379,8 +495,9 @@ export async function claimWorkspacePaths(context: WorkspaceTaskContext, paths: 
   if (!normalizedPaths.length) throw new CodexProError("WORKSPACE_PATH_REQUIRED: at least one path must be claimed.", { code: "WORKSPACE_PATH_REQUIRED" });
   return await withState(root, (state) => {
     const task = requireTask(state, context.taskId);
-    const head = currentHead(root);
-    const committedConflicts = changedPathsBetween(root, task.baseHead, head, normalizedPaths);
+    const gitRoot = taskGitRoot(context, task);
+    const head = currentHead(gitRoot);
+    const committedConflicts = task.worktreeRoot ? [] : changedPathsBetween(gitRoot, task.baseHead, head, normalizedPaths);
     if (committedConflicts.length) {
       throw new CodexProError(`WORKSPACE_STALE_BASE_CONFLICT: committed changes landed after ${task.taskId} began: ${committedConflicts.join(", ")}.`, {
         code: "WORKSPACE_STALE_BASE_CONFLICT",
@@ -466,17 +583,20 @@ function workspaceRelativePath(root: string, cwd: string, value: string): string
 
 export async function preflightWorkspaceGitAdd(context: WorkspaceTaskContext, cwd: string, args: string[]): Promise<void> {
   const root = canonicalRoot(context.root);
-  const paths = uniquePaths(args.map((value) => workspaceRelativePath(root, cwd, value)));
   await withState(root, (state) => {
     const task = requireTask(state, context.taskId);
+    const gitRoot = taskGitRoot(context, task);
+    const paths = uniquePaths(args.map((value) => workspaceRelativePath(gitRoot, cwd, value)));
     const ownedKeys = new Set(task.touchedPaths.map(canonicalPathKey));
-    const stagedPaths = uniquePaths(gitPaths(root, ["diff", "--cached", "--name-only", "-z", "--"]));
-    const foreignStaged = stagedPaths.filter((relPath) => !ownedKeys.has(canonicalPathKey(relPath)));
-    if (foreignStaged.length) {
-      throw new CodexProError(`WORKSPACE_GIT_INDEX_BUSY: staged paths belong to another task or predate ${task.taskId}: ${foreignStaged.join(", ")}. Commit or clear that integration first.`, {
-        code: "WORKSPACE_GIT_INDEX_BUSY",
-        details: { task_id: task.taskId, staged_paths: foreignStaged }
-      });
+    const stagedPaths = uniquePaths(gitPaths(gitRoot, ["diff", "--cached", "--name-only", "-z", "--"]));
+    if (!task.worktreeRoot) {
+      const foreignStaged = stagedPaths.filter((relPath) => !ownedKeys.has(canonicalPathKey(relPath)));
+      if (foreignStaged.length) {
+        throw new CodexProError(`WORKSPACE_GIT_INDEX_BUSY: staged paths belong to another task or predate ${task.taskId}: ${foreignStaged.join(", ")}. Commit or clear that integration first.`, {
+          code: "WORKSPACE_GIT_INDEX_BUSY",
+          details: { task_id: task.taskId, staged_paths: foreignStaged }
+        });
+      }
     }
     const unowned = paths.filter((relPath) => !ownedKeys.has(canonicalPathKey(relPath)));
     if (unowned.length) {
@@ -500,7 +620,8 @@ export async function preflightWorkspaceCommit(context: WorkspaceTaskContext): P
   const root = canonicalRoot(context.root);
   return await withState(root, (state) => {
     const task = requireTask(state, context.taskId);
-    const stagedPaths = uniquePaths(gitPaths(root, ["diff", "--cached", "--name-only", "-z", "--"]));
+    const gitRoot = taskGitRoot(context, task);
+    const stagedPaths = uniquePaths(gitPaths(gitRoot, ["diff", "--cached", "--name-only", "-z", "--"]));
     if (!stagedPaths.length) return { stagedPaths };
 
     const ownedKeys = new Set(task.touchedPaths.map(canonicalPathKey));
@@ -512,13 +633,15 @@ export async function preflightWorkspaceCommit(context: WorkspaceTaskContext): P
       });
     }
 
-    const dirtyAtStart = new Set(task.initialDirtyPaths.map(canonicalPathKey));
-    const preexisting = stagedPaths.filter((relPath) => dirtyAtStart.has(canonicalPathKey(relPath)));
-    if (preexisting.length) {
-      throw new CodexProError(`WORKSPACE_COMMIT_PREEXISTING_DIRTY: refusing to commit paths that were already dirty when ${task.taskId} started: ${preexisting.join(", ")}.`, {
-        code: "WORKSPACE_COMMIT_PREEXISTING_DIRTY",
-        details: { task_id: task.taskId, paths: preexisting }
-      });
+    if (!task.worktreeRoot) {
+      const dirtyAtStart = new Set(task.initialDirtyPaths.map(canonicalPathKey));
+      const preexisting = stagedPaths.filter((relPath) => dirtyAtStart.has(canonicalPathKey(relPath)));
+      if (preexisting.length) {
+        throw new CodexProError(`WORKSPACE_COMMIT_PREEXISTING_DIRTY: refusing to commit paths that were already dirty when ${task.taskId} started: ${preexisting.join(", ")}.`, {
+          code: "WORKSPACE_COMMIT_PREEXISTING_DIRTY",
+          details: { task_id: task.taskId, paths: preexisting }
+        });
+      }
     }
 
     const foreignClaims = stagedPaths.filter((relPath) => { const owner = claimOwner(state, relPath); return owner && owner !== task.taskId; });
@@ -529,13 +652,15 @@ export async function preflightWorkspaceCommit(context: WorkspaceTaskContext): P
       });
     }
 
-    const head = currentHead(root);
-    const conflicts = changedPathsBetween(root, task.baseHead, head, stagedPaths);
-    if (conflicts.length) {
-      throw new CodexProError(`WORKSPACE_COMMIT_STALE_BASE: HEAD changed on paths staged by ${task.taskId}: ${conflicts.join(", ")}.`, {
-        code: "WORKSPACE_COMMIT_STALE_BASE",
-        details: { task_id: task.taskId, base_head: task.baseHead, current_head: head, paths: conflicts }
-      });
+    if (!task.worktreeRoot) {
+      const head = currentHead(gitRoot);
+      const conflicts = changedPathsBetween(gitRoot, task.baseHead, head, stagedPaths);
+      if (conflicts.length) {
+        throw new CodexProError(`WORKSPACE_COMMIT_STALE_BASE: HEAD changed on paths staged by ${task.taskId}: ${conflicts.join(", ")}.`, {
+          code: "WORKSPACE_COMMIT_STALE_BASE",
+          details: { task_id: task.taskId, base_head: task.baseHead, current_head: head, paths: conflicts }
+        });
+      }
     }
     task.updatedAt = nowIso();
     return { stagedPaths };
@@ -544,81 +669,228 @@ export async function preflightWorkspaceCommit(context: WorkspaceTaskContext): P
 
 export async function recordWorkspaceCommit(context: WorkspaceTaskContext): Promise<string> {
   const root = canonicalRoot(context.root);
-  const head = currentHead(root);
-  if (!head) return "";
-  const message = gitText(root, ["show", "-s", "--format=%B", head]);
-  const provenance = `CodexPro-Task: ${context.taskId}`;
-  if (!message.split(/\r?\n/).some((line) => line.trim() === provenance)) {
-    throw new CodexProError(`WORKSPACE_COMMIT_PROVENANCE_MISSING: HEAD is not tagged for task ${context.taskId}.`, {
-      code: "WORKSPACE_COMMIT_PROVENANCE_MISSING",
-      details: { task_id: context.taskId, head }
-    });
-  }
-  await withState(root, (state) => {
+  return await withState(root, (state) => {
     const task = requireTask(state, context.taskId);
-    task.commitShas = [...new Set([...task.commitShas, head])].slice(-200);
-    task.baseHead = head;
-    task.baseBranch = currentBranch(root);
-    task.baseRemoteHead = currentRemoteHead(root);
-    task.updatedAt = nowIso();
-  });
-  return head;
-}
-
-export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskContext): Promise<() => Promise<void>> {
-  const root = canonicalRoot(context.root);
-  await withState(root, (state) => {
-    requireTask(state, context.taskId);
-    if (state.integrationLease && state.integrationLease.taskId !== context.taskId) {
-      throw new CodexProError(`WORKSPACE_INTEGRATION_BUSY: task ${state.integrationLease.taskId} is committing or pushing this workspace.`, {
-        code: "WORKSPACE_INTEGRATION_BUSY",
-        details: { task_id: context.taskId, owner_task_id: state.integrationLease.taskId }
+    const gitRoot = taskGitRoot(context, task);
+    const head = currentHead(gitRoot);
+    if (!head) return "";
+    const message = gitText(gitRoot, ["show", "-s", "--format=%B", head]);
+    const provenance = `CodexPro-Task: ${context.taskId}`;
+    if (!message.split(/\r?\n/).some((line) => line.trim() === provenance)) {
+      throw new CodexProError(`WORKSPACE_COMMIT_PROVENANCE_MISSING: HEAD is not tagged for task ${context.taskId}.`, {
+        code: "WORKSPACE_COMMIT_PROVENANCE_MISSING",
+        details: { task_id: context.taskId, head }
       });
     }
-    state.integrationLease = { taskId: context.taskId, acquiredAt: nowIso() };
+    task.commitShas = [...new Set([...task.commitShas, head])].slice(-200);
+    if (!task.worktreeRoot) {
+      task.baseHead = head;
+      task.baseBranch = currentBranch(gitRoot);
+      task.baseRemoteHead = currentRemoteHead(gitRoot);
+    }
+    task.updatedAt = nowIso();
+    return head;
   });
+}
+
+export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskContext, branch = ""): Promise<() => Promise<void>> {
+  const root = canonicalRoot(context.root);
+  const startedAt = Date.now();
+  const enqueuedAt = nowIso();
+  await withState(root, (state) => {
+    const task = requireTask(state, context.taskId);
+    if (state.integrationLease?.taskId === context.taskId) return;
+    if (!state.integrationQueue.some((entry) => entry.taskId === context.taskId)) {
+      state.integrationQueue.push({ taskId: context.taskId, branch: String(branch || "").slice(0, 200), enqueuedAt });
+    }
+    if (branch) {
+      task.integrationStatus = "queued";
+      task.integrationBranch = branch;
+      task.integrationRequestedAt = enqueuedAt;
+    }
+    task.updatedAt = nowIso();
+  });
+
+  while (true) {
+    const acquired = await withState(root, (state) => {
+      const task = requireTask(state, context.taskId);
+      if (state.integrationLease?.taskId === context.taskId) return true;
+      const first = state.integrationQueue[0];
+      if (state.integrationLease || first?.taskId !== context.taskId) return false;
+      state.integrationQueue.shift();
+      state.integrationLease = { taskId: context.taskId, acquiredAt: nowIso() };
+      if (branch) {
+        task.integrationStatus = "integrating";
+        task.integrationStartedAt = nowIso();
+      }
+      task.updatedAt = nowIso();
+      return true;
+    });
+    if (acquired) break;
+    if (Date.now() - startedAt >= INTEGRATION_QUEUE_WAIT_MS) {
+      await withState(root, (state) => {
+        state.integrationQueue = state.integrationQueue.filter((entry) => entry.taskId !== context.taskId);
+        const task = state.tasks[context.taskId];
+        if (task?.status === "running" && branch) {
+          task.integrationStatus = "failed";
+          task.integrationFinishedAt = nowIso();
+          task.updatedAt = nowIso();
+        }
+      }).catch(() => undefined);
+      throw new CodexProError(`WORKSPACE_INTEGRATION_QUEUE_TIMEOUT: task ${context.taskId} waited too long for workspace integration.`, {
+        code: "WORKSPACE_INTEGRATION_QUEUE_TIMEOUT",
+        details: { task_id: context.taskId, branch, wait_ms: INTEGRATION_QUEUE_WAIT_MS }
+      });
+    }
+    await sleep(INTEGRATION_QUEUE_POLL_MS);
+  }
+
+  let released = false;
   return async () => {
+    if (released) return;
+    released = true;
     await withState(root, (state) => {
       if (state.integrationLease?.taskId === context.taskId) delete state.integrationLease;
+      const task = state.tasks[context.taskId];
+      if (task?.status === "running" && branch && task.integrationStatus === "integrating") {
+        task.integrationStatus = "failed";
+        task.integrationFinishedAt = nowIso();
+        task.updatedAt = nowIso();
+      }
     }).catch(() => undefined);
   };
 }
 
 export async function preflightWorkspacePush(context: WorkspaceTaskContext, branch: string): Promise<void> {
   const root = canonicalRoot(context.root);
-  await withState(root, (state) => {
+  const task = await withState(root, (state) => {
+    const currentTask = requireTask(state, context.taskId);
+    return { ...currentTask, commitShas: [...currentTask.commitShas], touchedPaths: [...currentTask.touchedPaths] };
+  });
+  const gitRoot = taskGitRoot(context, task);
+  const current = currentBranch(gitRoot);
+  const expectedCurrent = task.worktreeRoot ? task.worktreeBranch : branch;
+  if (!current || (expectedCurrent && current !== expectedCurrent) || (task.worktreeRoot && task.baseBranch && branch !== task.baseBranch)) {
+    throw new CodexProError(`WORKSPACE_PUSH_BRANCH_MISMATCH: active task branch is ${current || "detached"}, integration target is ${branch}.`, {
+      code: "WORKSPACE_PUSH_BRANCH_MISMATCH",
+      details: { task_id: task.taskId, current_branch: current, task_branch: task.worktreeBranch || null, base_branch: task.baseBranch || null, requested_branch: branch }
+    });
+  }
+  const dirty = currentDirtyPaths(gitRoot);
+  if (dirty.length) {
+    throw new CodexProError(`WORKSPACE_PUSH_DIRTY_WORKTREE: commit or revert task changes before integrating: ${dirty.join(", ")}.`, {
+      code: "WORKSPACE_PUSH_DIRTY_WORKTREE",
+      details: { task_id: task.taskId, paths: dirty }
+    });
+  }
+  let head = currentHead(gitRoot);
+  if (head && !task.commitShas.includes(head)) {
+    throw new CodexProError(`WORKSPACE_PUSH_HEAD_NOT_OWNED: local HEAD was not committed by task ${task.taskId}.`, {
+      code: "WORKSPACE_PUSH_HEAD_NOT_OWNED",
+      details: { task_id: task.taskId, branch, local_head: head, commit_shas: task.commitShas }
+    });
+  }
+
+  const remoteLine = gitText(gitRoot, ["ls-remote", "origin", `refs/heads/${branch}`]);
+  let remoteHead = remoteLine.split(/\s+/)[0] || "";
+  if (remoteHead && head && gitStatus(gitRoot, ["merge-base", "--is-ancestor", remoteHead, head]) !== 0) {
+    const fetched = gitRun(gitRoot, ["fetch", "--quiet", "origin", branch], 60_000);
+    if (fetched.status !== 0) {
+      throw new CodexProError(`WORKSPACE_INTEGRATION_FETCH_FAILED: ${fetched.stderr || fetched.stdout || `could not fetch origin/${branch}`}.`, {
+        code: "WORKSPACE_INTEGRATION_FETCH_FAILED",
+        details: { task_id: task.taskId, branch }
+      });
+    }
+    remoteHead = gitText(gitRoot, ["rev-parse", `refs/remotes/origin/${branch}`]) || remoteHead;
+    const localChanged = changedPathsBetween(gitRoot, task.baseHead, head);
+    const remoteChanged = changedPathsBetween(gitRoot, task.baseHead, remoteHead);
+    const remoteKeys = new Set(remoteChanged.map(canonicalPathKey));
+    const overlap = localChanged.filter((relPath) => remoteKeys.has(canonicalPathKey(relPath)));
+    if (overlap.length) {
+      await withState(root, (state) => {
+        const live = requireTask(state, context.taskId);
+        live.integrationStatus = "conflict";
+        live.integrationFinishedAt = nowIso();
+        live.remoteHeadBeforeIntegration = remoteHead;
+        live.updatedAt = nowIso();
+      });
+      throw new CodexProError(`WORKSPACE_INTEGRATION_CONFLICT: origin/${branch} changed task-owned paths: ${overlap.join(", ")}.`, {
+        code: "WORKSPACE_INTEGRATION_CONFLICT",
+        details: { task_id: task.taskId, branch, base_head: task.baseHead, remote_head: remoteHead, local_head: head, paths: overlap }
+      });
+    }
+
+    const hooksDir = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-empty-git-hooks-"));
+    try {
+      const rebased = gitRun(gitRoot, ["-c", `core.hooksPath=${hooksDir}`, "rebase", remoteHead], 120_000);
+      if (rebased.status !== 0) {
+        gitRun(gitRoot, ["-c", `core.hooksPath=${hooksDir}`, "rebase", "--abort"], 30_000);
+        await withState(root, (state) => {
+          const live = requireTask(state, context.taskId);
+          live.integrationStatus = "conflict";
+          live.integrationFinishedAt = nowIso();
+          live.remoteHeadBeforeIntegration = remoteHead;
+          live.updatedAt = nowIso();
+        });
+        throw new CodexProError(`WORKSPACE_INTEGRATION_REBASE_FAILED: ${rebased.stderr || rebased.stdout || "git rebase failed"}`, {
+          code: "WORKSPACE_INTEGRATION_REBASE_FAILED",
+          details: { task_id: task.taskId, branch, remote_head: remoteHead, local_head: head }
+        });
+      }
+    } finally {
+      fs.rmSync(hooksDir, { recursive: true, force: true });
+    }
+    head = currentHead(gitRoot);
+    const rebasedCommits = gitText(gitRoot, ["rev-list", "--reverse", `${remoteHead}..${head}`]).split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+    const provenance = `CodexPro-Task: ${task.taskId}`;
+    for (const commit of rebasedCommits) {
+      const message = gitText(gitRoot, ["show", "-s", "--format=%B", commit]);
+      if (!message.split(/\r?\n/).some((line) => line.trim() === provenance)) {
+        throw new CodexProError(`WORKSPACE_COMMIT_PROVENANCE_MISSING: rebased commit ${commit} is not tagged for task ${task.taskId}.`, {
+          code: "WORKSPACE_COMMIT_PROVENANCE_MISSING",
+          details: { task_id: task.taskId, commit }
+        });
+      }
+    }
+    await withState(root, (state) => {
+      const live = requireTask(state, context.taskId);
+      live.baseHead = remoteHead;
+      live.baseRemoteHead = remoteHead;
+      live.commitShas = [...new Set([...live.commitShas, ...rebasedCommits, head].filter(Boolean))].slice(-200);
+      live.remoteHeadBeforeIntegration = remoteHead;
+      live.updatedAt = nowIso();
+    });
+  } else {
+    await withState(root, (state) => {
+      const live = requireTask(state, context.taskId);
+      live.remoteHeadBeforeIntegration = remoteHead;
+      live.updatedAt = nowIso();
+    });
+  }
+}
+
+export async function recordWorkspacePush(context: WorkspaceTaskContext, branch: string): Promise<string> {
+  const root = canonicalRoot(context.root);
+  return await withState(root, (state) => {
     const task = requireTask(state, context.taskId);
-    const current = currentBranch(root);
-    if (!current || current !== branch) {
-      throw new CodexProError(`WORKSPACE_PUSH_BRANCH_MISMATCH: active branch is ${current || "detached"}, requested ${branch}.`, {
-        code: "WORKSPACE_PUSH_BRANCH_MISMATCH",
-        details: { task_id: task.taskId, current_branch: current, requested_branch: branch }
-      });
-    }
-    const remoteLine = gitText(root, ["ls-remote", "origin", `refs/heads/${branch}`]);
-    const remoteHead = remoteLine.split(/\s+/)[0] || "";
-    const head = currentHead(root);
-    if (head && !task.commitShas.includes(head)) {
-      throw new CodexProError(`WORKSPACE_PUSH_HEAD_NOT_OWNED: local HEAD was not committed by task ${task.taskId}.`, {
-        code: "WORKSPACE_PUSH_HEAD_NOT_OWNED",
-        details: { task_id: task.taskId, branch, local_head: head, commit_shas: task.commitShas }
-      });
-    }
-    if (remoteHead && head && gitStatus(root, ["merge-base", "--is-ancestor", remoteHead, head]) !== 0) {
-      throw new CodexProError(`WORKSPACE_PUSH_REMOTE_ADVANCED: origin/${branch} is not an ancestor of local HEAD. Reconcile before pushing.`, {
-        code: "WORKSPACE_PUSH_REMOTE_ADVANCED",
-        details: { task_id: task.taskId, branch, remote_head: remoteHead, local_head: head }
-      });
-    }
+    const gitRoot = taskGitRoot(context, task);
+    const head = currentHead(gitRoot);
+    task.integrationStatus = "integrated";
+    task.integrationBranch = branch;
+    task.integrationFinishedAt = nowIso();
+    task.integratedHead = head;
+    task.baseHead = head;
+    task.baseRemoteHead = head;
     task.updatedAt = nowIso();
+    return head;
   });
 }
 
 export async function finalizeWorkspaceTask(context: WorkspaceTaskContext, status: WorkspaceTaskStatus): Promise<void> {
   const root = canonicalRoot(context.root);
-  await withState(root, (state) => {
+  const cleanup = await withState(root, (state) => {
     const task = state.tasks[context.taskId];
-    if (!task) return;
+    if (!task) return undefined;
     const now = nowIso();
     task.status = status;
     task.finishedAt = now;
@@ -626,12 +898,110 @@ export async function finalizeWorkspaceTask(context: WorkspaceTaskContext, statu
     for (const [claimPath, claim] of Object.entries(state.claims)) {
       if (claim.taskId === task.taskId) delete state.claims[claimPath];
     }
+    state.integrationQueue = state.integrationQueue.filter((entry) => entry.taskId !== task.taskId);
     if (state.integrationLease?.taskId === task.taskId) delete state.integrationLease;
+    return {
+      worktreeRoot: task.worktreeRoot,
+      worktreeBranch: task.worktreeBranch,
+      removeWorktree: status === "completed" && task.integrationStatus === "integrated"
+    };
   });
+  if (cleanup?.removeWorktree && cleanup.worktreeRoot && fs.existsSync(cleanup.worktreeRoot) && currentDirtyPaths(cleanup.worktreeRoot).length === 0) {
+    const removed = gitRun(root, ["worktree", "remove", cleanup.worktreeRoot], 60_000);
+    if (removed.status === 0 && cleanup.worktreeBranch) {
+      gitRun(root, ["branch", "-D", cleanup.worktreeBranch], 30_000);
+    }
+  }
 }
 
 export function readWorkspaceCoordination(root: string): WorkspaceCoordinationState {
   const state = readState(root);
   cleanupStaleState(state);
   return state;
+}
+
+export function readWorkspaceCoordinationStatus(root: string) {
+  const canonical = canonicalRoot(root);
+  const state = readState(canonical);
+  cleanupStaleState(state);
+  const head = currentHead(canonical);
+  const branch = currentBranch(canonical);
+  const queuePosition = new Map(state.integrationQueue.map((entry, index) => [entry.taskId, index + 1]));
+  const claims = Object.entries(state.claims)
+    .map(([claimPath, claim]) => {
+      const task = state.tasks[claim.taskId];
+      return {
+        path: claimPath,
+        task_id: claim.taskId,
+        task_title: task?.title || "",
+        worker_id: task?.workerId || "",
+        claimed_at: claim.claimedAt,
+        updated_at: claim.updatedAt
+      };
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+  const tasks = Object.values(state.tasks)
+    .map((task) => {
+      const watchedPaths = uniquePaths([...task.claimedPaths, ...task.touchedPaths]);
+      const stalePaths = task.status === "running" && task.baseHead && head && task.baseHead !== head && watchedPaths.length
+        ? changedPathsBetween(canonical, task.baseHead, head, watchedPaths)
+        : [];
+      return {
+        task_id: task.taskId,
+        worker_id: task.workerId,
+        title: task.title,
+        status: task.status,
+        base_head: task.baseHead,
+        base_branch: task.baseBranch,
+        base_remote_head: task.baseRemoteHead,
+        current_head: head,
+        current_branch: branch,
+        base_behind: Boolean(task.status === "running" && task.baseHead && head && task.baseHead !== head),
+        stale_base: stalePaths.length > 0,
+        stale_paths: stalePaths,
+        initial_dirty_paths: [...task.initialDirtyPaths],
+        touched_paths: [...task.touchedPaths],
+        claimed_paths: [...task.claimedPaths],
+        commit_shas: [...task.commitShas],
+        worktree_root: task.worktreeRoot || "",
+        worktree_branch: task.worktreeBranch || "",
+        integration_status: task.integrationStatus || "idle",
+        integration_branch: task.integrationBranch || "",
+        integration_requested_at: task.integrationRequestedAt || "",
+        integration_started_at: task.integrationStartedAt || "",
+        integration_finished_at: task.integrationFinishedAt || "",
+        integrated_head: task.integratedHead || "",
+        remote_head_before_integration: task.remoteHeadBeforeIntegration || "",
+        queue_position: queuePosition.get(task.taskId) || 0,
+        started_at: task.startedAt,
+        updated_at: task.updatedAt,
+        finished_at: task.finishedAt || ""
+      };
+    })
+    .sort((left, right) => {
+      if (left.status === "running" && right.status !== "running") return -1;
+      if (left.status !== "running" && right.status === "running") return 1;
+      return Date.parse(right.updated_at || "") - Date.parse(left.updated_at || "");
+    });
+  return {
+    version: state.version,
+    root: canonical,
+    updated_at: state.updatedAt,
+    current_head: head,
+    current_branch: branch,
+    tasks,
+    claims,
+    integration_queue: state.integrationQueue.map((entry, index) => ({
+      task_id: entry.taskId,
+      task_title: state.tasks[entry.taskId]?.title || "",
+      branch: entry.branch,
+      enqueued_at: entry.enqueuedAt,
+      position: index + 1
+    })),
+    integration_lease: state.integrationLease ? {
+      task_id: state.integrationLease.taskId,
+      task_title: state.tasks[state.integrationLease.taskId]?.title || "",
+      acquired_at: state.integrationLease.acquiredAt
+    } : null
+  };
 }
