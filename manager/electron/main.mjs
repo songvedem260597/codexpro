@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, nativeImage, Notification, protocol, safeStorage, shell } from "electron";
+import { app, BrowserWindow, clipboard, ClipboardItem, dialog, globalShortcut, ipcMain, nativeImage, Notification, protocol, safeStorage, shell } from "electron";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -26,6 +26,7 @@ import { buildTaskWorkflowPrompt, resolveTaskWorkflow } from "./task-workflow-re
 import { createAppPluginRegistry } from "./app-plugins/app-plugin-registry.mjs";
 import { createManagedAppPluginInstaller } from "./app-plugins/managed-app-plugin-installer.mjs";
 import { createPluginSkillBundle } from "./app-plugins/plugin-skill-bundle.mjs";
+import { registerReturnToManagerShortcut, RETURN_TO_MANAGER_ACCELERATOR } from "./return-to-manager-shortcut.mjs";
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "codexpro-plugin",
@@ -41,6 +42,7 @@ const execFileAsync = promisify(execFile);
 const workerPluginRegistry = new WorkerPluginRegistry();
 const pendingWorkerUpdates = new Map();
 let workerUpdateFlushTimer = null;
+let returnToManagerShortcutRegistration = null;
 const interruptionAlertTracker = createInterruptionAlertTracker();
 
 function showManagerNotification(payload) {
@@ -4672,6 +4674,16 @@ if (!hasSingleInstanceLock) {
       node_version: process.versions.node
     });
     createWindow();
+    returnToManagerShortcutRegistration = registerReturnToManagerShortcut({
+      globalShortcut,
+      getWindow: () => BrowserWindow.getAllWindows()[0]
+    });
+    diagnostic(returnToManagerShortcutRegistration.registered ? "info" : "warn", "electron", "shortcut", returnToManagerShortcutRegistration.registered
+      ? `Đã đăng ký phím tắt quay lại Manager: ${RETURN_TO_MANAGER_ACCELERATOR}`
+      : `Không thể đăng ký phím tắt quay lại Manager: ${RETURN_TO_MANAGER_ACCELERATOR}`, {
+      action: returnToManagerShortcutRegistration.registered ? "return-shortcut-registered" : "return-shortcut-register-failed",
+      accelerator: RETURN_TO_MANAGER_ACCELERATOR
+    });
     setImmediate(() => readManagerChatCache());
     void ensureFreshRuntimeAfterManagerStart();
     app.on("activate", () => {
@@ -4683,6 +4695,8 @@ if (!hasSingleInstanceLock) {
     if (process.platform !== "darwin") app.quit();
   });
   app.on("before-quit", () => {
+    returnToManagerShortcutRegistration?.unregister();
+    returnToManagerShortcutRegistration = null;
     diagnostic("info", "electron", "runtime", "CodexPro Manager đang thoát", { action: "manager-before-quit" });
   });
 }
