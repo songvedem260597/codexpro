@@ -3731,6 +3731,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         canonical_only: z.boolean().optional().describe("For get_chat_response, read the authenticated canonical conversation without querying the rendered DOM."),
         recover_stale_dom: z.boolean().optional().describe("For get_chat_response after network completion, compare the live DOM with the canonical ChatGPT conversation and reload the exact tab when the rendered stream is stale."),
         new_chat: z.boolean().optional().describe("For send_chat_request, create a new ChatGPT conversation in a background tab without focusing the profile."),
+        allow_busy_followup: z.boolean().optional().describe("For send_chat_request, allow one explicitly serialized follow-up while the target conversation is already generating. The send still waits for a fresh ChatGPT submission ACK before another send may proceed."),
         one_shot_recovery: z.boolean().optional().describe("For an interrupted-task continuation, disable renderer replacement and stop after the first send preparation failure."),
         title: z.string().max(120).optional().describe("New conversation title for rename_chat."),
         attachments: z.array(z.object({
@@ -3850,6 +3851,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           read_dom: args.read_dom,
           recover_stale_dom: args.recover_stale_dom,
           new_chat: args.new_chat,
+          allow_busy_followup: args.allow_busy_followup,
           one_shot_recovery: args.one_shot_recovery,
           title: args.title,
           attachments: args.attachments,

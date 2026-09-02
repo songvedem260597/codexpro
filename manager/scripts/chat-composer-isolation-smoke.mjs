@@ -10,6 +10,8 @@ assert.ok(composerStart >= 0 && appStart > composerStart, "ChatRequestComposer m
 
 const composer = source.slice(composerStart, appStart);
 assert.match(composer, /const \[draft, setDraft\] = useState\(/, "composer draft must be local state");
+assert.match(composer, /const draftRef = useRef\(String\(initialDraft \|\| ""\)\)/, "composer must track the live draft independently while a previous send waits for ACK");
+assert.match(composer, /const submittedDraft = draft[\s\S]*?onSend\(submittedDraft\)[\s\S]*?draftRef\.current === submittedDraft/, "a completed send may clear only the exact draft it submitted, never text typed for the next follow-up");
 assert.match(composer, /onDraftSnapshot\(normalized\)/, "composer must snapshot draft without lifting render state");
 assert.match(composer, /onDraftActivityChange\(Boolean\(normalized\.trim\(\)\)\)/, "typing must mark the composer active so background transcript pinning cannot move the reader viewport");
 assert.match(composer, /\[profileId, draftResetVersion\]/, "composer must reset local draft when switching profiles");
@@ -23,6 +25,13 @@ const modalStart = source.indexOf("function renderChatModal()");
 const modalEnd = source.indexOf("const selectedFont =", modalStart);
 const modal = source.slice(modalStart, modalEnd);
 assert.match(modal, /<ChatRequestComposer/, "chat modal must render the isolated composer");
+assert.match(modal, /const canSendBase = !sending && profile\.connected[\s\S]*?!selectedRecoveringNetworkAbort[\s\S]*?!rolloverCreating/, "manual follow-up send eligibility must depend on the send lock and transport safety, not on the assistant being idle");
+assert.match(modal, /disabled=\{!profile\.connected \|\| rolloverCreating\}/, "the follow-up textarea must stay editable while a send is awaiting ACK and while ChatGPT is generating");
+assert.match(composer, /selectedBusy \|\| selectedSettling \? "Gửi thêm"/, "busy and settling chats must present an enabled follow-up action instead of an idle-only blocker");
+assert.match(source, /allowBusyFollowup: !newChat/, "Manager manual sends must explicitly opt into serialized follow-up steering for existing chats");
+assert.match(electronMain, /const allowBusyFollowup = Boolean\(!newChat && payload\?\.allowBusyFollowup === true\)/, "Electron must require an explicit manual follow-up opt-in");
+assert.match(electronMain, /selectedNetworkState === "generating"\) && !allowBusyFollowup/, "Electron must keep automated sends blocked while allowing explicit manual steering");
+assert.match(electronMain, /allow_busy_followup: allowBusyFollowup/, "Electron must forward the busy-follow-up capability to the browser bridge");
 assert.match(modal, /managerSettings\.showChatConversationSelector !== false[\s\S]*?<ChatDropdown[\s\S]*selectRequestConversation\(profile, id\)/, "chat modal conversation selector must be controlled by the Manager setting");
 assert.match(source, /showChatConversationSelector:\s*true/, "conversation selector must remain enabled by default for existing users");
 assert.match(source, /title="Hiện mục Đoạn chat"[\s\S]*saveManagerSetting\(\{ showChatConversationSelector: value \}/, "Settings must expose an explicit conversation-selector toggle");

@@ -448,7 +448,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.106";
+const WORKER_EXTENSION_VERSION = "0.5.107";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -628,10 +628,12 @@ function ChatRequestComposer({
   onSend
 }) {
   const [draft, setDraft] = useState(() => String(initialDraft || ""));
+  const draftRef = useRef(String(initialDraft || ""));
   const sendingRef = useRef(false);
 
   const updateDraft = useCallback((nextDraft) => {
     const normalized = String(nextDraft || "");
+    draftRef.current = normalized;
     setDraft(normalized);
     onDraftSnapshot(normalized);
     onDraftActivityChange(Boolean(normalized.trim()));
@@ -645,10 +647,11 @@ function ChatRequestComposer({
 
   const submit = useCallback(async () => {
     if (!canSend || sendingRef.current) return;
+    const submittedDraft = draft;
     sendingRef.current = true;
     try {
-      const submitted = await onSend(draft);
-      if (submitted) updateDraft("");
+      const submitted = await onSend(submittedDraft);
+      if (submitted && draftRef.current === submittedDraft) updateDraft("");
     } finally {
       sendingRef.current = false;
     }
@@ -705,7 +708,7 @@ function ChatRequestComposer({
         <div className="request-card-actions">
           <button type="button" className="button secondary" onClick={onClose}>Đóng</button>
           <button type="button" className="button secondary" onClick={onOpenChrome} disabled={!canOpenChrome}>Mở Chrome</button>
-          <button type="button" className="button primary" onClick={() => void submit()} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy ? "Chat này đang trả lời" : selectedSettling ? "Chat đang hoàn tất" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
+          <button type="button" className="button primary" onClick={() => void submit()} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy || selectedSettling ? "Gửi thêm" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
         </div>
       </div>
     </>
@@ -3453,8 +3456,8 @@ function App() {
         canonicalBusy: currentResponse?.canonicalBusy,
         streamBusy: currentResponse?.networkStreamInProgress
       });
-      if (!turnReady) {
-        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "ChatGPT vẫn đang xử lý hoặc hoàn tất lượt trước. Chờ trạng thái về ĐANG RẢNH rồi gửi để tin nhắn không bị nhập vào turn cũ." }));
+      if (selectedRecoveringNetworkAbort) {
+        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "ChatGPT đang xác minh lại một lượt bị hủy transport. Chờ xác minh xong để tránh gửi trùng vào trạng thái chưa chắc chắn." }));
         return false;
       }
     }
@@ -3546,7 +3549,7 @@ function App() {
       };
       setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
       const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
-      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
+      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, allowBusyFollowup: !newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence(result) }));
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
@@ -4305,7 +4308,7 @@ function App() {
     const rolloverCreating = Boolean(responseCurrent && response?.rolloverStatus === "creating");
     const otherBusyTab = (profile.conversation_tabs || []).some((tab) => (!selectedTab || tab.id !== selectedTab.id) && (tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating"));
     const selectedResponseClearsProfileBusy = Boolean(responseVerifiedComplete && !selectedBusy && !selectedSettling && !otherBusyTab);
-    const canSendBase = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0);
+    const canSendBase = !sending && profile.connected && Boolean(selectedProjectRoot) && !selectedRecoveringNetworkAbort && !rolloverCreating && (isNewChat || conversations.length > 0);
     const working = profile.connected && ((profile.activity === "working" && !selectedResponseClearsProfileBusy) || selectedBusy || selectedSettling || rolloverCreating);
     const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
     const showRolloverNotice = Boolean(responseCurrent && !responseCleared && response?.rolloverNotice);
@@ -4438,7 +4441,7 @@ function App() {
               draftResetVersion={requestDraftResetVersions[profile.profile_id] || 0}
               attachments={attachments}
               placeholder={rolloverCreating ? "Chat cũ đã đầy · đang tạo chat mới để tiếp tục dự án…" : "Nhập file hoặc tin nhắn"}
-              disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating}
+              disabled={!profile.connected || rolloverCreating}
               attachmentDisabled={!profile.connected || sending || rolloverCreating}
               canSendBase={canSendBase}
               sending={sending}
@@ -4449,7 +4452,7 @@ function App() {
               sendError={sendError}
               sendEvidence={sendEvidence}
               canOpenChrome={!busy && profile.connected && !isNewChat && Boolean(profile.conversation_tabs?.length)}
-              onPaste={(event) => void pasteRequestImage(profile.profile_id, event)}
+              onPaste={(event) => { if (!sending) void pasteRequestImage(profile.profile_id, event); }}
               onChooseAttachments={() => void chooseRequestAttachments(profile.profile_id)}
               onOpenAttachmentPreview={(file) => openAttachmentPreview(file)}
               onRemoveAttachment={(filePath) => setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== filePath) }))}

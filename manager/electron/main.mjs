@@ -329,7 +329,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.106";
+const WORKER_EXTENSION_VERSION = "0.5.107";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -3624,6 +3624,7 @@ async function sendProfileRequestUnlocked(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
   const newChat = Boolean(payload?.newChat);
+  const allowBusyFollowup = Boolean(!newChat && payload?.allowBusyFollowup === true);
   const text = String(payload?.text || "").trim();
   const requestedWorkflow = String(payload?.workflow || "").trim();
   const taskWorkflow = resolveTaskWorkflow(requestedWorkflow, text);
@@ -3757,7 +3758,7 @@ async function sendProfileRequestUnlocked(payload) {
   }
   const selectedConversationTab = newChat ? null : (profile.conversation_tabs || []).find((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] === conversationId);
   const selectedNetworkState = String(selectedConversationTab?.network_state || "");
-  if (selectedConversationTab?.busy || selectedNetworkState === "generating") throw new Error("Đoạn chat này đang xử lý yêu cầu khác. Hãy chờ trạng thái về ĐANG RẢNH.");
+  if ((selectedConversationTab?.busy || selectedNetworkState === "generating") && !allowBusyFollowup) throw new Error("Đoạn chat này đang xử lý yêu cầu khác. Hãy chờ trạng thái về ĐANG RẢNH.");
   if (!newChat) {
     const allowedConversationIds = new Set([
       ...(profile.recent_conversations || []).map((conversation) => String(conversation.id || "")),
@@ -3836,6 +3837,7 @@ async function sendProfileRequestUnlocked(payload) {
     new_chat: newChat,
     text: taskText,
     attachments,
+    allow_busy_followup: allowBusyFollowup,
     one_shot_recovery: payload?.oneShotRecovery === true
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');

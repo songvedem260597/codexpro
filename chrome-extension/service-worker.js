@@ -21,6 +21,7 @@ const TRUSTED_INPUT_TIMEOUT_MS = 10000;
 const DOM_PREPARE_TIMEOUT_MS = 15000;
 const ATTACHMENT_PREPARE_TIMEOUT_MS = 60000;
 const NETWORK_START_TIMEOUT_MS = 30000;
+const SEND_POST_ACK_STABILITY_MS = 650;
 const CDP_NETWORK_START_TIMEOUT_MS = 15000;
 const CDP_NETWORK_TRACKER_MAX_MS = 30 * 60 * 1000;
 const CANONICAL_COMPLETION_PROBE_MS = 30000;
@@ -2408,6 +2409,7 @@ async function execute(command) {
     const text=String(args.text||'').trim();
     const attachments=Array.isArray(args.attachments)?args.attachments.slice(0,4).map(file=>({name:String(file?.name||'').trim().slice(0,255),mime_type:String(file?.mime_type||'application/octet-stream').trim().slice(0,160),data_base64:String(file?.data_base64||'')})):[];
     const newChat=Boolean(args.new_chat);
+    const allowBusyFollowup=Boolean(!newChat&&args.allow_busy_followup===true);
     const oneShotRecovery=Boolean(args.one_shot_recovery);
     if(!text&&!attachments.length)throw new Error('Yêu cầu và file đính kèm không được cùng để trống.');
     if(text.length>20000)throw new Error('Yêu cầu dài quá 20.000 ký tự.');
@@ -2456,8 +2458,9 @@ async function execute(command) {
     ]);
     const networkCaptureInstalled=Boolean(networkCaptureProbe?.capture_installed||networkCaptureProbe?.available);
     if(conversationLimit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(conversationLimit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
-    if(requestState.busy)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
-    if(domActivity.busy){
+    const followupWhileGenerating=Boolean(allowBusyFollowup&&requestState.busy&&requestState.network_state==='generating');
+    if(requestState.busy&&!followupWhileGenerating)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
+    if(domActivity.busy&&!followupWhileGenerating){
       // ChatGPT can leave a stale stop/interrupted DOM marker after the canonical turn is complete.
       // Re-check the authoritative conversation before rejecting a new send, regardless of the DOM busy subtype.
       const canonical=await timedSendPhase('stale_busy_canonical_ms',()=>probeCanonicalActivity(tab.id,targetConversationId,true));
@@ -2467,7 +2470,15 @@ async function execute(command) {
     }
     const targetTemporarilyActivated=false;
     const submitStartedAt=Date.now();
+    const networkAckStartedAfterMs=submitStartedAt;
     const attemptId=crypto.randomUUID();
+    const stabilizeSubmittedSend=async()=>{
+      const startedAt=Date.now();
+      const availableMs=Math.max(0,remainingCommandMs()-100);
+      const waitMs=Math.min(SEND_POST_ACK_STABILITY_MS,availableMs);
+      if(waitMs>0)await new Promise(resolve=>setTimeout(resolve,waitMs));
+      return {send_stabilized:true,send_stability_wait_ms:Math.max(0,Date.now()-startedAt),followup_while_generating:followupWhileGenerating};
+    };
 
     const prepareTimeoutMs=attachments.length?ATTACHMENT_PREPARE_TIMEOUT_MS:DOM_PREPARE_TIMEOUT_MS;
     let deadlineAt=Math.min(submitStartedAt+prepareTimeoutMs-1500,commandDeadlineAt-1500);
@@ -2481,7 +2492,7 @@ async function execute(command) {
       pendingConversationByTab.delete(tab.id);
       await clearChatAttachmentOwnership(tab.id,attemptId);
       const submittedBy=String(injectedResult.submitted_by||'network-observed');
-      const networkEvidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
+      const networkEvidence=recentChatPostEvidence(tab.id,networkAckStartedAfterMs);
       const shared={network_tracking:true,network_acknowledged:true,network_stream_capture_installed:networkCaptureInstalled,submission_state:'submitted',generation_state:networkAck.network_state,network_state:networkAck.network_state,network_generation_endpoint:networkAck.network_generation_endpoint,network_error:networkAck.network_error,network_status_code:networkAck.network_status_code,network_evidence:networkEvidence,command_queued_ms:commandQueuedMs,...injectedResult,submitted:true,submitted_by:submittedBy};
       if(networkAck.network_state==='failed'){
         const limit=await probeConversationLimit(tab.id);
@@ -2493,15 +2504,15 @@ async function execute(command) {
         if(created?.conversationId){
           await bindConversationToTab(tab.id,created.conversationId);
           recentConversationCache={at:0,items:[]};
-          return {action,target_id:tab.id,conversation_id:created.conversationId,new_chat:true,...shared,...sendTimingPayload()};
+          return {action,target_id:tab.id,conversation_id:created.conversationId,new_chat:true,...shared,...await stabilizeSubmittedSend(),...sendTimingPayload()};
         }
-        return {action,target_id:tab.id,conversation_id:'',new_chat:true,...shared,conversation_pending:true,...sendTimingPayload()};
+        return {action,target_id:tab.id,conversation_id:'',new_chat:true,...shared,conversation_pending:true,...await stabilizeSubmittedSend(),...sendTimingPayload()};
       }
       await bindConversationToTab(tab.id,conversationId);
-      return {action,target_id:tab.id,conversation_id:conversationId,...shared,...sendTimingPayload()};
+      return {action,target_id:tab.id,conversation_id:conversationId,...shared,...await stabilizeSubmittedSend(),...sendTimingPayload()};
     };
     const resultForSubmitLifecycle=async(lifecycleEvidence,injectedResult={})=>{
-      if(networkGenerationStartedAfter(tab.id,submitStartedAt-100)){
+      if(networkGenerationStartedAfter(tab.id,networkAckStartedAfterMs)){
         return await resultForNetwork(await chatRequestState(tab.id,newChat?'':conversationId),{...injectedResult,submission_ack_source:'generation'});
       }
       if(newChat)return null;
@@ -2527,11 +2538,12 @@ async function execute(command) {
         network_generation_endpoint:String(latestEvidence.endpoint||''),
         network_status_code:Number(latestEvidence.status_code)||0,
         network_error:String(latestEvidence.error||''),
-        network_evidence:recentChatPostEvidence(tab.id,submitStartedAt-100),
+        network_evidence:recentChatPostEvidence(tab.id,networkAckStartedAfterMs),
         command_queued_ms:commandQueuedMs,
         ...injectedResult,
         submitted:true,
         submitted_by:submittedBy,
+        ...await stabilizeSubmittedSend(),
         ...sendTimingPayload()
       };
     };
@@ -2558,7 +2570,7 @@ async function execute(command) {
         prepareErrors.push(prepareError);
         const hardRendererHang=/Chrome renderer không phản hồi/i.test(prepareError);
         let networkAck=null;
-        try{if(remainingCommandMs()>500)networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100,Math.max(100,Math.min(5000,remainingCommandMs()-500)));}catch{}
+        try{if(remainingCommandMs()>500)networkAck=await waitForNetworkGeneration(tab.id,networkAckStartedAfterMs,Math.max(100,Math.min(5000,remainingCommandMs()-500)));}catch{}
         if(networkAck)return await resultForNetwork(networkAck,{dom_timeout:true,dom_error:prepareError,prepare_attempts:prepareAttempt+1});
         if(!hardRendererHang)await cleanupAttempt();
         if(prepareAttempt===0&&!oneShotRecovery){
@@ -2613,7 +2625,7 @@ async function execute(command) {
     if(injected.result.requires_trusted_submit){
       if(attachments.length&&!injected.result.attachment_reused){
         try{
-          const uploadAck=await timedSendPhase('attachment_upload_ms',()=>waitForAttachmentUploadNetwork(tab.id,submitStartedAt-100,Math.max(1000,Math.min(ATTACHMENT_UPLOAD_TIMEOUT_MS,remainingCommandMs()-1500))));
+          const uploadAck=await timedSendPhase('attachment_upload_ms',()=>waitForAttachmentUploadNetwork(tab.id,networkAckStartedAfterMs,Math.max(1000,Math.min(ATTACHMENT_UPLOAD_TIMEOUT_MS,remainingCommandMs()-1500))));
           submitResult={...submitResult,attachment_upload_acknowledged:true,attachment_upload_endpoint:uploadAck.endpoint,attachment_upload_fallback:Boolean(uploadAck.fallback)};
         }catch(error){
           pendingConversationByTab.delete(tab.id);
@@ -2636,7 +2648,7 @@ async function execute(command) {
           : {...submitResult,trusted_enter_dispatched:true,...trustedSubmit};
       }catch(error){
         let networkAck=null;
-        try{if(remainingCommandMs()>500)networkAck=await timedSendPhase('network_ack_after_submit_error_ms',()=>waitForNetworkGeneration(tab.id,submitStartedAt-100,Math.max(100,Math.min(3000,remainingCommandMs()-500))));}catch{}
+        try{if(remainingCommandMs()>500)networkAck=await timedSendPhase('network_ack_after_submit_error_ms',()=>waitForNetworkGeneration(tab.id,networkAckStartedAfterMs,Math.max(100,Math.min(3000,remainingCommandMs()-500))));}catch{}
         const trustedSubmitError=String(error?.message||error).slice(0,300);
         if(networkAck)return await resultForNetwork(networkAck,{...submitResult,...(attachmentSubmit?{dom_click_error:trustedSubmitError}:{trusted_enter_error:trustedSubmitError})});
         const definitelyNotDispatched=trustedSubmitError.startsWith(attachmentSubmit?'ATTACHMENT_DOM_CLICK_PRE_DISPATCH:':'TRUSTED_ENTER_PRE_DISPATCH:');
@@ -2661,7 +2673,7 @@ async function execute(command) {
         if(submitResult.trusted_click_dispatched) {
           // The safe pre-dispatch fallback was sent; continue to the existing network ACK path.
         } else {
-        const evidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
+        const evidence=recentChatPostEvidence(tab.id,networkAckStartedAfterMs);
         pendingConversationByTab.delete(tab.id);
         const limit=await probeConversationLimit(tab.id);
         if(limit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(limit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
@@ -2672,7 +2684,7 @@ async function execute(command) {
 
       let earlyLifecycleEvidence=[];
       try{
-        if(remainingCommandMs()>300)earlyLifecycleEvidence=await timedSendPhase('submit_lifecycle_ack_ms',()=>waitForChatSubmitLifecycle(tab.id,submitStartedAt-100,Math.max(100,Math.min(1800,remainingCommandMs()-300))));
+        if(remainingCommandMs()>300)earlyLifecycleEvidence=await timedSendPhase('submit_lifecycle_ack_ms',()=>waitForChatSubmitLifecycle(tab.id,networkAckStartedAfterMs,Math.max(100,Math.min(1800,remainingCommandMs()-300))));
       }catch{}
       if(earlyLifecycleEvidence.length){
         const lifecycleResult=await resultForSubmitLifecycle(earlyLifecycleEvidence,submitResult);
@@ -2684,7 +2696,7 @@ async function execute(command) {
         DOM_ACTION_TIMEOUT_MS,
         'Chrome không phản hồi khi kiểm tra draft sau trusted Enter.'
       ));
-      const earlyEvidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
+      const earlyEvidence=recentChatPostEvidence(tab.id,networkAckStartedAfterMs);
       const submitActivity=earlyEvidence.filter(isChatSubmitLifecycleEvidence);
       const safeClickFallback=remainingCommandMs()>1500&&shouldUseTrustedClickFallback(attemptState?.result,earlyEvidence);
       if(!attachmentSubmit&&safeClickFallback){
@@ -2712,9 +2724,9 @@ async function execute(command) {
     }
 
     if(!newChat){
-      let lateLifecycleEvidence=recentChatPostEvidence(tab.id,submitStartedAt-100).filter(isChatSubmissionAckEvidence);
+      let lateLifecycleEvidence=recentChatPostEvidence(tab.id,networkAckStartedAfterMs).filter(isChatSubmissionAckEvidence);
       try{
-        if(!lateLifecycleEvidence.length&&remainingCommandMs()>300)lateLifecycleEvidence=await timedSendPhase('post_fallback_lifecycle_ack_ms',()=>waitForChatSubmitLifecycle(tab.id,submitStartedAt-100,Math.max(100,Math.min(1200,remainingCommandMs()-300))));
+        if(!lateLifecycleEvidence.length&&remainingCommandMs()>300)lateLifecycleEvidence=await timedSendPhase('post_fallback_lifecycle_ack_ms',()=>waitForChatSubmitLifecycle(tab.id,networkAckStartedAfterMs,Math.max(100,Math.min(1200,remainingCommandMs()-300))));
       }catch{}
       if(lateLifecycleEvidence.length){
         const lifecycleResult=await resultForSubmitLifecycle(lateLifecycleEvidence,{...submitResult,target_temporarily_activated:targetTemporarilyActivated});
@@ -2723,16 +2735,16 @@ async function execute(command) {
     }
     let networkAck=null;
     let targetRebound=null;
-    try{if(remainingCommandMs()>500)networkAck=await timedSendPhase('network_ack_ms',()=>waitForNetworkGeneration(tab.id,submitStartedAt-100,Math.max(100,Math.min(NETWORK_START_TIMEOUT_MS,remainingCommandMs()-500))));}catch{}
+    try{if(remainingCommandMs()>500)networkAck=await timedSendPhase('network_ack_ms',()=>waitForNetworkGeneration(tab.id,networkAckStartedAfterMs,Math.max(100,Math.min(NETWORK_START_TIMEOUT_MS,remainingCommandMs()-500))));}catch{}
     if(!networkAck&&!newChat){
       try{targetRebound=await timedSendPhase('tab_rebind_ms',()=>rebindMissingConversationTab());}catch{}
       if(targetRebound&&remainingCommandMs()>500){
-        try{networkAck=await timedSendPhase('rebound_network_ack_ms',()=>waitForNetworkGeneration(tab.id,submitStartedAt-100,Math.max(100,Math.min(2500,remainingCommandMs()-500))));}catch{}
+        try{networkAck=await timedSendPhase('rebound_network_ack_ms',()=>waitForNetworkGeneration(tab.id,networkAckStartedAfterMs,Math.max(100,Math.min(2500,remainingCommandMs()-500))));}catch{}
         if(networkAck)return await resultForNetwork(networkAck,{...submitResult,target_temporarily_activated:targetTemporarilyActivated,...targetRebound});
       }
     }
     if(!networkAck){
-      const evidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
+      const evidence=recentChatPostEvidence(tab.id,networkAckStartedAfterMs);
       let attemptState=null;
       try{[attemptState]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:inspectChatSendAttemptPage,args:[attemptId,text]});}catch{}
       const submitActivity=evidence.filter(isChatSubmitLifecycleEvidence);
