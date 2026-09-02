@@ -5372,7 +5372,7 @@ function App() {
                   <SettingsDropdown
                     value={managerSettings.workingBorderStyle}
                     options={[
-                      { value: "shine", label: "Ánh sáng xoay", hint: "Kiểu viền hiện tại" },
+                      { value: "shine", label: "Ánh sáng xoay", hint: "Glow mint → xanh lam chạy quanh viền" },
                       { value: "beam", label: "Tia chạy quanh viền", hint: "Border Beam gọn theo Ant Design" }
                     ]}
                     disabled={settingsBusy === "save"}

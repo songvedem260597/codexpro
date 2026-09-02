@@ -16,7 +16,10 @@ assert.ok((renderer.match(/className="worker-active-border"/g) || []).length >= 
 
 assert.match(styles, /working-border-shine[\s\S]*?conic-gradient/, "the existing conic shine CSS must remain available");
 assert.doesNotMatch(styles, /\.app-shell\s*\{[^}]*animation:\s*profile-border-shine/, "the rotating shine must not invalidate styles across the entire app shell");
-assert.match(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working::before,[\s\S]*?animation:\s*profile-border-shine/, "shine animation must be scoped to the pseudo-elements that actually render it");
+assert.match(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working::before,[\s\S]*?animation:\s*profile-border-shine\s+2\.8s\s+linear\s+infinite/, "shine animation must be scoped to the working-card ring and use the requested pace");
+assert.match(styles, /conic-gradient\(from var\(--profile-border-shine-angle\)[\s\S]*?transparent 300deg[\s\S]*?#7cffc4 330deg[\s\S]*?#6aa7ff 350deg[\s\S]*?transparent 360deg\)/, "shine border must use the requested mint-to-blue moving highlight");
+assert.match(styles, /working-border-shine[\s\S]*?-webkit-mask-composite:\s*xor[\s\S]*?mask-composite:\s*exclude/, "shine border must mask the gradient down to the border ring");
+assert.match(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working\s*\{[^}]*border-color:\s*#334052;[^}]*#7cffc414[^}]*#6aa7ff12/, "shine mode must neutralize the old orange card ring so the mint-blue highlight stays visible");
 assert.match(styles, /@property --profile-border-shine-angle[\s\S]*?inherits:\s*false/, "shine angle must not inherit through the renderer tree");
 assert.match(styles, /\.chat-response\.is-streaming::before,[\s\S]*?data-layout-settling="1"\]::before,[\s\S]*?data-layout-stream="1"\]::before[^}]*animation:\s*profile-border-shine/, "streaming chat shine must remain painted through transient busy-to-settling transitions");
 assert.match(renderer, /chat-response is-inline \$\{sending \? "is-sending" : selectedBusy \? "is-streaming" : ""\}/, "submission must use a stable sending border instead of restarting the streaming shine before ACK");
