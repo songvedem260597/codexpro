@@ -191,13 +191,23 @@ h1, h2, h3, h4, h5, h6,
 .chat-response-head strong { font-family: var(--heading-font-family, -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif); }
 h1 { font-size: var(--font-page); line-height: 1.18; font-weight: var(--weight-bold); margin-bottom: 8px; letter-spacing: -.7px; }
 .title-accent { color: #b79cff; text-shadow: 0 0 18px #8f6bff30; }
-.title-galaxy-accent { --chat-galaxy-active: 1; position: relative; isolation: isolate; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; vertical-align: .06em; margin: 0 .03em; padding: .06em .34em .09em; border: 1px solid #8178ff; border-radius: .42em; background: #101321; color: #f8f7ff; text-shadow: none; box-shadow: none; }
-.title-galaxy-accent .chat-galaxy-backdrop { inset: 0; border-radius: inherit; background: radial-gradient(130% 180% at 112% 128%, #7668ff88 0 22%, transparent 58%), radial-gradient(85% 150% at -10% -25%, #4f46a555 0 20%, transparent 62%), #111526; }
-.title-galaxy-accent .chat-galaxy-static,
-.title-galaxy-accent .chat-galaxy-orbit {
-  opacity: 1;
+.title-galaxy-accent {
+  display: inline-block;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: radial-gradient(circle at 16% 31%, #fff 0 1.1px, transparent 1.7px) 0 0 / 22px 20px, radial-gradient(circle at 71% 68%, #d9d4ff 0 1px, transparent 1.6px) 7px 4px / 27px 23px, radial-gradient(130% 180% at 112% 128%, #a69cff 0 22%, transparent 58%), radial-gradient(85% 150% at -10% -25%, #5c52b8 0 20%, transparent 62%), linear-gradient(105deg, #f6f4ff 4%, #c9c2ff 32%, #7d72ff 58%, #f7f5ff 82%, #9288ff 100%);
+  background-size: 22px 20px, 27px 23px, 135% 135%, 135% 135%, 220% 100%;
+  background-position: 0 0, 7px 4px, 100% 100%, 0 0, 0% 50%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  text-shadow: none;
+  animation: title-galaxy-text-drift 3.8s linear infinite;
 }
-.title-galaxy-label { position: relative; z-index: 4; display: inline-block; color: inherit; letter-spacing: -.02em; }
+@keyframes title-galaxy-text-drift {
+  to { background-position: 22px 20px, -20px -19px, 76% 82%, 20% 18%, 100% 50%; }
+}
+@media (prefers-reduced-motion: reduce) { .title-galaxy-accent { animation: none; } }
+
 h2 { font-size: var(--font-section); line-height: 1.3; font-weight: var(--weight-semibold); letter-spacing: -.3px; margin-bottom: 8px; }
 h3 { font-size: var(--font-base); line-height: 1.4; font-weight: var(--weight-semibold); color: #c5cbd6; margin: 22px 0 8px; }
 .subtitle, .section-note { color: var(--muted); margin: 0; font-size: var(--font-base); line-height: var(--leading-body); }
