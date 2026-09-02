@@ -1,4 +1,4 @@
-export const CHATGPT_CONVERSATION_MESSAGE_LIMIT = 18;
+export const CHATGPT_CONVERSATION_MESSAGE_LIMIT = 5;
 
 function normalizedCount(value) {
   const count = Number(value);
