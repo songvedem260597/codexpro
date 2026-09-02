@@ -7,7 +7,7 @@ const electronSource = fs.readFileSync(new URL("../electron/main.mjs", import.me
 assert.match(source, /Hãy kết nối API worker và Chrome profile của bạn/, "connected workers section must use the concise connection guidance");
 assert.match(styles, /\.profile-worker \{[^}]*aspect-ratio:\s*1\s*\/\s*1;/, "worker GIF frames must enforce a square aspect ratio");
 assert.match(styles, /\.profile-worker img \{[^}]*max-width:\s*100%;[^}]*max-height:\s*100%;[^}]*object-fit:\s*contain;/, "worker GIFs must stay contained inside their frame");
-assert.match(styles, /\.profile-list\.is-card-layout \.profile-worker \{[^}]*width:\s*148px;[^}]*height:\s*148px;/, "card layout worker frames must remain square");
+assert.match(styles, /\.profile-list\.is-card-layout \.profile-worker \{[^}]*width:\s*178px;[^}]*height:\s*178px;/, "card layout worker frames must remain square at the enlarged size");
 assert.match(styles, /\.profile-layout-preview\.is-card \.profile-worker \{[^}]*width:\s*58px;[^}]*height:\s*58px;/, "card layout preview worker frames must remain square");
 
 assert.match(source, /<h2>Worker đã kết nối<\/h2>/, "overview must use the unified connected worker heading");
