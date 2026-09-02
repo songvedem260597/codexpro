@@ -25,6 +25,9 @@ assert.match(managerMain, /browser-profile-auto-recovery-launched[\s\S]*?recover
 assert.match(bridgeSource, /PROFILE_TTL_MS = 3 \* 60_000[\s\S]*?PROFILE_RETENTION_MS = 24 \* 60 \* 60_000/, "source Chrome profiles must tolerate suspended MV3 heartbeats and remain visible offline for a day");
 assert.match(bridgeSource, /browserProfileRetentionState\(profile, now\)\.visible/, "normal Chrome profiles must remain in Manager after heartbeat expiry instead of disappearing immediately");
 assert.match(bridgeSource, /const \{ connected \} = browserProfileRetentionState\(profile, now\)[\s\S]*?connected,/, "retained source profiles must switch to offline instead of being reported online forever");
+assert.match(bridgeSource, /browser-profiles\.json[\s\S]*?loadBrowserProfileRegistry\(state\)/, "the runtime bridge must restore retained source profiles after a process restart");
+assert.match(bridgeSource, /restored: true[\s\S]*?tabs: \[\][\s\S]*?recentConversations: \[\]/, "restored profiles must start offline without stale tab or task activity");
+assert.match(bridgeSource, /profile\?\.headless !== true[\s\S]*?browserProfileRetentionState\(profile, now\)\.visible/, "headless and expired profiles must not be persisted as duplicate cards");
 assert.match(fs.readFileSync(new URL("../electron/browser-profile-recovery.mjs", import.meta.url), "utf8"), /window_removed[\s\S]*?browser_control_close_profile[\s\S]*?evidenceMaxAgeMs/, "automatic recovery must require recent window-removal evidence and ignore explicit CodexPro closes");
 
 const workers = [{
