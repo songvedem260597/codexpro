@@ -4202,8 +4202,6 @@ function App() {
     const workspaceProjects = projects;
     const selectedProjectRoot = projectRootForProfile(profile);
     const selectedTarget = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
-    const selectedConversation = conversations.find((chat) => String(chat.id) === selectedTarget);
-    const renameOpen = renameChat?.profileId === profile.profile_id && renameChat?.conversationId === selectedTarget;
     const isNewChat = selectedTarget === NEW_CHAT_TARGET;
     const sending = busy === `request:${profile.profile_id}`;
     const initialDraft = requestDraftsRef.current[profile.profile_id] || "";
@@ -4336,20 +4334,7 @@ function App() {
             <label className="request-label">Chọn repo và đường dẫn</label>
             <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => changeProjectForProfile(profile, root)} disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating} />
             {!workspaceProjects.length && selectedProjectRoot !== ALL_ALLOWED_WORKSPACES && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
-            <div className="request-label-row">
-              <label className="request-label">Đoạn chat <small>giữ nguyên lựa chọn khi làm mới</small></label>
-              <div className="chat-manage-actions">
-                <button type="button" onClick={() => beginRenameSelectedChat(profile, selectedTarget, selectedConversation?.title || "")} disabled={!profile.connected || isNewChat || !selectedConversation || Boolean(busy)}>Đổi tên</button>
-                <button type="button" onClick={() => startNewChat(profile)} disabled={!profile.connected || Boolean(busy)}>+ Chat mới</button>
-              </div>
-            </div>
-            {renameOpen && (
-              <div className="chat-rename-editor">
-                <input className="chat-rename-input" type="text" value={renameChat.title} maxLength={120} autoFocus aria-label="Tên đoạn chat mới" onChange={(event) => setRenameChat((current) => current ? { ...current, title: event.target.value } : current)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void saveRenamedChat(profile); } if (event.key === "Escape") { event.preventDefault(); setRenameChat(null); } }} disabled={Boolean(busy)} />
-                <button type="button" className="chat-rename-cancel" onClick={() => setRenameChat(null)} disabled={Boolean(busy)}>Hủy</button>
-                <button type="button" className="chat-rename-save" onClick={() => void saveRenamedChat(profile)} disabled={Boolean(busy) || !String(renameChat.title || "").trim()}>Lưu</button>
-              </div>
-            )}
+            <label className="request-label">Đoạn chat <small>giữ nguyên lựa chọn khi làm mới</small></label>
             <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => selectRequestConversation(profile, id)} disabled={!profile.connected || !conversations.length || sending} />
             <label className="request-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${sending ? "is-sending" : selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-transcript-loading={responseCurrent && response?.transcriptLoading ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>

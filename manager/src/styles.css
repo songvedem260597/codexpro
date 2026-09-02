@@ -368,17 +368,6 @@ section { margin-bottom: 38px; }
 .request-card-head code { display: block; color: #69758a; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .request-label { display: block; margin: 13px 0 7px; color: #aeb7c7; font-size: 13px; font-weight: 700; }
 .request-label small { margin-left: 6px; color: #6f7b8f; font-size: 11px; font-weight: 500; }
-.request-label-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
-.chat-manage-actions { display: flex; align-items: center; gap: 6px; margin: 8px 0; }
-.chat-manage-actions button { padding: 7px 10px; color: #bdc7d8; border: 1px solid #303a4b; border-radius: var(--radius-control); background: #111722; font-size: 12px; font-weight: 600; }
-.chat-manage-actions button:hover:not(:disabled) { color: #fff; border-color: #52617a; background: #18202d; }
-.chat-manage-actions button:disabled { opacity: .42; cursor: default; }
-.chat-rename-editor { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 7px; margin: 0 0 8px; }
-.chat-rename-input { min-width: 0; height: 36px; padding: 0 10px; color: #eef2f8; border: 1px solid #53658c; border-radius: var(--radius-control); outline: 0; background: #0d121a; font: inherit; font-size: 13px; box-shadow: 0 0 0 3px #6b8cff18; }
-.chat-rename-editor button { min-width: 56px; padding: 0 10px; border: 1px solid #303a4b; border-radius: var(--radius-control); font-size: 12px; font-weight: 700; }
-.chat-rename-cancel { color: #aeb8c8; background: #111722; }
-.chat-rename-save { color: #eef3ff; border-color: #4d64a0 !important; background: #24345c; }
-.chat-rename-editor button:disabled { opacity: .42; cursor: default; }
 .chat-dropdown { position: relative; z-index: 2; }
 .chat-dropdown.is-open { z-index: 12; }
 .chat-dropdown-trigger { width: 100%; min-height: 54px; display: flex; align-items: center; gap: 12px; padding: 9px 12px 9px 14px; color: #eef2f8; border: 1px solid #303846; border-radius: var(--radius-panel); background: linear-gradient(145deg, #10141b, #0c0f15); text-align: left; transition: border-color .16s ease, box-shadow .16s ease, background .16s ease; }
@@ -862,11 +851,8 @@ nav button,
 .already-connected,
 .project-actions button,
 .project-pagination button,
-.chat-manage-actions button,
-.chat-rename-editor button,
 .attach-button,
 .chat-response-head button { font-size: var(--font-control); font-weight: var(--weight-control); }
-.chat-rename-input,
 .project-dropdown-search input,
 .project-dropdown-search input:hover,
 .project-dropdown-search input:focus,
