@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="/src/styles.css" />
+  <style>
+    body { margin: 0; padding: 28px; background: #090d13; color: #dce3ee; font-family: Arial, sans-serif; }
+    .fixture-grid { display: grid; grid-template-columns: repeat(3, minmax(260px, 1fr)); gap: 18px; }
+    .fixture-card { min-width: 0; }
+    .fixture-card h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: #9aa7bc; }
+    .fixture-copy { padding: 18px; color: #aab6c8; font-size: 13px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <div class="fixture-grid">
+    <section class="fixture-card"><h2>Idle</h2><div id="idle" class="chat-response is-inline"><div class="chat-response-head"><div><span class="response-status-dot"></span><strong>Chờ tín hiệu network</strong></div></div><div class="fixture-copy">Khung mặc định trước khi gửi.</div></div></section>
+    <section class="fixture-card"><h2>Sending · chưa ACK</h2><div id="sending" class="chat-response is-inline is-sending"><div class="chat-response-head"><div><span class="response-status-dot"></span><strong>Chờ tín hiệu network</strong><span class="chat-response-send-state">Đang gửi tin nhắn</span></div></div><div class="fixture-copy">Gửi cục bộ không được đổi viền.</div></div></section>
+    <section class="fixture-card"><h2>Processing · đã xác nhận</h2><div id="streaming" class="chat-response is-inline is-streaming"><div class="chat-response-head"><div><span class="response-status-dot"></span><strong>CodexPro đang xử lý…</strong></div></div><div class="fixture-copy">Chỉ trạng thái xử lý thật mới bật viền streaming.</div></div></section>
+  </div>
+  <div id="toggle" class="chat-response is-inline is-streaming" style="position:fixed;left:-10000px;top:-10000px;width:320px"></div>
+  <script>
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const circularDistance = (a, b) => {
+      const delta = Math.abs(a - b) % 360;
+      return Math.min(delta, 360 - delta);
+    };
+    const snapshot = (id) => {
+      const element = document.getElementById(id);
+      const style = getComputedStyle(element);
+      const before = getComputedStyle(element, '::before');
+      return {
+        borderColor: style.borderTopColor,
+        boxShadow: style.boxShadow,
+        beforeOpacity: Number(before.opacity),
+        beforePlayState: before.animationPlayState,
+        angle: Number.parseFloat(before.getPropertyValue('--profile-border-shine-angle')) || 0
+      };
+    };
+    (async () => {
+      try {
+        await wait(180);
+        const idle = snapshot('idle');
+        const sending = snapshot('sending');
+        const streaming = snapshot('streaming');
+        if (idle.borderColor !== sending.borderColor) throw new Error(`sending border changed before ACK: ${idle.borderColor} -> ${sending.borderColor}`);
+        if (idle.boxShadow !== sending.boxShadow) throw new Error(`sending shadow changed before ACK: ${idle.boxShadow} -> ${sending.boxShadow}`);
+        if (sending.beforeOpacity !== 0) throw new Error(`sending shine became visible before ACK: ${sending.beforeOpacity}`);
+        if (sending.beforePlayState !== 'paused') throw new Error(`sending shine must be paused, got ${sending.beforePlayState}`);
+        if (streaming.borderColor === idle.borderColor) throw new Error(`processing border did not activate: ${streaming.borderColor}`);
+        if (streaming.beforeOpacity < 0.95) throw new Error(`processing shine not visible: ${streaming.beforeOpacity}`);
+        if (streaming.beforePlayState !== 'running') throw new Error(`processing shine must run, got ${streaming.beforePlayState}`);
+
+        const toggle = document.getElementById('toggle');
+        await wait(220);
+        const runningAngle = snapshot('toggle').angle;
+        toggle.className = 'chat-response is-inline is-sending';
+        await wait(140);
+        const paused = snapshot('toggle');
+        if (paused.beforeOpacity > 0.05) throw new Error(`shine stayed visibly active after processing ended: ${paused.beforeOpacity}`);
+        if (paused.beforePlayState !== 'paused') throw new Error(`shine did not pause after processing ended: ${paused.beforePlayState}`);
+        if (circularDistance(runningAngle, paused.angle) > 5) throw new Error(`hidden shine restarted or drifted while paused: ${runningAngle} -> ${paused.angle}`);
+        toggle.className = 'chat-response is-inline is-streaming';
+        await wait(180);
+        const resumed = snapshot('toggle');
+        if (resumed.beforePlayState !== 'running') throw new Error(`shine did not resume: ${resumed.beforePlayState}`);
+        if (circularDistance(paused.angle, resumed.angle) < 5) throw new Error(`shine appears to restart instead of resume: ${paused.angle} -> ${resumed.angle}`);
+        window.__chatBorderStateResult = { ok: true, idle, sending, streaming, runningAngle, pausedAngle: paused.angle, resumedAngle: resumed.angle };
+      } catch (error) {
+        window.__chatBorderStateResult = { ok: false, error: error?.message || String(error) };
+      }
+    })();
+  </script>
+</body>
+</html>

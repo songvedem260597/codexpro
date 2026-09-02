@@ -19,6 +19,8 @@ assert.match(modal, /const allAllowedScope = root === ALL_ALLOWED_WORKSPACES[\s\
 assert.match(modal, /Tin nhắn gần nhất[\s\S]*?<LatestMessagePanel[\s\S]*?Nhắn tiếp/, "the API popup must keep the shared latest-message and continue-message sections");
 assert.match(latestMessagePanel, /chat-response is-inline[\s\S]*?latest-response chat-transcript/, "the shared latest-message surface must preserve the fixed Chat response geometry");
 assert.match(modal, /<LatestMessagePanel[\s\S]*?worker\.stream_text[\s\S]*?worker\.last_result/, "API workers must render live stream text through the shared latest-message surface before falling back to the settled result");
+assert.match(modal, /const processing = worker\.activity === "working";[\s\S]*?const working = sending \|\| processing;/, "API workers must distinguish local submission from confirmed processing");
+assert.match(modal, /<LatestMessagePanel[\s\S]*?working=\{processing\}[\s\S]*?headline=\{sending \? "Đang gửi tin nhắn…" : processing \? "CodexPro đang xử lý…" : ""\}/, "API latest-message border must not enter streaming mode until the worker actually reports processing");
 assert.match(modal, /request-files[\s\S]*?request-file-image[\s\S]*?attach-button/, "the API popup must keep Chat file/image attachment controls");
 assert.match(modal, /AI tự đặt title 4–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP/, "API job composer must explain the AI-owned MCP title bootstrap");
 
