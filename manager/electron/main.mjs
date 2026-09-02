@@ -16,6 +16,7 @@ import { createInterruptionAlertTracker } from "./interruption-alert.mjs";
 import { taskUnfinalizedIncidents, TASK_UNFINALIZED_REPEAT_MS } from "./task-unfinalized-diagnostic.mjs";
 import { classifyUserReportedError } from "./user-reported-error.mjs";
 import { createRuntimeRestartGuard } from "./runtime-restart-guard.mjs";
+import { createBrowserProfileRecoveryPlanner } from "./browser-profile-recovery.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
 import { WorkerPluginRegistry } from "./worker-core/plugin-registry.mjs";
 import { createApiWorkerStore } from "./worker-core/api-worker-store.mjs";
@@ -332,7 +333,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.103";
+const WORKER_EXTENSION_VERSION = "0.5.104";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -422,6 +423,91 @@ const headlessWorkers = createHeadlessWorkerManager({
     }, 10000);
   }
 });
+const browserProfileRecoveryPlanner = createBrowserProfileRecoveryPlanner();
+let browserProfileRecoveryTimer = null;
+
+function macSourceChromeExecutable() {
+  return [
+    process.env.CODEXPRO_SOURCE_CHROME_PATH,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    path.join(os.homedir(), "Applications", "Google Chrome.app", "Contents", "MacOS", "Google Chrome")
+  ].map((candidate) => String(candidate || "").trim()).find((candidate) => candidate && fs.existsSync(candidate)) || "";
+}
+
+function recoverMissingMacBrowserProfiles(profiles) {
+  if (process.platform !== "darwin") return [];
+  const registry = headlessWorkers.listWorkers();
+  const launches = browserProfileRecoveryPlanner.observe({ profiles, workers: registry.workers });
+  if (!launches.length) return [];
+  const knownDirectories = new Set((Array.isArray(registry.sourceProfiles) ? registry.sourceProfiles : []).map((profile) => String(profile?.profileDirectory || "")));
+  const chromePath = macSourceChromeExecutable();
+  for (const action of launches) {
+    const lastLifecycle = action.lifecycleEvent || browserProfileLastLifecycleState.get(action.profileId) || null;
+    if (!chromePath || !fs.existsSync(chromePath) || !knownDirectories.has(action.profileDirectory)) {
+      diagnostic("error", "manager", "profile", `Không thể tự mở lại ${action.label || action.profileId}: thiếu Chrome hoặc profile nguồn`, {
+        action: "browser-profile-auto-recovery-failed",
+        profile_id: action.profileId,
+        profile_directory: action.profileDirectory,
+        chrome_path: chromePath,
+        missing_for_ms: action.missingForMs
+      });
+      continue;
+    }
+    try {
+      const child = spawn(chromePath, [
+        `--profile-directory=${action.profileDirectory}`,
+        "--new-window",
+        "https://chatgpt.com/"
+      ], { detached: true, stdio: "ignore" });
+      child.once("error", (error) => {
+        diagnostic("error", "manager", "profile", `Tự mở lại ${action.label || action.profileId} thất bại: ${error?.message || String(error)}`, {
+          action: "browser-profile-auto-recovery-spawn-failed",
+          profile_id: action.profileId,
+          profile_directory: action.profileDirectory,
+          chrome_path: chromePath,
+          error
+        });
+      });
+      child.unref();
+      diagnostic("warn", "manager", "profile", `Đã tự mở lại Chrome profile ${action.label || action.profileId} sau khi mất worker`, {
+        action: "browser-profile-auto-recovery-launched",
+        profile_id: action.profileId,
+        profile_directory: action.profileDirectory,
+        chrome_path: chromePath,
+        missing_for_ms: action.missingForMs,
+        recovery_reason: action.recoveryReason || "",
+        recovery_evidence: action.lifecycleEvent || null,
+        last_lifecycle_event: lastLifecycle
+      });
+    } catch (error) {
+      diagnostic("error", "manager", "profile", `Tự mở lại ${action.label || action.profileId} thất bại: ${error?.message || String(error)}`, {
+        action: "browser-profile-auto-recovery-failed",
+        profile_id: action.profileId,
+        profile_directory: action.profileDirectory,
+        chrome_path: chromePath,
+        error
+      });
+    }
+  }
+  return launches;
+}
+
+function startMacBrowserProfileRecoveryWatchdog() {
+  if (process.platform !== "darwin" || browserProfileRecoveryTimer) return;
+  const observe = () => {
+    if (!latestBrowserProfileStream.connected) return;
+    recoverMissingMacBrowserProfiles(latestBrowserProfileStream.profiles);
+  };
+  observe();
+  browserProfileRecoveryTimer = setInterval(observe, 5_000);
+  browserProfileRecoveryTimer.unref?.();
+}
+
+function stopMacBrowserProfileRecoveryWatchdog() {
+  if (!browserProfileRecoveryTimer) return;
+  clearInterval(browserProfileRecoveryTimer);
+  browserProfileRecoveryTimer = null;
+}
 
 async function syncInstalledWorkerExtension() {
   try {
@@ -1241,6 +1327,42 @@ const browserProfileStreamControllers = new WeakMap();
 let latestBrowserProfileStream = { connected: false, checkedAt: "", profiles: [] };
 let lastBrowserProfileStreamErrorAt = 0;
 const browserProfileDiagnosticState = new Map();
+const browserProfileLifecycleSeen = new Map();
+const browserProfileLastLifecycleState = new Map();
+
+function browserProfileLifecycleEventKey(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) return "";
+  return String(event.event_id || [event.at, event.type, event.reason, event.tab_id, event.window_id].map((value) => String(value || "")).join("|"));
+}
+
+function recordBrowserProfileLifecycleEvents(profileId, current, details) {
+  const events = (Array.isArray(current?.lifecycle_events) ? current.lifecycle_events : [])
+    .filter((event) => event && typeof event === "object" && !Array.isArray(event));
+  if (!events.length && current?.lifecycle_event) events.push(current.lifecycle_event);
+  let seen = browserProfileLifecycleSeen.get(profileId);
+  if (!seen) {
+    seen = [];
+    browserProfileLifecycleSeen.set(profileId, seen);
+  }
+  for (const event of events.slice(-20)) {
+    const key = browserProfileLifecycleEventKey(event);
+    if (!key || seen.includes(key)) continue;
+    seen.push(key);
+    if (seen.length > 100) seen.splice(0, seen.length - 100);
+    const eventType = String(event.type || "lifecycle_event");
+    const eventReason = String(event.reason || "unknown");
+    const destructive = /(?:removed|close_requested)$/.test(eventType);
+    diagnostic(destructive ? "warn" : "info", "browser", "profile", `Chrome profile ghi nhận ${eventType} (${eventReason})`, {
+      ...details,
+      action: "browser-profile-lifecycle-event",
+      event_id: String(event.event_id || ""),
+      event_at: String(event.at || ""),
+      event_type: eventType,
+      event_reason: eventReason,
+      lifecycle_event: event
+    });
+  }
+}
 
 function activeBrowserTaskSummaries() {
   return (Array.isArray(latestBrowserProfileStream?.profiles) ? latestBrowserProfileStream.profiles : [])
@@ -1281,7 +1403,11 @@ function profileDiagnosticSnapshot(profile) {
     activity: String(profile?.activity || "idle"),
     task_id: String(profile?.current_task_id || ""),
     task_title: String(profile?.current_task_title || "").trim(),
-    tab_count: Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs.length : 0
+    tab_count: Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs.length : 0,
+    lifecycle_event: profile?.lifecycle_event && typeof profile.lifecycle_event === "object" ? profile.lifecycle_event : null,
+    lifecycle_events: Array.isArray(profile?.lifecycle_events)
+      ? profile.lifecycle_events.filter((event) => event && typeof event === "object" && !Array.isArray(event)).slice(-20)
+      : []
   };
 }
 
@@ -1293,11 +1419,12 @@ function recordBrowserProfileTransitions(profiles, checkedAt) {
     nextIds.add(profileId);
     const current = profileDiagnosticSnapshot(profile);
     const previous = browserProfileDiagnosticState.get(profileId);
+    const { lifecycle_events: currentLifecycleEvents, ...currentDetails } = current;
     const details = {
       action: "profile-state-transition",
       profile_id: profileId,
       checked_at: String(checkedAt || ""),
-      ...current,
+      ...currentDetails,
       ...(previous ? {
         previous_connector_installed: previous.connector_installed,
         previous_connector_profile_bound: previous.connector_profile_bound,
@@ -1306,6 +1433,9 @@ function recordBrowserProfileTransitions(profiles, checkedAt) {
         previous_connector_checked_at: previous.connector_checked_at
       } : {})
     };
+    const newestLifecycle = currentLifecycleEvents.at(-1) || current.lifecycle_event || null;
+    if (newestLifecycle) browserProfileLastLifecycleState.set(profileId, newestLifecycle);
+    recordBrowserProfileLifecycleEvents(profileId, current, details);
     if (previous) {
       if (previous.connected && !current.connected) {
         diagnostic("warn", "browser", "profile", "Chrome profile mất heartbeat", details);
@@ -1367,11 +1497,14 @@ function recordBrowserProfileTransitions(profiles, checkedAt) {
   }
   for (const [profileId, previous] of browserProfileDiagnosticState.entries()) {
     if (nextIds.has(profileId)) continue;
+    const lastLifecycle = previous.lifecycle_events?.at(-1) || previous.lifecycle_event || browserProfileLastLifecycleState.get(profileId) || null;
     diagnostic("info", "browser", "profile", "Chrome profile đã rời danh sách realtime", {
       action: "profile-removed-from-stream",
       profile_id: profileId,
       checked_at: String(checkedAt || ""),
-      ...previous
+      ...Object.fromEntries(Object.entries(previous).filter(([key]) => key !== "lifecycle_events")),
+      last_lifecycle_event: lastLifecycle,
+      last_lifecycle_event_age_ms: lastLifecycle?.at ? Math.max(0, Date.now() - (Date.parse(String(lastLifecycle.at)) || Date.now())) : null
     });
     browserProfileDiagnosticState.delete(profileId);
   }
@@ -1423,6 +1556,7 @@ function startBrowserProfileEventStream(win) {
             if (Array.isArray(payload?.profiles)) {
               latestBrowserProfileStream = { connected: true, checkedAt: String(payload.checked_at || ""), profiles: payload.profiles };
               recordBrowserProfileTransitions(payload.profiles, payload.checked_at);
+              recoverMissingMacBrowserProfiles(payload.profiles);
               void headlessWorkers.enforceExclusiveUse(payload.profiles).catch((error) => {
                 if (diagnosticAllowed(`headless-exclusive-stream:${String(error?.message || error).slice(0, 160)}`, 30_000)) {
                   diagnostic("warn", "manager", "worker", `Luồng realtime không áp được khóa độc quyền headless: ${error?.message || String(error)}`, {
@@ -5261,6 +5395,7 @@ if (!hasSingleInstanceLock) {
       });
     }
     createWindow();
+    startMacBrowserProfileRecoveryWatchdog();
     setImmediate(() => readManagerChatCache());
     void ensureFreshRuntimeAfterManagerStart();
     void headlessWorkers.startAutoWorkers().catch((error) => {
@@ -5275,6 +5410,7 @@ if (!hasSingleInstanceLock) {
     if (process.platform !== "darwin") app.quit();
   });
   app.on("before-quit", () => {
+    stopMacBrowserProfileRecoveryWatchdog();
     diagnostic("info", "electron", "runtime", "CodexPro Manager đang thoát", { action: "manager-before-quit" });
   });
 }

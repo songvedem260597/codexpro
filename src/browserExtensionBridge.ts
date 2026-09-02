@@ -9,8 +9,8 @@ import { createRuntimeTraceContext, currentRuntimeTraceContext, recordRuntimeTra
 const BRIDGE_HOST = "127.0.0.1";
 const CODEXPRO_EXTENSION_ORIGIN = "chrome-extension://gndipignbnipohooclcbhjliikamjlpl";
 export const BROWSER_EXTENSION_BRIDGE_PORT = 9224;
-const PROFILE_TTL_MS = 45_000;
-const PROFILE_RETENTION_MS = 10 * 60_000;
+const PROFILE_TTL_MS = 3 * 60_000;
+const PROFILE_RETENTION_MS = 24 * 60 * 60_000;
 const PROFILE_RECONNECT_WAIT_MS = 45_000;
 const COMMAND_TIMEOUT_MS = 25_000;
 const CHECK_COMMAND_TIMEOUT_MS = 60_000;
@@ -30,6 +30,22 @@ export function browserProfileDisplayLabel(value: unknown, headless = false): st
   return headless ? label.replace(/^Headless\s*·\s*/i, "").trim() : label;
 }
 
+export function browserProfileRetentionState(
+  profile: { headless?: boolean; lastSeen?: number },
+  now = Date.now()
+): { connected: boolean; visible: boolean; nextTransitionAt: number | null } {
+  const lastSeen = Math.max(0, Number(profile?.lastSeen) || 0);
+  const ageMs = Math.max(0, Number(now) - lastSeen);
+  const connected = ageMs <= PROFILE_TTL_MS;
+  const visible = profile?.headless === true ? connected : ageMs <= PROFILE_RETENTION_MS;
+  const nextTransitionAt = connected
+    ? lastSeen + PROFILE_TTL_MS
+    : visible && profile?.headless !== true
+      ? lastSeen + PROFILE_RETENTION_MS
+      : null;
+  return { connected, visible, nextTransitionAt };
+}
+
 export interface ExtensionProfileSummary {
   profile_id: string;
   email: string;
@@ -41,6 +57,8 @@ export interface ExtensionProfileSummary {
   worker_id: string;
   headless: boolean;
   source_profile_id: string;
+  lifecycle_event: Record<string, unknown> | null;
+  lifecycle_events: Array<Record<string, unknown>>;
   connector_profile_bound: boolean;
   connector_update_required: boolean;
   active: boolean;
@@ -197,6 +215,8 @@ interface ExtensionProfile {
   connectorWorkerId: string;
   headless: boolean;
   sourceProfileId: string;
+  lifecycleEvent: Record<string, unknown> | null;
+  lifecycleEvents: Array<Record<string, unknown>>;
   lastSeen: number;
   tabs: unknown[];
   recentConversations: unknown[];
@@ -274,8 +294,13 @@ function headlessExclusiveLock(profileId: string, workerId = ""): { locked: bool
   try {
     const state = JSON.parse(fs.readFileSync(headlessWorkerStatePath(), "utf8"));
     const workers = Array.isArray(state?.workers) ? state.workers : [];
+    const now = Date.now();
     const worker = workers.find((item: any) => {
-      if (!item || !processAlive(item.pid)) return false;
+      if (!item) return false;
+      const startingAtMs = Date.parse(String(item.startingAt || ""));
+      const ownsSession = processAlive(item.pid)
+        || (Number.isFinite(startingAtMs) && Math.max(0, now - startingAtMs) < 30_000);
+      if (!ownsSession) return false;
       if (workerId && String(item.id || "") !== workerId) return false;
       return String(item.sourceProfileId || "") === profileId;
     });
@@ -489,8 +514,9 @@ function scheduleProfileExpiryNotification(state: BridgeState): void {
   state.profileExpiryTimer = undefined;
   const now = Date.now();
   const nextExpiry = [...state.profiles.values()]
-    .map((profile) => profile.lastSeen + PROFILE_TTL_MS)
-    .filter((expiresAt) => expiresAt > now)
+    .map((profile) => browserProfileRetentionState(profile, now).nextTransitionAt)
+    .filter((expiresAt): expiresAt is number => expiresAt != null)
+    .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > now)
     .sort((left, right) => left - right)[0];
   if (!Number.isFinite(nextExpiry)) return;
   state.profileExpiryTimer = setTimeout(() => {
@@ -599,6 +625,8 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     connectorWorkerId: "",
     headless: false,
     sourceProfileId: "",
+    lifecycleEvent: null,
+    lifecycleEvents: [],
     lastSeen: 0,
     tabs: [],
     recentConversations: [],
@@ -618,6 +646,14 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   ).slice(0, 320);
   profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
   profile.sourceProfileId = String(source.source_profile_id ?? profile.sourceProfileId ?? "").trim().slice(0, 160);
+  profile.lifecycleEvent = source.lifecycle_event && typeof source.lifecycle_event === "object" && !Array.isArray(source.lifecycle_event)
+    ? source.lifecycle_event
+    : profile.lifecycleEvent;
+  profile.lifecycleEvents = Array.isArray(source.lifecycle_events)
+    ? source.lifecycle_events
+      .filter((event: unknown): event is Record<string, unknown> => Boolean(event) && typeof event === "object" && !Array.isArray(event))
+      .slice(-20)
+    : profile.lifecycleEvents;
   profile.connectorServerFingerprint = String(source.connector_server_fingerprint ?? profile.connectorServerFingerprint ?? "").trim().slice(0, 128);
   if (source.connector_install && typeof source.connector_install === "object") {
     const incomingInstalled = source.connector_install.ok === true;
@@ -716,7 +752,7 @@ function markCommandDispatched(state: BridgeState, profile: ExtensionProfile, co
 
 function pruneExpiredProfiles(state: BridgeState, now = Date.now()): void {
   for (const [id, profile] of state.profiles) {
-    if (now - profile.lastSeen <= PROFILE_RETENTION_MS || profile.waiter || profile.queued.length) continue;
+    if (browserProfileRetentionState(profile, now).visible || profile.waiter || profile.queued.length) continue;
     state.profiles.delete(id);
     profileWorkspaceRoots.delete(id);
     profileWorkspaceBindings.delete(id);
@@ -958,12 +994,13 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
   pruneExpiredHeadlessProfiles(state, now);
   pruneExpiredProfiles(state, now);
   const visibleProfiles = [...state.profiles.values()]
-    .filter((profile) => profile.enabled && now - profile.lastSeen <= PROFILE_TTL_MS);
-  if (state.activeProfileId && !visibleProfiles.some((profile) => profile.id === state.activeProfileId)) {
+    .filter((profile) => profile.enabled && browserProfileRetentionState(profile, now).visible);
+  if (state.activeProfileId && !visibleProfiles.some((profile) => profile.id === state.activeProfileId && browserProfileRetentionState(profile, now).connected)) {
     state.activeProfileId = undefined;
   }
   return visibleProfiles
     .map((profile) => {
+      const { connected } = browserProfileRetentionState(profile, now);
       const tabs = profile.tabs
         .filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value));
       const chatgptTabs = tabs.filter((tab) => String(tab.url ?? "").startsWith("https://chatgpt.com/"));
@@ -1081,10 +1118,12 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       worker_id: profile.connectorWorkerId,
       headless: profile.headless,
       source_profile_id: profile.sourceProfileId,
+      lifecycle_event: profile.lifecycleEvent,
+      lifecycle_events: profile.lifecycleEvents.slice(-20),
       connector_profile_bound: connectorProfileBound,
       connector_update_required: connectorUpdateRequired,
-      active: state.activeProfileId === profile.id,
-      connected: true,
+      active: connected && state.activeProfileId === profile.id,
+      connected,
       last_seen: new Date(profile.lastSeen).toISOString(),
       tab_count: profile.tabs.length,
       chatgpt_tab_count: chatgptTabs.length,

@@ -338,8 +338,26 @@ function compactToolActivityMessages(messages, { collapseArgumentPayloads = fals
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.103";
+const WORKER_EXTENSION_VERSION = "0.5.104";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
+
+function chromeProfileIdLabel(profileId) {
+  const value = String(profileId || "").trim();
+  return value ? `Chrome ${value.slice(0, 8)}` : "";
+}
+
+function headlessWorkerForSource(profile, workers = []) {
+  const profileId = String(profile?.profileId || profile?.profile_id || "").trim();
+  const profileDirectory = String(profile?.profileDirectory || "").trim();
+  return (Array.isArray(workers) ? workers : []).find((worker) => {
+    const sourceProfileId = String(worker?.sourceProfileId || "").trim();
+    const sourceProfileDirectory = String(worker?.sourceProfileDirectory || "").trim();
+    return Boolean(
+      (profileId && sourceProfileId && profileId === sourceProfileId)
+      || (profileDirectory && sourceProfileDirectory && profileDirectory === sourceProfileDirectory)
+    );
+  }) || null;
+}
 
 function dateMs(value) {
   const timestamp = Date.parse(String(value || ""));
@@ -1404,10 +1422,11 @@ function App() {
       setHeadlessState(next || { supported: false, chromePath: "", chromeUserDataRoot: "", sourceProfiles: [], workers: [] });
       setHeadlessSelectedProfiles((current) => {
         const eligible = (next?.sourceProfiles || []).filter((profile) => profile.codexProInstalled);
-        const eligibleIds = new Set(eligible.map((profile) => profile.profileDirectory));
-        const kept = current.filter((profileDirectory) => eligibleIds.has(profileDirectory)).slice(0, 3);
+        const available = eligible.filter((profile) => !headlessWorkerForSource(profile, next?.workers || []));
+        const availableIds = new Set(available.map((profile) => profile.profileDirectory));
+        const kept = current.filter((profileDirectory) => availableIds.has(profileDirectory));
         if (kept.length > 0) return kept;
-        return eligible[0]?.profileDirectory ? [eligible[0].profileDirectory] : [];
+        return available[0]?.profileDirectory ? [available[0].profileDirectory] : [];
       });
       return next;
     } catch (err) {
@@ -4823,6 +4842,7 @@ function App() {
                       {profile.headless && (headlessSourceLabel || headlessSourceDirectory) && (
                         <span className="headless-clone-source" title={headlessSourceTitle || undefined}>
                           Clone từ <b>{headlessSourceLabel || headlessSourceDirectory}</b>
+                          {profile.source_profile_id && <code>{chromeProfileIdLabel(profile.source_profile_id)}</code>}
                           {headlessSourceDirectory && headlessSourceDirectory !== headlessSourceLabel && <code>{headlessSourceDirectory}</code>}
                         </span>
                       )}
@@ -5019,22 +5039,27 @@ function App() {
               <div className="headless-source-select">
                 <div className="headless-source-label-row">
                   <label>Chrome profile nguồn</label>
-                  <span>{headlessSelectedProfiles.length}/3 đã chọn</span>
+                  <span>{headlessSelectedProfiles.length} đã chọn, {(headlessState.sourceProfiles || []).filter((profile) => profile.codexProInstalled && !headlessWorkerForSource(profile, headlessState.workers || [])).length} có thể tạo</span>
                 </div>
-                <div className="headless-source-options" role="group" aria-label="Chọn tối đa 3 Chrome profile để tạo headless worker">
+                <div className="headless-source-options" role="group" aria-label="Chọn Chrome profile để tạo headless worker">
                   {(headlessState.sourceProfiles || []).filter((profile) => profile.codexProInstalled).map((profile) => {
-                    const checked = headlessSelectedProfiles.includes(profile.profileDirectory);
-                    const selectionFull = headlessSelectedProfiles.length >= 3 && !checked;
+                    const clonedWorker = headlessWorkerForSource(profile, headlessState.workers || []);
+                    const checked = !clonedWorker && headlessSelectedProfiles.includes(profile.profileDirectory);
                     return (
-                      <label className={`headless-source-option ${checked ? "is-selected" : ""}`} key={profile.profileDirectory}>
+                      <label
+                        className={`headless-source-option ${checked ? "is-selected" : ""} ${clonedWorker ? "is-cloned" : ""}`}
+                        key={profile.profileDirectory}
+                        title={clonedWorker ? `Profile này đã có headless worker ${clonedWorker.label || clonedWorker.id}` : undefined}
+                      >
                         <input
                           className="headless-source-checkbox"
                           type="checkbox"
                           checked={checked}
-                          disabled={Boolean(headlessBusy) || selectionFull}
+                          disabled={Boolean(headlessBusy) || Boolean(clonedWorker)}
                           onChange={(event) => setHeadlessSelectedProfiles((current) => {
+                            if (clonedWorker) return current.filter((profileDirectory) => profileDirectory !== profile.profileDirectory);
                             if (event.target.checked) {
-                              if (current.includes(profile.profileDirectory) || current.length >= 3) return current;
+                              if (current.includes(profile.profileDirectory)) return current;
                               return [...current, profile.profileDirectory];
                             }
                             return current.filter((profileDirectory) => profileDirectory !== profile.profileDirectory);
@@ -5043,7 +5068,8 @@ function App() {
                         <span className="headless-source-checkmark" aria-hidden="true" />
                         <span className="headless-source-option-copy">
                           <strong>{profile.userName || profile.name || profile.profileDirectory}</strong>
-                          <small>{profile.name || profile.profileDirectory} · {profile.profileDirectory}</small>
+                          <small>{chromeProfileIdLabel(profile.profileId) || "Chrome chưa có ID"} · {profile.name || profile.profileDirectory} · {profile.profileDirectory}</small>
+                          {clonedWorker && <small className="headless-source-existing">Đã có headless {clonedWorker.label || clonedWorker.id}</small>}
                         </span>
                       </label>
                     );
@@ -5077,7 +5103,7 @@ function App() {
                     `Đã tạo ${selectedProfiles.length} headless worker và clone session`
                   );
                 }}
-              >{headlessBusy === "create" ? `Đang tạo ${headlessSelectedProfiles.length}…` : `＋ Tạo ${headlessSelectedProfiles.length} headless worker`}</button>
+              >{headlessBusy === "create" ? `Đang tạo ${headlessSelectedProfiles.length}…` : headlessSelectedProfiles.length > 0 ? `＋ Tạo ${headlessSelectedProfiles.length} headless worker` : "Không có profile mới"}</button>
             </div>
             <div className="headless-runtime-meta">
               <span><b>Chrome</b> {headlessState.chromePath || "Không tìm thấy"}</span>
@@ -5096,6 +5122,7 @@ function App() {
                       <div className="headless-worker-title"><strong>{worker.label}</strong><code>{worker.id}</code></div>
                       <div className="headless-worker-details">
                         <span>Nguồn: <b>{worker.sourceUserName || worker.sourceProfileName || worker.sourceProfileDirectory}</b></span>
+                        {worker.sourceProfileId && <span>ID nguồn: <code>{chromeProfileIdLabel(worker.sourceProfileId)}</code></span>}
                         <span>Profile: <code>{worker.sourceProfileDirectory}</code></span>
                         <span>{worker.running ? `PID ${worker.pid}` : "Không chạy"}</span>
                         <span>{worker.lastSyncedAt ? `Sync ${new Date(worker.lastSyncedAt).toLocaleString("vi-VN")}` : "Chưa sync"}</span>

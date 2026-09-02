@@ -36,6 +36,9 @@ const MAC_MAX_CHATGPT_TABS = 1;
 const CHAT_TAB_CLEANUP_INTERVAL_MS = 30 * 1000;
 const CHAT_TAB_HEALTH_TIMEOUT_MS = 1200;
 const CHAT_TAB_HEALTH_FAILURES_TO_CLOSE = 2;
+const PROFILE_LIFECYCLE_STORAGE_KEY = 'codexproProfileLifecycleV1';
+const PROFILE_LIFECYCLE_HISTORY_STORAGE_KEY = 'codexproProfileLifecycleHistoryV1';
+const PROFILE_LIFECYCLE_HISTORY_LIMIT = 20;
 let polling = false;
 let installing = false;
 const chatNetworkStateByTab = new Map();
@@ -71,6 +74,11 @@ let recentConversationCache = {at:0,items:[]};
 const TITLE_OVERRIDE_TTL_MS = 10 * 60 * 1000;
 let conversationTitleOverrides = null;
 let headlessIdentityCache = null;
+let latestProfileLifecycleEvent = null;
+let profileLifecycleHistory = [];
+let profileLifecycleWriteTail = Promise.resolve();
+const tabRemovalIntents = new Map();
+const windowRemovalIntents = new Map();
 
 function conversationIdFromUrl(value) {
   try{return new URL(String(value||'')).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1]||'';}catch{return '';}
@@ -78,6 +86,44 @@ function conversationIdFromUrl(value) {
 
 function isChatGptTabUrl(value) {
   try{const url=new URL(String(value||''));return url.origin==='https://chatgpt.com';}catch{return false;}
+}
+
+function mergeProfileLifecycleEvents(...groups) {
+  const merged=[];
+  const seen=new Set();
+  for(const event of groups.flat()){
+    if(!event||typeof event!=='object'||Array.isArray(event))continue;
+    const key=String(event.event_id||`${event.at||''}|${event.type||''}|${event.reason||''}|${event.tab_id||''}|${event.window_id||''}`);
+    if(seen.has(key))continue;
+    seen.add(key);
+    merged.push(event);
+  }
+  return merged.slice(-PROFILE_LIFECYCLE_HISTORY_LIMIT);
+}
+
+function recordProfileLifecycleEvent(event={}) {
+  const value={event_id:crypto.randomUUID(),at:new Date().toISOString(),...event};
+  latestProfileLifecycleEvent=value;
+  profileLifecycleHistory=mergeProfileLifecycleEvents(profileLifecycleHistory,value);
+  profileLifecycleWriteTail=profileLifecycleWriteTail.catch(()=>{}).then(async()=>{
+    const stored=await chrome.storage.local.get([PROFILE_LIFECYCLE_HISTORY_STORAGE_KEY]);
+    profileLifecycleHistory=mergeProfileLifecycleEvents(stored[PROFILE_LIFECYCLE_HISTORY_STORAGE_KEY]||[],profileLifecycleHistory);
+    await chrome.storage.local.set({
+      [PROFILE_LIFECYCLE_STORAGE_KEY]:value,
+      [PROFILE_LIFECYCLE_HISTORY_STORAGE_KEY]:profileLifecycleHistory
+    });
+  });
+  scheduleRealtimeProfilePush(0);
+  return profileLifecycleWriteTail;
+}
+
+async function removeTabWithReason(tabId,reason,details={}) {
+  let tab=null;
+  try{tab=await chrome.tabs.get(tabId);}catch{}
+  tabRemovalIntents.set(tabId,{reason:String(reason||'codexpro_internal'),window_id:Number.isInteger(tab?.windowId)?tab.windowId:null,at:Date.now(),...details});
+  await recordProfileLifecycleEvent({type:'tab_close_requested',reason:String(reason||'codexpro_internal'),tab_id:tabId,window_id:Number.isInteger(tab?.windowId)?tab.windowId:null,url:String(tab?.url||''),details}).catch(()=>{});
+  try{await chrome.tabs.remove(tabId);}
+  catch(error){tabRemovalIntents.delete(tabId);throw error;}
 }
 
 async function chatGptTabLimit() {
@@ -174,7 +220,7 @@ async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
       const domActivity=chatDomActivityByTab.get(tabId)?.value;
       const debuggerBusy=Number(debuggerSessionsByTab.get(tabId)?.refs||0)>0;
       if((current.active&&!allowActiveIdle)||current.pinned||current.audible||current.status==='loading'||pendingConversationByTab.has(tabId)||chatAttachmentOwnershipByTab.has(tabId)||browserMutationTailsByTab.has(tabId)||debuggerBusy||summary.busy||summary.settling||networkState.busy||canonicalActivity.busy||domActivity?.busy)continue;
-      await chrome.tabs.remove(tabId);
+      await removeTabWithReason(tabId,`chat_cleanup:${plan.reasons[tabId]||'tab_limit'}`,{url:String(current.url||'')});
       closed.push({tab_id:tabId,reason:plan.reasons[tabId]||'tab_limit',url:String(current.url||''),active:Boolean(current.active),window_id:Number.isInteger(current.windowId)?current.windowId:null});
     }catch{}
   }
@@ -231,6 +277,23 @@ async function createChatGptTab(createArgs={}) {
   return await serializeChatGptTabCreation(async()=>{
     const tabLimit=await chatGptTabLimit();
     let current=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(tab=>Number.isInteger(tab.id));
+    if(tabLimit===MAC_MAX_CHATGPT_TABS&&current.length){
+      const reusable=current.find(tab=>tab.active)||current[0];
+      const summaries=await tabList();
+      const summary=summaries.find(tab=>tab.id===reusable.id)||{};
+      const conversationId=conversationIdFromUrl(reusable.url);
+      const [networkState,domActivity]=await Promise.all([
+        chatRequestState(reusable.id,conversationId),
+        chatDomActivityState(reusable.id,conversationId,{maxAgeMs:750}).catch(()=>({busy:false}))
+      ]);
+      const debuggerBusy=Number(debuggerSessionsByTab.get(reusable.id)?.refs||0)>0;
+      const protectedTab=reusable.pinned||reusable.audible||reusable.status==='loading'||pendingConversationByTab.has(reusable.id)||chatAttachmentOwnershipByTab.has(reusable.id)||browserMutationTailsByTab.has(reusable.id)||debuggerBusy||summary.busy||summary.settling||networkState.busy||domActivity?.busy;
+      if(protectedTab)throw new Error('CHAT_TAB_LIMIT_REACHED: Tab ChatGPT duy nhất đang hoạt động hoặc được bảo vệ; chưa điều hướng để tránh cắt task.');
+      const previousUrl=String(reusable.url||'');
+      const updated=await chrome.tabs.update(reusable.id,{url,active:createArgs.active===true});
+      recordProfileLifecycleEvent({type:'chat_tab_reused',reason:'mac_single_tab_limit',tab_id:reusable.id,window_id:reusable.windowId,previous_url:previousUrl,next_url:url});
+      return {...updated,codexpro_reused:true,codexpro_previous_url:previousUrl};
+    }
     if(current.length>=tabLimit){
       const summaries=await tabList();
       const recentConversations=await recentConversationList(Math.max(1,tabLimit));
@@ -816,7 +879,8 @@ chrome.webRequest.onCompleted.addListener(details=>{const attributed=attributedC
 chrome.webRequest.onErrorOccurred.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'failed',0,details.error);finishChatRequest(attributed,'failed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onBeforeRedirect.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'redirected',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
 chrome.tabs.onUpdated.addListener((tabId,changeInfo)=>{if(typeof changeInfo?.url==='string')void reconcileChatTabNavigation(tabId,changeInfo.url);});
-chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatTabHealthByTab.delete(tabId);realtimeNetworkStreamsByTab.delete(tabId);pendingRealtimeStreamTabs.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();scheduleRealtimeProfilePush(0);});
+chrome.tabs.onRemoved.addListener((tabId,removeInfo)=>{const intent=tabRemovalIntents.get(tabId);tabRemovalIntents.delete(tabId);recordProfileLifecycleEvent({type:'tab_removed',reason:String(intent?.reason||'external_or_chrome'),tab_id:tabId,window_id:Number.isInteger(removeInfo?.windowId)?removeInfo.windowId:intent?.window_id??null,is_window_closing:Boolean(removeInfo?.isWindowClosing),requested_at:intent?.at?new Date(intent.at).toISOString():'',details:intent||{}});pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatTabHealthByTab.delete(tabId);realtimeNetworkStreamsByTab.delete(tabId);pendingRealtimeStreamTabs.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();scheduleRealtimeProfilePush(0);});
+chrome.windows.onRemoved.addListener(windowId=>{const intent=windowRemovalIntents.get(windowId);windowRemovalIntents.delete(windowId);recordProfileLifecycleEvent({type:'window_removed',reason:String(intent?.reason||'external_or_chrome'),window_id:windowId,requested_at:intent?.at?new Date(intent.at).toISOString():''});});
 chrome.tabs.onCreated.addListener(tab=>{if(isChatGptTabUrl(tab?.pendingUrl||tab?.url))void enforceSingleChatTabSoon().catch(()=>{});});
 
 function chatNavigationSupersedesNetworkState(current,nextUrl) {
@@ -896,7 +960,8 @@ async function headlessIdentity(stored) {
 }
 
 async function profileInfo() {
-  const stored = await chrome.storage.local.get(['profileId','active','connectorInstall','connectorServerFingerprint','headlessWorkerId','headlessWorkerLabel','headlessSourceProfileId','workerEnabled','workerEnabledUpdatedAt']);
+  const stored = await chrome.storage.local.get(['profileId','active','connectorInstall','connectorServerFingerprint','headlessWorkerId','headlessWorkerLabel','headlessSourceProfileId','workerEnabled','workerEnabledUpdatedAt',PROFILE_LIFECYCLE_STORAGE_KEY,PROFILE_LIFECYCLE_HISTORY_STORAGE_KEY]);
+  profileLifecycleHistory=mergeProfileLifecycleEvents(stored[PROFILE_LIFECYCLE_HISTORY_STORAGE_KEY]||[],profileLifecycleHistory,latestProfileLifecycleEvent||[]);
   const headless=await headlessIdentity(stored);
   const profileId = headless?.id || stored.profileId || crypto.randomUUID();
   if (!headless && !stored.profileId) await chrome.storage.local.set({profileId});
@@ -913,7 +978,9 @@ async function profileInfo() {
     enabled:stored.workerEnabled!==false,
     worker_enabled_updated_at:Math.max(0,Number(stored.workerEnabledUpdatedAt)||0),
     headless:Boolean(headless),
-    source_profile_id:headless?.source_profile_id||''
+    source_profile_id:headless?.source_profile_id||'',
+    lifecycle_event:latestProfileLifecycleEvent||stored[PROFILE_LIFECYCLE_STORAGE_KEY]||null,
+    lifecycle_events:profileLifecycleHistory
   };
 }
 
@@ -2272,6 +2339,8 @@ async function execute(command) {
     const windows=(await chrome.windows.getAll({populate:false})).filter(win=>Number.isInteger(win?.id));
     let closedWindowCount=0;
     for(const win of windows){
+      windowRemovalIntents.set(win.id,{reason:'browser_control_close_profile',at:Date.now()});
+      await recordProfileLifecycleEvent({type:'window_close_requested',reason:'browser_control_close_profile',window_id:win.id}).catch(()=>{});
       try{await chrome.windows.remove(win.id);closedWindowCount+=1;}catch{}
     }
     const remainingWindows=(await chrome.windows.getAll({populate:false}).catch(()=>[])).filter(win=>Number.isInteger(win?.id));
@@ -2571,7 +2640,7 @@ async function execute(command) {
       const limit=await probeConversationLimit(tab.id);
       if(limit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(limit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
       if(injected?.result?.expired)return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'failed',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'prepare-timeout',submit_path:'prepare-timeout',path_attempted:['prepare'],send_uncertain:false,error:`${attachments.length?'ATTACHMENT_PREPARE_TIMEOUT':'PREPARE_TIMEOUT'}: ${injected.result.error||'Lần chuẩn bị đã hết hạn trước khi phát lệnh gửi.'}`,attempt_id:attemptId,cleanup:injected.result.cleanup,...sendTimingPayload()};
-      if(newChat)await chrome.tabs.remove(tab.id).catch(()=>{});
+      if(newChat)await removeTabWithReason(tab.id,'send_prepare_failed_new_chat').catch(()=>{});
       throw new Error(injected?.result?.error||'Không gửi được yêu cầu vào ChatGPT.');
     }
     if(injected.result.stale_owned_cleanup?.source==='extension-ownership'){
@@ -3020,7 +3089,7 @@ if(action==='rename_chat'){
     }
     return {action,target_id:activeTab.id,ok:true,conversation_verified:expectedConversationId?actualConversationId===expectedConversationId:true,expected_conversation_id:expectedConversationId,actual_conversation_id:actualConversationId,window_id:activeTab.windowId,window_state:String(windowInfo?.state||''),window_focused:Boolean(windowInfo?.focused)};
   }
-  if(action==='close_tab'){await chrome.tabs.remove(tab.id);return {action,target_id:tab.id,ok:true};}
+  if(action==='close_tab'){await removeTabWithReason(tab.id,'browser_control_close_tab');return {action,target_id:tab.id,ok:true};}
   const executeOnTab=async(action,args)=>{
   if(action==='navigate'){const updated=await chrome.tabs.update(tab.id,{url:args.url});return {action,target_id:tab.id,url:updated.url||args.url,title:updated.title||''};}
   if(action==='batch'){
@@ -3154,19 +3223,20 @@ async function replaceUnresponsiveChatTab(tab,recoveryUrl,timeoutMs=45000,option
   let replacement=await serializeChatGptTabCreation(async()=>{
     const tabLimit=await chatGptTabLimit();
     let current=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(candidate=>Number.isInteger(candidate.id));
-    if(current.length>=tabLimit){
+    const preserveOnlyMacTab=tabLimit===MAC_MAX_CHATGPT_TABS&&current.length===1&&current[0].id===replacedTabId;
+    if(current.length>=tabLimit&&!preserveOnlyMacTab){
       await releaseChatDebuggerForRecovery(replacedTabId);
-      await chrome.tabs.remove(replacedTabId);
+      await removeTabWithReason(replacedTabId,'renderer_replacement_precreate');
       replacedTabRemoved=true;
       current=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(candidate=>Number.isInteger(candidate.id));
     }
-    if(current.length>=tabLimit){
+    if(current.length>=tabLimit&&!preserveOnlyMacTab){
       const summaries=await tabList();
       const recentConversations=await recentConversationList(Math.max(1,tabLimit));
       await cleanupChatGptTabs(summaries,recentConversations,{force:true,maxTabs:tabLimit-1,allowActiveIdle:tabLimit===MAC_MAX_CHATGPT_TABS});
       current=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(candidate=>Number.isInteger(candidate.id));
     }
-    if(current.length>=tabLimit)throw new Error(`CHAT_TAB_LIMIT_REACHED: Không thể mở tab khôi phục vì profile vẫn có ${current.length} tab ChatGPT được bảo vệ.`);
+    if(current.length>=tabLimit&&!preserveOnlyMacTab)throw new Error(`CHAT_TAB_LIMIT_REACHED: Không thể mở tab khôi phục vì profile vẫn có ${current.length} tab ChatGPT được bảo vệ.`);
     return await chrome.tabs.create(createArgs);
   });
   try{
@@ -3174,7 +3244,7 @@ async function replaceUnresponsiveChatTab(tab,recoveryUrl,timeoutMs=45000,option
     replacement=await chrome.tabs.get(replacement.id);
     await ensureChatNetworkStreamCapture(replacement.id);
   }catch(error){
-    await chrome.tabs.remove(replacement.id).catch(()=>{});
+    await removeTabWithReason(replacement.id,'renderer_replacement_failed').catch(()=>{});
     throw error;
   }
   if(carryState&&previousState)chatNetworkStateByTab.set(replacement.id,{...previousState});
@@ -3183,7 +3253,7 @@ async function replaceUnresponsiveChatTab(tab,recoveryUrl,timeoutMs=45000,option
   pendingConversationByTab.delete(replacedTabId);
   if(!replacedTabRemoved){
     await releaseChatDebuggerForRecovery(replacedTabId);
-    await chrome.tabs.remove(replacedTabId);
+    await removeTabWithReason(replacedTabId,'renderer_replacement_completed').catch(()=>{});
   }
   await persistChatNetworkState();
   recentConversationCache={at:0,items:[]};
@@ -3415,7 +3485,9 @@ async function checkConnectorInstalled() {
     await chrome.storage.local.set({connectorInstall:saved});
     return {ok:true,installed:saved.ok,message:saved.message,checked_at:saved.at,diagnostic:result.diagnostic||{}};
   }finally{
-    await chrome.tabs.remove(tab.id).catch(()=>{});
+    if(tab.codexpro_reused&&previousChat?.id===tab.id&&isChatGptTabUrl(previousChat.url)){
+      await chrome.tabs.update(tab.id,{url:previousChat.url,active:Boolean(previousChat.active)}).catch(()=>{});
+    }else await removeTabWithReason(tab.id,'connector_check_cleanup').catch(()=>{});
     if(tabLimit===MAC_MAX_CHATGPT_TABS&&previousChat&&isChatGptTabUrl(previousChat.url)){
       const remaining=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(candidate=>Number.isInteger(candidate.id));
       if(!remaining.length){
@@ -3461,7 +3533,7 @@ function ensureBridgeAlarm(){
 chrome.runtime.onInstalled.addListener(()=>{
   ensureBridgeAlarm();
   chrome.storage.local.get('codexproReloadTabId').then(async ({codexproReloadTabId})=>{
-    if(Number.isInteger(codexproReloadTabId))await chrome.tabs.remove(codexproReloadTabId).catch(()=>{});
+    if(Number.isInteger(codexproReloadTabId))await removeTabWithReason(codexproReloadTabId,'extension_reload_cleanup').catch(()=>{});
     await chrome.storage.local.remove('codexproReloadTabId');
   }).catch(()=>{});
   pollLoop();

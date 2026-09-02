@@ -488,7 +488,7 @@ assert.match(worker, /if\(action==='stop_chat_generation'\)[\s\S]*?stopChatGener
 assert.match(server, /"stop_chat_generation"/, "browser_control schema must expose stop_chat_generation");
 assert.match(server, /"audit_long_running_chat"/, "browser_control schema must expose the one-shot long-task audit");
 assert.match(server, /task_id: args\.task_id[\s\S]*?started_at: args\.started_at[\s\S]*?attempt_key: args\.attempt_key/, "browser_control must forward the persistent one-shot audit identity to the extension");
-assert.match(worker, /async function replaceUnresponsiveChatTab[\s\S]*?chrome\.tabs\.create[\s\S]*?waitForTab[\s\S]*?chrome\.tabs\.remove\(replacedTabId\)/, "renderer recovery must load a replacement before closing the exact stuck tab");
+assert.match(worker, /async function replaceUnresponsiveChatTab[\s\S]*?chrome\.tabs\.create[\s\S]*?waitForTab[\s\S]*?removeTabWithReason\(replacedTabId,'renderer_replacement_completed'\)/, "renderer recovery must load a replacement before closing the exact stuck tab");
 assert.match(worker, /dom_replaced=true[\s\S]*?recovery_tab_id/, "stale-response reload recovery must escalate to replacing a renderer that stays unresponsive");
 assert.match(worker, /conversation\|steer_turn/, "ChatGPT steer_turn must be tracked as a generation request");
 assert.match(worker, /const staleActivity=Boolean\(injected\.result\.busy\)/, "canonical completion must recover a tab whose DOM is still stuck busy");
@@ -557,10 +557,11 @@ assert.match(bridge, /const connectorInstalled = profile\.connectorInstalled && 
 assert.match(bridge, /CodexPro đang gọi tool qua connector cũ chưa gắn đúng profile/, "profile summaries must explain activity from an old unbound connector");
 assert.match(bridge, /function pruneExpiredProfiles/);
 assert.match(bridge, /profileWorkspaceRoots\.delete\(id\)[\s\S]*?profileWorkspaceBindings\.delete\(id\)/, "expired extension profiles must release workspace maps");
-assert.match(bridge, /const visibleProfiles = \[\.\.\.state\.profiles\.values\(\)\][\s\S]*?now - profile\.lastSeen <= PROFILE_TTL_MS/, "profiles without a live heartbeat must disappear from the Manager list instead of remaining as disconnected cards");
-assert.match(bridge, /function scheduleProfileExpiryNotification[\s\S]*?profile\.lastSeen \+ PROFILE_TTL_MS[\s\S]*?scheduleProfileNotification\(state\)/, "the bridge must publish a profile-list update as soon as the heartbeat grace period expires");
-assert.match(bridge, /if \(state\.activeProfileId && !visibleProfiles\.some[\s\S]*?state\.activeProfileId = undefined/, "an expired active profile must release active ownership when it disappears from the UI");
-assert.doesNotMatch(bridge, /connected: now - profile\.lastSeen <= PROFILE_TTL_MS/, "the Manager must not receive retained-but-disconnected profile records");
+assert.match(bridge, /const PROFILE_TTL_MS = 3 \* 60_000[\s\S]*?const PROFILE_RETENTION_MS = 24 \* 60 \* 60_000/, "normal Chrome heartbeat expiry must tolerate MV3 suspension and macOS sleep while retaining offline metadata for a day");
+assert.match(bridge, /const visibleProfiles = \[\.\.\.state\.profiles\.values\(\)\][\s\S]*?browserProfileRetentionState\(profile, now\)\.visible/, "source Chrome profiles without a live heartbeat must remain visible as offline cards instead of disappearing");
+assert.match(bridge, /function scheduleProfileExpiryNotification[\s\S]*?browserProfileRetentionState\(profile, now\)\.nextTransitionAt[\s\S]*?scheduleProfileNotification\(state\)/, "the bridge must publish both heartbeat-offline and final-retention transitions");
+assert.match(bridge, /if \(state\.activeProfileId && !visibleProfiles\.some[\s\S]*?browserProfileRetentionState\(profile, now\)\.connected[\s\S]*?state\.activeProfileId = undefined/, "an offline active profile must release active ownership without removing its card");
+assert.match(bridge, /const \{ connected \} = browserProfileRetentionState\(profile, now\)[\s\S]*?connected,/, "the Manager must receive retained source profiles with an explicit offline state after heartbeat expiry");
 assert.match(bridge, /const PROFILE_RECONNECT_WAIT_MS = 45_000/, "a retained Chrome profile must get a bounded reconnect window");
 assert.match(bridge, /const waitingForReconnect = Date\.now\(\) - profile\.lastSeen > PROFILE_TTL_MS/, "a stale heartbeat must enter reconnect mode instead of being rejected immediately");
 assert.match(bridge, /function markCommandDispatched[\s\S]*?pending\.waitingForReconnect = false[\s\S]*?pending\.timeoutMs/, "a reconnected profile must receive the full action timeout after command dispatch");
@@ -774,7 +775,7 @@ assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
 assert.match(worker, /if\(domActivity\.busy\)\{[\s\S]*?probeCanonicalActivity\(tab\.id,targetConversationId,true\)[\s\S]*?canonicalCompleted[\s\S]*?send_preflight_canonical/, "send preflight must clear a stale DOM busy guard when canonical proves the previous turn completed");
-assert.equal(manifest.version, "0.5.103");
+assert.equal(manifest.version, "0.5.104");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
@@ -802,7 +803,7 @@ assert.doesNotMatch(popupHtml + popupJs, /CÀI LẠI \/ KIỂM TRA LẠI/, "the 
 assert.match(popupHtml, /id="workerToggle"[\s\S]*?role="switch"/, "the popup must expose an accessible worker connection toggle");
 assert.match(popupJs, /workerEnabled[\s\S]*?BRIDGE}\/register[\s\S]*?enabled:false/, "disabling a worker must immediately publish a hidden profile state to the Bridge");
 assert.match(worker, /if\(!profile\.enabled\)[\s\S]*?setTimeout\(resolve,2000\)[\s\S]*?continue/, "a disabled extension must stop polling the Bridge");
-assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && now - profile\.lastSeen <= PROFILE_TTL_MS/, "disabled profiles must be retained internally but excluded from the connected worker list");
+assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && browserProfileRetentionState\(profile, now\)\.visible/, "disabled profiles must be retained internally but excluded while enabled source profiles survive temporary heartbeat loss");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.match(managerMain, /profile\.connector_update_required \|\| profile\.connector_profile_bound === false[\s\S]*?action: "setup_chatgpt"[\s\S]*?profile\.connector_installed && profile\.connector_profile_bound/, "Manager send preflight must rebind an old connector before dispatching a task");

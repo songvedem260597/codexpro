@@ -265,10 +265,17 @@ export function createHeadlessWorkerManager(options = {}) {
     return discovered;
   }
 
+  function workerOwnsExclusiveSourceSession(worker, now = Date.now()) {
+    if (!worker) return false;
+    if (processAlive(Number(worker.pid) || 0)) return true;
+    const startingAtMs = Date.parse(String(worker.startingAt || ""));
+    return Number.isFinite(startingAtMs) && Math.max(0, now - startingAtMs) < 30_000;
+  }
+
   function conflictingRunningWorker(worker, state = readState()) {
     const sourceProfileId = refreshWorkerSourceProfileId(worker);
     return state.workers.find((candidate) => {
-      if (!candidate || candidate.id === worker.id || !processAlive(Number(candidate.pid) || 0)) return false;
+      if (!candidate || candidate.id === worker.id || !workerOwnsExclusiveSourceSession(candidate)) return false;
       const candidateSourceId = refreshWorkerSourceProfileId(candidate);
       if (sourceProfileId && candidateSourceId && sourceProfileId === candidateSourceId) return true;
       return Boolean(worker.sourceProfileDirectory && candidate.sourceProfileDirectory === worker.sourceProfileDirectory);
@@ -414,8 +421,11 @@ export function createHeadlessWorkerManager(options = {}) {
       }
     }
     worker.pid = 0;
+    worker.startingAt = "";
     worker.lastStoppedAt = new Date().toISOString();
     saveState(state);
+    const sourceProfileId = String(worker.sourceProfileId || "").trim();
+    if (sourceProfileId) await clearSourceProfileLock(sourceProfileId, worker.id).catch(() => {});
     return workerPayload(worker);
   }
 
@@ -490,7 +500,6 @@ export function createHeadlessWorkerManager(options = {}) {
     });
     child.unref();
     worker.pid = Number(child.pid) || 0;
-    worker.startingAt = "";
     worker.lastStartedAt = new Date().toISOString();
     worker.lastError = "";
     saveState(state);
@@ -514,6 +523,8 @@ export function createHeadlessWorkerManager(options = {}) {
       saveState(state);
       throw new Error(worker.lastError);
     }
+    worker.startingAt = "";
+    saveState(state);
     sourceLockProfileId = "";
     return workerPayload(worker);
     } catch (error) {
@@ -637,7 +648,7 @@ export function createHeadlessWorkerManager(options = {}) {
     if (!id) return { ok: true };
     const state = readState();
     for (const worker of state.workers) refreshWorkerSourceProfileId(worker);
-    const running = state.workers.filter((worker) => processAlive(Number(worker.pid) || 0));
+    const running = state.workers.filter((worker) => workerOwnsExclusiveSourceSession(worker));
     const sourceLockedBy = running.find((worker) => String(worker.sourceProfileId || "").trim() === id);
     if (sourceLockedBy) {
       throw new Error(`Chrome vẫn dùng bình thường, nhưng ChatGPT và task CodexPro trên profile nguồn đang bị khóa vì headless ${sourceLockedBy.label || sourceLockedBy.id} đang chạy. Hãy dừng headless trước khi dùng ChatGPT.`);

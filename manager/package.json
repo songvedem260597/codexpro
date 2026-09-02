@@ -14,7 +14,7 @@
     "test:diagnostic": "node scripts/user-reported-error-smoke.mjs && node scripts/diagnostic-log-smoke.mjs && node scripts/runtime-health-diagnostic-smoke.mjs && node scripts/operations-metrics-smoke.mjs && node scripts/task-unfinalized-diagnostic-smoke.mjs && node scripts/tunnel-offline-diagnostic-smoke.mjs",
     "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs",
     "test:chat-response-finality": "node scripts/chat-response-finality-smoke.mjs",
-    "test:runtime-restart": "node scripts/runtime-restart-send-race-smoke.mjs",
+    "test:runtime-restart": "node scripts/runtime-restart-send-race-smoke.mjs && node scripts/browser-profile-recovery-smoke.mjs",
     "test:mcp-response-queue": "node scripts/mcp-response-queue-smoke.mjs",
     "test:api-worker-form": "node scripts/api-worker-form-smoke.mjs",
     "test:api-worker-models": "node scripts/api-worker-model-discovery-smoke.mjs",

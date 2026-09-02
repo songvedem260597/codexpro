@@ -25,6 +25,10 @@ assert.match(source, /function profileVisibleInWorkerList\(profile\)[\s\S]*?tab_
 assert.match(source, /status\?\.browserProfiles \|\| \[\][\s\S]*?\.filter\(profileVisibleInWorkerList\)[\s\S]*?\.map\(\(profile\)/, "the connected worker cards must exclude background profiles with no tabs");
 assert.match(source, /headlessWorker = profile\.headless[\s\S]*?headlessState\?\.workers[\s\S]*?sourceProfileDirectory/, "headless connected worker cards must resolve their clone source from the headless worker registry");
 assert.match(source, /headlessSourceProfile = profile\.headless && profile\.source_profile_id[\s\S]*?headlessSourceLabel[\s\S]*?Clone từ <b>/, "headless connected worker cards must show which Chrome profile they were cloned from");
+assert.match(source, /function chromeProfileIdLabel\(profileId\)[\s\S]*?`Chrome \$\{value\.slice\(0, 8\)\}`/, "Chrome profile ids must be rendered as a stable short label such as Chrome e3b58d66");
+assert.match(source, /headless-source-option-copy[\s\S]*?chromeProfileIdLabel\(profile\.profileId\)/, "headless source selection must display the source Chrome profile id before cloning");
+assert.match(source, /ID nguồn:[\s\S]*?chromeProfileIdLabel\(worker\.sourceProfileId\)/, "headless worker details must retain the source Chrome profile id after cloning");
+assert.match(source, /Clone từ <b>[\s\S]*?chromeProfileIdLabel\(profile\.source_profile_id\)/, "connected headless worker cards must show the short source Chrome id alongside clone metadata");
 assert.match(styles, /\.profile-meta > \.headless-clone-source[\s\S]*?\.profile-list\.is-card-layout \.headless-clone-source/, "headless clone-source metadata must stay readable in row and card layouts");
 assert.match(source, /function profileSafeForWorkerUpdate\(profile\)[\s\S]*?\["idle", "no_chatgpt"\]\.includes\(profile\?\.activity\)/, "a hidden background profile must remain safe to update while it has no work");
 assert.match(electronSource, /const safeToReload = \(profile\)[\s\S]*?\["idle", "no_chatgpt"\]\.includes\(profile\.activity\)/, "the backend must reload an outdated background profile that has no work");

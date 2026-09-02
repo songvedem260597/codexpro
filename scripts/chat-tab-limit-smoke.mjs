@@ -14,7 +14,15 @@ assert.match(worker, /async function resetSupersededChatActivity[\s\S]*?chatNetw
 assert.match(worker, /codexpro_unreachable[\s\S]*?healthReplacement[\s\S]*?chrome\.tabs\.create/, "a dead sole macOS ChatGPT tab must be replaced after it is closed");
 assert.match(worker, /recover_chat_tab[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\}\)/, "fresh-chat recovery must use the capped tab creator");
 assert.match(worker, /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:false\}\)/, "new chat requests must use the capped tab creator");
-assert.match(worker, /replaceUnresponsiveChatTab[\s\S]*?const tabLimit=await chatGptTabLimit\(\)[\s\S]*?current\.length>=tabLimit[\s\S]*?chrome\.tabs\.remove\(replacedTabId\)[\s\S]*?chrome\.tabs\.create\(createArgs\)/, "hung-tab recovery must close the old tab before opening a replacement at the macOS cap");
+const replacementSource = worker.slice(
+  worker.indexOf("async function replaceUnresponsiveChatTab"),
+  worker.indexOf("async function waitForConversationUrl")
+);
+assert.match(replacementSource, /preserveOnlyMacTab=tabLimit===MAC_MAX_CHATGPT_TABS/, "macOS recovery must recognize its sole existing ChatGPT tab");
+assert.ok(
+  replacementSource.indexOf("chrome.tabs.create(createArgs)") < replacementSource.indexOf("removeTabWithReason(replacedTabId,'renderer_replacement_completed')"),
+  "macOS recovery must finish creating the replacement before closing the sole old tab"
+);
 
 const limitSource = worker.slice(
   worker.indexOf("async function chatGptTabLimit"),
@@ -52,6 +60,12 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
   const chrome = {
     tabs: {
       async query() { return tabs.map(tab => ({ ...tab })); },
+      async update(id, args) {
+        const tab = tabs.find(candidate => candidate.id === id);
+        if (!tab) throw new Error("missing tab");
+        Object.assign(tab, args);
+        return { ...tab };
+      },
       async create(args) {
         creates += 1;
         const tab = { id: nextId++, url: args.url, active: Boolean(args.active) };
@@ -61,7 +75,7 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
       }
     }
   };
-  const tabList = async () => tabs.map(tab => ({ ...tab }));
+  const tabList = async () => tabs.map(tab => ({ ...tab, busy: Boolean(tab.protected) }));
   const recentConversationList = async () => [];
   const cleanupChatGptTabs = async (_summaries, _recent, options = {}) => {
     const requested = Number(options.maxTabs);
@@ -79,6 +93,9 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
     try { return new URL(String(value || "")).origin === "https://chatgpt.com"; } catch { return false; }
   };
   const chatGptTabLimit = async () => limit;
+  const conversationIdFromUrl = value => {
+    try { return new URL(String(value || "")).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || ""; } catch { return ""; }
+  };
   const factory = Function(
     "chrome",
     "MAX_CHATGPT_TABS",
@@ -88,6 +105,14 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
     "recentConversationList",
     "cleanupChatGptTabs",
     "chatGptTabLimit",
+    "conversationIdFromUrl",
+    "chatRequestState",
+    "chatDomActivityState",
+    "debuggerSessionsByTab",
+    "pendingConversationByTab",
+    "chatAttachmentOwnershipByTab",
+    "browserMutationTailsByTab",
+    "recordProfileLifecycleEvent",
     `let chatTabCreationTail = Promise.resolve(); ${helperSource}; return { createChatGptTab };`
   );
   const { createChatGptTab } = factory(
@@ -98,7 +123,15 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
     tabList,
     recentConversationList,
     cleanupChatGptTabs,
-    chatGptTabLimit
+    chatGptTabLimit,
+    conversationIdFromUrl,
+    async () => ({ busy: false }),
+    async () => ({ busy: false }),
+    new Map(),
+    new Map(),
+    new Map(),
+    new Map(),
+    () => {}
   );
   return {
     createChatGptTab,
@@ -122,8 +155,9 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
   ], { limit: 1 });
   await harness.createChatGptTab({ url: "https://chatgpt.com/", active: true });
   assert.equal(harness.state().count, 1);
-  assert.equal(harness.state().maxObserved, 1, "macOS replacement must close the old idle tab before creating a new one");
-  assert.deepEqual(harness.state().closed, [1], "the previous macOS ChatGPT tab must be closed");
+  assert.equal(harness.state().maxObserved, 1, "macOS must reuse its sole idle tab without closing the profile window");
+  assert.equal(harness.state().creates, 0, "macOS one-tab navigation must not create a replacement tab");
+  assert.deepEqual(harness.state().closed, [], "the sole macOS ChatGPT tab must remain open");
 }
 
 {

@@ -51,6 +51,7 @@ type HeadlessWorkerStateRecord = {
   sourceProfileId?: string;
   sourceProfileDirectory?: string;
   pid?: number;
+  startingAt?: string;
 };
 
 function processIdAlive(pid: unknown): boolean {
@@ -67,8 +68,14 @@ function processIdAlive(pid: unknown): boolean {
 function runningHeadlessWorkerState(): HeadlessWorkerStateRecord[] {
   try {
     const state = JSON.parse(fs.readFileSync(path.join(codexProHome(), "headless-workers.json"), "utf8"));
+    const now = Date.now();
     return (Array.isArray(state?.workers) ? state.workers : [])
-      .filter((worker: HeadlessWorkerStateRecord) => worker && processIdAlive(worker.pid));
+      .filter((worker: HeadlessWorkerStateRecord) => {
+        if (!worker) return false;
+        if (processIdAlive(worker.pid)) return true;
+        const startingAtMs = Date.parse(String(worker.startingAt || ""));
+        return Number.isFinite(startingAtMs) && Math.max(0, now - startingAtMs) < 30_000;
+      });
   } catch {
     return [];
   }

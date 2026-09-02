@@ -260,7 +260,7 @@ const recoveryNetworkState = new Map([[41, { state: "completed", conversation_id
 const recoveryPostLog = new Map([[41, [{ state: "completed" }]]]);
 const recoveryPostVersion = new Map([[41, 3]]);
 const replaceUnresponsiveChatTab = Function(
-  "chrome", "waitForTab", "ensureChatNetworkStreamCapture", "ensureChatNetworkStateLoaded", "chatNetworkStateByTab", "chatNetworkPostLogByTab", "chatNetworkPostVersionByTab", "pendingConversationByTab", "persistChatNetworkState", "scheduleRealtimeProfilePush", "recentConversationCache", "serializeChatGptTabCreation", "MAX_CHATGPT_TABS", "chatGptTabLimit", "releaseChatDebuggerForRecovery",
+  "chrome", "waitForTab", "ensureChatNetworkStreamCapture", "ensureChatNetworkStateLoaded", "chatNetworkStateByTab", "chatNetworkPostLogByTab", "chatNetworkPostVersionByTab", "pendingConversationByTab", "persistChatNetworkState", "scheduleRealtimeProfilePush", "recentConversationCache", "serializeChatGptTabCreation", "MAX_CHATGPT_TABS", "MAC_MAX_CHATGPT_TABS", "chatGptTabLimit", "releaseChatDebuggerForRecovery", "removeTabWithReason",
   `${replaceTabSource.replace(/^function/, "async function")}; return replaceUnresponsiveChatTab;`
 )(
   { tabs: {
@@ -281,13 +281,15 @@ const replaceUnresponsiveChatTab = Function(
   { at: 1, items: [] },
   async (operation) => await operation(),
   3,
+  1,
   async () => 3,
-  async (id) => { recoveryCalls.push(["release", id]); }
+  async (id) => { recoveryCalls.push(["release", id]); },
+  async (id, reason) => { recoveryCalls.push(["remove-reason", id, reason]); }
 );
 const recoveryResult = await replaceUnresponsiveChatTab({ id: 41, windowId: 7, active: true, url: "https://chatgpt.com/c/12345678-abcd" }, "https://chatgpt.com/c/12345678-abcd", 5000);
 assert.equal(recoveryResult.replaced_tab_id, 41);
 assert.equal(recoveryResult.recovery_tab_id, 42);
-assert.ok(recoveryCalls.findIndex(([name]) => name === "wait") < recoveryCalls.findIndex(([name]) => name === "remove"), "the replacement must finish loading before the stuck tab is closed");
+assert.ok(recoveryCalls.findIndex(([name]) => name === "wait") < recoveryCalls.findIndex(([name]) => name === "remove-reason"), "the replacement must finish loading before the stuck tab is closed");
 assert.deepEqual(recoveryNetworkState.get(42), recoveryNetworkState.get(41), "completed network evidence must follow the replacement tab");
 
 const sendStart = worker.indexOf("if(action==='send_chat_request'){");
