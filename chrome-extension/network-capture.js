@@ -75,6 +75,29 @@
     return true;
   };
   const messageId = (message, record) => bounded(message?.id || message?.message?.id || record.activeMessageId || `stream-${record.id}`, 220);
+  const publish = (record, payload = {}) => {
+    record.revision = Math.max(0, Number(record.revision) || 0) + 1;
+    try {
+      globalThis.postMessage({
+        source: "codexpro-network-stream-v1",
+        type: "stream-update",
+        event: {
+          record_id: record.id,
+          conversation_id: record.conversationId,
+          message_id: record.activeMessageId,
+          revision: record.revision,
+          event_count: record.eventCount,
+          in_progress: !record.completedAt,
+          updated_at: new Date(record.updatedAt).toISOString(),
+          completed_at: record.completedAt ? new Date(record.completedAt).toISOString() : "",
+          error: record.error,
+          ...payload
+        }
+      }, "*");
+    } catch {
+      // The isolated-world bridge is optional; polling remains the recovery path.
+    }
+  };
 
   function createRecord(url, conversationId = "") {
     const record = {
@@ -85,6 +108,7 @@
       updatedAt: Date.now(),
       completedAt: 0,
       eventCount: 0,
+      revision: 0,
       error: "",
       activeMessageId: "",
       patchPath: "",
@@ -123,6 +147,8 @@
     Object.assign(existing, next);
     record.messages = record.messages.slice(-20);
     record.updatedAt = Date.now();
+    const activity = toolActivityFromText(existing.text);
+    publish(record, activity ? { kind: "activity", activity_text: activity } : { kind: "snapshot", text: existing.text });
   }
 
   function appendDelta(record, delta, payload) {
@@ -139,6 +165,7 @@
     existing.updated_at = new Date().toISOString();
     record.messages = record.messages.slice(-20);
     record.updatedAt = Date.now();
+    publish(record, { kind: "delta", delta: value, text_length: existing.text.length });
   }
 
   function inspectPayload(record, payload, depth = 0, seen = new Set()) {
@@ -223,10 +250,14 @@
       }
       record.completedAt = Date.now();
       record.updatedAt = Date.now();
+      const latest = [...record.messages].reverse().find((message) => message.role === "assistant" && message.text && !toolActivityFromText(message.text));
+      publish(record, { kind: "settled", text: latest?.text || "", activity_text: "", in_progress: false });
     } catch (error) {
       record.error = bounded(error?.message || error, 500);
       record.completedAt = Date.now();
       record.updatedAt = Date.now();
+      const latest = [...record.messages].reverse().find((message) => message.role === "assistant" && message.text && !toolActivityFromText(message.text));
+      publish(record, { kind: "settled", text: latest?.text || "", activity_text: "", in_progress: false, error: record.error });
     }
   }
 

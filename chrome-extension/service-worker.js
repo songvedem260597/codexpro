@@ -54,6 +54,9 @@ const pendingConversationByTab = new Map();
 const chatAttachmentOwnershipByTab = new Map();
 const chatDomActivityByTab = new Map();
 const chatTabHealthByTab = new Map();
+const realtimeNetworkStreamsByTab = new Map();
+const pendingRealtimeStreamTabs = new Set();
+let realtimeStreamFlushTimer = null;
 let lastChatTabCleanupAt = 0;
 let chatTabCreationTail = Promise.resolve();
 let singleChatTabEnforcementTail = Promise.resolve();
@@ -656,6 +659,76 @@ function scheduleRealtimeProfilePush(delayMs=40) {
   },delayMs);
 }
 
+async function realtimeStreamProfileId() {
+  const stored=await chrome.storage.local.get(['profileId','workerEnabled']);
+  if(stored.workerEnabled===false)return '';
+  const profileId=String(stored.profileId||crypto.randomUUID());
+  if(!stored.profileId)await chrome.storage.local.set({profileId});
+  return profileId;
+}
+
+function scheduleRealtimeStreamPush(tabId) {
+  if(Number.isInteger(tabId))pendingRealtimeStreamTabs.add(tabId);
+  if(realtimeStreamFlushTimer)return;
+  realtimeStreamFlushTimer=setTimeout(()=>{
+    realtimeStreamFlushTimer=null;
+    void (async()=>{
+      const tabIds=[...pendingRealtimeStreamTabs];
+      pendingRealtimeStreamTabs.clear();
+      if(!tabIds.length)return;
+      try{
+        const profileId=await realtimeStreamProfileId();
+        if(!profileId)return;
+        const streams=tabIds.map(id=>realtimeNetworkStreamsByTab.get(id)).filter(Boolean);
+        if(!streams.length)return;
+        await fetch(`${BRIDGE}/stream`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile_id:profileId,streams})});
+      }catch{}
+    })();
+  },40);
+}
+
+function applyRealtimeNetworkStreamEvent(tabId,event,tab={}) {
+  if(!Number.isInteger(tabId)||!event||typeof event!=='object')return;
+  const recordId=Math.max(0,Number(event.record_id)||0);
+  const revision=Math.max(0,Number(event.revision)||0);
+  if(!recordId||!revision)return;
+  const previous=realtimeNetworkStreamsByTab.get(tabId);
+  if(previous&&previous.record_id===recordId&&revision<=previous.revision)return;
+  const conversationId=String(event.conversation_id||conversationIdFromUrl(tab.url)||previous?.conversation_id||'').slice(0,180);
+  const next=previous&&previous.record_id===recordId?{...previous}:{tab_id:tabId,record_id:recordId,conversation_id:conversationId,text:'',revision:0,event_count:0,in_progress:true,updated_at:'',error:'',activity_text:'',url:String(tab.url||''),active:Boolean(tab.active)};
+  next.conversation_id=conversationId||next.conversation_id;
+  next.revision=revision;
+  next.event_count=Math.max(next.event_count||0,Number(event.event_count)||0);
+  next.updated_at=String(event.updated_at||new Date().toISOString());
+  next.in_progress=event.in_progress!==false;
+  next.error=String(event.error||'').slice(0,500);
+  next.url=String(tab.url||next.url||'');
+  next.active=Boolean(tab.active);
+  const kind=String(event.kind||'');
+  if(kind==='snapshot'||kind==='settled'){
+    next.text=String(event.text||'').slice(0,200000);
+    next.activity_text=String(event.activity_text||'').trim().slice(0,220);
+  }else if(kind==='activity'){
+    next.activity_text=String(event.activity_text||'').trim().slice(0,220);
+  }else if(kind==='delta'){
+    next.activity_text='';
+    const delta=String(event.delta||'');
+    const expectedLength=Math.max(0,Number(event.text_length)||0);
+    if(delta&&(!expectedLength||next.text.length+delta.length===expectedLength))next.text=`${next.text}${delta}`.slice(0,200000);
+    else if(expectedLength&&next.text.length!==expectedLength)scheduleRealtimeProfilePush(0);
+  }
+  realtimeNetworkStreamsByTab.set(tabId,next);
+  scheduleRealtimeStreamPush(tabId);
+}
+
+chrome.runtime.onMessage.addListener((message,sender)=>{
+  if(message?.type!=='codexpro-network-stream')return false;
+  const tabId=Number(sender?.tab?.id);
+  if(!Number.isInteger(tabId))return false;
+  applyRealtimeNetworkStreamEvent(tabId,message.event,sender.tab||{});
+  return false;
+});
+
 async function ensureChatAttachmentOwnershipLoaded() {
   if(chatAttachmentOwnershipLoaded)return;
   if(chatAttachmentOwnershipLoadPromise)return await chatAttachmentOwnershipLoadPromise;
@@ -723,7 +796,7 @@ chrome.webRequest.onBeforeRequest.addListener(details=>{const attributed=attribu
 chrome.webRequest.onCompleted.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'completed',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onErrorOccurred.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'failed',0,details.error);finishChatRequest(attributed,'failed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onBeforeRedirect.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'redirected',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
-chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatTabHealthByTab.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();scheduleRealtimeProfilePush(0);});
+chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatTabHealthByTab.delete(tabId);realtimeNetworkStreamsByTab.delete(tabId);pendingRealtimeStreamTabs.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();scheduleRealtimeProfilePush(0);});
 chrome.tabs.onCreated.addListener(tab=>{if(isChatGptTabUrl(tab?.pendingUrl||tab?.url))void enforceSingleChatTabSoon().catch(()=>{});});
 
 function chatNavigationSupersedesNetworkState(current,nextUrl) {
@@ -981,6 +1054,8 @@ async function tabList() {
       }
     }
     const networkStream=conversationId&&networkState.network_state!=='idle'?await chatNetworkStreamCapture(tab.id,conversationId):{};
+    const realtimeStream=realtimeNetworkStreamsByTab.get(tab.id);
+    const realtimeStreamCurrent=Boolean(realtimeStream&&(!conversationId||!realtimeStream.conversation_id||realtimeStream.conversation_id===conversationId));
     const titleOverride=conversationId?titleOverrides[conversationId]:null;
     const streamBusy=Boolean(networkStream.in_progress&&!domActivity.response_ready);
     const networkBusy=Boolean(networkState.busy||streamBusy);
@@ -1004,7 +1079,14 @@ async function tabList() {
       busy_since:networkState.busy_since||(canonicalBusy&&canonicalActivity.busy_since?new Date(canonicalActivity.busy_since).toISOString():''),
       busy_source:streamBusy?'network_stream':networkState.busy?'network':domImageBusy?'dom_image_generation':domToolBusy?'dom_tool':canonicalBusy?'canonical':domActivity.busy?domActivity.source:'',
       activity_text:hungAudit?'Tab bị treo · watchdog đã dừng retry':streamBusy?(streamActivity||'Codex Pro đang sử dụng công cụ'):domImageBusy?domActivity.activity_text:domToolBusy?domActivity.activity_text:canonicalBusy?'ChatGPT đang tiếp tục xử lý':domActivity.busy?domActivity.activity_text:'',
-      network_stream_in_progress:streamBusy,
+      network_stream_in_progress:realtimeStreamCurrent?Boolean(realtimeStream.in_progress):streamBusy,
+      network_stream_text:String(realtimeStreamCurrent?realtimeStream.text||'':networkStream.text||'').slice(0,200000),
+      network_stream_revision:realtimeStreamCurrent?Math.max(0,Number(realtimeStream.revision)||0):Math.max(0,Number(networkStream.event_count)||0),
+      network_stream_record_id:realtimeStreamCurrent?Math.max(0,Number(realtimeStream.record_id)||0):0,
+      network_stream_event_count:realtimeStreamCurrent?Math.max(0,Number(realtimeStream.event_count)||0):Math.max(0,Number(networkStream.event_count)||0),
+      network_stream_updated_at:String(realtimeStreamCurrent?realtimeStream.updated_at||'':networkStream.updated_at||''),
+      network_stream_error:String(realtimeStreamCurrent?realtimeStream.error||'':networkStream.error||''),
+      network_stream_activity_text:streamActivity,
       dom_busy:domActivity.busy,
       image_generation_in_progress:Boolean(domActivity.image_generation_in_progress),
       image_response_ready:Boolean(domActivity.image_response_ready),

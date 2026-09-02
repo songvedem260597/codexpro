@@ -22,7 +22,7 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
-import { ensureBrowserExtensionBridge, getBrowserExtensionProfilePendingTask, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionProfilePendingTask, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles, subscribeBrowserExtensionStreams } from "./browserExtensionBridge.js";
 
 const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
 const RUNTIME_STARTED_AT = new Date().toISOString();
@@ -1887,6 +1887,10 @@ async function main(): Promise<void> {
     };
     send();
     const unsubscribe = subscribeBrowserExtensionProfiles(send);
+    const unsubscribeStreams = subscribeBrowserExtensionStreams((updates) => {
+      if (res.writableEnded || !updates.length) return;
+      res.write(`event: browser-stream\ndata: ${JSON.stringify({ type: "browser-stream", updates })}\n\n`);
+    });
     const heartbeat = setInterval(() => {
       if (!res.writableEnded) res.write(`: heartbeat ${Date.now()}\n\n`);
     }, 15_000);
@@ -1894,6 +1898,7 @@ async function main(): Promise<void> {
     req.on("close", () => {
       clearInterval(heartbeat);
       unsubscribe();
+      unsubscribeStreams();
     });
   });
 
