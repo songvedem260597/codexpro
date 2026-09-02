@@ -4,6 +4,7 @@ import fs from "node:fs";
 const renderer = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const managerMain = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
+const borderSync = fs.readFileSync(new URL("../src/worker-border-sync.js", import.meta.url), "utf8");
 
 assert.match(managerMain, /workingBorderStyle:\s*"shine"/, "the existing rotating shine must remain the default");
 assert.match(managerMain, /MANAGER_WORKING_BORDER_STYLES\s*=\s*new Set\(\["shine",\s*"beam"\]\)/, "Manager settings must accept both border styles");
@@ -30,6 +31,9 @@ assert.doesNotMatch(styles, /\.chat-response\.is-sending(?:\s*,|\s*\{)[^}]*borde
 assert.doesNotMatch(styles, /\.chat-response\.is-sending::before/, "pre-ACK sending must not own the animated border paint layer");
 assert.match(styles, /working-border-beam[\s\S]*?mask:[\s\S]*?offset-path:\s*rect\(/, "Border Beam must be clipped to the card ring and follow its perimeter");
 assert.match(styles, /width:\s*44px[\s\S]*?animation:\s*worker-border-beam-move\s+4\.4s/, "worker Border Beam must use the compact segment and gentle speed");
+assert.match(borderSync, /profile-border-shine[\s\S]*worker-border-beam-move/, "both worker border animation styles must participate in synchronization");
+assert.match(borderSync, /animation\.startTime\s*!==\s*0[\s\S]*animation\.startTime\s*=\s*0/, "worker border animations must share the document timeline epoch instead of their individual start times");
+assert.match(renderer, /synchronizeWorkerBorderAnimations\(document\)/, "the overview must resynchronize working borders whenever worker state changes");
 assert.match(styles, /\.profile-list\.working-border-beam \.browser-profile\.is-working\s*\{[^}]*border-color:\s*#3c4655;[^}]*box-shadow:[^}]*#4b5769/, "Border Beam must replace the static orange card border with a neutral slate ring");
 assert.match(styles, /\.profile-list\.working-border-beam\.is-card-layout \.browser-profile\.is-working\s*\{[^}]*box-shadow:\s*none/, "card layout Border Beam must not restore the removed top status edge");
 assert.match(styles, /prefers-reduced-motion:\s*reduce[\s\S]*?worker-active-border::before[\s\S]*?animation:\s*none/, "Border Beam must honor reduced-motion preferences");
