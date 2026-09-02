@@ -333,7 +333,9 @@ assert.ok(sendBlock.indexOf("if(conversationLimit.reached)") < sendBlock.indexOf
 assert.doesNotMatch(sendBlock, /chrome\.tabs\.update\(tab\.id,\{active:true\}\)/, "background send must not activate the target tab");
 assert.doesNotMatch(sendBlock, /restorePreviouslyActiveTab/, "background send must not need to restore tabs because it never activates them");
 assert.match(sendBlock, /SEND_UNCERTAIN:/);
-assert.match(sendBlock, /shouldUseTrustedClickFallback\(attemptState\?\.result,earlyEvidence\)/, "fallback must require an owned draft and no submit lifecycle evidence");
+assert.match(sendBlock, /rebindMissingConversationTab/, "an uncertain send must be able to rebind to a replacement tab for the same conversation");
+assert.match(sendBlock, /rebound_network_ack_ms/, "a rebound tab must get one bounded generation-ACK observation before the send is reported uncertain");
+assert.match(sendBlock, /shouldUseTrustedClickFallback\(attemptState\?\.result,earlyEvidence\)/, "fallback must require an owned draft and no authoritative submission ACK");
 assert.match(sendBlock, /trustedSubmitError\.startsWith\(attachmentSubmit\?'ATTACHMENT_DOM_CLICK_PRE_DISPATCH:':'TRUSTED_ENTER_PRE_DISPATCH:'\)/, "each submit mechanism must recognize its definitely-unsent pre-dispatch failure");
 assert.match(sendBlock, /definitelyNotDispatched&&!attachmentSubmit&&remainingCommandMs\(\)>1500/, "an expired pre-dispatch attempt must not start a late click fallback");
 assert.match(sendBlock, /trusted-enter-pre-dispatch','trusted-click-fallback'/, "a definitely-unsent focus failure may use one trusted-click fallback");
@@ -415,10 +417,15 @@ assert.match(trustedKeySource, /Emulation\.setFocusEmulationEnabled/, "generic t
 
 const evidenceSource = extractFunction("isChatSubmitLifecycleEvidence");
 const isChatSubmitLifecycleEvidence = Function(`${evidenceSource}; return isChatSubmitLifecycleEvidence;`)();
+const submissionAckSource = extractFunction("isChatSubmissionAckEvidence");
+const isChatSubmissionAckEvidence = Function(`${submissionAckSource}; return isChatSubmissionAckEvidence;`)();
+assert.equal(isChatSubmissionAckEvidence({ endpoint: "/backend-api/f/conversation/prepare", matched_generation: false }), false, "conversation prepare is pre-submit lifecycle, not submission ACK");
+assert.equal(isChatSubmissionAckEvidence({ endpoint: "/backend-api/f/conversation", matched_generation: true }), true, "generation endpoint remains authoritative submission ACK");
 const fallbackSource = extractFunction("shouldUseTrustedClickFallback");
-const shouldUseTrustedClickFallback = Function(`${evidenceSource}; ${fallbackSource}; return shouldUseTrustedClickFallback;`)();
+const shouldUseTrustedClickFallback = Function(`${submissionAckSource}; ${fallbackSource}; return shouldUseTrustedClickFallback;`)();
 assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, []), true, "unchanged owned draft with no network activity can use click fallback");
-assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, [{ endpoint: "/backend-api/sentinel/chat-requirements", matched_generation: false }]), false, "Sentinel activity blocks a duplicate fallback");
+assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, [{ endpoint: "/backend-api/sentinel/chat-requirements/prepare", matched_generation: false }]), true, "pre-submit Sentinel activity must not block a safe fallback while the owned draft is still present");
+assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, [{ endpoint: "/backend-api/f/conversation/prepare", matched_generation: false }]), true, "conversation prepare activity must not be mistaken for a generation ACK");
 assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, [{ endpoint: "/backend-api/f/conversation", matched_generation: true }]), false, "generation ACK blocks duplicate fallback");
 assert.equal(shouldUseTrustedClickFallback({ draft_owned: false, draft_present: true }, []), false, "a React-replaced/unowned composer cannot be clicked as fallback");
 assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: false }, []), false, "a consumed draft cannot be retried");

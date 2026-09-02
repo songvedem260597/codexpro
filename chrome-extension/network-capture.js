@@ -18,7 +18,8 @@
   const isGenerationEndpoint = (url, method) => {
     if (String(method || "GET").toUpperCase() !== "POST") return false;
     const endpoint = endpointOf(url);
-    return /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|(?:codex\/)?responses)(?:\/|$)/.test(endpoint);
+    return /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|steer_turn)$/.test(endpoint)
+      || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(endpoint);
   };
   const sourceHeadlessLock = () => {
     const root = globalThis.document?.documentElement;
