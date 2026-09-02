@@ -34,7 +34,8 @@
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
     "test:icon": "node scripts/icon-asset-smoke.mjs",
-    "dist": "npm run build && electron-builder --win nsis --x64",
+    "publish:artifacts": "node ../scripts/publish-manager-artifacts.mjs",
+    "dist": "npm run build && electron-builder --win nsis --x64 && npm run publish:artifacts",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
