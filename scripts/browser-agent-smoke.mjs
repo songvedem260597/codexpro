@@ -557,10 +557,11 @@ assert.match(bridge, /const connectorInstalled = profile\.connectorInstalled && 
 assert.match(bridge, /CodexPro đang gọi tool qua connector cũ chưa gắn đúng profile/, "profile summaries must explain activity from an old unbound connector");
 assert.match(bridge, /function pruneExpiredProfiles/);
 assert.match(bridge, /profileWorkspaceRoots\.delete\(id\)[\s\S]*?profileWorkspaceBindings\.delete\(id\)/, "expired extension profiles must release workspace maps");
-assert.match(bridge, /const visibleProfiles = \[\.\.\.state\.profiles\.values\(\)\][\s\S]*?now - profile\.lastSeen <= PROFILE_TTL_MS/, "profiles without a live heartbeat must disappear from the Manager list instead of remaining as disconnected cards");
-assert.match(bridge, /function scheduleProfileExpiryNotification[\s\S]*?profile\.lastSeen \+ PROFILE_TTL_MS[\s\S]*?scheduleProfileNotification\(state\)/, "the bridge must publish a profile-list update as soon as the heartbeat grace period expires");
-assert.match(bridge, /if \(state\.activeProfileId && !visibleProfiles\.some[\s\S]*?state\.activeProfileId = undefined/, "an expired active profile must release active ownership when it disappears from the UI");
-assert.doesNotMatch(bridge, /connected: now - profile\.lastSeen <= PROFILE_TTL_MS/, "the Manager must not receive retained-but-disconnected profile records");
+assert.match(bridge, /const visibleProfiles = \[\.\.\.state\.profiles\.values\(\)\][\s\S]*?browserProfileRetentionState\(profile, now\)\.visible/, "profiles must remain visible during the bounded retention window even after heartbeat loss");
+assert.match(bridge, /function scheduleProfileExpiryNotification[\s\S]*?browserProfileRetentionState\(profile, now\)\.nextTransitionAt[\s\S]*?scheduleProfileNotification\(state\)/, "the bridge must publish profile-list updates at connected and retained-state transitions");
+assert.match(bridge, /if \(state\.activeProfileId && !visibleProfiles\.some[\s\S]*?browserProfileRetentionState\(profile, now\)\.connected[\s\S]*?state\.activeProfileId = undefined/, "a disconnected active profile must release active ownership while its retained card remains visible");
+assert.match(bridge, /connected: browserProfileRetentionState\(profile, now\)\.connected/, "the Manager must receive retained profiles with an explicit disconnected state");
+assert.match(bridge, /browser-profiles\.json[\s\S]*?loadBrowserProfileRegistry\(state\)/, "browser profile metadata must survive runtime restarts through the persisted registry");
 assert.match(bridge, /const PROFILE_RECONNECT_WAIT_MS = 45_000/, "a retained Chrome profile must get a bounded reconnect window");
 assert.match(bridge, /const waitingForReconnect = Date\.now\(\) - profile\.lastSeen > PROFILE_TTL_MS/, "a stale heartbeat must enter reconnect mode instead of being rejected immediately");
 assert.match(bridge, /function markCommandDispatched[\s\S]*?pending\.waitingForReconnect = false[\s\S]*?pending\.timeoutMs/, "a reconnected profile must receive the full action timeout after command dispatch");
@@ -766,7 +767,7 @@ assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
 assert.match(worker, /if\(domActivity\.busy\)\{[\s\S]*?probeCanonicalActivity\(tab\.id,targetConversationId,true\)[\s\S]*?canonicalCompleted[\s\S]*?send_preflight_canonical/, "send preflight must clear a stale DOM busy guard when canonical proves the previous turn completed");
-assert.equal(manifest.version, "0.5.97");
+assert.equal(manifest.version, "0.5.105");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
@@ -794,7 +795,7 @@ assert.doesNotMatch(popupHtml + popupJs, /CÀI LẠI \/ KIỂM TRA LẠI/, "the 
 assert.match(popupHtml, /id="workerToggle"[\s\S]*?role="switch"/, "the popup must expose an accessible worker connection toggle");
 assert.match(popupJs, /workerEnabled[\s\S]*?BRIDGE}\/register[\s\S]*?enabled:false/, "disabling a worker must immediately publish a hidden profile state to the Bridge");
 assert.match(worker, /if\(!profile\.enabled\)[\s\S]*?setTimeout\(resolve,2000\)[\s\S]*?continue/, "a disabled extension must stop polling the Bridge");
-assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && now - profile\.lastSeen <= PROFILE_TTL_MS/, "disabled profiles must be retained internally but excluded from the connected worker list");
+assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && browserProfileRetentionState\(profile, now\)\.visible/, "disabled profiles must be retained internally but excluded from the visible worker list");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.extension_version\)/, "worker update must wait for a heartbeat confirming the new extension version");
 assert.match(managerMain, /profile\.connector_update_required \|\| profile\.connector_profile_bound === false[\s\S]*?action: "setup_chatgpt"[\s\S]*?profile\.connector_installed && profile\.connector_profile_bound/, "Manager send preflight must rebind an old connector before dispatching a task");

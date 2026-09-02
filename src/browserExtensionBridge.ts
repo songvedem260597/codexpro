@@ -12,8 +12,8 @@ const configuredBridgePort = Number(process.env.CODEXPRO_BROWSER_EXTENSION_BRIDG
 export const BROWSER_EXTENSION_BRIDGE_PORT = Number.isInteger(configuredBridgePort) && configuredBridgePort > 0 && configuredBridgePort <= 65_535
   ? configuredBridgePort
   : 9224;
-const PROFILE_TTL_MS = 45_000;
-const PROFILE_RETENTION_MS = 10 * 60_000;
+const PROFILE_TTL_MS = 3 * 60_000;
+const PROFILE_RETENTION_MS = 24 * 60 * 60_000;
 const PROFILE_RECONNECT_WAIT_MS = 45_000;
 const COMMAND_TIMEOUT_MS = 25_000;
 const CHECK_COMMAND_TIMEOUT_MS = 60_000;
@@ -29,6 +29,65 @@ const PROFILE_TASK_EVENT_LOG_MAX_BYTES = 2 * 1024 * 1024;
 const PROFILE_TASK_EVENT_THROTTLE_MS = 30_000;
 const FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES = 8 * 1024 * 1024;
 const MAX_PROFILE_FLIGHT_RECORDER_INCIDENTS = 60;
+
+const PROFILE_REGISTRY_VERSION = 1;
+const PROFILE_REGISTRY_WRITE_INTERVAL_MS = 30_000;
+
+export interface BrowserProfilePersistenceRecord {
+  id: string;
+  enabled: boolean;
+  enabledUpdatedAt: number;
+  email: string;
+  label: string;
+  extensionVersion: string;
+  connectorInstalled: boolean;
+  connectorMessage: string;
+  connectorCheckedAt: string;
+  connectorServerFingerprint: string;
+  workspaceRoot: string;
+  lastSeen: number;
+}
+
+export function browserProfileRetentionState(
+  profile: { lastSeen?: number; restored?: boolean },
+  now = Date.now()
+): { connected: boolean; visible: boolean; nextTransitionAt: number | null } {
+  const lastSeen = Math.max(0, Number(profile?.lastSeen) || 0);
+  const ageMs = Math.max(0, Number(now) - lastSeen);
+  const connected = profile?.restored !== true && ageMs <= PROFILE_TTL_MS;
+  const visible = ageMs <= PROFILE_RETENTION_MS;
+  const nextTransitionAt = connected
+    ? lastSeen + PROFILE_TTL_MS
+    : visible
+      ? lastSeen + PROFILE_RETENTION_MS
+      : null;
+  return { connected, visible, nextTransitionAt };
+}
+
+export function browserProfilePersistenceSnapshot(
+  profiles: Iterable<BrowserProfilePersistenceRecord>,
+  now = Date.now()
+): { version: number; saved_at: string; profiles: BrowserProfilePersistenceRecord[] } {
+  const retained = [...profiles]
+    .filter((profile) => browserProfileRetentionState(profile, now).visible)
+    .map((profile) => ({
+      id: String(profile.id || "").slice(0, 160),
+      enabled: profile.enabled !== false,
+      enabledUpdatedAt: Math.max(0, Number(profile.enabledUpdatedAt) || 0),
+      email: String(profile.email || "").slice(0, 320),
+      label: String(profile.label || "").slice(0, 320),
+      extensionVersion: String(profile.extensionVersion || "").slice(0, 32),
+      connectorInstalled: profile.connectorInstalled === true,
+      connectorMessage: String(profile.connectorMessage || "").slice(0, 500),
+      connectorCheckedAt: String(profile.connectorCheckedAt || "").slice(0, 64),
+      connectorServerFingerprint: String(profile.connectorServerFingerprint || "").slice(0, 128),
+      workspaceRoot: String(profile.workspaceRoot || "").slice(0, 4_096),
+      lastSeen: Math.max(0, Number(profile.lastSeen) || 0)
+    }))
+    .filter((profile) => Boolean(profile.id))
+    .slice(0, 100);
+  return { version: PROFILE_REGISTRY_VERSION, saved_at: new Date(now).toISOString(), profiles: retained };
+}
 
 export interface ExtensionProfileSummary {
   profile_id: string;
@@ -208,6 +267,7 @@ export interface BrowserExtensionBridgeOptions {
 }
 
 interface ExtensionProfile {
+  restored?: boolean;
   id: string;
   enabled: boolean;
   enabledUpdatedAt: number;
@@ -246,6 +306,8 @@ interface PendingResult {
 }
 
 interface BridgeState {
+  profileRegistryTimer?: NodeJS.Timeout;
+  profileRegistryLastWrittenAt?: number;
   server: http.Server;
   profiles: Map<string, ExtensionProfile>;
   pending: Map<string, PendingResult>;
@@ -272,6 +334,60 @@ function browserProfileTaskStatePath(): string {
   const configuredHome = String(process.env.CODEXPRO_HOME || "").trim();
   const home = configuredHome ? path.resolve(configuredHome) : path.join(os.homedir(), ".codexpro");
   return path.join(home, "browser-profile-tasks.json");
+}
+
+function browserProfileRegistryPath(): string {
+  return path.join(path.dirname(browserProfileTaskStatePath()), "browser-profiles.json");
+}
+
+function persistBrowserProfileRegistry(state: BridgeState, now = Date.now()): void {
+  try {
+    const registryPath = browserProfileRegistryPath();
+    const temporaryPath = `${registryPath}.${process.pid}.tmp`;
+    fs.mkdirSync(path.dirname(registryPath), { recursive: true });
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(browserProfilePersistenceSnapshot(state.profiles.values(), now), null, 2)}\n`, "utf8");
+    fs.renameSync(temporaryPath, registryPath);
+    state.profileRegistryLastWrittenAt = now;
+  } catch {
+    // Profile retention is best-effort and must never make the bridge unavailable.
+  }
+}
+
+function scheduleBrowserProfileRegistryPersistence(state: BridgeState): void {
+  if (state.profileRegistryTimer) return;
+  const now = Date.now();
+  const delay = state.profileRegistryLastWrittenAt
+    ? Math.max(250, PROFILE_REGISTRY_WRITE_INTERVAL_MS - (now - state.profileRegistryLastWrittenAt))
+    : 250;
+  state.profileRegistryTimer = setTimeout(() => {
+    state.profileRegistryTimer = undefined;
+    persistBrowserProfileRegistry(state);
+  }, delay);
+  state.profileRegistryTimer.unref?.();
+}
+
+function loadBrowserProfileRegistry(state: BridgeState, now = Date.now()): void {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(browserProfileRegistryPath(), "utf8")) as {
+      version?: number;
+      profiles?: BrowserProfilePersistenceRecord[];
+    };
+    if (Number(parsed?.version) !== PROFILE_REGISTRY_VERSION || !Array.isArray(parsed?.profiles)) return;
+    for (const saved of browserProfilePersistenceSnapshot(parsed.profiles, now).profiles) {
+      const profile: ExtensionProfile = {
+        ...saved,
+        restored: true,
+        tabs: [],
+        recentConversations: [],
+        flightRecorderIncidents: [],
+        queued: []
+      };
+      state.profiles.set(profile.id, profile);
+      if (profile.workspaceRoot) profileWorkspaceRoots.set(profile.id, profile.workspaceRoot);
+    }
+  } catch {
+    // A missing or corrupt snapshot behaves like a clean first run.
+  }
 }
 
 function browserProfileTaskEventLogPath(): string {
@@ -524,8 +640,9 @@ function scheduleProfileExpiryNotification(state: BridgeState): void {
   state.profileExpiryTimer = undefined;
   const now = Date.now();
   const nextExpiry = [...state.profiles.values()]
-    .map((profile) => profile.lastSeen + PROFILE_TTL_MS)
-    .filter((expiresAt) => expiresAt > now)
+    .map((profile) => browserProfileRetentionState(profile, now).nextTransitionAt)
+    .filter((expiresAt): expiresAt is number => expiresAt != null)
+    .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > now)
     .sort((left, right) => left - right)[0];
   if (!Number.isFinite(nextExpiry)) return;
   state.profileExpiryTimer = setTimeout(() => {
@@ -661,6 +778,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     }
   }
   profile.lastSeen = Date.now();
+  profile.restored = false;
   if (Array.isArray(body.tabs)) profile.tabs = body.tabs.slice(0, 500);
   else if (Array.isArray(body.tab_inventory)) {
     const existingTabsById = new Map(
@@ -697,6 +815,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     }
   }
   state.profiles.set(id, profile);
+  scheduleBrowserProfileRegistryPersistence(state);
   scheduleProfileNotification(state);
   scheduleProfileExpiryNotification(state);
   return profile;
@@ -742,13 +861,16 @@ function markCommandDispatched(state: BridgeState, profile: ExtensionProfile, co
 }
 
 function pruneExpiredProfiles(state: BridgeState, now = Date.now()): void {
+  let removed = false;
   for (const [id, profile] of state.profiles) {
-    if (now - profile.lastSeen <= PROFILE_RETENTION_MS || profile.waiter || profile.queued.length) continue;
+    if (browserProfileRetentionState(profile, now).visible || profile.waiter || profile.queued.length) continue;
     state.profiles.delete(id);
+    removed = true;
     profileWorkspaceRoots.delete(id);
     profileWorkspaceBindings.delete(id);
     if (state.activeProfileId === id) state.activeProfileId = undefined;
   }
+  if (removed) scheduleBrowserProfileRegistryPersistence(state);
 }
 
 function deliver(state: BridgeState, profile: ExtensionProfile, command: BridgeCommand | null): boolean {
@@ -814,6 +936,8 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     }
     const { changed, updates } = mergeBrowserExtensionStreamBatch(profile.id, profile.tabs, body.streams);
     profile.lastSeen = Date.now();
+    profile.restored = false;
+    scheduleBrowserProfileRegistryPersistence(state);
     if (updates.length) {
       for (const listener of state.streamListeners) {
         try { listener(updates); } catch {}
@@ -922,6 +1046,8 @@ export function ensureBrowserExtensionBridge(options: BrowserExtensionBridgeOpti
   state.profileListeners = new Set();
   state.streamListeners = new Set();
   state.connectorInfo = options.connectorInfo;
+  loadBrowserProfileRegistry(state);
+  scheduleProfileExpiryNotification(state);
   state.server = http.createServer((req, res) => {
     handleRequest(state, req, res).catch((error) => {
       if (!res.headersSent) sendJson(req, res, 400, { error: error instanceof Error ? error.message : String(error) });
@@ -941,8 +1067,8 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
   const now = Date.now();
   pruneExpiredProfiles(state, now);
   const visibleProfiles = [...state.profiles.values()]
-    .filter((profile) => profile.enabled && now - profile.lastSeen <= PROFILE_TTL_MS);
-  if (state.activeProfileId && !visibleProfiles.some((profile) => profile.id === state.activeProfileId)) {
+    .filter((profile) => profile.enabled && browserProfileRetentionState(profile, now).visible);
+  if (state.activeProfileId && !visibleProfiles.some((profile) => profile.id === state.activeProfileId && browserProfileRetentionState(profile, now).connected)) {
     state.activeProfileId = undefined;
   }
   return visibleProfiles
@@ -1069,8 +1195,8 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       connector_checked_at: profile.connectorCheckedAt,
       connector_profile_bound: connectorProfileBound,
       connector_update_required: connectorUpdateRequired,
-      active: state.activeProfileId === profile.id,
-      connected: true,
+      active: browserProfileRetentionState(profile, now).connected && state.activeProfileId === profile.id,
+      connected: browserProfileRetentionState(profile, now).connected,
       last_seen: new Date(profile.lastSeen).toISOString(),
       tab_count: profile.tabs.length,
       chatgpt_tab_count: chatgptTabs.length,
@@ -1114,6 +1240,7 @@ export function setBrowserExtensionProfileWorkspace(profileId: string, root: str
   else profileWorkspaceRoots.delete(id);
   const profile = singleton?.profiles.get(id);
   if (profile) profile.workspaceRoot = workspaceRoot;
+  if (singleton) scheduleBrowserProfileRegistryPersistence(singleton);
   if (singleton) scheduleProfileNotification(singleton);
 }
 

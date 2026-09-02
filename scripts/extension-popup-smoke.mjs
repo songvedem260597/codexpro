@@ -24,7 +24,7 @@ assert.doesNotMatch(popupHtml + popupJs, /CÀI LẠI \/ KIỂM TRA LẠI/, "popu
 assert.match(popupJs, /workerEnabled[\s\S]*?BRIDGE}\/register[\s\S]*?enabled:false/, "disable must immediately publish a hidden profile state");
 assert.match(worker, /if\(!profile\.enabled\)[\s\S]*?setTimeout\(resolve,2000\)[\s\S]*?continue/, "disabled extension must stop polling the Bridge");
 assert.match(worker, /if\(!profile\.enabled\)return;[\s\S]*?BRIDGE}\/register/, "disabled extension must suppress realtime heartbeat pushes");
-assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && now - profile\.lastSeen <= PROFILE_TTL_MS/, "Bridge must exclude disabled profiles from connected workers");
+assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && browserProfileRetentionState\(profile, now\)\.visible/, "Bridge must retain disabled profile metadata but exclude disabled profiles from the visible worker list");
 assert.deepEqual(manifest.icons, {
   16: "icons/icon16.png",
   32: "icons/icon32.png",

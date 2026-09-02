@@ -2242,6 +2242,37 @@ async function waitForLongTaskRenderer(tabId,conversationId,timeoutMs=12000) {
   return {responsive:false,renderer_responsive:false,hard_failure:true,busy:Boolean(lastNetworkState.busy),response_ready:false,canonical_busy:false,canonical_response_ready:false,connection_interrupted:false,message_delivery_timed_out:false,network_busy:Boolean(lastNetworkState.busy),network_state:String(lastNetworkState.network_state||'idle'),network_error:String(lastNetworkState.network_error||''),activity_text:'',target_id:tabId,conversation_id:conversationId,error:lastError||lastNetworkState.network_error||'Chrome renderer không phản hồi sau thời gian chờ.'};
 }
 
+async function readUnopenedChatResponse(tabs,conversation,args={},expiresAt=0) {
+  const conversationId=String(conversation.id);
+  const source=tabs.find(tab=>tab.id&&tab.active&&isChatGptTabUrl(tab.url))||tabs.find(tab=>tab.id&&isChatGptTabUrl(tab.url));
+  if(!source)throw new Error('CHAT_TAB_MISSING: Profile chưa có tab ChatGPT để đọc lịch sử.');
+  const base={action:'get_chat_response',ok:true,conversation_id:conversationId,url:`https://chatgpt.com/c/${conversationId}`,title:String(conversation.title||''),
+    source_tab_id:source.id,tab_open:false,text:'',text_length:0,messages:[],message_count:0,total_message_count:0,truncated:false,
+    busy:false,incomplete:false,incomplete_reason:'',response_ready:false,dom_available:false,dom_skipped:true,dom_error:'',
+    canonical_available:false,network_stream_available:false,network_stream_in_progress:false,network_state:'idle',
+    response_source:'network_state',updated_at:new Date().toISOString()};
+  // A closed conversation has no live stream of its own. Never borrow the
+  // source tab's network/canonical state just because it shares the profile.
+  if(args.read_dom===false&&args.canonical_only!==true)return withResponseAudit(base);
+  const budget=expiresAt?Math.min(CANONICAL_READ_TIMEOUT_MS,expiresAt-Date.now()-1000):CANONICAL_READ_TIMEOUT_MS;
+  if(budget<=0)throw new Error('COMMAND_EXPIRED: Không còn thời gian đọc lịch sử ChatGPT.');
+  const [injected]=await promiseWithTimeout(
+    chrome.scripting.executeScript({target:{tabId:source.id},world:'MAIN',func:readCanonicalConversationPage,args:[conversationId]}),
+    budget,'CHAT_HISTORY_TIMEOUT: ChatGPT không phản hồi khi đọc lịch sử; không điều hướng tab đang mở.'
+  );
+  const canonical=injected?.result;
+  if(!canonical?.ok)throw new Error(`CHAT_HISTORY_UNAVAILABLE: ${String(canonical?.error||'Không đọc được lịch sử ChatGPT.').slice(0,500)}`);
+  const messages=Array.isArray(canonical.messages)?canonical.messages:[];
+  const latestAssistant=messages.findLast(message=>message.role==='assistant');
+  const text=String(canonical.text||'');
+  return withResponseAudit({...base,text,text_length:text.length,messages,total_message_count:messages.length,
+    message_count:messages.filter(message=>message.role==='assistant').length,truncated:Boolean(latestAssistant?.truncated),
+    busy:Boolean(canonical.busy),incomplete:Boolean(canonical.busy),incomplete_reason:canonical.busy?'canonical_generation_in_progress':'',
+    canonical_available:true,canonical_error:'',canonical_busy:Boolean(canonical.busy),canonical_observed:true,
+    canonical_response_ready:Boolean(canonical.response_ready&&!canonical.busy),response_ready:Boolean(canonical.response_ready&&!canonical.busy),response_source:'canonical_api'
+  },{canonical});
+}
+
 async function execute(command) {
   const {action,args={}}=command;
   const commandExpiresAt=Number(command?.expires_at_ms)||0;
@@ -2748,7 +2779,12 @@ if(action==='rename_chat'){
     if(!tab){
       const recent=await recentConversationList(3);
       if(!recent.some(conversation=>conversation.id===conversationId))throw new Error('Đoạn chat không còn thuộc 3 chat gần nhất của profile này.');
-      tab=await createChatGptTab({url:`https://chatgpt.com/c/${conversationId}`,active:false},'get_chat_response');await waitForTab(tab.id,45000);tab=await chrome.tabs.get(tab.id);
+      const conversation=recent.find(conversation=>conversation.id===conversationId);
+      addResponsePhaseTiming('find_tab_ms',findTabStartedAt);
+      const canonicalStartedAt=Date.now();
+      const response=await readUnopenedChatResponse(tabs,conversation,args,commandExpiresAt);
+      addResponsePhaseTiming('unopened_chat_read_ms',canonicalStartedAt);
+      return {...response,...responseTimingPayload()};
     }
     if(!tab?.id)throw new Error('Không mở được đoạn chat cần đọc phản hồi.');
     addResponsePhaseTiming('find_tab_ms',findTabStartedAt);
@@ -3098,15 +3134,26 @@ async function connectorInfo(profile) {
 }
 
 async function waitForTab(tabId, timeoutMs=30000) {
-  const current = await chrome.tabs.get(tabId);
-  if (current.status === 'complete') return current;
   return await new Promise((resolve,reject) => {
-    const timer=setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error('ChatGPT tải quá lâu.')); },timeoutMs);
+    let settled=false;
+    const finish=(error,tab)=>{
+      if(settled)return;
+      settled=true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      chrome.tabs.onRemoved.removeListener(removed);
+      if(error)reject(error);else resolve(tab);
+    };
     const listener=(updatedId,changeInfo,tab) => {
       if(updatedId!==tabId||changeInfo.status!=='complete')return;
-      clearTimeout(timer);chrome.tabs.onUpdated.removeListener(listener);resolve(tab);
+      finish(null,tab);
     };
+    const removed=removedId=>{if(removedId===tabId)finish(new Error('CHAT_TAB_CLOSED: Tab ChatGPT đã đóng khi đang tải.'));};
+    const timer=setTimeout(()=>finish(new Error('ChatGPT tải quá lâu.')),timeoutMs);
+    // Subscribe first: completion may arrive while tabs.get is still pending.
     chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.onRemoved.addListener(removed);
+    chrome.tabs.get(tabId).then(tab=>{if(tab.status==='complete')finish(null,tab);},error=>finish(error));
   });
 }
 
