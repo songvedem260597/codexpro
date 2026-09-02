@@ -1683,9 +1683,36 @@ function createWindow() {
         const bridge = await win.webContents.executeJavaScript("typeof window.codexpro", true);
         if (bridge !== "object") throw new Error(`Preload bridge unavailable: ${bridge}`);
         const status = await win.webContents.executeJavaScript("window.codexpro.getStatus().then((value) => JSON.parse(JSON.stringify(value)))", true);
-        if (Array.isArray(status?.browserProfiles) && status.browserProfiles.length) {
-          win.webContents.send("codexpro:browser-profiles", { checked_at: status.checkedAt, profiles: status.browserProfiles });
+        let smokeBrowserProfiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+        if (process.env.CODEXPRO_MANAGER_SMOKE_FLIGHT_RECORDER === "1") {
+          const baseProfile = smokeBrowserProfiles[0] || {
+            profile_id: "flight-recorder-ui-smoke",
+            email: "flight-recorder-smoke@local.invalid",
+            label: "Flight Recorder Smoke",
+            extension_version: "0.0.0-smoke",
+            connected: true,
+            connector_installed: true,
+            connector_profile_bound: true,
+            activity: "idle",
+            tab_count: 1,
+            chatgpt_tab_count: 1,
+            conversation_tabs: []
+          };
+          smokeBrowserProfiles = [{
+            ...baseProfile,
+            flight_recorder_incident_count: 3,
+            flight_recorder_latest_at: new Date().toISOString(),
+            flight_recorder_latest_kind: "Runtime.exceptionThrown",
+            flight_recorder_latest_message: "Synthetic renderer exception for Manager visual smoke"
+          }, ...smokeBrowserProfiles.slice(1)];
+        }
+        if (smokeBrowserProfiles.length) {
+          win.webContents.send("codexpro:browser-profiles", { checked_at: status.checkedAt, profiles: smokeBrowserProfiles });
           await new Promise((resolve) => setTimeout(resolve, 350));
+        }
+        if (process.env.CODEXPRO_MANAGER_SMOKE_FLIGHT_RECORDER === "1") {
+          const recorderVisible = await win.webContents.executeJavaScript(`(() => [...document.querySelectorAll('.profile-meta .profile-warning')].some((item) => /Recorder 3 sự cố/.test(item.textContent || '')))()`, true);
+          if (!recorderVisible) throw new Error("Flight recorder smoke badge did not render in the Manager profile card.");
         }
         const projects = await win.webContents.executeJavaScript("window.codexpro.listProjects().then((value) => JSON.parse(JSON.stringify(value)))", true);
         if (controlSmokeMode) {
@@ -2494,6 +2521,10 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         } else if (process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT_FONT_ROLES === "1") {
           await win.webContents.executeJavaScript("document.querySelector('.font-role-grid')?.closest('.settings-panel')?.scrollIntoView({ block: 'start' })", true);
           await new Promise((resolve) => setTimeout(resolve, 180));
+        }
+        if (process.env.CODEXPRO_MANAGER_SMOKE_FLIGHT_RECORDER === "1" && smokeBrowserProfiles.length) {
+          win.webContents.send("codexpro:browser-profiles", { checked_at: status.checkedAt, profiles: smokeBrowserProfiles });
+          await new Promise((resolve) => setTimeout(resolve, 220));
         }
         const smokeScrollSelector = String(process.env.CODEXPRO_MANAGER_SMOKE_SCROLL_SELECTOR || "").trim();
         if (smokeScrollSelector) {

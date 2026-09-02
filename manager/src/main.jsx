@@ -4867,6 +4867,10 @@ function App() {
                 headlessSourceDirectory ? `Thư mục: ${headlessSourceDirectory}` : "",
                 profile.source_profile_id ? `Profile ID: ${profile.source_profile_id}` : ""
               ].filter(Boolean).join(" · ");
+              const flightRecorderCount = Math.max(0, Number(profile.flight_recorder_incident_count) || 0);
+              const flightRecorderKind = String(profile.flight_recorder_latest_kind || "").trim();
+              const flightRecorderMessage = String(profile.flight_recorder_latest_message || "").trim();
+              const flightRecorderAt = String(profile.flight_recorder_latest_at || "").trim();
               return (
                 <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`} key={profile.profile_id}>
                   <span className="worker-active-border" aria-hidden="true" />
@@ -4904,6 +4908,7 @@ function App() {
                           {headlessSourceDirectory && headlessSourceDirectory !== headlessSourceLabel && <code>{headlessSourceDirectory}</code>}
                         </span>
                       )}
+                      {flightRecorderCount > 0 && <span className="profile-warning" title={[flightRecorderKind, flightRecorderMessage, flightRecorderAt].filter(Boolean).join(" · ")}>Recorder {flightRecorderCount} sự cố{flightRecorderKind ? ` · ${flightRecorderKind}` : ""}</span>}
                       {connectorMessage && <span className={connectorInstalled ? "ready-text" : "profile-warning"}>{connectorMessage}</span>}
                     </div>
                     {profileTaskLabel && (
