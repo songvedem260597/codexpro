@@ -69,6 +69,9 @@ app.whenReady().then(async () => {
     if (!first.webkitMaskComposite || first.webkitMaskComposite === "source-over") {
       throw new Error(`Working border WebKit mask ring is not active: ${first.webkitMaskComposite}`);
     }
+    if (!first.maskComposite || /add|source-over/i.test(first.maskComposite)) {
+      throw new Error(`Working border standard mask ring is not active: ${first.maskComposite}`);
+    }
     if (first.angle && second.angle && first.angle === second.angle) {
       throw new Error(`Registered angle did not interpolate at runtime: ${first.angle}`);
     }
