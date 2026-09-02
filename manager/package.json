@@ -33,6 +33,7 @@
     "test:dropdowns": "node scripts/app-dropdown-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
+    "test:return-shortcut": "node scripts/return-to-manager-shortcut-smoke.mjs && electron scripts/return-to-manager-shortcut-electron-smoke.cjs",
     "test:icon": "node scripts/icon-asset-smoke.mjs",
     "publish:artifacts": "node ../scripts/publish-manager-artifacts.mjs",
     "dist": "npm run build && electron-builder --win nsis --x64 && npm run publish:artifacts",
