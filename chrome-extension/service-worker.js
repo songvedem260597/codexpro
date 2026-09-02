@@ -3210,6 +3210,8 @@ function bridgeErrorEnvelope(error,command) {
 }
 
 async function postResult(profile,command,result,error) {
+  // A check/setup may have changed connectorInstall while this command ran.
+  profile=await profileInfo();
   const response=await fetch(`${BRIDGE}/result`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,command_id:command.id,result,error:error?bridgeErrorEnvelope(error,command):undefined})});
   if(!response.ok)throw new Error(`CodexPro bridge từ chối kết quả ${command?.action||'action'}: HTTP ${response.status}`);
 }
@@ -3354,11 +3356,15 @@ async function openChatGpt(url) {
   return loaded;
 }
 
-async function sendPageMessage(tabId,message,timeoutMs=DOM_ACTION_TIMEOUT_MS) {
-  try{return await promiseWithTimeout(chrome.tabs.sendMessage(tabId,message),timeoutMs,'ChatGPT UI không phản hồi message của CodexPro.');}
+async function sendPageMessage(tabId,message,timeoutMs=DOM_ACTION_TIMEOUT_MS,deadlineAt=0) {
+  const budget=max=>{const remaining=deadlineAt?deadlineAt-Date.now():max;if(remaining<=0)throw new Error('Hết thời gian xác minh CodexPro.');return Math.min(max,remaining);};
+  const firstBudget=budget(timeoutMs);
+  try{return await promiseWithTimeout(chrome.tabs.sendMessage(tabId,message),firstBudget,'ChatGPT UI không phản hồi message của CodexPro.');}
   catch{
-    await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId},files:['connector-installer.js']}),DOM_ACTION_TIMEOUT_MS,'Chrome renderer không phản hồi khi nạp connector installer.');
-    return await promiseWithTimeout(chrome.tabs.sendMessage(tabId,message),timeoutMs,'ChatGPT UI không phản hồi sau khi nạp connector installer.');
+    const reloadBudget=budget(DOM_ACTION_TIMEOUT_MS);
+    await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId},files:['connector-installer.js']}),reloadBudget,'Chrome renderer không phản hồi khi nạp connector installer.');
+    const retryBudget=budget(timeoutMs);
+    return await promiseWithTimeout(chrome.tabs.sendMessage(tabId,message),retryBudget,'ChatGPT UI không phản hồi sau khi nạp connector installer.');
   }
 }
 
@@ -3397,30 +3403,31 @@ async function probeConnectorEndpoint(serverUrl) {
   }finally{clearTimeout(timer);}
 }
 
-async function navigateInstallerTab(tabId,url) {
+async function navigateInstallerTab(tabId,url,deadlineAt=0) {
+  if(deadlineAt&&Date.now()>=deadlineAt)throw new Error('Hết thời gian xác minh CodexPro.');
   await chrome.tabs.update(tabId,{url,active:true});
-  await waitForTab(tabId,45000);
+  await waitForTab(tabId,deadlineAt?Math.max(1,Math.min(45000,deadlineAt-Date.now())):45000);
   await new Promise(resolve=>setTimeout(resolve,900));
 }
 
-async function openConnectorDetailPage() {
+async function openConnectorDetailPage(deadlineAt=0) {
   const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
   const visible=element=>{if(!(element instanceof Element))return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const normalizedValue=value=>String(value||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[đĐ]/g,'d').replace(/\s+/g,' ').trim().toLowerCase();
   const normalized=element=>normalizedValue(element?.innerText||element?.textContent||element?.getAttribute?.('aria-label')||'');
   const settingsRoot=()=>[...document.querySelectorAll('[role="dialog"],dialog')].filter(visible).find(dialog=>{const value=normalized(dialog);const settingsMarker=value.includes('settings')||value.includes('cai dat');const pluginMarker=value.includes('plugin')||value.includes('ung dung');return settingsMarker&&pluginMarker;})||null;
   const connectionMarker=value=>value.includes('connection')||value.includes('ket noi');
-  const detailReady=()=>{const root=settingsRoot();if(!root)return null;const value=normalized(root);return location.hash.toLowerCase().includes('/plugin_')||(value.includes('codexpro')&&connectionMarker(value))?root:null;};
+  const detailReady=()=>{const root=settingsRoot();if(!root)return null;const namedHeading=[...root.querySelectorAll('h1,h2,h3,[role="heading"]')].filter(visible).some(element=>normalized(element)==='codexpro');return namedHeading&&connectionMarker(normalized(root))?root:null;};
   const candidates=root=>root?[...root.querySelectorAll('button,a,[role="button"]')].filter(visible).filter(item=>{const value=normalized(item);return value==='codexpro'||value.startsWith('codexpro ');}):[];
   const pointerClick=element=>{if(!(element instanceof Element))return false;element.scrollIntoView({block:'center',inline:'center'});try{element.focus({preventScroll:true});}catch{}const rect=element.getBoundingClientRect(),clientX=rect.left+Math.max(1,rect.width/2),clientY=rect.top+Math.max(1,rect.height/2),base={bubbles:true,cancelable:true,composed:true,view:window,button:0,clientX,clientY};try{element.dispatchEvent(new PointerEvent('pointerdown',{...base,buttons:1,pointerId:1,pointerType:'mouse',isPrimary:true}));}catch{}try{element.dispatchEvent(new MouseEvent('mousedown',{...base,buttons:1}));}catch{}try{element.dispatchEvent(new PointerEvent('pointerup',{...base,buttons:0,pointerId:1,pointerType:'mouse',isPrimary:true}));}catch{}try{element.dispatchEvent(new MouseEvent('mouseup',{...base,buttons:0}));}catch{}try{element.dispatchEvent(new MouseEvent('click',{...base,buttons:0}));}catch{element.click();}return true;};
   if(detailReady())return {ok:true,already_open:true,url:location.href,language:String(document.documentElement.lang||'')};
-  const deadline=Date.now()+20000;
+  const deadline=Math.min(Date.now()+20000,deadlineAt||Infinity);
   let clickAttempts=0;
   while(Date.now()<deadline){
     const root=settingsRoot();
     const button=candidates(root)[0]||null;
     if(button){clickAttempts+=1;if(clickAttempts===1)button.click();else pointerClick(button);}
-    for(let attempt=0;attempt<10;attempt+=1){if(detailReady())return {ok:true,already_open:false,url:location.href};await sleep(150);}
+    for(let attempt=0;attempt<10&&Date.now()<deadline;attempt+=1){if(detailReady())return {ok:true,already_open:false,url:location.href};await sleep(150);}
   }
   const dialogs=[...document.querySelectorAll('[role="dialog"],dialog')].filter(visible);
   const root=settingsRoot();
@@ -3428,8 +3435,9 @@ async function openConnectorDetailPage() {
   return {ok:false,error:'Không mở được trang chi tiết CodexPro trong Settings.',diagnostic:{code:'SETTINGS_PLUGIN_DETAIL_NOT_FOUND',url:location.href,hash:location.hash,language:String(document.documentElement.lang||''),visible_dialog_count:dialogs.length,settings_root_found:Boolean(root),settings_marker:rootValue.includes('settings')?'settings':rootValue.includes('cai dat')?'cai_dat':'',plugin_marker:rootValue.includes('plugin')?'plugin':rootValue.includes('ung dung')?'ung_dung':'',connection_marker:connectionMarker(rootValue),codexpro_candidate_count:candidates(root).length,click_attempts:clickAttempts}};
 }
 
-async function ensureConnectorDetailTab(tabId) {
-  const [injected]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:openConnectorDetailPage}),30000,'Chrome renderer không phản hồi khi mở chi tiết CodexPro.');
+async function ensureConnectorDetailTab(tabId,deadlineAt=0) {
+  if(deadlineAt&&Date.now()>=deadlineAt)throw new Error('Hết thời gian xác minh CodexPro.');
+  const [injected]=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:openConnectorDetailPage,args:[deadlineAt]}),deadlineAt?Math.min(30000,deadlineAt-Date.now()):30000,'Chrome renderer không phản hồi khi mở chi tiết CodexPro.');
   if(!injected?.result?.ok){const evidence=JSON.stringify(injected?.result?.diagnostic||{}).slice(0,3000);throw new Error(`${injected?.result?.error||'Không mở được trang chi tiết CodexPro trong Settings.'} [CODEXPRO_SETUP_EVIDENCE ${evidence}]`);}
   return injected.result;
 }
@@ -3489,18 +3497,20 @@ async function installConnector() {
     await ensureConnectorDetailTab(tab.id);
     const connected=await sendPageMessage(tab.id,{type:'codexpro-connect-connector-definition'},60000);
     if(!connected?.ok)throw new Error(connected?.error || 'ChatGPT chưa hoàn tất Connection cho CodexPro.');
+    const verified=await sendPageMessage(tab.id,{type:'codexpro-check-connector-connection'},20000);
+    if(!verified?.ok||!verified.connected)throw new Error(verified?.message||verified?.error||'Chưa xác minh được Connection sau khi thêm CodexPro.');
 
     const probe=await probeConnectorEndpoint(connector.server_url);
     if(!probe.ok)throw new Error('Không xác minh được MCP endpoint của profile.');
 
     const workerId=result?.alreadyInstalled?String(profile.connector_install?.worker_id||''):String(connector.worker_id||'');
-    const saved={ok:true,message:'CodexPro READY',at:new Date().toISOString(),...(workerId?{worker_id:workerId}:{})};
+    const saved={ok:true,verification_state:'connected',message:'CodexPro READY',at:new Date().toISOString(),...(workerId?{worker_id:workerId}:{})};
     await chrome.storage.local.set({connectorInstall:saved,connectorServerFingerprint:fingerprint});
     await chrome.action.setBadgeBackgroundColor({color:'#39d98a'});
     await chrome.action.setBadgeText({text:'OK'});
     return saved;
   }catch(error){
-    const saved={ok:false,message:String(error?.message||error),at:new Date().toISOString()};
+    const saved={ok:false,verification_state:'unknown',message:String(error?.message||error),at:new Date().toISOString()};
     await chrome.storage.local.set({connectorInstall:saved});
     await chrome.action.setBadgeBackgroundColor({color:'#e5484d'});
     await chrome.action.setBadgeText({text:'!'});
@@ -3508,40 +3518,88 @@ async function installConnector() {
   }finally{installing=false;}
 }
 
+function probeConnectorCheckSafetyPage() {
+  const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
+  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+  if(!composer)return {safe:false};
+  const draft=String(composer.isContentEditable?composer.innerText:composer.value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim();
+  const root=composer.closest('form')||composer.closest('[data-type="unified-composer"]')||composer.parentElement;
+  const attachments=[...root.querySelectorAll('button[aria-label*="Remove file" i],button[aria-label*="Remove attachment" i],button[aria-label*="Xóa tệp" i],button[aria-label*="Xóa file" i]')].some(visible);
+  return {safe:!draft&&!attachments};
+}
+
+function connectorCheckOwnsUrl(value) {
+  try {
+    const url=new URL(String(value||''));
+    return url.origin==='https://chatgpt.com'&&(/^\/plugins(?:\/|$)/.test(url.pathname)||url.pathname==='/'&&/^#settings\/plugins(?:\/|$)/i.test(url.hash));
+  }catch{return false;}
+}
+
 async function checkConnectorInstalled() {
   const profile=await profileInfo();
-  const connector=await connectorInfo(profile);
+  const activity=await tabList();
+  if(installing||activity.some(tab=>tab.busy||tab.settling))return {ok:true,deferred:true,message:'Đợi ChatGPT rảnh để kiểm tra CodexPro.'};
   const tabLimit=await chatGptTabLimit();
   const [previousActive]=await chrome.tabs.query({active:true,currentWindow:true});
   const previousChatTabs=tabLimit===MAC_MAX_CHATGPT_TABS
     ? (await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(candidate=>Number.isInteger(candidate.id))
     : [];
   const previousChat=previousChatTabs.find(candidate=>candidate.active)||previousChatTabs[0]||null;
-  const tab=await createChatGptTab({url:connector.settings_url || 'https://chatgpt.com/plugins?q=CodexPro',active:true});
+  if(previousChat){
+    const safety=await promiseWithTimeout(chrome.scripting.executeScript({target:{tabId:previousChat.id},func:probeConnectorCheckSafetyPage}),5000,'Không đọc được bản nháp.').catch(()=>null);
+    if(!safety?.[0]?.result?.safe)return {ok:true,deferred:true,message:'Giữ nguyên tab đang có bản nháp hoặc chưa kiểm tra an toàn được.'};
+  }
+  let tab=null;
+  const deadline=Date.now()+100000;
+  const remaining=()=>{const ms=deadline-Date.now();if(ms<=0)throw new Error('Hết thời gian xác minh CodexPro.');return ms;};
+  const assertOwned=async()=>{remaining();const current=await chrome.tabs.get(tab.id);if(!connectorCheckOwnsUrl(current.url))throw new Error('Tab kiểm tra đã được chuyển sang trang khác.');};
   try{
+    const connector=await connectorInfo(profile);
+    tab=await createChatGptTab({url:connector.settings_url || 'https://chatgpt.com/plugins?q=CodexPro',active:true});
     if(tab.windowId)await chrome.windows.update(tab.windowId,{focused:true});
-    await waitForTab(tab.id);
-    const result=await sendPageMessage(tab.id,{type:'codexpro-check-connector'},30000);
+    await waitForTab(tab.id,Math.min(30000,remaining()));
+    await assertOwned();
+    const result=await sendPageMessage(tab.id,{type:'codexpro-check-connector'},30000,deadline);
     if(!result?.ok)throw new Error(result?.error || 'Không kiểm tra được Apps trong ChatGPT.');
+    let connection=null;
+    if(result.installed){
+      // A listed definition is not proof that this account has connected it.
+      // This is read-only: do not click Connect or grant consent during checks.
+      await assertOwned();
+      await navigateInstallerTab(tab.id,'https://chatgpt.com/#settings/Plugins',deadline);
+      await assertOwned();
+      await ensureConnectorDetailTab(tab.id,deadline);
+      await assertOwned();
+      connection=await sendPageMessage(tab.id,{type:'codexpro-check-connector-connection'},20000,deadline);
+      if(!connection?.ok)throw new Error(connection?.error || 'Chưa xác minh được Connection của CodexPro.');
+    }
+    await assertOwned();
     const saved={
-      ok:Boolean(result.installed),
-      message:result.installed?'CodexPro READY':'Profile này chưa thêm CodexPro.',
+      ok:Boolean(result.installed&&connection?.connected),
+      verification_state:result.installed?(connection.connection_state||'unknown'):'missing',
+      message:result.installed?connection.message:'Profile này chưa thêm CodexPro.',
       at:new Date().toISOString(),
       ...(profile.connector_install?.worker_id?{worker_id:String(profile.connector_install.worker_id)}:{})
     };
     await chrome.storage.local.set({connectorInstall:saved});
-    return {ok:true,installed:saved.ok,message:saved.message,checked_at:saved.at,diagnostic:result.diagnostic||{}};
+    return {ok:true,installed:saved.ok,message:saved.message,checked_at:saved.at,diagnostic:{...result.diagnostic,...connection?.diagnostic}};
+  }catch(error){
+    const saved={ok:false,verification_state:'unknown',message:`Chưa xác minh được CodexPro: ${String(error?.message||error).slice(0,350)}`,at:new Date().toISOString()};
+    await chrome.storage.local.set({connectorInstall:saved});
+    throw error;
   }finally{
-    if(tab.codexpro_reused&&previousChat?.id===tab.id&&isChatGptTabUrl(previousChat.url)){
+    const current=tab?await chrome.tabs.get(tab.id).catch(()=>null):null;
+    const stillOwned=Boolean(current&&connectorCheckOwnsUrl(current.url));
+    if(stillOwned&&tab?.codexpro_reused&&previousChat?.id===tab.id&&isChatGptTabUrl(previousChat.url)){
       await chrome.tabs.update(tab.id,{url:previousChat.url,active:Boolean(previousChat.active)}).catch(()=>{});
-    }else await removeTabWithReason(tab.id,'connector_check_cleanup').catch(()=>{});
-    if(tabLimit===MAC_MAX_CHATGPT_TABS&&previousChat&&isChatGptTabUrl(previousChat.url)){
+    }else if(stillOwned)await removeTabWithReason(tab.id,'connector_check_cleanup').catch(()=>{});
+    if(tab&&tabLimit===MAC_MAX_CHATGPT_TABS&&previousChat&&isChatGptTabUrl(previousChat.url)){
       const remaining=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(candidate=>Number.isInteger(candidate.id));
       if(!remaining.length){
         const restored=await createChatGptTab({url:previousChat.url,active:Boolean(previousChat.active)}).catch(()=>null);
         if(restored?.windowId&&previousChat.active)await chrome.windows.update(restored.windowId,{focused:true}).catch(()=>{});
       }
-    }else if(previousActive?.id)await chrome.tabs.update(previousActive.id,{active:true}).catch(()=>{});
+    }else if(stillOwned&&previousActive?.id)await chrome.tabs.update(previousActive.id,{active:true}).catch(()=>{});
   }
 }
 
@@ -3563,7 +3621,7 @@ async function pollLoop() {
         const isActive=message.active_profile_id===profile.id;
         if(profile.active!==isActive)await chrome.storage.local.set({active:isActive});
         if(message.command){
-          const heartbeat=setInterval(()=>{void Promise.all([chrome.storage.local.get('workerEnabled'),tabInventory()]).then(([{workerEnabled},tab_inventory])=>workerEnabled===false?null:fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,tab_inventory})})).catch(()=>{});},10000);
+          const heartbeat=setInterval(()=>{void Promise.all([profileInfo(),tabInventory()]).then(([profile,tab_inventory])=>profile.enabled?fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,tab_inventory})}):null).catch(()=>{});},10000);
           try{await postResult(profile,message.command,await execute(message.command));}
           catch(error){await postResult(profile,message.command,null,error);}
           finally{clearInterval(heartbeat);}

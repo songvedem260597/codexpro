@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import "./connector-verification-smoke.mjs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -460,7 +461,7 @@ assert.match(worker, /for\(const tabId of chatDomActivityByTab\.keys\(\)\)if\(!l
 assert.match(worker, /value\.includes\('settings'\)\|\|value\.includes\('cai dat'\)/, "connector setup must recognize Vietnamese Settings");
 assert.match(worker, /value\.includes\('connection'\)\|\|value\.includes\('ket noi'\)/, "connector setup must recognize Vietnamese Connection");
 assert.match(connectorInstaller, /aria === 'thao tac voi plugin'/, "connector migration must recognize the Vietnamese plugin-actions label");
-assert.match(connectorInstaller, /pageText\.includes\('connected'\)\s*\|\|\s*pageText\.includes\('da ket noi'\)/, "connector setup must recognize an already-connected Vietnamese plugin detail page");
+assert.match(connectorInstaller, /connectorConnectionStatus\(connectionText\) === 'connected'/, "connector setup must require a positive connection state instead of matching disconnected");
 assert.match(worker, /testId==='stop-button'/, "DOM activity probe must recognize ChatGPT's stop control");
 assert.match(worker, /const domToolBusy=Boolean\(domActivity\.busy&&domActivity\.source==='dom_tool'\)/, "DOM tool calls must remain working after the initial network request completes");
 assert.match(worker, /busy:hungAudit\?false:networkBusy\|\|domImageBusy\|\|domToolBusy\|\|canonicalBusy/, "profile status must treat image generation, canonical generation, and active DOM tool calls as working unless the one-shot watchdog marked the tab hung");
@@ -775,7 +776,7 @@ assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
 assert.match(worker, /if\(domActivity\.busy\)\{[\s\S]*?probeCanonicalActivity\(tab\.id,targetConversationId,true\)[\s\S]*?canonicalCompleted[\s\S]*?send_preflight_canonical/, "send preflight must clear a stale DOM busy guard when canonical proves the previous turn completed");
-assert.equal(manifest.version, "0.5.105");
+assert.equal(manifest.version, "0.5.106");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");

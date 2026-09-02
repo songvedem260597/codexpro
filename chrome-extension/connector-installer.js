@@ -1,5 +1,5 @@
 (() => {
-  const INSTALLER_REVISION = '2026-08-31-27';
+  const INSTALLER_REVISION = '2026-09-03-28';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
   document.querySelector('#codexpro-setup-status')?.remove();
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
@@ -165,13 +165,19 @@
 
   function connectorActionLabelMatches(aria, value, interactive) {
     if (aria === 'actions for codexpro' || aria === 'hanh dong cho codexpro' ||
-      aria === 'thao tac voi codexpro' || aria === 'thao tac voi plugin') return true;
+      aria === 'thao tac voi codexpro') return true;
     if (!interactive) return false;
     return value === 'codexpro' || value.startsWith('codexpro ');
   }
 
   function installedConnectorAction() {
-    return candidates().find(element => connectorActionLabelMatches(
+    // Never search a conversation/sidebar for a plugin definition. Tool pills
+    // and historical chat buttons can also start with the word CodexPro.
+    const search = document.querySelector('#plugin-search');
+    const root = settingsDialog() || (/^\/plugins\/?$/.test(location.pathname) && search && visible(search)
+      ? search.closest('main,[role="main"]') : null);
+    if (!root) return null;
+    return candidates(root).find(element => !element.closest('[data-message-author-role],article') && connectorActionLabelMatches(
       normalize(element.getAttribute?.('aria-label') || ''),
       text(element),
       element.matches('button,[role="button"],[role="menuitem"],[role="option"]')
@@ -412,9 +418,37 @@
 
   function connectorDetailVisible(root) {
     if (!root) return false;
-    const value = text(root);
-    return location.hash.toLowerCase().includes('/plugin_') ||
-      (value.includes('codexpro') && hasConnectionMarker(value));
+    // A /plugin_ route or a sidebar listing CodexPro does not identify the
+    // currently selected plugin. Require the detail heading itself.
+    const namedHeading = [...root.querySelectorAll('h1,h2,h3,[role="heading"]')]
+      .filter(visible).some(element => text(element) === 'codexpro');
+    return namedHeading && hasConnectionMarker(text(root));
+  }
+
+  function connectorConnectionStatus(value) {
+    if (/\b(disconnected|not connected|chua ket noi|khong ket noi|ngat ket noi)\b/.test(value)) return 'missing';
+    if (/\b(connected|da ket noi)\b/.test(value)) return 'connected';
+    if (['connect', 'ket noi', 'connection connect', 'ket noi ket noi'].includes(value)) return 'missing';
+    return 'unknown';
+  }
+
+  async function checkConnectorConnection() {
+    const root = await waitFor(() => {
+      const current = settingsDialog();
+      return connectorDetailVisible(current) ? current : null;
+    }, 12000, 150);
+    if (!root) throw new Error('Chưa xác minh được trang chi tiết CodexPro.');
+    const connection = await waitFor(() => candidates(root).find(element => hasConnectionMarker(text(element))) || null, 5000, 100);
+    const value = text(connection);
+    const connectionState = connectorConnectionStatus(value);
+    return {
+      ok: true,
+      connected: connectionState === 'connected',
+      connection_state: connectionState,
+      message: connectionState === 'missing' ? 'CodexPro đã có trong danh sách nhưng chưa kết nối với ChatGPT.'
+        : connectionState === 'unknown' ? 'Chưa xác minh được kết nối CodexPro trong ChatGPT.' : 'CodexPro READY',
+      diagnostic: { revision: INSTALLER_REVISION, detail_identity_verified: true, connection_state: connectionState, connection_text: value.slice(0, 160) }
+    };
   }
 
   function settingsCodexProButton(root) {
@@ -513,14 +547,14 @@
       }) || null, 5000, 100);
     if (!connection) {
       const pageText = text(root);
-      if (pageText.includes('codexpro') && (pageText.includes('connected') || pageText.includes('da ket noi'))) {
+      if (connectorDetailVisible(root) && connectorConnectionStatus(pageText) === 'connected') {
         return {ok: true, connected: true, alreadyConnected: true};
       }
       throw new Error('Không tìm thấy mục Connection của CodexPro.');
     }
 
     const connectionText = text(connection);
-    if (connectionText.includes('connected') || connectionText.includes('da ket noi')) {
+    if (connectorConnectionStatus(connectionText) === 'connected') {
       return {ok: true, connected: true, alreadyConnected: true};
     }
     await trustedClick(connection);
@@ -538,7 +572,7 @@
     if (!consent) {
       const current = settingsDialog();
       const currentConnection = current ? [...current.querySelectorAll('button,[role="button"]')].filter(visible).find(button => hasConnectionMarker(text(button))) : null;
-      if (currentConnection && (text(currentConnection).includes('connected') || text(currentConnection).includes('da ket noi'))) {
+      if (currentConnection && connectorConnectionStatus(text(currentConnection)) === 'connected') {
         return {ok: true, connected: true, alreadyConnected: true};
       }
       const visibleDialogs = [...document.querySelectorAll('[role="dialog"],dialog')].filter(visible);
@@ -611,6 +645,12 @@
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === 'codexpro-check-connector-connection') {
+      checkConnectorConnection()
+        .then(sendResponse)
+        .catch(error => sendResponse({ok: false, error: String(error?.message || error)}));
+      return true;
+    }
     if (message?.type === 'codexpro-check-connector') {
       checkInstalled()
         .then(sendResponse)

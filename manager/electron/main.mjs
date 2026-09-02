@@ -333,7 +333,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.105";
+const WORKER_EXTENSION_VERSION = "0.5.106";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -1390,6 +1390,8 @@ function profileDiagnosticSnapshot(profile) {
     connector_update_required: Boolean(profile?.connector_update_required),
     connector_message: String(profile?.connector_message || "").slice(0, 500),
     connector_checked_at: String(profile?.connector_checked_at || "").slice(0, 64),
+    connector_verification_required: Boolean(profile?.connector_verification_required),
+    connector_verification_state: String(profile?.connector_verification_state || "unknown").slice(0, 24),
     renderer_unresponsive: Boolean(profile?.renderer_unresponsive || tabs.some((tab) => tab?.renderer_unresponsive)),
     connection_interrupted: tabs.some((tab) => tab?.connection_interrupted),
     message_delivery_timed_out: tabs.some((tab) => tab?.message_delivery_timed_out),
@@ -3747,7 +3749,7 @@ async function checkChatGptProfile(profileId) {
   return await localMcpTool(status.config, token, "browser_control", {
     action: "check_chatgpt",
     profile_id: id
-  }, 65000);
+  }, 125000);
 }
 
 async function focusChromeWindow(chatTitle) {

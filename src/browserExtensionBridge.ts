@@ -10,10 +10,11 @@ const BRIDGE_HOST = "127.0.0.1";
 const CODEXPRO_EXTENSION_ORIGIN = "chrome-extension://gndipignbnipohooclcbhjliikamjlpl";
 export const BROWSER_EXTENSION_BRIDGE_PORT = 9224;
 const PROFILE_TTL_MS = 3 * 60_000;
+const CONNECTOR_VERIFICATION_TTL_MS = 15 * 60_000;
 const PROFILE_RETENTION_MS = 24 * 60 * 60_000;
 const PROFILE_RECONNECT_WAIT_MS = 45_000;
 const COMMAND_TIMEOUT_MS = 25_000;
-const CHECK_COMMAND_TIMEOUT_MS = 60_000;
+const CHECK_COMMAND_TIMEOUT_MS = 120_000;
 const SETUP_COMMAND_TIMEOUT_MS = 300_000;
 const SEND_COMMAND_TIMEOUT_MS = 180_000;
 const LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS = 125_000;
@@ -35,6 +36,7 @@ export interface BrowserProfilePersistenceRecord {
   label: string;
   extensionVersion: string;
   connectorInstalled: boolean;
+  connectorVerificationState?: string;
   connectorMessage: string;
   connectorCheckedAt: string;
   connectorServerFingerprint: string;
@@ -82,6 +84,7 @@ export function browserProfilePersistenceSnapshot(
       label: String(profile.label || "").slice(0, 320),
       extensionVersion: String(profile.extensionVersion || "").slice(0, 32),
       connectorInstalled: profile.connectorInstalled === true,
+      connectorVerificationState: ['connected', 'missing', 'unknown'].includes(String(profile.connectorVerificationState)) ? profile.connectorVerificationState : 'unknown',
       connectorMessage: String(profile.connectorMessage || "").slice(0, 500),
       connectorCheckedAt: String(profile.connectorCheckedAt || "").slice(0, 64),
       connectorServerFingerprint: String(profile.connectorServerFingerprint || "").slice(0, 128),
@@ -110,6 +113,8 @@ export interface ExtensionProfileSummary {
   connector_installed: boolean;
   connector_message: string;
   connector_checked_at: string;
+  connector_verification_required?: boolean;
+  connector_verification_state?: string;
   worker_id: string;
   headless: boolean;
   source_profile_id: string;
@@ -264,6 +269,7 @@ interface ExtensionProfile {
   label: string;
   extensionVersion: string;
   connectorInstalled: boolean;
+  connectorVerificationState?: string;
   connectorMessage: string;
   connectorCheckedAt: string;
   connectorServerFingerprint: string;
@@ -766,20 +772,25 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
       .filter((event: unknown): event is Record<string, unknown> => Boolean(event) && typeof event === "object" && !Array.isArray(event))
       .slice(-20)
     : profile.lifecycleEvents;
-  profile.connectorServerFingerprint = String(source.connector_server_fingerprint ?? profile.connectorServerFingerprint ?? "").trim().slice(0, 128);
   if (source.connector_install && typeof source.connector_install === "object") {
     const incomingInstalled = source.connector_install.ok === true;
     const incomingCheckedAt = String(source.connector_install.at ?? "").trim().slice(0, 64);
     const incomingCheckedAtMs = Date.parse(incomingCheckedAt);
     const currentCheckedAtMs = Date.parse(profile.connectorCheckedAt);
-    const mayDowngrade = !profile.connectorInstalled
-      || (Number.isFinite(incomingCheckedAtMs) && (!Number.isFinite(currentCheckedAtMs) || incomingCheckedAtMs >= currentCheckedAtMs));
-    if (incomingInstalled || mayDowngrade) {
+    // Both upgrades and downgrades must be monotonic. Commands/heartbeats may
+    // finish out of order and carry the pre-check snapshot of the profile.
+    const acceptObservation = !Number.isFinite(currentCheckedAtMs)
+      || (Number.isFinite(incomingCheckedAtMs) && (incomingCheckedAtMs > currentCheckedAtMs
+        || incomingCheckedAtMs === currentCheckedAtMs && (profile.connectorInstalled === incomingInstalled || !incomingInstalled)));
+    if (acceptObservation) {
       profile.connectorInstalled = incomingInstalled;
+      profile.connectorVerificationState = ['connected', 'missing'].includes(source.connector_install.verification_state)
+        ? source.connector_install.verification_state : 'unknown';
       profile.connectorMessage = String(source.connector_install.message ?? "").trim().slice(0, 500);
       profile.connectorCheckedAt = incomingCheckedAt;
+      profile.connectorServerFingerprint = String(source.connector_server_fingerprint ?? profile.connectorServerFingerprint ?? "").trim().slice(0, 128);
+      profile.connectorWorkerId = String(source.connector_install.worker_id ?? profile.connectorWorkerId ?? "").trim().slice(0, 80);
     }
-    profile.connectorWorkerId = String(source.connector_install.worker_id ?? profile.connectorWorkerId ?? "").trim().slice(0, 80);
   }
   profile.lastSeen = Date.now();
   profile.restored = false;
@@ -1216,12 +1227,17 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       const connectorProfileBound = expectedFingerprint
         ? Boolean(profile.connectorServerFingerprint && profile.connectorServerFingerprint === expectedFingerprint)
         : profile.connectorInstalled;
-      const connectorUpdateRequired = Boolean(expectedFingerprint && (
-        (profile.connectorInstalled && profile.connectorServerFingerprint !== expectedFingerprint) ||
-        (!profile.connectorInstalled && profile.connectorServerFingerprint)
-      ));
-      const connectorInstalled = profile.connectorInstalled && connectorProfileBound;
-      const connectorMessage = connectorUpdateRequired
+      const checkedAtMs = Date.parse(profile.connectorCheckedAt);
+      const connectorVerificationRequired = !['connected', 'missing'].includes(profile.connectorVerificationState || '')
+        || !Number.isFinite(checkedAtMs) || checkedAtMs > Date.now()
+        || Date.now() - checkedAtMs >= CONNECTOR_VERIFICATION_TTL_MS;
+      const connectorUpdateRequired = Boolean(!connectorVerificationRequired && profile.connectorVerificationState === 'connected' && expectedFingerprint
+        && profile.connectorServerFingerprint !== expectedFingerprint);
+      const connectorInstalled = profile.connectorInstalled && connectorProfileBound && !connectorVerificationRequired && profile.connectorVerificationState === 'connected';
+      const connectorMessage = connectorVerificationRequired
+        ? (profile.connectorVerificationState === 'unknown' && !profile.connectorInstalled && profile.connectorMessage
+          ? profile.connectorMessage : "Chưa xác minh lại CodexPro trong ChatGPT.")
+        : connectorUpdateRequired
         ? observedCodexProToolActivity
           ? "CodexPro đang gọi tool qua connector cũ chưa gắn đúng profile. Cần cập nhật connector."
           : "CodexPro hiện có đang dùng URL cũ, chưa gắn đúng profile Chrome."
@@ -1234,6 +1250,8 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       connector_installed: connectorInstalled,
       connector_message: connectorMessage,
       connector_checked_at: profile.connectorCheckedAt,
+      connector_verification_required: connectorVerificationRequired,
+      connector_verification_state: connectorVerificationRequired ? 'unknown' : profile.connectorVerificationState,
       worker_id: profile.connectorWorkerId,
       headless: profile.headless,
       source_profile_id: profile.sourceProfileId,

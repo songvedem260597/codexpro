@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import managerPackage from "../package.json";
+import { shouldCheckProfileConnector } from "./profile-connector-check.js";
 import "./styles.css";
 import "@fontsource/be-vietnam-pro/400.css";
 import "@fontsource/be-vietnam-pro/500.css";
@@ -46,8 +47,7 @@ const ResponseText = React.lazy(() => loadResponseMarkdownModule().then((module)
 const CodeGraphView = React.lazy(() => import("./code-graph-view.jsx").then((module) => ({ default: module.CodeGraphView })));
 const ControlCenter = React.lazy(() => import("./control-center.jsx").then((module) => ({ default: module.ControlCenter })));
 const api = window.codexpro;
-const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
-const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
+// Connector checks are serialized and deferred while a worker is busy.
 const CONNECTOR_AUTO_MIGRATION_RETRY_MS = 5 * 60 * 1000;
 const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
 const RESPONSE_MANUAL_SCROLL_RESUME_MS = 5000;
@@ -338,7 +338,7 @@ function compactToolActivityMessages(messages, { collapseArgumentPayloads = fals
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.105";
+const WORKER_EXTENSION_VERSION = "0.5.106";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function chromeProfileIdLabel(profileId) {
@@ -2251,11 +2251,10 @@ function App() {
 
   useEffect(() => {
     const profiles = status?.browserProfiles || [];
+    if (busy || connectorAutoMigrationInFlight.current || profileChecksInFlight.current.size) return;
     for (const profile of profiles) {
       const lastCheck = profileCheckTimes.current.get(profile.profile_id) || 0;
-      const checkedAt = Date.parse(profile.connector_checked_at || "");
-      const recentlyVerified = Number.isFinite(checkedAt) && Date.now() - checkedAt < PROFILE_CHECK_TTL_MS;
-      if (!profile.connected || !extensionReady(profile.extension_version) || recentlyVerified || Date.now() - lastCheck < PROFILE_CHECK_RETRY_MS) continue;
+      if (!extensionReady(profile.extension_version) || !shouldCheckProfileConnector(profile, { lastCheck, safe: profileSafeForWorkerUpdate(profile) })) continue;
       profileCheckTimes.current.set(profile.profile_id, Date.now());
       profileChecksInFlight.current.add(profile.profile_id);
       setCheckingProfiles((current) => [...new Set([...current, profile.profile_id])]);
@@ -2269,8 +2268,9 @@ function App() {
           setCheckingProfiles((current) => current.filter((id) => id !== profile.profile_id));
           window.setTimeout(() => void refresh(false), 1200);
         });
+      break;
     }
-  }, [status?.browserProfiles, refresh]);
+  }, [status?.browserProfiles, refresh, busy]);
 
   useEffect(() => {
     if (busy || connectorAutoMigrationInFlight.current) return;
@@ -2848,7 +2848,7 @@ function App() {
       working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length + apiWorkers.filter((worker) => worker.connected && worker.activity === "working").length,
       idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile.extension_version))).length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
       hung: visibleProfiles.filter((profile) => !profile.connected).length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
-      missing: profiles.filter((profile) => profile.activity === "no_chatgpt" && !profile.connector_installed).length,
+      missing: profiles.filter((profile) => !profile.connector_installed).length,
       reload: outdated.filter(profileSafeForWorkerUpdate).length,
       deferredUpdate: outdated.filter((profile) => !profileSafeForWorkerUpdate(profile)).length,
       outdated: outdated.length
@@ -4826,7 +4826,7 @@ function App() {
                       {noBrowserTabs && <span className="badge profile-missing">CHROME CHẠY NỀN</span>}
                       {noChatGpt && !noBrowserTabs && <span className="badge profile-missing">CHƯA MỞ CHATGPT</span>}
                       {connectorUpdateRequired && <span className="badge profile-missing">CẦN CẬP NHẬT CONNECTOR</span>}
-                      {!connectorInstalled && !connectorUpdateRequired && !profileChecking && !idle && !working && !settling && !noChatGpt && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
+                      {!connectorInstalled && !connectorUpdateRequired && !profileChecking && <span className="badge profile-missing">{profile.connector_verification_required ? "CẦN KIỂM TRA CODEXPRO" : "CHƯA SẴN SÀNG CODEXPRO"}</span>}
                       <span
                         className={`active-repo-chip ${repoLabel ? "" : "is-empty"}`}
                         title={repoTitle}
