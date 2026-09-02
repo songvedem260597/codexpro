@@ -36,6 +36,7 @@
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:extension-sync": "node scripts/extension-sync-smoke.mjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
+    "test:return-shortcut": "node scripts/return-to-manager-shortcut-smoke.mjs && electron scripts/return-to-manager-shortcut-electron-smoke.cjs",
     "test:icon": "node scripts/icon-asset-smoke.mjs",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
