@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList } from "../src/ui-performance.js";
+import { EMPTY_BROWSER_PROFILE_GRACE_MS, mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "../src/ui-performance.js";
 
 const previous = [{
   profile_id: "profile-a",
@@ -40,6 +40,27 @@ const workingMerge = mergeBrowserProfilePayload(previous, working);
 assert.notEqual(workingMerge, previous, "meaningful profile changes must publish a new array");
 assert.equal(workingMerge[0].activity, "working");
 assert.equal(workingMerge[0].current_workspace_repo, "owner/repo");
+
+const emptyStartedAt = Date.parse("2026-08-30T11:00:10.000Z");
+const transientEmpty = stabilizeEmptyBrowserProfileSnapshot(previous, [], { nowMs: emptyStartedAt });
+assert.equal(transientEmpty.profiles, previous, "the first all-empty snapshot must preserve the last good worker cards");
+assert.equal(transientEmpty.preserved, true);
+assert.equal(transientEmpty.emptySinceMs, emptyStartedAt);
+assert.equal(transientEmpty.retryAfterMs, EMPTY_BROWSER_PROFILE_GRACE_MS);
+
+const recoveredBeforeGrace = stabilizeEmptyBrowserProfileSnapshot(previous, heartbeatOnly, {
+  nowMs: emptyStartedAt + 5_000,
+  emptySinceMs: transientEmpty.emptySinceMs
+});
+assert.equal(recoveredBeforeGrace.preserved, false, "a recovered heartbeat must immediately clear the empty-snapshot gate");
+assert.equal(recoveredBeforeGrace.emptySinceMs, 0);
+
+const confirmedEmpty = stabilizeEmptyBrowserProfileSnapshot(previous, [], {
+  nowMs: emptyStartedAt + EMPTY_BROWSER_PROFILE_GRACE_MS,
+  emptySinceMs: transientEmpty.emptySinceMs
+});
+assert.deepEqual(confirmedEmpty.profiles, [], "an all-empty snapshot that survives the grace period must clear disconnected workers");
+assert.equal(confirmedEmpty.preserved, false);
 
 const projects = [{ root: "C:/repo", name: "repo" }];
 assert.equal(sameProjectList(projects, [{ root: "C:/repo", name: "repo" }]), true);

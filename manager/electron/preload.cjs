@@ -58,6 +58,8 @@ contextBridge.exposeInMainWorld("codexpro", {
   deleteWorkerImagePack: (packId) => invoke("codexpro:delete-worker-image-pack", packId),
   chooseWorkerImage: (payload) => invoke("codexpro:choose-worker-image", payload),
   resetWorkerImage: (payload) => invoke("codexpro:reset-worker-image", payload),
+  chooseAppBackground: () => invoke("codexpro:choose-app-background"),
+  resetAppBackground: () => invoke("codexpro:reset-app-background"),
   resetManagerSettings: () => invoke("codexpro:reset-manager-settings"),
   getHeadlessWorkers: () => invoke("codexpro:headless-workers"),
   createHeadlessWorker: (payload) => invoke("codexpro:create-headless-worker", payload),

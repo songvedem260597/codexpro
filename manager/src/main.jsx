@@ -31,7 +31,7 @@ import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shou
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { confirmChatResponseFinality, hasStrongerNetworkStreamEvidence } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
-import { mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList } from "./ui-performance.js";
+import { mergeRuntimeStatus, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "./ui-performance.js";
 import { createApiWorkerDraft, normalizeApiWorkerModels, switchApiWorkerProvider, validateApiWorkerDraft } from "./api-worker-form.js";
 import { AppDropdown } from "./app-dropdown.jsx";
 import { ALL_ALLOWED_WORKSPACES, formatRepoActivity, ProjectDropdown } from "./project-dropdown.jsx";
@@ -157,6 +157,10 @@ const DEFAULT_MANAGER_SETTINGS = {
   autoRecovery: false,
   autoUpdateWorkers: false,
   taskNotifications: true,
+  appBackground: "",
+  appBackgroundDataUrl: "",
+  appBackgroundBlur: 6,
+  appBackgroundDim: 54,
   globalRules: GLOBAL_RULES_TEMPLATE,
   repoSelections: {},
   selectedWorkerPackId: "default",
@@ -1041,6 +1045,9 @@ function App() {
   const refreshForegroundQueued = useRef(false);
   const projectRefreshInFlight = useRef(false);
   const statusRefreshInFlight = useRef(false);
+  const emptyBrowserSnapshotSince = useRef(0);
+  const emptyBrowserSnapshotTimer = useRef(0);
+  const refreshStatusRef = useRef(null);
   const profileCheckTimes = useRef(new Map());
   const profileChecksInFlight = useRef(new Set());
   const connectorAutoMigrationAttempts = useRef(new Map());
@@ -1693,6 +1700,30 @@ function App() {
     if (nextHeight !== managerSettings.profileCardHeight) void saveManagerSetting({ profileCardHeight: nextHeight }, "Đã lưu chiều cao thẻ profile");
   }, [profileCardHeightInput, managerSettings.profileCardHeight, saveManagerSetting]);
 
+  const changeAppBackground = useCallback(async () => {
+    setSettingsBusy("background");
+    try {
+      applyManagerSettings(await api.chooseAppBackground());
+      notify("Đã đổi hình nền ứng dụng");
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setSettingsBusy("");
+    }
+  }, [applyManagerSettings, notify]);
+
+  const restoreAppBackground = useCallback(async () => {
+    setSettingsBusy("background");
+    try {
+      applyManagerSettings(await api.resetAppBackground());
+      notify("Đã xóa hình nền ứng dụng");
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setSettingsBusy("");
+    }
+  }, [applyManagerSettings, notify]);
+
   const changeWorkerImage = useCallback(async (state) => {
     setSettingsBusy(`worker:${state}`);
     try {
@@ -1960,7 +1991,32 @@ function App() {
     setError("");
     try {
       const nextStatus = await api.getStatus();
-      setStatus((current) => applyConversationTitleOverrides(mergeRuntimeStatus(current, nextStatus), conversationTitleOverridesRef.current));
+      setStatus((current) => {
+        const merged = mergeRuntimeStatus(current, nextStatus);
+        if (!current || nextStatus?.workerSnapshotAvailable === false || nextStatus?.local?.ok === false) return applyConversationTitleOverrides(merged, conversationTitleOverridesRef.current);
+        const stabilized = stabilizeEmptyBrowserProfileSnapshot(current.browserProfiles, merged.browserProfiles, { emptySinceMs: emptyBrowserSnapshotSince.current });
+        const firstTransientEmpty = stabilized.preserved && !emptyBrowserSnapshotSince.current;
+        emptyBrowserSnapshotSince.current = stabilized.emptySinceMs;
+        if (stabilized.preserved) {
+          if (firstTransientEmpty) logRendererDiagnostic(api, "warn", "status", "Snapshot worker tạm thời rỗng; giữ dữ liệu gần nhất để xác minh", { action: "worker-empty-snapshot-grace", retry_after_ms: stabilized.retryAfterMs });
+          if (!emptyBrowserSnapshotTimer.current) emptyBrowserSnapshotTimer.current = window.setTimeout(() => {
+            emptyBrowserSnapshotTimer.current = 0;
+            void refreshStatusRef.current?.();
+          }, stabilized.retryAfterMs);
+          return applyConversationTitleOverrides({
+            ...merged,
+            browserProfiles: stabilized.profiles,
+            workers: current.workers || merged.workers,
+            workerSources: current.workerSources || merged.workerSources,
+            workerSnapshotStale: true,
+            workerSnapshotStaleReason: "empty-grace",
+            workerSnapshotStaleSince: current.workerSnapshotStaleReason === "empty-grace" ? current.workerSnapshotStaleSince : (nextStatus.checkedAt || new Date().toISOString())
+          }, conversationTitleOverridesRef.current);
+        }
+        if (emptyBrowserSnapshotTimer.current) window.clearTimeout(emptyBrowserSnapshotTimer.current);
+        emptyBrowserSnapshotTimer.current = 0;
+        return applyConversationTitleOverrides({ ...merged, browserProfiles: stabilized.profiles, workerSnapshotStaleReason: "" }, conversationTitleOverridesRef.current);
+      });
       if (foreground) {
         const nextProjects = await api.listProjects();
         setProjects((current) => sameProjectList(current, nextProjects) ? current : nextProjects);
@@ -1985,7 +2041,32 @@ function App() {
     statusRefreshInFlight.current = true;
     try {
       const nextStatus = await api.getStatus();
-      setStatus((current) => applyConversationTitleOverrides(mergeRuntimeStatus(current, nextStatus), conversationTitleOverridesRef.current));
+      setStatus((current) => {
+        const merged = mergeRuntimeStatus(current, nextStatus);
+        if (!current || nextStatus?.workerSnapshotAvailable === false || nextStatus?.local?.ok === false) return applyConversationTitleOverrides(merged, conversationTitleOverridesRef.current);
+        const stabilized = stabilizeEmptyBrowserProfileSnapshot(current.browserProfiles, merged.browserProfiles, { emptySinceMs: emptyBrowserSnapshotSince.current });
+        const firstTransientEmpty = stabilized.preserved && !emptyBrowserSnapshotSince.current;
+        emptyBrowserSnapshotSince.current = stabilized.emptySinceMs;
+        if (stabilized.preserved) {
+          if (firstTransientEmpty) logRendererDiagnostic(api, "warn", "status", "Snapshot worker tạm thời rỗng; giữ dữ liệu gần nhất để xác minh", { action: "worker-empty-snapshot-grace", retry_after_ms: stabilized.retryAfterMs });
+          if (!emptyBrowserSnapshotTimer.current) emptyBrowserSnapshotTimer.current = window.setTimeout(() => {
+            emptyBrowserSnapshotTimer.current = 0;
+            void refreshStatusRef.current?.();
+          }, stabilized.retryAfterMs);
+          return applyConversationTitleOverrides({
+            ...merged,
+            browserProfiles: stabilized.profiles,
+            workers: current.workers || merged.workers,
+            workerSources: current.workerSources || merged.workerSources,
+            workerSnapshotStale: true,
+            workerSnapshotStaleReason: "empty-grace",
+            workerSnapshotStaleSince: current.workerSnapshotStaleReason === "empty-grace" ? current.workerSnapshotStaleSince : (nextStatus.checkedAt || new Date().toISOString())
+          }, conversationTitleOverridesRef.current);
+        }
+        if (emptyBrowserSnapshotTimer.current) window.clearTimeout(emptyBrowserSnapshotTimer.current);
+        emptyBrowserSnapshotTimer.current = 0;
+        return applyConversationTitleOverrides({ ...merged, browserProfiles: stabilized.profiles, workerSnapshotStaleReason: "" }, conversationTitleOverridesRef.current);
+      });
     } catch (err) {
       logRendererDiagnostic(api, "warn", "status", `Background status refresh lỗi: ${err?.message || String(err)}`, { action: "refresh-status", error: err });
       // Background realtime refresh should not flash a global error for a transient miss.
@@ -1993,6 +2074,7 @@ function App() {
       statusRefreshInFlight.current = false;
     }
   }, []);
+  refreshStatusRef.current = refreshStatus;
 
   const refreshProjects = useCallback(async () => {
     if (projectRefreshInFlight.current || refreshInFlight.current) return;
@@ -2014,9 +2096,27 @@ function App() {
       const profiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
       setStatus((current) => {
         if (!current) return current;
-        const browserProfiles = mergeBrowserProfilePayload(current.browserProfiles, profiles);
-        if (browserProfiles === current.browserProfiles) return current;
-        return applyConversationTitleOverrides({ ...current, checkedAt: payload?.checked_at || new Date().toISOString(), browserProfiles }, conversationTitleOverridesRef.current);
+        const stabilized = stabilizeEmptyBrowserProfileSnapshot(current.browserProfiles, profiles, { emptySinceMs: emptyBrowserSnapshotSince.current });
+        const firstTransientEmpty = stabilized.preserved && !emptyBrowserSnapshotSince.current;
+        emptyBrowserSnapshotSince.current = stabilized.emptySinceMs;
+        if (stabilized.preserved && firstTransientEmpty) logRendererDiagnostic(api, "warn", "status", "Luồng realtime trả danh sách worker rỗng; giữ dữ liệu gần nhất để xác minh", { action: "worker-empty-snapshot-grace", retry_after_ms: stabilized.retryAfterMs });
+        if (stabilized.preserved && !emptyBrowserSnapshotTimer.current) emptyBrowserSnapshotTimer.current = window.setTimeout(() => {
+          emptyBrowserSnapshotTimer.current = 0;
+          void refreshStatusRef.current?.();
+        }, stabilized.retryAfterMs);
+        if (!stabilized.preserved && emptyBrowserSnapshotTimer.current) window.clearTimeout(emptyBrowserSnapshotTimer.current);
+        if (!stabilized.preserved) emptyBrowserSnapshotTimer.current = 0;
+        const browserProfiles = stabilized.profiles;
+        const clearedEmptyGrace = !stabilized.preserved && current.workerSnapshotStaleReason === "empty-grace";
+        if (browserProfiles === current.browserProfiles && !clearedEmptyGrace) return current;
+        return applyConversationTitleOverrides({
+          ...current,
+          checkedAt: payload?.checked_at || new Date().toISOString(),
+          browserProfiles,
+          workerSnapshotStale: stabilized.preserved,
+          workerSnapshotStaleReason: stabilized.preserved ? "empty-grace" : "",
+          workerSnapshotStaleSince: stabilized.preserved ? (current.workerSnapshotStaleSince || payload?.checked_at || new Date().toISOString()) : ""
+        }, conversationTitleOverridesRef.current);
       });
     });
     const unsubscribeBrowserStream = api.onBrowserStream?.((payload) => {
@@ -2089,6 +2189,8 @@ function App() {
       unsubscribeWorkers?.();
       window.clearInterval(statusTimer);
       window.clearInterval(projectsTimer);
+      if (emptyBrowserSnapshotTimer.current) window.clearTimeout(emptyBrowserSnapshotTimer.current);
+      emptyBrowserSnapshotTimer.current = 0;
     };
   }, [refresh, refreshProjects, refreshStatus]);
 
@@ -4455,7 +4557,9 @@ function App() {
     "--weight-control": Math.max(managerSettings.fontWeight, 600),
     "--weight-title": Math.max(managerSettings.fontWeight, 600),
     "--weight-semibold": Math.max(managerSettings.fontWeight, 600),
-    "--weight-bold": Math.max(managerSettings.fontWeight, 700)
+    "--weight-bold": Math.max(managerSettings.fontWeight, 700),
+    "--app-wallpaper-blur": `${Math.max(0, Math.min(24, Number(managerSettings.appBackgroundBlur) || 0))}px`,
+    "--app-wallpaper-dim": Math.max(0, Math.min(85, Number(managerSettings.appBackgroundDim) || 0)) / 100
   };
   const workerSettingItems = [
     { state: "idle", title: "Đang rảnh", description: "Hiện khi profile online và đang chờ việc." },
@@ -4479,7 +4583,11 @@ function App() {
   ];
 
   return (
-    <div className="app-shell" style={appStyle}>
+    <div className={`app-shell ${managerSettings.appBackgroundDataUrl ? "has-wallpaper" : ""}`} style={appStyle}>
+      {managerSettings.appBackgroundDataUrl && <>
+        <div className="app-wallpaper" aria-hidden="true" style={{ backgroundImage: `url("${managerSettings.appBackgroundDataUrl}")` }} />
+        <div className="app-wallpaper-overlay" aria-hidden="true" />
+      </>}
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">C</div>
@@ -4543,7 +4651,9 @@ function App() {
           </div>
           {status?.workerSnapshotStale && (
             <div className="worker-snapshot-warning" role="status">
-              MCP tạm thời không phản hồi, worker sẽ tự cập nhật khi kết nối phục hồi.
+              {status.workerSnapshotStaleReason === "empty-grace"
+                ? "Đang xác minh kết nối worker; tạm giữ trạng thái gần nhất."
+                : "MCP tạm thời không phản hồi, worker sẽ tự cập nhật khi kết nối phục hồi."}
             </div>
           )}
           <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout working-border-${managerSettings.workingBorderStyle === "beam" ? "beam" : "shine"}`}>
@@ -4969,6 +5079,41 @@ function App() {
           </section>
 
           <ApiWorkerSettings onChanged={() => refresh(false)} notify={notify} onError={reportApiWorkerError} />
+
+          <section className="settings-panel app-background-panel">
+            <div className="settings-panel-head">
+              <div>
+                <p className="eyebrow">APP WALLPAPER</p>
+                <h2>Hình nền ứng dụng</h2>
+                <p className="section-note">Dùng PNG, JPG, WEBP hoặc GIF làm hình nền toàn app. GIF sẽ tự phát; giao diện phủ lớp tối và blur để chữ vẫn dễ đọc.</p>
+              </div>
+              <span className={`wallpaper-status-badge ${managerSettings.appBackgroundDataUrl ? "is-active" : ""}`}>{managerSettings.appBackgroundDataUrl ? "ĐANG DÙNG" : "MẶC ĐỊNH"}</span>
+            </div>
+            <div className="app-background-layout">
+              <div className={`app-background-preview ${managerSettings.appBackgroundDataUrl ? "has-image" : ""}`}>
+                {managerSettings.appBackgroundDataUrl
+                  ? <img src={managerSettings.appBackgroundDataUrl} alt="" aria-hidden="true" style={{ filter: `blur(${managerSettings.appBackgroundBlur}px)` }} />
+                  : <div className="app-background-empty"><strong>Chưa có hình nền</strong><span>Chọn ảnh hoặc GIF để xem trước.</span></div>}
+                {managerSettings.appBackgroundDataUrl && <div className="app-background-preview-shade" style={{ backgroundColor: `rgba(4, 7, 12, ${managerSettings.appBackgroundDim / 100})` }} />}
+                {managerSettings.appBackgroundDataUrl && <div className="app-background-preview-glass"><strong>CodexPro</strong><span>Glass wallpaper preview</span></div>}
+              </div>
+              <div className="app-background-controls">
+                <div className="app-background-actions">
+                  <button type="button" className="button primary" disabled={Boolean(settingsBusy)} onClick={() => void changeAppBackground()}>{settingsBusy === "background" ? "Đang chọn…" : managerSettings.appBackgroundDataUrl ? "Đổi ảnh / GIF" : "Chọn ảnh / GIF"}</button>
+                  <button type="button" className="button ghost" disabled={Boolean(settingsBusy) || !managerSettings.appBackgroundDataUrl} onClick={() => void restoreAppBackground()}>Xóa nền</button>
+                </div>
+                <div className="app-background-control">
+                  <div className="app-background-control-head"><label htmlFor="app-background-blur">Độ mờ hình nền</label><strong>{managerSettings.appBackgroundBlur}px</strong></div>
+                  <input id="app-background-blur" className="settings-range" type="range" min="0" max="24" step="1" value={managerSettings.appBackgroundBlur} onChange={(event) => setManagerSettings((current) => ({ ...current, appBackgroundBlur: Number(event.target.value) }))} onPointerUp={(event) => void saveManagerSetting({ appBackgroundBlur: Number(event.currentTarget.value) }, "Đã lưu độ mờ hình nền")} onKeyUp={(event) => void saveManagerSetting({ appBackgroundBlur: Number(event.currentTarget.value) }, "Đã lưu độ mờ hình nền")} />
+                </div>
+                <div className="app-background-control">
+                  <div className="app-background-control-head"><label htmlFor="app-background-dim">Lớp tối phủ nền</label><strong>{managerSettings.appBackgroundDim}%</strong></div>
+                  <input id="app-background-dim" className="settings-range" type="range" min="0" max="85" step="1" value={managerSettings.appBackgroundDim} onChange={(event) => setManagerSettings((current) => ({ ...current, appBackgroundDim: Number(event.target.value) }))} onPointerUp={(event) => void saveManagerSetting({ appBackgroundDim: Number(event.currentTarget.value) }, "Đã lưu độ tối hình nền")} onKeyUp={(event) => void saveManagerSetting({ appBackgroundDim: Number(event.currentTarget.value) }, "Đã lưu độ tối hình nền")} />
+                </div>
+                <small className="app-background-help">Tối đa 25 MB · ảnh được copy vào dữ liệu CodexPro nên không phụ thuộc file gốc.</small>
+              </div>
+            </div>
+          </section>
 
           <section className="settings-panel global-rules-panel">
             <div className="settings-panel-head global-rules-head">
