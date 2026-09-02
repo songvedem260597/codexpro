@@ -193,6 +193,33 @@ const conversationLimit = await probeConversationLimitPage();
 assert.equal(conversationLimit.reached, true, "the exact ChatGPT maximum-length banner must be treated as a terminal conversation");
 assert.equal(conversationLimit.button_label, "Start new chat", "the detector must require the visible new-chat action in the same banner");
 
+const inspectAttemptSource = extractFunction("inspectChatSendAttemptPage");
+const replacedComposerPayload = `${"*:before{box-sizing:border-box;}".repeat(260)}\nHÃY NÂNG CẤP CHO NÚT CHAT HIỆU ỨNG NÀY`;
+const replacedComposer = {
+  dataset: {},
+  isContentEditable: true,
+  innerText: replacedComposerPayload,
+  textContent: replacedComposerPayload,
+  getBoundingClientRect: () => ({ width: 760, height: 420 })
+};
+const inspectChatSendAttemptPage = Function(
+  "document",
+  "getComputedStyle",
+  `${inspectAttemptSource}; return inspectChatSendAttemptPage;`
+)(
+  { querySelector: () => replacedComposer },
+  () => ({ display: "block", visibility: "visible" })
+);
+const recoveredReplacedComposer = inspectChatSendAttemptPage("attempt-react-replaced", replacedComposerPayload);
+assert.equal(recoveredReplacedComposer.draft_present, true, "a React-replaced composer must still expose the unchanged draft");
+assert.equal(recoveredReplacedComposer.draft_owned, true, "an exact unchanged payload must recover attempt ownership after React replaces the composer node");
+assert.equal(recoveredReplacedComposer.composer_recovered_after_react, true, "send diagnostics must expose React composer ownership recovery");
+assert.equal(replacedComposer.dataset.codexproDraftAttempt, "attempt-react-replaced", "ownership recovery must re-mark the replacement composer for the one scoped fallback");
+replacedComposer.dataset = {};
+const editedReplacedComposer = inspectChatSendAttemptPage("attempt-react-replaced", `${replacedComposerPayload}\nNỘI DUNG KHÁC`);
+assert.equal(editedReplacedComposer.draft_owned, false, "a changed replacement draft must never inherit attempt ownership");
+assert.equal(replacedComposer.dataset.codexproDraftAttempt, undefined, "a changed draft must remain untouched so CodexPro cannot click-send user edits");
+
 const mergeRecoverySource = extractFunction("mergeChatRecoveryResponse");
 const mergeChatRecoveryResponse = Function(`${mergeRecoverySource}; return mergeChatRecoveryResponse;`)();
 const recoveredCheckpoint = mergeChatRecoveryResponse({
@@ -218,7 +245,7 @@ const recoveryNetworkState = new Map([[41, { state: "completed", conversation_id
 const recoveryPostLog = new Map([[41, [{ state: "completed" }]]]);
 const recoveryPostVersion = new Map([[41, 3]]);
 const replaceUnresponsiveChatTab = Function(
-  "chrome", "waitForTab", "ensureChatNetworkStreamCapture", "ensureChatNetworkStateLoaded", "chatNetworkStateByTab", "chatNetworkPostLogByTab", "chatNetworkPostVersionByTab", "pendingConversationByTab", "persistChatNetworkState", "scheduleRealtimeProfilePush", "recentConversationCache", "serializeChatGptTabCreation", "MAX_CHATGPT_TABS", "releaseChatDebuggerForRecovery",
+  "chrome", "waitForTab", "ensureChatNetworkStreamCapture", "ensureChatNetworkStateLoaded", "chatNetworkStateByTab", "chatNetworkPostLogByTab", "chatNetworkPostVersionByTab", "pendingConversationByTab", "persistChatNetworkState", "scheduleRealtimeProfilePush", "recentConversationCache", "serializeChatGptTabCreation", "MAX_CHATGPT_TABS", "releaseChatDebuggerForRecovery", "auditedCreateTab", "auditedRemoveTab",
   `${replaceTabSource.replace(/^function/, "async function")}; return replaceUnresponsiveChatTab;`
 )(
   { tabs: {
@@ -239,7 +266,9 @@ const replaceUnresponsiveChatTab = Function(
   { at: 1, items: [] },
   async (operation) => await operation(),
   3,
-  async (id) => { recoveryCalls.push(["release", id]); }
+  async (id) => { recoveryCalls.push(["release", id]); },
+  async (args) => { recoveryCalls.push(["create", args]); return { id: 42, windowId: 7, active: true, url: args.url }; },
+  async (tabOrId) => { recoveryCalls.push(["remove", typeof tabOrId === "object" ? tabOrId.id : tabOrId]); }
 );
 const recoveryResult = await replaceUnresponsiveChatTab({ id: 41, windowId: 7, active: true, url: "https://chatgpt.com/c/12345678-abcd" }, "https://chatgpt.com/c/12345678-abcd", 5000);
 assert.equal(recoveryResult.replaced_tab_id, 41);
@@ -325,7 +354,7 @@ assert.match(worker, /async function submitChatAttachmentButtonTab\(tabId,attemp
 assert.match(worker, /func:clickPreparedChatSendButtonPage,args:\[attemptId\]/, "attachment submit must click only the Send button marked for the exact attempt");
 assert.match(sendBlock, /ATTACHMENT_UPLOAD_FAILED:/, "a failed upload must stop before submit and clean only the owned draft");
 assert.match(worker, /const tracker=cdpNetworkTrackersByTab\.get\(tabId\);if\(tracker\)void tracker\.cleanup\(\)/, "closing a tab must detach its CDP tracker");
-assert.match(worker, /chrome\.tabs\.onUpdated\.addListener\(\(tabId,changeInfo\)=>\{if\(typeof changeInfo\?\.url==='string'\)void reconcileChatTabNavigation\(tabId,changeInfo\.url\);\}\)/, "navigating the same tab away from its conversation must immediately reconcile conversation-scoped state");
+assert.match(worker, /chrome\.tabs\.onUpdated\.addListener\(\(tabId,changeInfo(?:,tab)?\)=>\{[\s\S]*?if\(typeof changeInfo\?\.url==='string'\)void reconcileChatTabNavigation\(tabId,changeInfo\.url\);/, "navigating the same tab away from its conversation must immediately reconcile conversation-scoped state");
 assert.match(worker, /conversationScopedStateMismatch\(current\.conversation_id,conversationId\)\)\{chatNetworkStateByTab\.delete\(tabId\)/, "network state from the previous conversation must be removed even when the active URL has no conversation id");
 assert.match(worker, /conversationScopedStateMismatch\(current\.conversation_id,conversationId\)\)\{chatCanonicalActivityByTab\.delete\(tabId\)/, "canonical activity from the previous conversation must not keep a root ChatGPT tab busy");
 assert.doesNotMatch(worker, /body_text:String\(request\.body_text/, "diagnostics must not export captured message bodies");

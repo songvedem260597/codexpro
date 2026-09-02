@@ -4633,6 +4633,10 @@ function App() {
               const profileProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const profileRepoLabel = String(profile.current_workspace_repo || profileProject?.githubRepo || profileProject?.name || "").trim();
               const profileTaskLabel = String(profile.current_task_title || profileTaskLabels[profile.profile_id] || "").trim();
+              const flightRecorderCount = Math.max(0, Number(profile.flight_recorder_incident_count) || 0);
+              const flightRecorderKind = String(profile.flight_recorder_latest_kind || "").trim();
+              const flightRecorderMessage = String(profile.flight_recorder_latest_message || "").trim();
+              const flightRecorderAt = String(profile.flight_recorder_latest_at || "").trim();
               const profileRepository = profileRepoLabel ? {
                 label: profileRepoLabel,
                 title: profileProject?.remoteUrl || workspaceRoot || profileRepoLabel
@@ -4660,6 +4664,7 @@ function App() {
                       <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Mất heartbeat extension"}</span>
                       <span>v{profile.extension_version || "cũ"}</span>
                       <span>{chatGptTabCount} tab</span>
+                      {flightRecorderCount > 0 && <span className="profile-warning" title={[flightRecorderKind, flightRecorderMessage, flightRecorderAt].filter(Boolean).join(" · ")}>Recorder {flightRecorderCount} sự cố{flightRecorderKind ? ` · ${flightRecorderKind}` : ""}</span>}
                       {connectorMessage && <span className={connectorInstalled ? "ready-text" : "profile-warning"}>{connectorMessage}</span>}
                     </div>
                     {profileTaskLabel && (

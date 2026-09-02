@@ -37,6 +37,11 @@ const CHAT_TAB_HEALTH_FAILURES_TO_CLOSE = 2;
 const TAB_AUDIT_STORAGE_KEY = 'codexproTabAuditV1';
 const TAB_AUDIT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const TAB_AUDIT_MAX_EVENTS = 1200;
+const FLIGHT_RECORDER_STORAGE_KEY = 'codexproFlightRecorderIncidentsV1';
+const FLIGHT_RECORDER_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const FLIGHT_RECORDER_MAX_INCIDENTS = 80;
+const FLIGHT_RECORDER_EVENT_LIMIT = 240;
+const FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS = 5000;
 let polling = false;
 let installing = false;
 const chatNetworkStateByTab = new Map();
@@ -72,6 +77,12 @@ let conversationTitleOverrides = null;
 let tabAuditWriteTail = Promise.resolve();
 let tabAuditPrimed = false;
 const tabAuditKnownTabs = new Map();
+const flightRecorderTrackersByTab = new Map();
+const flightRecorderEventsByTab = new Map();
+const flightRecorderContextByTab = new Map();
+const flightRecorderIncidentAtByTab = new Map();
+let flightRecorderIncidents = null;
+let flightRecorderIncidentsLoadPromise = null;
 
 function conversationIdFromUrl(value) {
   try{return new URL(String(value||'')).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1]||'';}catch{return '';}
@@ -853,6 +864,7 @@ chrome.tabs.onCreated.addListener(tab=>{
   if(!summary.url)return;
   tabAuditKnownTabs.set(tab.id,summary);
   void recordTabAuditEvent('open_observed',{source:'chrome.tabs.onCreated',...summary});
+  void ensureFlightRecorderForTab(tab.id,summary.url).catch(()=>{});
 });
 chrome.tabs.onUpdated.addListener((tabId,changeInfo,tab)=>{
   if(typeof changeInfo?.url==='string')void reconcileChatTabNavigation(tabId,changeInfo.url);
@@ -861,17 +873,19 @@ chrome.tabs.onUpdated.addListener((tabId,changeInfo,tab)=>{
   if(summary.url){
     if(!previous)void recordTabAuditEvent('open_observed',{source:'chrome.tabs.onUpdated',reason:'chatgpt_url_observed',...summary});
     tabAuditKnownTabs.set(tabId,{...previous,...summary});
+    void ensureFlightRecorderForTab(tabId,summary.url).catch(()=>{});
     if(changeInfo?.status==='loading')void recordTabAuditEvent('load_observed',{source:'chrome.tabs.onUpdated',reason:'status_loading',...summary,status:'loading'});
   }else if(previous&&typeof changeInfo?.url==='string'){
     void recordTabAuditEvent('leave_chatgpt_observed',{source:'chrome.tabs.onUpdated',reason:'navigated_away',...previous});
     tabAuditKnownTabs.delete(tabId);
   }
 });
-chrome.tabs.onRemoved.addListener(tabId=>{const auditTab=tabAuditKnownTabs.get(tabId);if(auditTab)void recordTabAuditEvent('close_observed',{source:'chrome.tabs.onRemoved',...auditTab});tabAuditKnownTabs.delete(tabId);pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatTabHealthByTab.delete(tabId);realtimeNetworkStreamsByTab.delete(tabId);pendingRealtimeStreamTabs.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();scheduleRealtimeProfilePush(0);});
+chrome.tabs.onRemoved.addListener(tabId=>{const auditTab=tabAuditKnownTabs.get(tabId);if(auditTab)void recordTabAuditEvent('close_observed',{source:'chrome.tabs.onRemoved',...auditTab});tabAuditKnownTabs.delete(tabId);pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatTabHealthByTab.delete(tabId);realtimeNetworkStreamsByTab.delete(tabId);pendingRealtimeStreamTabs.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));void stopFlightRecorderForTab(tabId);flightRecorderEventsByTab.delete(tabId);flightRecorderContextByTab.delete(tabId);flightRecorderIncidentAtByTab.delete(tabId);const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();scheduleRealtimeProfilePush(0);});
 void primeTabAuditKnownTabs().catch(()=>{});
 
 async function tabInventory() {
   const tabs=await chrome.tabs.query({});
+  void ensureFlightRecordersForTabs(tabs);
   return tabs.filter(tab=>Number.isInteger(tab.id)).map(tab=>({
     id:tab.id,
     window_id:tab.windowId,
@@ -990,6 +1004,7 @@ async function chatDomActivityState(tabId,conversationId,options={}) {
 }
 
 async function tabList() {
+  const recorderIncidents=await getFlightRecorderIncidents();
   const tabs = await chrome.tabs.query({});
   const liveTabIds=new Set(tabs.map(tab=>tab.id).filter(Number.isInteger));
   for(const tabId of chatDomActivityByTab.keys())if(!liveTabIds.has(tabId))chatDomActivityByTab.delete(tabId);
@@ -999,6 +1014,8 @@ async function tabList() {
   const longTaskAudits=await getLongTaskAuditRecords();
   const summaries=await Promise.all(tabs.map(async tab => {
     const conversationId=conversationIdFromUrl(tab.url);
+    const recorderMatches=recorderIncidents.filter(item=>Number(item?.tab_id)===Number(tab.id)||(conversationId&&String(item?.conversation_id||'')===conversationId));
+    const latestRecorderIncident=recorderMatches.at(-1)||null;
     const hungAudit=Object.values(longTaskAudits).find(record=>record?.status==='hung'&&String(record?.conversation_id||'')===conversationId);
     let networkState=await chatRequestState(tab.id,conversationId);
     const cachedDomActivity=chatDomActivityByTab.get(tab.id)?.value;
@@ -1072,6 +1089,11 @@ async function tabList() {
       renderer_error:hungAudit?'LONG_TASK_WATCHDOG_UNRESPONSIVE':String(domActivity.error||''),
       long_task_watchdog_hung:Boolean(hungAudit),
       long_task_watchdog_attempt_key:String(hungAudit?.attempt_key||''),
+      flight_recorder_incident_count:recorderMatches.length,
+      flight_recorder_latest_at:String(latestRecorderIncident?.at||''),
+      flight_recorder_latest_kind:String(latestRecorderIncident?.kind||''),
+      flight_recorder_latest_message:String(latestRecorderIncident?.message||'').slice(0,500),
+      flight_recorder_latest_task_id:String(latestRecorderIncident?.task_id||''),
       conversation_limit_reached:false,
       conversation_limit_message:''
     };
@@ -1653,11 +1675,19 @@ async function readChatResponsePage() {
   return {ok:true,title:document.title,url:location.href,text,text_length:text.length,links,truncated:Boolean(assistantAfterLatestUser?.truncated),incomplete:busy,incomplete_reason:imageGenerationLoading?'image_generation_in_progress':messageDeliveryTimedOut?'message_delivery_timeout':connectionInterrupted?'connection_interrupted':busy?(thinkingPlaceholder?'thinking_placeholder':'generation_in_progress'):'',image_generation_in_progress:imageGenerationLoading,image_response_ready:imageResponseReady,response_kind:imageResponseReady||imageGenerationLoading?'image':'text',connection_interrupted:recoveryRequired,message_delivery_timed_out:messageDeliveryTimedOut,conversation_limit_reached:false,conversation_limit_message:'',conversation_limit_button_label:'',message_count:finalizedMessages.filter(message=>message.role==='assistant').length,total_message_count:finalizedMessages.length,messages:finalizedMessages,busy,response_ready:responseReady,response_source:'chatgpt_dom',updated_at:new Date().toISOString()};
 }
 
-function inspectChatSendAttemptPage(attemptId='') {
+function inspectChatSendAttemptPage(attemptId='',expectedText='') {
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
+  const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
   const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
   const text=String(composer?.isContentEditable?(composer.innerText||composer.textContent||''):(composer?.value||'')).replace(/[\u200B-\u200D\uFEFF]/g,'').trim();
-  return {ok:true,draft_owned:Boolean(composer&&composer.dataset.codexproDraftAttempt===attemptId),draft_present:Boolean(text),draft_length:text.length,composer_found:Boolean(composer)};
+  const marked=Boolean(composer&&composer.dataset.codexproDraftAttempt===attemptId);
+  const recovered=Boolean(composer&&!marked&&expectedText&&normalized(text)===normalized(expectedText));
+  if(recovered){
+    composer.dataset.codexproDraftAttempt=attemptId;
+    composer.dataset.codexproDraftText=expectedText;
+    composer.dataset.codexproSubmitAttempt=attemptId;
+  }
+  return {ok:true,draft_owned:Boolean(marked||recovered),draft_present:Boolean(text),draft_length:text.length,composer_found:Boolean(composer),composer_recovered_after_react:recovered};
 }
 
 async function focusChatComposerForSubmitPage(attemptId='',expectedText='') {
@@ -2570,7 +2600,7 @@ async function execute(command) {
       }
 
       const [attemptState]=await timedSendPhase('attempt_inspect_ms',()=>promiseWithTimeout(
-        chrome.scripting.executeScript({target:{tabId:tab.id},func:inspectChatSendAttemptPage,args:[attemptId]}),
+        chrome.scripting.executeScript({target:{tabId:tab.id},func:inspectChatSendAttemptPage,args:[attemptId,text]}),
         DOM_ACTION_TIMEOUT_MS,
         'Chrome không phản hồi khi kiểm tra draft sau trusted Enter.'
       ));
@@ -2624,7 +2654,7 @@ async function execute(command) {
     if(!networkAck){
       const evidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
       let attemptState=null;
-      try{[attemptState]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:inspectChatSendAttemptPage,args:[attemptId]});}catch{}
+      try{[attemptState]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:inspectChatSendAttemptPage,args:[attemptId,text]});}catch{}
       const submitActivity=evidence.filter(isChatSubmitLifecycleEvidence);
       const definitelyUnsent=shouldUseTrustedClickFallback(attemptState?.result,evidence);
       pendingConversationByTab.delete(tab.id);
@@ -3333,9 +3363,14 @@ async function pollLoop() {
         const isActive=message.active_profile_id===profile.id;
         if(profile.active!==isActive)await chrome.storage.local.set({active:isActive});
         if(message.command){
+          const commandTargetId=Number(message.command?.args?.target_id);
+          if(Number.isInteger(commandTargetId)){
+            flightRecorderContextByTab.set(commandTargetId,{profile_id:profile.id,task_id:String(message.command?.args?.task_id||''),task_title:String(message.command?.args?.task_title||''),conversation_id:String(message.command?.args?.conversation_id||''),command_id:String(message.command?.id||''),action:String(message.command?.action||'')});
+            void ensureFlightRecorderForTab(commandTargetId).catch(()=>{});
+          }
           const heartbeat=setInterval(()=>{void Promise.all([chrome.storage.local.get('workerEnabled'),tabInventory()]).then(([{workerEnabled},tab_inventory])=>workerEnabled===false?null:fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,tab_inventory})})).catch(()=>{});},10000);
           try{await postResult(profile,message.command,await execute(message.command));}
-          catch(error){await postResult(profile,message.command,null,error);}
+          catch(error){if(Number.isInteger(commandTargetId))await persistFlightRecorderIncident(commandTargetId,{at:new Date().toISOString(),event:'CodexPro.commandError',error:String(error?.message||error).slice(0,1000)},'command_error').catch(()=>{});await postResult(profile,message.command,null,error);}
           finally{clearInterval(heartbeat);}
         }
       }catch{await new Promise(resolve=>setTimeout(resolve,2000));}
@@ -3388,6 +3423,7 @@ function releaseDebuggerTab(tabId) {
 }
 
 async function releaseChatDebuggerForRecovery(tabId) {
+  if(Number.isInteger(tabId))await stopFlightRecorderForTab(tabId);
   if(!Number.isInteger(tabId))return false;
   const tracker=cdpNetworkTrackersByTab.get(tabId);
   if(tracker){try{await tracker.cleanup();}catch{}}
@@ -3426,9 +3462,113 @@ function safeExtensionTraceEvent(event) {
   if(method==='Network.loadingFinished')return {at,event:method,request_id:bounded(params.requestId,160),encoded_bytes:Number(params.encodedDataLength)||0};
   if(method==='Network.loadingFailed')return {at,event:method,request_id:bounded(params.requestId,160),error:bounded(params.errorText,500),canceled:Boolean(params.canceled)};
   if(method==='Runtime.consoleAPICalled')return {at,event:method,level:bounded(params.type,40),text:(Array.isArray(params.args)?params.args.map(item=>bounded(item?.value??item?.description,300)).join(' '):'').slice(0,1000)};
+  if(method==='Runtime.exceptionThrown'){const details=params.exceptionDetails||{};return {at,event:method,text:bounded(details.text||details.exception?.description||'Unhandled exception',1000),url:safeUrl(details.url),line:Number(details.lineNumber)||0,column:Number(details.columnNumber)||0};}
   if(method==='Log.entryAdded')return {at,event:method,level:bounded(params.entry?.level,40),source:bounded(params.entry?.source,80),text:bounded(params.entry?.text,1000),url:safeUrl(params.entry?.url)};
   if(['Page.lifecycleEvent','Page.domContentEventFired','Page.loadEventFired','Page.frameNavigated'].includes(method))return {at,event:method,name:bounded(params.name,80),url:safeUrl(params.frame?.url)};
   return null;
+}
+
+function flightRecorderEventIsIncident(event) {
+  const type=String(event?.event||''),level=String(event?.level||'').toLowerCase();
+  if(type==='Runtime.exceptionThrown'||type==='Inspector.targetCrashed')return true;
+  if(type==='Network.loadingFailed')return !event?.canceled;
+  if(type==='Runtime.consoleAPICalled')return ['error','assert'].includes(level);
+  if(type==='Log.entryAdded')return ['error','warning'].includes(level);
+  if(type==='CodexPro.commandError'||type==='Debugger.detached')return true;
+  return false;
+}
+
+function flightRecorderIncidentMessage(event) {
+  return String(event?.text||event?.error||event?.reason||event?.event||'Browser incident').slice(0,1000);
+}
+
+async function getFlightRecorderIncidents() {
+  if(flightRecorderIncidents)return flightRecorderIncidents;
+  if(flightRecorderIncidentsLoadPromise)return await flightRecorderIncidentsLoadPromise;
+  flightRecorderIncidentsLoadPromise=(async()=>{
+    try{
+      const stored=await chrome.storage.local.get(FLIGHT_RECORDER_STORAGE_KEY);
+      const cutoff=Date.now()-FLIGHT_RECORDER_RETENTION_MS;
+      const raw=Array.isArray(stored[FLIGHT_RECORDER_STORAGE_KEY])?stored[FLIGHT_RECORDER_STORAGE_KEY]:[];
+      flightRecorderIncidents=raw.filter(item=>item&&typeof item==='object'&&Number(item.at_ms||Date.parse(item.at)||0)>=cutoff).slice(-FLIGHT_RECORDER_MAX_INCIDENTS);
+    }catch{flightRecorderIncidents=[];}
+    flightRecorderIncidentsLoadPromise=null;
+    return flightRecorderIncidents;
+  })();
+  return await flightRecorderIncidentsLoadPromise;
+}
+
+async function persistFlightRecorderIncident(tabId,event,reason='cdp') {
+  if(!Number.isInteger(tabId))return null;
+  const now=Date.now(),previous=Number(flightRecorderIncidentAtByTab.get(tabId)||0);
+  if(reason==='cdp'&&now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS)return null;
+  flightRecorderIncidentAtByTab.set(tabId,now);
+  const [profile,tab]=await Promise.all([profileInfo().catch(()=>({id:''})),chrome.tabs.get(tabId).catch(()=>null)]);
+  const context=flightRecorderContextByTab.get(tabId)||{};
+  const conversationId=String(context.conversation_id||conversationIdFromUrl(tab?.url)||'').slice(0,180);
+  const incident={
+    id:crypto.randomUUID(),at:new Date(now).toISOString(),at_ms:now,reason:String(reason||'cdp').slice(0,80),kind:String(event?.event||'unknown').slice(0,120),message:flightRecorderIncidentMessage(event),
+    profile_id:String(context.profile_id||profile?.id||'').slice(0,160),tab_id:tabId,window_id:Number(tab?.windowId)||0,conversation_id:conversationId,
+    task_id:String(context.task_id||'').slice(0,160),task_title:String(context.task_title||'').slice(0,300),command_id:String(context.command_id||'').slice(0,160),action:String(context.action||'').slice(0,160),
+    url:safeTabAuditUrl(tab?.url||''),event:event&&typeof event==='object'?event:{event:String(event||'unknown')},events:(flightRecorderEventsByTab.get(tabId)||[]).slice(-120)
+  };
+  try{
+    const incidents=await getFlightRecorderIncidents();
+    incidents.push(incident);
+    const cutoff=Date.now()-FLIGHT_RECORDER_RETENTION_MS;
+    flightRecorderIncidents=incidents.filter(item=>Number(item?.at_ms||0)>=cutoff).slice(-FLIGHT_RECORDER_MAX_INCIDENTS);
+    await chrome.storage.local.set({[FLIGHT_RECORDER_STORAGE_KEY]:flightRecorderIncidents});
+  }catch{}
+  try{await fetch(`${BRIDGE}/flight-recorder`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile,incident})});}catch{}
+  scheduleRealtimeProfilePush(0);
+  return incident;
+}
+
+function noteFlightRecorderEvent(tabId,rawEvent) {
+  const event=rawEvent?.method?safeExtensionTraceEvent(rawEvent):rawEvent;
+  if(!event||typeof event!=='object')return;
+  const events=flightRecorderEventsByTab.get(tabId)||[];
+  events.push(event);
+  if(events.length>FLIGHT_RECORDER_EVENT_LIMIT)events.splice(0,events.length-FLIGHT_RECORDER_EVENT_LIMIT);
+  flightRecorderEventsByTab.set(tabId,events);
+  if(flightRecorderEventIsIncident(event))void persistFlightRecorderIncident(tabId,event,'cdp');
+}
+
+async function stopFlightRecorderForTab(tabId) {
+  const tracker=flightRecorderTrackersByTab.get(tabId);
+  if(!tracker)return false;
+  flightRecorderTrackersByTab.delete(tabId);
+  try{tracker.unsubscribe?.();}catch{}
+  releaseDebuggerTab(tabId);
+  return true;
+}
+
+async function ensureFlightRecorderForTab(tabId,url='') {
+  if(!Number.isInteger(tabId))return null;
+  if(url&&!isChatGptTabUrl(url)){await stopFlightRecorderForTab(tabId);return null;}
+  const existing=flightRecorderTrackersByTab.get(tabId);
+  if(existing)return existing;
+  const target=await acquireDebuggerTab(tabId);
+  const unsubscribe=subscribeDebuggerEvents(tabId,event=>noteFlightRecorderEvent(tabId,event));
+  const tracker={target,unsubscribe};
+  flightRecorderTrackersByTab.set(tabId,tracker);
+  try{
+    await Promise.allSettled([
+      chrome.debugger.sendCommand(target,'Network.enable',{}),chrome.debugger.sendCommand(target,'Runtime.enable',{}),chrome.debugger.sendCommand(target,'Log.enable',{}),chrome.debugger.sendCommand(target,'Page.enable',{}),chrome.debugger.sendCommand(target,'Page.setLifecycleEventsEnabled',{enabled:true})
+    ]);
+    return tracker;
+  }catch(error){
+    flightRecorderTrackersByTab.delete(tabId);try{unsubscribe();}catch{}releaseDebuggerTab(tabId);throw error;
+  }
+}
+
+async function ensureFlightRecordersForTabs(tabs) {
+  const live=new Set();
+  for(const tab of Array.isArray(tabs)?tabs:[]){
+    if(!Number.isInteger(tab?.id)||!isChatGptTabUrl(tab?.url))continue;
+    live.add(tab.id);void ensureFlightRecorderForTab(tab.id,tab.url).catch(()=>{});
+  }
+  for(const tabId of flightRecorderTrackersByTab.keys())if(!live.has(tabId))void stopFlightRecorderForTab(tabId);
 }
 
 async function withExtensionCdpTrace(tabId,args,operation) {
@@ -3457,6 +3597,11 @@ async function serializeBrowserTabMutation(tabId,action,args,operation) {
 }
 
 chrome.debugger.onDetach.addListener(source=>{
+  const detachedTabId=source?.tabId;
+  if(Number.isInteger(detachedTabId)&&flightRecorderTrackersByTab.has(detachedTabId)){
+    flightRecorderTrackersByTab.delete(detachedTabId);
+    noteFlightRecorderEvent(detachedTabId,{at:new Date().toISOString(),event:'Debugger.detached',reason:'unexpected_detach'});
+  }
   const tabId=source?.tabId;
   if(!Number.isInteger(tabId))return;
   const session=debuggerSessionsByTab.get(tabId);

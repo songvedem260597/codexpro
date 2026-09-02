@@ -8,7 +8,10 @@ import { createRuntimeTraceContext, currentRuntimeTraceContext, recordRuntimeTra
 
 const BRIDGE_HOST = "127.0.0.1";
 const CODEXPRO_EXTENSION_ORIGIN = "chrome-extension://gndipignbnipohooclcbhjliikamjlpl";
-export const BROWSER_EXTENSION_BRIDGE_PORT = 9224;
+const configuredBridgePort = Number(process.env.CODEXPRO_BROWSER_EXTENSION_BRIDGE_PORT);
+export const BROWSER_EXTENSION_BRIDGE_PORT = Number.isInteger(configuredBridgePort) && configuredBridgePort > 0 && configuredBridgePort <= 65_535
+  ? configuredBridgePort
+  : 9224;
 const PROFILE_TTL_MS = 45_000;
 const PROFILE_RETENTION_MS = 10 * 60_000;
 const PROFILE_RECONNECT_WAIT_MS = 45_000;
@@ -24,6 +27,8 @@ const PROFILE_TASK_STATE_VERSION = 1;
 const MAX_PERSISTED_PROFILE_TASKS = 200;
 const PROFILE_TASK_EVENT_LOG_MAX_BYTES = 2 * 1024 * 1024;
 const PROFILE_TASK_EVENT_THROTTLE_MS = 30_000;
+const FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES = 8 * 1024 * 1024;
+const MAX_PROFILE_FLIGHT_RECORDER_INCIDENTS = 60;
 
 export interface ExtensionProfileSummary {
   profile_id: string;
@@ -48,6 +53,10 @@ export interface ExtensionProfileSummary {
   current_task_id: string;
   current_task_title: string;
   current_task_conversation_id: string;
+  flight_recorder_incident_count: number;
+  flight_recorder_latest_at: string;
+  flight_recorder_latest_kind: string;
+  flight_recorder_latest_message: string;
   chatgpt_tabs: Array<{
     id: number;
     title: string;
@@ -81,6 +90,11 @@ export interface ExtensionProfileSummary {
     message_delivery_timed_out: boolean;
     renderer_unresponsive: boolean;
     renderer_error: string;
+    flight_recorder_incident_count: number;
+    flight_recorder_latest_at: string;
+    flight_recorder_latest_kind: string;
+    flight_recorder_latest_message: string;
+    flight_recorder_latest_task_id: string;
     long_task_watchdog_hung: boolean;
     long_task_watchdog_attempt_key: string;
   }>;
@@ -169,6 +183,26 @@ export interface BrowserExtensionConnectorInfo {
   authentication: "none";
 }
 
+interface BrowserFlightRecorderIncident {
+  id: string;
+  at: string;
+  at_ms: number;
+  reason: string;
+  kind: string;
+  message: string;
+  profile_id: string;
+  tab_id: number;
+  window_id: number;
+  conversation_id: string;
+  task_id: string;
+  task_title: string;
+  command_id: string;
+  action: string;
+  url: string;
+  event: Record<string, unknown>;
+  events: Array<Record<string, unknown>>;
+}
+
 export interface BrowserExtensionBridgeOptions {
   connectorInfo?: (profileId: string) => BrowserExtensionConnectorInfo;
 }
@@ -188,6 +222,7 @@ interface ExtensionProfile {
   lastSeen: number;
   tabs: unknown[];
   recentConversations: unknown[];
+  flightRecorderIncidents: BrowserFlightRecorderIncident[];
   queued: BridgeCommand[];
   waiter?: ServerResponse;
   waiterTimer?: NodeJS.Timeout;
@@ -259,6 +294,48 @@ export function recordBrowserProfileTaskEvent(event: string, details: Record<str
     fs.appendFileSync(logPath, `${JSON.stringify({ at: new Date().toISOString(), event: String(event).slice(0, 120), ...safeDetails })}\n`, "utf8");
   } catch {
     // Diagnostics must never break the profile bridge or MCP runtime.
+  }
+}
+
+function browserFlightRecorderLogPath(): string {
+  return path.join(path.dirname(browserProfileTaskStatePath()), "browser-flight-recorder.jsonl");
+}
+
+function sanitizeFlightRecorderEvent(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 40).map(([key, item]) => [
+    String(key).slice(0, 100),
+    typeof item === "string" ? item.slice(0, 2000) : typeof item === "number" || typeof item === "boolean" || item == null ? item : String(item).slice(0, 2000)
+  ]));
+}
+
+function sanitizeFlightRecorderIncident(value: unknown, fallbackProfileId = ""): BrowserFlightRecorderIncident | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, any>;
+  const tabId = Number(source.tab_id);
+  if (!Number.isInteger(tabId) || tabId < 0) return null;
+  const atMs = Math.max(0, Number(source.at_ms) || Date.parse(String(source.at || "")) || Date.now());
+  return {
+    id: String(source.id || randomUUID()).slice(0, 160), at: String(source.at || new Date(atMs).toISOString()).slice(0, 64), at_ms: atMs,
+    reason: String(source.reason || "cdp").slice(0, 80), kind: String(source.kind || "unknown").slice(0, 120), message: String(source.message || "").slice(0, 2000),
+    profile_id: String(source.profile_id || fallbackProfileId).slice(0, 160), tab_id: tabId, window_id: Math.max(0, Number(source.window_id) || 0), conversation_id: String(source.conversation_id || "").slice(0, 180),
+    task_id: String(source.task_id || "").slice(0, 160), task_title: String(source.task_title || "").slice(0, 300), command_id: String(source.command_id || "").slice(0, 160), action: String(source.action || "").slice(0, 160), url: String(source.url || "").slice(0, 1000),
+    event: sanitizeFlightRecorderEvent(source.event), events: (Array.isArray(source.events) ? source.events : []).slice(-120).map(sanitizeFlightRecorderEvent)
+  };
+}
+
+function recordBrowserFlightRecorderIncident(incident: BrowserFlightRecorderIncident): void {
+  try {
+    const logPath = browserFlightRecorderLogPath();
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    if (fs.existsSync(logPath) && fs.statSync(logPath).size >= FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES) {
+      const previousPath = `${logPath}.1`;
+      if (fs.existsSync(previousPath)) fs.rmSync(previousPath, { force: true });
+      fs.renameSync(logPath, previousPath);
+    }
+    fs.appendFileSync(logPath, `${JSON.stringify(incident)}\n`, "utf8");
+  } catch {
+    // Flight-recorder persistence is diagnostic-only and must not break commands.
   }
 }
 
@@ -557,6 +634,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     lastSeen: 0,
     tabs: [],
     recentConversations: [],
+    flightRecorderIncidents: [],
     queued: []
   };
   const incomingEnabledUpdatedAt = Math.max(0, Number(source.worker_enabled_updated_at) || 0);
@@ -746,6 +824,24 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     return;
   }
 
+  if (req.url === "/flight-recorder") {
+    const profile = profileFromBody(state, body);
+    const incident = sanitizeFlightRecorderIncident(body.incident, profile.id);
+    if (!incident) {
+      sendJson(req, res, 400, { error: "Invalid flight recorder incident." });
+      return;
+    }
+    if (!incident.task_id) incident.task_id = String(profileTaskIds.get(profile.id) || "").slice(0, 160);
+    if (!incident.task_title) incident.task_title = String(profileTaskTitles.get(profile.id) || "").slice(0, 300);
+    if (!incident.conversation_id) incident.conversation_id = String(profileTaskConversationIds.get(profile.id) || "").slice(0, 180);
+    profile.flightRecorderIncidents.push(incident);
+    profile.flightRecorderIncidents = profile.flightRecorderIncidents.slice(-MAX_PROFILE_FLIGHT_RECORDER_INCIDENTS);
+    recordBrowserFlightRecorderIncident(incident);
+    scheduleProfileNotification(state);
+    sendJson(req, res, 200, { ok: true, profile_id: profile.id, incident_id: incident.id });
+    return;
+  }
+
   if (req.url === "/register") {
     const profile = profileFromBody(state, body);
     sendJson(req, res, 200, { ok: true, active_profile_id: state.activeProfileId ?? null, profile_id: profile.id });
@@ -910,6 +1006,11 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
           message_delivery_timed_out: tab.message_delivery_timed_out === true,
           renderer_unresponsive: tab.renderer_unresponsive === true,
           renderer_error: String(tab.renderer_error ?? "").trim().slice(0, 300),
+          flight_recorder_incident_count: Math.max(0, Number(tab.flight_recorder_incident_count) || 0),
+          flight_recorder_latest_at: String(tab.flight_recorder_latest_at ?? "").trim().slice(0, 64),
+          flight_recorder_latest_kind: String(tab.flight_recorder_latest_kind ?? "").trim().slice(0, 120),
+          flight_recorder_latest_message: String(tab.flight_recorder_latest_message ?? "").trim().slice(0, 500),
+          flight_recorder_latest_task_id: String(tab.flight_recorder_latest_task_id ?? "").trim().slice(0, 160),
           long_task_watchdog_hung: tab.long_task_watchdog_hung === true,
           long_task_watchdog_attempt_key: String(tab.long_task_watchdog_attempt_key ?? "").trim().slice(0, 300),
           network_recent_posts: Array.isArray(tab.network_recent_posts) ? tab.network_recent_posts.slice(-12) : []
@@ -952,6 +1053,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
         (!profile.connectorInstalled && profile.connectorServerFingerprint)
       ));
       const connectorInstalled = profile.connectorInstalled && connectorProfileBound;
+      const latestFlightRecorderIncident = profile.flightRecorderIncidents.at(-1);
       const connectorMessage = connectorUpdateRequired
         ? observedCodexProToolActivity
           ? "CodexPro đang gọi tool qua connector cũ chưa gắn đúng profile. Cần cập nhật connector."
@@ -980,6 +1082,10 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       current_task_id: profileTaskIds.get(profile.id) || "",
       current_task_title: profileTaskTitles.get(profile.id) || "",
       current_task_conversation_id: profileTaskConversationIds.get(profile.id) || "",
+      flight_recorder_incident_count: profile.flightRecorderIncidents.length,
+      flight_recorder_latest_at: String(latestFlightRecorderIncident?.at || ""),
+      flight_recorder_latest_kind: String(latestFlightRecorderIncident?.kind || ""),
+      flight_recorder_latest_message: String(latestFlightRecorderIncident?.message || "").slice(0, 500),
       chatgpt_tabs: chatgptTabSummaries,
       conversation_tabs: conversationSummaries,
       recent_conversations: recentConversations
@@ -1163,10 +1269,17 @@ async function runBrowserExtensionCommandCore(
           ? READ_RESPONSE_TIMEOUT_MS
       : COMMAND_TIMEOUT_MS;
   const createdAtMs = Date.now();
+  const commandArgs: Record<string, unknown> = {
+    ...args,
+    profile_id: String(args.profile_id || selectedId).slice(0, 160),
+    task_id: String(args.task_id || profileTaskIds.get(selectedId) || "").slice(0, 160),
+    task_title: String(args.task_title || profileTaskTitles.get(selectedId) || "").slice(0, 300),
+    conversation_id: String(args.conversation_id || profileTaskConversationIds.get(selectedId) || "").slice(0, 180)
+  };
   const command: BridgeCommand = {
     id: randomUUID(),
     action,
-    args,
+    args: commandArgs,
     created_at_ms: createdAtMs,
     expires_at_ms: createdAtMs
       + (waitingForReconnect ? PROFILE_RECONNECT_WAIT_MS : 0)
