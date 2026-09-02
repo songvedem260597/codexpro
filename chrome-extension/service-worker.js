@@ -601,6 +601,10 @@ async function bindConversationToTab(tabId,conversationId) {
   if(canonicalActivity&&!canonicalActivity.conversation_id)chatCanonicalActivityByTab.set(tabId,{...canonicalActivity,conversation_id:String(conversationId)});
 }
 
+function conversationScopedStateMismatch(stateConversationId,activeConversationId='') {
+  const stateId=String(stateConversationId||'');
+  return Boolean(stateId&&stateId!==String(activeConversationId||''));
+}
 async function chatRequestState(tabId,conversationId='') {
   await ensureChatNetworkStateLoaded();
   const now=Date.now();
@@ -608,7 +612,7 @@ async function chatRequestState(tabId,conversationId='') {
   if(!current)return {busy:false,busy_request_count:0,busy_since:'',network_state:'idle',network_source:'',network_generation_endpoint:'',network_last_started_at:'',network_last_completed_at:'',network_status_code:0,network_error:'',network_duration_ms:0};
   const at=Number(current.completed_at_ms||current.started_at_ms||0);
   if(!at||now-at>CHAT_REQUEST_STALE_MS){chatNetworkStateByTab.delete(tabId);void persistChatNetworkState();return {busy:false,busy_request_count:0,busy_since:'',network_state:'idle',network_source:'',network_generation_endpoint:'',network_last_started_at:'',network_last_completed_at:'',network_status_code:0,network_error:'',network_duration_ms:0};}
-  if(conversationId&&current.conversation_id&&current.conversation_id!==conversationId)return {busy:false,busy_request_count:0,busy_since:'',network_state:'idle',network_source:'',network_generation_endpoint:'',network_last_started_at:'',network_last_completed_at:'',network_status_code:0,network_error:'',network_duration_ms:0};
+  if(conversationScopedStateMismatch(current.conversation_id,conversationId)){chatNetworkStateByTab.delete(tabId);void persistChatNetworkState();return {busy:false,busy_request_count:0,busy_since:'',network_state:'idle',network_source:'',network_generation_endpoint:'',network_last_started_at:'',network_last_completed_at:'',network_status_code:0,network_error:'',network_duration_ms:0};}
   const busy=current.state==='generating';
   return {
     busy,
@@ -791,11 +795,27 @@ function scheduleDomActivityRefresh(delayMs=1000) {
   },delayMs);
 }
 
+async function reconcileChatTabNavigation(tabId,url='') {
+  if(!Number.isInteger(tabId))return;
+  const conversationId=conversationIdFromUrl(url);
+  await ensureChatNetworkStateLoaded();
+  let networkChanged=false;
+  const networkState=chatNetworkStateByTab.get(tabId);
+  if(conversationScopedStateMismatch(networkState?.conversation_id,conversationId)){chatNetworkStateByTab.delete(tabId);networkChanged=true;}
+  const canonicalActivity=chatCanonicalActivityByTab.get(tabId);
+  if(conversationScopedStateMismatch(canonicalActivity?.conversation_id,conversationId))chatCanonicalActivityByTab.delete(tabId);
+  chatDomActivityByTab.delete(tabId);
+  chatCanonicalActivityProbesByTab.delete(tabId);
+  canonicalCompletionProbeAtByTab.delete(tabId);
+  if(networkChanged)await persistChatNetworkState();
+  scheduleRealtimeProfilePush(0);
+}
 const CHATGPT_REQUEST_FILTER={urls:['https://chatgpt.com/*','https://*.chatgpt.com/*']};
 chrome.webRequest.onBeforeRequest.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'started');beginChatRequest(attributed);},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onCompleted.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'completed',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onErrorOccurred.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'failed',0,details.error);finishChatRequest(attributed,'failed');},CHATGPT_REQUEST_FILTER);
 chrome.webRequest.onBeforeRedirect.addListener(details=>{const attributed=attributedChatRequestDetails(details);recordChatPost(attributed,'redirected',details.statusCode);finishChatRequest(attributed,'completed');},CHATGPT_REQUEST_FILTER);
+chrome.tabs.onUpdated.addListener((tabId,changeInfo)=>{if(typeof changeInfo?.url==='string')void reconcileChatTabNavigation(tabId,changeInfo.url);});
 chrome.tabs.onRemoved.addListener(tabId=>{pendingConversationByTab.delete(tabId);void clearChatAttachmentOwnership(tabId);chatDomActivityByTab.delete(tabId);chatTabHealthByTab.delete(tabId);realtimeNetworkStreamsByTab.delete(tabId);pendingRealtimeStreamTabs.delete(tabId);chatCanonicalActivityByTab.delete(tabId);chatCanonicalActivityProbesByTab.delete(tabId);chatNetworkPostLogByTab.delete(tabId);chatNetworkPostVersionByTab.delete(tabId);canonicalCompletionProbeAtByTab.delete(tabId);const postWaiters=chatNetworkPostWaitersByTab.get(tabId);if(postWaiters){chatNetworkPostWaitersByTab.delete(tabId);for(const waiter of postWaiters){clearTimeout(waiter.timer);waiter.reject(new Error('Tab ChatGPT đã đóng trong lúc chờ upload network.'));}}rejectChatNetworkWaiters(tabId,new Error('Tab ChatGPT đã đóng trong lúc chờ network ACK.'));const tracker=cdpNetworkTrackersByTab.get(tabId);if(tracker)void tracker.cleanup();const session=debuggerSessionsByTab.get(tabId);if(session?.detachTimer)clearTimeout(session.detachTimer);debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);browserMutationTailsByTab.delete(tabId);void (async()=>{await ensureChatNetworkStateLoaded();chatNetworkStateByTab.delete(tabId);await persistChatNetworkState();})();scheduleRealtimeProfilePush(0);});
 chrome.tabs.onCreated.addListener(tab=>{if(isChatGptTabUrl(tab?.pendingUrl||tab?.url))void enforceSingleChatTabSoon().catch(()=>{});});
 
@@ -2019,7 +2039,7 @@ function beginCanonicalActivityGeneration(tabId,conversationId='',startedAt=Date
 function canonicalActivityState(tabId,conversationId='') {
   const current=chatCanonicalActivityByTab.get(tabId);
   if(!current)return emptyCanonicalActivity();
-  if(conversationId&&current.conversation_id&&current.conversation_id!==conversationId){chatCanonicalActivityByTab.delete(tabId);return emptyCanonicalActivity();}
+  if(conversationScopedStateMismatch(current.conversation_id,conversationId)){chatCanonicalActivityByTab.delete(tabId);return emptyCanonicalActivity();}
   const age=Date.now()-Math.max(Number(current.last_checked_at||0),Number(current.busy_since||0),Number(current.generation_started_at||0));
   if(age>CANONICAL_ACTIVITY_STALE_MS){chatCanonicalActivityByTab.delete(tabId);return emptyCanonicalActivity();}
   return current;

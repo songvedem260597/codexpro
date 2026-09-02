@@ -73,6 +73,52 @@ assert.equal(attachmentUploadHelpers.attachmentUploadStage("/unauth-mweb/image-u
 assert.equal(attachmentUploadHelpers.attachmentUploadStage("/unauth-mweb/image-uploads/process"), "processing", "headless ChatGPT image processing endpoint must be recognized");
 assert.equal(attachmentUploadHelpers.isAttachmentUploadEndpoint("/unauth-mweb/events/business"), false, "unrelated mweb telemetry must not acknowledge an attachment upload");
 
+const conversationStateMismatchSource = extractFunction("conversationScopedStateMismatch");
+const conversationScopedStateMismatch = Function(`${conversationStateMismatchSource}; return conversationScopedStateMismatch;`)();
+assert.equal(conversationScopedStateMismatch("old-conversation", ""), true, "a tab that navigates from /c/... back to the ChatGPT root must discard conversation-scoped state");
+assert.equal(conversationScopedStateMismatch("old-conversation", "new-conversation"), true, "switching the same tab to another conversation must discard the old state");
+assert.equal(conversationScopedStateMismatch("same-conversation", "same-conversation"), false, "the current conversation must keep its live state");
+assert.equal(conversationScopedStateMismatch("", "new-conversation"), false, "a just-created chat may keep unbound generation state until its /c/... URL is assigned");
+
+const navigationSource = extractFunction("reconcileChatTabNavigation");
+const navigationNetworkState = new Map([[77, { conversation_id: "old-conversation", state: "generating" }]]);
+const navigationCanonicalState = new Map([[77, { conversation_id: "old-conversation", busy: true }]]);
+const navigationDomState = new Map([[77, { value: { busy: true } }]]);
+const navigationCanonicalProbes = new Map([[77, Promise.resolve({})]]);
+const navigationCompletionProbe = new Map([[77, Date.now()]]);
+let navigationPersisted = 0;
+let navigationPushes = 0;
+const reconcileChatTabNavigation = Function(
+  "conversationIdFromUrl",
+  "ensureChatNetworkStateLoaded",
+  "chatNetworkStateByTab",
+  "conversationScopedStateMismatch",
+  "chatCanonicalActivityByTab",
+  "chatDomActivityByTab",
+  "chatCanonicalActivityProbesByTab",
+  "canonicalCompletionProbeAtByTab",
+  "persistChatNetworkState",
+  "scheduleRealtimeProfilePush",
+  `async ${navigationSource}; return reconcileChatTabNavigation;`
+)(
+  (value) => { try { return new URL(String(value || "")).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || ""; } catch { return ""; } },
+  async () => {},
+  navigationNetworkState,
+  conversationScopedStateMismatch,
+  navigationCanonicalState,
+  navigationDomState,
+  navigationCanonicalProbes,
+  navigationCompletionProbe,
+  async () => { navigationPersisted += 1; },
+  () => { navigationPushes += 1; }
+);
+await reconcileChatTabNavigation(77, "https://chatgpt.com/");
+assert.equal(navigationNetworkState.has(77), false, "root navigation must drop the previous conversation's network generation state");
+assert.equal(navigationCanonicalState.has(77), false, "root navigation must drop the previous conversation's canonical busy state");
+assert.equal(navigationDomState.has(77), false, "root navigation must drop cached DOM activity from the previous conversation");
+assert.equal(navigationPersisted, 1, "discarded network state must be persisted immediately");
+assert.equal(navigationPushes, 1, "navigation reconciliation must push an idle profile snapshot immediately");
+
 assert.equal(isChatGenerationRequest({
   tabId: 9,
   method: "POST",
@@ -324,6 +370,9 @@ assert.match(worker, /async function submitChatAttachmentButtonTab\(tabId,attemp
 assert.match(worker, /func:clickPreparedChatSendButtonPage,args:\[attemptId\]/, "attachment submit must click only the Send button marked for the exact attempt");
 assert.match(sendBlock, /ATTACHMENT_UPLOAD_FAILED:/, "a failed upload must stop before submit and clean only the owned draft");
 assert.match(worker, /const tracker=cdpNetworkTrackersByTab\.get\(tabId\);if\(tracker\)void tracker\.cleanup\(\)/, "closing a tab must detach its CDP tracker");
+assert.match(worker, /chrome\.tabs\.onUpdated\.addListener\(\(tabId,changeInfo\)=>\{if\(typeof changeInfo\?\.url==='string'\)void reconcileChatTabNavigation\(tabId,changeInfo\.url\);\}\)/, "navigating the same tab away from its conversation must immediately reconcile conversation-scoped state");
+assert.match(worker, /conversationScopedStateMismatch\(current\.conversation_id,conversationId\)\)\{chatNetworkStateByTab\.delete\(tabId\)/, "network state from the previous conversation must be removed even when the active URL has no conversation id");
+assert.match(worker, /conversationScopedStateMismatch\(current\.conversation_id,conversationId\)\)\{chatCanonicalActivityByTab\.delete\(tabId\)/, "canonical activity from the previous conversation must not keep a root ChatGPT tab busy");
 assert.doesNotMatch(worker, /body_text:String\(request\.body_text/, "diagnostics must not export captured message bodies");
 assert.match(worker, /replace\(\/\^@\\s\*\(\?=CodexPro\\b\)\/i,''\)/, "manager mentions must compare semantically after ChatGPT renders them");
 assert.match(worker, /const verifyDeadline=Math\.min\(/, "composer verification must not consume the entire send deadline");
