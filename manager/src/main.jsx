@@ -4692,7 +4692,7 @@ function App() {
                 : "MCP tạm thời không phản hồi, worker sẽ tự cập nhật khi kết nối phục hồi."}
             </div>
           )}
-          <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout working-border-${managerSettings.workingBorderStyle === "beam" ? "beam" : "shine"}`}>
+          <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout working-border-${managerSettings.workingBorderStyle}`}>
             {!(status?.workers || []).some((worker) => worker.worker_type === "api") && !status?.browserProfiles?.length && (
               <div className="empty">Chưa có worker nào kết nối. Hãy lưu API worker hoặc Load unpacked extension CodexPro trong Chrome profile cần dùng.</div>
             )}
@@ -5378,12 +5378,13 @@ function App() {
                   <SettingsDropdown
                     value={managerSettings.workingBorderStyle}
                     options={[
-                      { value: "shine", label: "Ánh sáng xoay", hint: "Glow mint → xanh lam chạy quanh viền" },
+                      { value: "shine", label: "Ánh sáng xoay", hint: "Kiểu viền cam xoay hiện tại" },
+                      { value: "mint", label: "Glow mint xanh", hint: "Mint → xanh lam chạy quanh viền" },
                       { value: "beam", label: "Tia chạy quanh viền", hint: "Border Beam gọn theo Ant Design" }
                     ]}
                     disabled={settingsBusy === "save"}
                     ariaLabel="Chọn kiểu viền worker đang hoạt động"
-                    onChange={(value) => void saveManagerSetting({ workingBorderStyle: value }, value === "beam" ? "Đã chọn viền tia chạy" : "Đã chọn viền ánh sáng xoay")}
+                    onChange={(value) => void saveManagerSetting({ workingBorderStyle: value }, value === "beam" ? "Đã chọn viền tia chạy" : value === "mint" ? "Đã chọn viền glow mint xanh" : "Đã chọn viền ánh sáng xoay")}
                   />
                 </div>
                 <div className="profile-card-height-control">
@@ -5418,7 +5419,7 @@ function App() {
                 </div>
               </div>
             </div>
-            <div className={`profile-layout-preview is-${managerSettings.profileLayout === "cards" ? "card" : "row"} working-border-${managerSettings.workingBorderStyle === "beam" ? "beam" : "shine"}`} aria-hidden="true">
+            <div className={`profile-layout-preview is-${managerSettings.profileLayout === "cards" ? "card" : "row"} working-border-${managerSettings.workingBorderStyle}`} aria-hidden="true">
               {["idle", "working", "idle", "hung"].map((state, index) => (
                 <span className={`profile-layout-preview-item is-${state}`} key={`${state}-${index}`}>
                   <span className="worker-active-border" />
