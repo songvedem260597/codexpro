@@ -324,12 +324,12 @@ const sendEnd = worker.indexOf("if(action==='rename_chat'){", sendStart);
 assert.ok(sendStart >= 0 && sendEnd > sendStart, "send_chat_request command block must exist");
 const sendBlock = worker.slice(sendStart, sendEnd);
 const timeoutCatch = sendBlock.indexOf("}catch(error){");
-const networkRecovery = sendBlock.indexOf("networkAck=await waitForNetworkGeneration(tab.id,submitStartedAt-100", timeoutCatch);
+const networkRecovery = sendBlock.indexOf("networkAck=await waitForNetworkGeneration(tab.id,networkAckStartedAfterMs", timeoutCatch);
 const acknowledgedReturn = sendBlock.indexOf("if(networkAck)return await resultForNetwork", networkRecovery);
 const cleanup = sendBlock.indexOf("await cleanupAttempt()", timeoutCatch);
 const enterPrimary = sendBlock.indexOf("trustedSubmitChatComposerTab(tab.id,attemptId,text)");
 const lifecycleAckBlock = sendBlock.indexOf("let earlyLifecycleEvidence=[]", enterPrimary);
-const lifecycleAck = sendBlock.indexOf("waitForChatSubmitLifecycle(tab.id,submitStartedAt-100", lifecycleAckBlock);
+const lifecycleAck = sendBlock.indexOf("waitForChatSubmitLifecycle(tab.id,networkAckStartedAfterMs", lifecycleAckBlock);
 const lifecycleReturn = sendBlock.indexOf("if(lifecycleResult)return lifecycleResult", lifecycleAck);
 const clickFallback = sendBlock.indexOf("trustedActivateChatSendButtonTab(tab.id,attemptId)", lifecycleReturn);
 
@@ -354,7 +354,7 @@ assert.equal(strictSubmitAck({ endpoint: "/unauth-mweb/conversation/prepare", ma
 assert.equal(strictSubmitAck({ endpoint: "/unauth-mweb/conversation/prepare" }), false, "an unrelated guest prepare must not acknowledge submission");
 assert.equal(strictSubmitAck({ endpoint: "/unauth-mweb/conversation/updates" }), false, "guest update polling must not acknowledge submission");
 assert.doesNotMatch(strictSubmitAckSource, /sentinel/, "sentinel chat-requirements traffic must not be treated as proof that the user message was submitted");
-assert.match(sendBlock, /lateLifecycleEvidence=recentChatPostEvidence\(tab\.id,submitStartedAt-100\)\.filter\(isChatSubmissionAckEvidence\)/, "late send ACK must reject sentinel preparation traffic just like the early ACK path");
+assert.match(sendBlock, /lateLifecycleEvidence=recentChatPostEvidence\(tab\.id,networkAckStartedAfterMs\)\.filter\(isChatSubmissionAckEvidence\)/, "late send ACK must reject sentinel preparation traffic just like the early ACK path");
 assert.match(sendBlock, /submitted_by:'trusted-enter'/);
 assert.match(sendBlock, /submitted_by:'trusted-click-fallback'/);
 assert.match(sendBlock, /Promise\.all\(\[[\s\S]*?probeConversationLimit\(tab\.id\)[\s\S]*?if\(conversationLimit\.reached\)throw new Error\('CONVERSATION_LIMIT_REACHED:/, "send preflight must detect a full conversation before touching its old composer");
@@ -393,7 +393,7 @@ assert.match(worker, /const CDP_NETWORK_START_TIMEOUT_MS = 15000;/, "the pre-arm
 const networkWaitSource = extractFunction("waitForNetworkGeneration");
 assert.match(networkWaitSource, /chatNetworkWaitersByTab/, "generation ACK waits must subscribe to network state changes");
 assert.doesNotMatch(networkWaitSource, /setTimeout\(resolve,50\)/, "generation ACK waits must not spin every 50 ms");
-assert.match(sendBlock, /waitForAttachmentUploadNetwork\(tab\.id,submitStartedAt-100,/, "attachment sends must wait for upload network completion before submit");
+assert.match(sendBlock, /waitForAttachmentUploadNetwork\(tab\.id,networkAckStartedAfterMs,/, "attachment sends must wait for upload network completion before submit");
 assert.doesNotMatch(sendBlock, /attachmentSubmit\?trustedSubmitChatSendButtonTab/, "attachment primary submit must not depend on a background mouse click");
 assert.match(sendBlock, /submitted_by:'dom-click-attachment'/, "attachment sends must honestly report their page-context submit path");
 assert.match(sendBlock, /attachmentSubmit\?submitChatAttachmentButtonTab\(tab\.id,attemptId,text\):trustedSubmitChatComposerTab/, "attachment sends must use a scoped background page click after upload ACK while text keeps trusted Enter");
@@ -465,6 +465,12 @@ assert.match(worker, /readCanonicalConversationPage/, "canonical conversation re
 assert.match(bridge, /expires_at_ms: number/, "bridge commands must carry an explicit expiry");
 assert.match(bridge, /profile\.queued = profile\.queued\.filter\(\(queued\) => queued\.id !== command\.id\)/, "timed-out commands must be removed from the extension queue");
 assert.match(bridge, /command\.expires_at_ms<=Date\.now\(\)\|\|!state\.pending\.has\(command\.id\)/, "poll must discard expired or orphaned commands before delivery");
+assert.match(sendBlock, /const allowBusyFollowup=Boolean\(!newChat&&args\.allow_busy_followup===true\)/, "only an explicit existing-chat follow-up may bypass the normal busy preflight");
+assert.match(sendBlock, /const followupWhileGenerating=Boolean\(allowBusyFollowup&&requestState\.busy&&requestState\.network_state==='generating'\)/, "busy follow-ups must require authoritative network generation rather than a stale DOM busy marker");
+assert.match(sendBlock, /if\(requestState\.busy&&!followupWhileGenerating\)throw new Error/, "ordinary automated sends must remain blocked while another generation is active");
+assert.match(sendBlock, /const networkAckStartedAfterMs=submitStartedAt;/, "follow-up ACK detection must ignore the generation that was already running before the new send started");
+assert.match(sendBlock, /SEND_POST_ACK_STABILITY_MS/, "successful sends must wait through the post-ACK stability window before the profile send lock is released");
+assert.match(sendBlock, /send_stabilized:true[\s\S]*?followup_while_generating:followupWhileGenerating/, "send results must expose the stability gate and whether a live generation was steered");
 assert.match(managerMain, /const profileSendOperations = new Map\(\)/, "Manager must reject concurrent sends for the same profile");
 assert.match(managerMain, /Profile này đang gửi một yêu cầu khác/, "concurrent profile sends must fail explicitly instead of queueing a duplicate");
 const responseSource = extractFunction("readChatResponsePage");

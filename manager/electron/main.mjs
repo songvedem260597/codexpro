@@ -4265,6 +4265,7 @@ async function sendProfileRequestUnlocked(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
   const newChat = Boolean(payload?.newChat);
+  const allowBusyFollowup = Boolean(!newChat && payload?.allowBusyFollowup === true);
   const text = String(payload?.text || "").trim();
   const requestedWorkflow = String(payload?.workflow || "").trim();
   const taskWorkflow = resolveTaskWorkflow(requestedWorkflow, text);
@@ -4416,7 +4417,7 @@ async function sendProfileRequestUnlocked(payload) {
     }
   }
   const selectedNetworkState = String(selectedConversationTab?.network_state || "");
-  if (selectedConversationTab?.busy || selectedNetworkState === "generating") throw new Error("Đoạn chat này đang xử lý yêu cầu khác. Hãy chờ trạng thái về ĐANG RẢNH.");
+  if ((selectedConversationTab?.busy || selectedNetworkState === "generating") && !allowBusyFollowup) throw new Error("Đoạn chat này đang xử lý yêu cầu khác. Hãy chờ trạng thái về ĐANG RẢNH.");
   if (!newChat) {
     const allowedConversationIds = new Set([
       ...(profile.recent_conversations || []).map((conversation) => String(conversation.id || "")),
@@ -4495,6 +4496,7 @@ async function sendProfileRequestUnlocked(payload) {
     new_chat: newChat,
     text: taskText,
     attachments,
+    allow_busy_followup: allowBusyFollowup,
     one_shot_recovery: payload?.oneShotRecovery === true
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
