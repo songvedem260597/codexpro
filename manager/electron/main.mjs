@@ -646,7 +646,7 @@ async function materializeApiWorkerRequest(payload) {
 }
 
 const MANAGER_FONT_CHOICES = new Set(["system", "be-vietnam-pro", "manrope", "jetbrains-mono", "arial", "tahoma", "verdana", "trebuchet", "georgia", "cascadia"]);
-const MANAGER_WORKING_BORDER_STYLES = new Set(["shine", "beam"]);
+const MANAGER_WORKING_BORDER_STYLES = new Set(["shine", "beam", "mint"]);
 const WORKER_IMAGE_STATES = new Set(["idle", "working", "hung"]);
 const WORKER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const MAX_WORKER_IMAGE_BYTES = 10 * 1024 * 1024;

@@ -19,14 +19,14 @@ body { display: grid; place-items: center; min-height: 100vh; }
 .profile-live-activity { margin-top: 16px; color: #bdc9dc; font: 13px/1.5 system-ui, sans-serif; }
 </style></head><body>
   <div class="visual-shell">
-    <div class="visual-title">Existing working worker - original orange shine</div>
-    <div class="profile-list working-border-shine is-row-layout">
+    <div class="visual-title">Added working worker - rotating mint-blue border</div>
+    <div class="profile-list working-border-mint is-row-layout">
       <article class="browser-profile is-online is-working">
         <div class="profile-worker is-working"><span class="profile-worker-dot"></span></div>
         <div class="profile-main">
           <div class="profile-title"><strong>Working worker</strong><span class="badge">WORKING</span></div>
-          <div class="profile-meta">CodexPro - existing rotating shine</div>
-          <div class="profile-live-activity">Original border style remains available...</div>
+          <div class="profile-meta">CodexPro - added mint border option</div>
+          <div class="profile-live-activity">Running tools and updating results...</div>
         </div>
       </article>
     </div>
@@ -43,6 +43,7 @@ async function inspect(win) {
       animationDuration: pseudo.animationDuration,
       angle: pseudo.getPropertyValue('--profile-border-shine-angle').trim(),
       backgroundImage: pseudo.backgroundImage,
+      webkitMaskComposite: pseudo.webkitMaskComposite,
       maskComposite: pseudo.maskComposite,
       borderColor: getComputedStyle(card).borderColor,
       card: { left: rect.left, right: rect.right, width: rect.width, scrollWidth: card.scrollWidth, clientWidth: card.clientWidth },
@@ -60,26 +61,29 @@ app.whenReady().then(async () => {
     await new Promise((resolve) => setTimeout(resolve, 420));
     const second = await inspect(win);
 
-    if (first.animationName !== "profile-border-shine" || first.animationDuration !== "2.75s") {
-      throw new Error(`Original shine animation changed unexpectedly: ${JSON.stringify(first)}`);
+    if (first.animationName !== "profile-border-shine" || first.animationDuration !== "2.8s") {
+      throw new Error(`Mint border animation is not active: ${JSON.stringify(first)}`);
     }
-    if (!/#f4a340|rgb\(244, 163, 64\)/i.test(first.backgroundImage) || !/#ff9f1c|rgb\(255, 159, 28\)/i.test(first.backgroundImage)) {
-      throw new Error(`Original orange shine colors changed unexpectedly: ${first.backgroundImage}`);
+    if (!/#7cffc4|rgb\(124, 255, 196\)/i.test(first.backgroundImage) || !/#6aa7ff|rgb\(106, 167, 255\)/i.test(first.backgroundImage)) {
+      throw new Error(`Mint border does not use the requested mint-blue gradient: ${first.backgroundImage}`);
+    }
+    if (!first.webkitMaskComposite || first.webkitMaskComposite === "source-over") {
+      throw new Error(`Mint border WebKit mask ring is not active: ${first.webkitMaskComposite}`);
     }
     if (!first.maskComposite || /add|source-over/i.test(first.maskComposite)) {
-      throw new Error(`Original shine border mask is not active: ${first.maskComposite}`);
+      throw new Error(`Mint border standard mask ring is not active: ${first.maskComposite}`);
     }
-    if (!/255,\s*193,\s*92|ffc15c/i.test(first.borderColor)) {
-      throw new Error(`Original shine static orange border was replaced: ${first.borderColor}`);
+    if (!/51,\s*64,\s*82|334052/i.test(first.borderColor)) {
+      throw new Error(`Mint mode did not get its own neutral static ring: ${first.borderColor}`);
     }
     if (first.angle && second.angle && first.angle === second.angle) {
-      throw new Error(`Registered shine angle did not interpolate at runtime: ${first.angle}`);
+      throw new Error(`Registered mint angle did not interpolate at runtime: ${first.angle}`);
     }
     if (first.card.scrollWidth > first.card.clientWidth + 2 || first.card.left < -2 || first.card.right > first.viewportWidth + 2) {
-      throw new Error(`Original shine fixture overflowed: ${JSON.stringify(first.card)}`);
+      throw new Error(`Mint border fixture overflowed: ${JSON.stringify(first.card)}`);
     }
 
-    const screenshotPath = path.join(managerRoot, "working-border-shine-smoke.png");
+    const screenshotPath = path.join(managerRoot, "working-border-mint-smoke.png");
     const image = await win.webContents.capturePage();
     fs.writeFileSync(screenshotPath, image.toPNG());
 
@@ -87,9 +91,9 @@ app.whenReady().then(async () => {
     await win.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", { media: "", features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
     await new Promise((resolve) => setTimeout(resolve, 120));
     const reduced = await inspect(win);
-    if (reduced.animationName !== "none") throw new Error(`Original shine must stop with reduced motion: ${reduced.animationName}`);
+    if (reduced.animationName !== "none") throw new Error(`Mint border must stop with reduced motion: ${reduced.animationName}`);
 
-    console.log("working border original shine visual smoke passed");
+    console.log("working border mint visual smoke passed");
     console.log(`visual screenshot: ${screenshotPath}`);
   } finally {
     if (win.webContents.debugger.isAttached()) win.webContents.debugger.detach();
