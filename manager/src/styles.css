@@ -235,8 +235,8 @@ section { margin-bottom: 38px; }
   .chat-response.is-streaming::before { animation: none; --profile-border-shine-angle: 24deg; }
 }
 @media (prefers-reduced-motion: reduce) { .worker-active-border::before { display: none; animation: none; } }
-.profile-worker { position: relative; width: 78px; height: 78px; flex: 0 0 auto; display: grid; place-items: center; border-radius: var(--radius-panel); background: radial-gradient(circle at 50% 54%, #26344d 0, #111925 62%, #090d14 100%); border: 1px solid #35435a; box-shadow: 0 9px 26px #0009, inset 0 1px 0 #ffffff0a; }
-.profile-worker img { width: 74px; height: 74px; display: block; object-fit: contain; image-rendering: pixelated; }
+.profile-worker { position: relative; width: 78px; height: 78px; aspect-ratio: 1 / 1; box-sizing: border-box; flex: 0 0 auto; display: grid; place-items: center; border-radius: var(--radius-panel); background: radial-gradient(circle at 50% 54%, #26344d 0, #111925 62%, #090d14 100%); border: 1px solid #35435a; box-shadow: 0 9px 26px #0009, inset 0 1px 0 #ffffff0a; }
+.profile-worker img { width: 74px; height: 74px; max-width: 100%; max-height: 100%; display: block; object-fit: contain; image-rendering: pixelated; }
 .profile-worker-dot { position: absolute; right: 5px; bottom: 5px; width: 11px; height: 11px; border: 2px solid #111720; border-radius: 50%; color: #e5484d; background: currentColor; box-shadow: 0 0 10px #e5484db3; isolation: isolate; }
 .profile-worker-dot::after { content: ""; position: absolute; inset: -5px; z-index: -1; border: 1px solid currentColor; border-radius: 50%; opacity: 0; transform: scale(.72); pointer-events: none; }
 .profile-worker.is-working .profile-worker-dot::after { animation: worker-signal-wave 2s ease-out infinite; }
@@ -318,8 +318,8 @@ section { margin-bottom: 38px; }
 .profile-list.working-border-beam .browser-profile.is-working { border-color: #3c4655; box-shadow: inset 0 0 0 1px #303947, inset 3px 0 0 #4b5769, 0 0 10px #0007; }
 .profile-list.working-border-beam.is-card-layout .browser-profile.is-working { box-shadow: inset 0 3px 0 #4b5769; }
 .profile-list.is-card-layout .browser-profile.is-error { box-shadow: inset 0 3px 0 var(--red); }
-.profile-list.is-card-layout .profile-worker { width: 148px; height: 164px; border-radius: 15px; background: radial-gradient(circle at 50% 52%, #2b3d5b 0, #141e2c 58%, #090d14 100%); box-shadow: 0 15px 34px #000b, 0 0 22px #70a0ff17, inset 0 1px 0 #ffffff12; }
-.profile-list.is-card-layout .profile-worker img { width: 142px; height: 158px; }
+.profile-list.is-card-layout .profile-worker { width: 148px; height: 148px; border-radius: 15px; background: radial-gradient(circle at 50% 52%, #2b3d5b 0, #141e2c 58%, #090d14 100%); box-shadow: 0 15px 34px #000b, 0 0 22px #70a0ff17, inset 0 1px 0 #ffffff12; }
+.profile-list.is-card-layout .profile-worker img { width: 142px; height: 142px; }
 .profile-list.is-card-layout .profile-worker-dot { right: 9px; bottom: 9px; width: 14px; height: 14px; }
 .profile-list.is-card-layout .profile-main { width: 100%; flex: 1 1 auto; }
 .profile-list.is-card-layout .profile-title { justify-content: center; margin-bottom: 7px; }
@@ -973,8 +973,8 @@ h6.response-heading { font-size: var(--font-body); font-weight: var(--weight-tit
 .profile-layout-preview.is-card .profile-layout-preview-item { min-height: 102px; justify-content: center; flex-direction: column; }
 .profile-layout-preview .profile-worker { width: 42px; height: 42px; }
 .profile-layout-preview .profile-worker img { width: 39px; height: 39px; }
-.profile-layout-preview.is-card .profile-worker { width: 58px; height: 62px; }
-.profile-layout-preview.is-card .profile-worker img { width: 55px; height: 59px; }
+.profile-layout-preview.is-card .profile-worker { width: 58px; height: 58px; }
+.profile-layout-preview.is-card .profile-worker img { width: 55px; height: 55px; }
 .profile-layout-preview .profile-worker-dot { right: 2px; bottom: 2px; width: 8px; height: 8px; border-width: 1px; }
 .profile-layout-preview-item i { min-width: 0; width: 34%; height: 6px; border-radius: 999px; background: #53627a; box-shadow: 0 11px 0 #2c3748; }
 .profile-layout-preview.is-card .profile-layout-preview-item i { width: 62%; }

@@ -2,8 +2,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const electronSource = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
 assert.match(source, /Hãy kết nối API worker và Chrome profile của bạn/, "connected workers section must use the concise connection guidance");
+assert.match(styles, /\.profile-worker \{[^}]*aspect-ratio:\s*1\s*\/\s*1;/, "worker GIF frames must enforce a square aspect ratio");
+assert.match(styles, /\.profile-worker img \{[^}]*max-width:\s*100%;[^}]*max-height:\s*100%;[^}]*object-fit:\s*contain;/, "worker GIFs must stay contained inside their frame");
+assert.match(styles, /\.profile-list\.is-card-layout \.profile-worker \{[^}]*width:\s*148px;[^}]*height:\s*148px;/, "card layout worker frames must remain square");
+assert.match(styles, /\.profile-layout-preview\.is-card \.profile-worker \{[^}]*width:\s*58px;[^}]*height:\s*58px;/, "card layout preview worker frames must remain square");
 
 assert.match(source, /<h2>Worker đã kết nối<\/h2>/, "overview must use the unified connected worker heading");
 assert.doesNotMatch(source, /<h2>Profile đã kết nối<\/h2>/, "legacy Chrome-only heading must be removed");
