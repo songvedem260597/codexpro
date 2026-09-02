@@ -229,6 +229,50 @@ function WorkingBadge() {
   );
 }
 
+const CHAT_GALAXY_ORBIT_STARS = [
+  { size: 2, alpha: 0.72, distance: 30, duration: 7, delay: 1 },
+  { size: 3, alpha: 0.86, distance: 38, duration: 11, delay: 4 },
+  { size: 2, alpha: 0.58, distance: 44, duration: 9, delay: 7 },
+  { size: 4, alpha: 0.82, distance: 50, duration: 15, delay: 2 },
+  { size: 2, alpha: 0.66, distance: 56, duration: 13, delay: 8 },
+  { size: 3, alpha: 0.78, distance: 62, duration: 17, delay: 5 },
+  { size: 2, alpha: 0.54, distance: 68, duration: 12, delay: 9 },
+  { size: 3, alpha: 0.9, distance: 74, duration: 19, delay: 3 },
+  { size: 2, alpha: 0.64, distance: 80, duration: 14, delay: 6 },
+  { size: 4, alpha: 0.76, distance: 86, duration: 18, delay: 10 },
+  { size: 2, alpha: 0.7, distance: 92, duration: 16, delay: 2 },
+  { size: 3, alpha: 0.56, distance: 98, duration: 20, delay: 7 },
+];
+
+const CHAT_GALAXY_STATIC_STARS = [
+  { x: 18, y: 28, size: 2, alpha: 0.78 },
+  { x: 34, y: 72, size: 3, alpha: 0.88 },
+  { x: 68, y: 24, size: 2, alpha: 0.7 },
+  { x: 82, y: 67, size: 3, alpha: 0.82 },
+];
+
+function ChatGalaxyButtonContent() {
+  return (
+    <>
+      <span className="chat-galaxy-backdrop" aria-hidden="true" />
+      <span className="chat-galaxy-spark" aria-hidden="true" />
+      <span className="chat-galaxy-static" aria-hidden="true">
+        {CHAT_GALAXY_STATIC_STARS.map((star, index) => (
+          <span key={`static-${index}`} className="chat-galaxy-star is-static" style={{ "--x": `${star.x}%`, "--y": `${star.y}%`, "--size": `${star.size}px`, "--alpha": star.alpha }} />
+        ))}
+      </span>
+      <span className="chat-galaxy-orbit" aria-hidden="true">
+        <span className="chat-galaxy-ring">
+          {CHAT_GALAXY_ORBIT_STARS.map((star, index) => (
+            <span key={`orbit-${index}`} className="chat-galaxy-star" style={{ "--size": `${star.size}px`, "--alpha": star.alpha, "--distance": `${star.distance}px`, "--duration": `${star.duration}s`, "--delay": `${star.delay}s` }} />
+          ))}
+        </span>
+      </span>
+      <span className="chat-galaxy-label">Chat</span>
+    </>
+  );
+}
+
 function SettingsDropdown({ value, options, disabled, onChange, ariaLabel = "Chọn font chữ", selectedHint = "" }) {
   return (
     <AppDropdown
@@ -824,7 +868,7 @@ function ApiWorkerCards({ workers, customImages, onRun, onStop }) {
         </div>
         <div className="profile-actions">
           <div className={`profile-action-buttons ${worker.activity === "working" ? "" : "is-single"}`}>
-            <button className="button primary" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}>Chat</button>
+            <button className="button primary profile-chat chat-galaxy-button" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}><ChatGalaxyButtonContent /></button>
             {worker.activity === "working" && <button className="button profile-stop-button" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button>}
           </div>
           {worker.connected
@@ -4631,12 +4675,12 @@ function App() {
                     {profileChecking && <span className="checking-profile">Đang kiểm tra ChatGPT…</span>}
                     <div className="profile-action-buttons">
                       <button
-                        className="button primary profile-chat"
+                        className="button primary profile-chat chat-galaxy-button"
                         onClick={() => openChat(profile)}
                         disabled={!profile.connected || !connectorInstalled}
                         title={profileRequestChats(profile).length ? "Mở khung chat của profile" : "Nhập task; CodexPro sẽ tự mở tab ChatGPT khi gửi"}
                       >
-                        Chat
+                        <ChatGalaxyButtonContent />
                       </button>
                       <button
                         className="button secondary open-profile"
