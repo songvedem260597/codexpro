@@ -473,8 +473,8 @@ assert.match(worker, /const heartbeat=setInterval\([\s\S]*?tabInventory\(\)[\s\S
 assert.match(worker, /chrome\.tabs\.onRemoved\.addListener\([\s\S]*?scheduleRealtimeProfilePush\(0\)/, "closing the last ChatGPT tab must immediately clear the Manager profile snapshot");
 assert.match(worker, /if\(action==='recover_chat_tab'\)[\s\S]*?WORKER_BUSY:[\s\S]*?replaceUnresponsiveChatTab/, "manual tab recovery must refuse active generations and replace only an idle renderer");
 const longTaskAuditSource = worker.slice(worker.indexOf("if(action==='audit_long_running_chat')"), worker.indexOf("if(action==='recover_chat_tab')"));
-assert.match(longTaskAuditSource, /claimLongTaskAudit[\s\S]*?preflight[\s\S]*?chrome\.tabs\.reload\(tab\.id\)[\s\S]*?waitForLongTaskRenderer[\s\S]*?status=reloadProbe\.responsive\?'responsive_after_reload':'hung'/, "the 30-minute audit must reload exactly once and then stop when the renderer stays unresponsive");
-assert.equal((longTaskAuditSource.match(/chrome\.tabs\.reload\(/g) || []).length, 1, "a long-task audit must contain exactly one tab reload");
+assert.match(longTaskAuditSource, /claimLongTaskAudit[\s\S]*?preflight[\s\S]*?auditedReloadTab\(tab,'chat_recovery','explicit_recovery_reload'\)[\s\S]*?waitForLongTaskRenderer[\s\S]*?status=reloadProbe\.responsive\?'responsive_after_reload':'hung'/, "the 30-minute audit must reload exactly once and then stop when the renderer stays unresponsive");
+assert.equal((longTaskAuditSource.match(/auditedReloadTab\(/g) || []).length, 1, "a long-task audit must contain exactly one audited tab reload");
 assert.equal((longTaskAuditSource.match(/replaceUnresponsiveChatTab\(/g) || []).length, 0, "a watchdog-detected hung renderer must stop instead of opening replacement tabs");
 assert.match(longTaskAuditSource, /already_attempted:true[\s\S]*?status:'hung'[\s\S]*?retry_allowed:false/, "repeated audits must be deduplicated and an unresponsive tab must be marked hung with retries disabled");
 assert.match(worker, /LONG_TASK_AUDIT_STORAGE_KEY[\s\S]*?chrome\.storage\.local/, "the one-shot audit marker must survive extension and Manager restarts");
@@ -485,7 +485,7 @@ assert.match(worker, /if\(action==='stop_chat_generation'\)[\s\S]*?stopChatGener
 assert.match(server, /"stop_chat_generation"/, "browser_control schema must expose stop_chat_generation");
 assert.match(server, /"audit_long_running_chat"/, "browser_control schema must expose the one-shot long-task audit");
 assert.match(server, /task_id: args\.task_id[\s\S]*?started_at: args\.started_at[\s\S]*?attempt_key: args\.attempt_key/, "browser_control must forward the persistent one-shot audit identity to the extension");
-assert.match(worker, /async function replaceUnresponsiveChatTab[\s\S]*?chrome\.tabs\.create[\s\S]*?waitForTab[\s\S]*?chrome\.tabs\.remove\(replacedTabId\)/, "renderer recovery must load a replacement before closing the exact stuck tab");
+assert.match(worker, /async function replaceUnresponsiveChatTab[\s\S]*?auditedCreateTab\(createArgs,'chat_tab_create'\)[\s\S]*?waitForTab[\s\S]*?auditedRemoveTab\(replacedTabId,'replaceUnresponsiveChatTab','remove_old_tab'\)/, "renderer recovery must load a replacement before closing the exact stuck tab");
 assert.match(worker, /dom_replaced=true[\s\S]*?recovery_tab_id/, "stale-response reload recovery must escalate to replacing a renderer that stays unresponsive");
 assert.match(worker, /conversation\|steer_turn/, "ChatGPT steer_turn must be tracked as a generation request");
 assert.match(worker, /const staleActivity=Boolean\(injected\.result\.busy\)/, "canonical completion must recover a tab whose DOM is still stuck busy");
@@ -665,9 +665,9 @@ assert.match(managerUi, /function changeProjectForProfile\(profile, root\)[\s\S]
 assert.match(managerUi, /openChatAwaitingAssistant[\s\S]*?pollLatestResponse[\s\S]*?completedResponseNeedsDomFallback\(canonical\)[\s\S]*?loadResponse\(profile, conversationId, true, true\)/, "Manager must fall back to the live DOM when network completion arrives before canonical contains the newest response");
 assert.match(managerUi, /tab\.connection_interrupted[\s\S]*?connectionRecoveryReads[\s\S]*?loadResponse\(profile, conversationId, true, true, true\)/, "Manager must automatically recover the exact chat when ChatGPT reports an interrupted connection");
 assert.match(worker, /connection_interrupted:Boolean\(domActivity\.connection_interrupted\)/, "profile status must expose interrupted ChatGPT renderers to Manager");
-assert.match(worker, /const reloadAllowed=shouldReloadChatRecovery\([\s\S]*?if\(stale&&reloadAllowed\)[\s\S]*?chrome\.tabs\.reload\(tab\.id\)/, "response reload must pass through the guarded recovery decision");
+assert.match(worker, /const reloadAllowed=shouldReloadChatRecovery\([\s\S]*?if\(stale&&reloadAllowed\)[\s\S]*?auditedReloadTab\(tab,'chat_recovery','explicit_recovery_reload'\)/, "response reload must pass through the guarded recovery decision");
 assert.match(worker, /if\(networkBusy\)return false/, "active generation or tool traffic must block an early response reload");
-assert.match(longTaskAuditSource, /preflight[\s\S]*?active_without_reload[\s\S]*?chrome\.tabs\.reload/, "the 30-minute watchdog must probe a healthy active task without reloading it");
+assert.match(longTaskAuditSource, /preflight[\s\S]*?active_without_reload[\s\S]*?auditedReloadTab/, "the 30-minute watchdog must probe a healthy active task before the guarded audited reload branch");
 assert.match(worker, /waitForLongTaskRenderer[\s\S]*?network_state==='failed'[\s\S]*?connection_interrupted/, "a living DOM with an interrupted or failed transport must not count as recovered");
 assert.match(worker, /rendererHealthy=Boolean\(\(activity\.available\|\|canonical\.ok\|\|networkState\.busy\)&&!hardFailure\)/, "live generation network traffic must prevent a destructive reload even when DOM and canonical probes are temporarily unavailable");
 assert.match(managerUi, /responsive_after_reload[\s\S]*?text: "tiếp tục"[\s\S]*?previousTaskId: recoveryTaskId[\s\S]*?long-task-watchdog-resume-done/, "an interrupted task must reload once and send one continuation in the original conversation while preserving its Task ID");

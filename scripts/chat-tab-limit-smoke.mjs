@@ -4,14 +4,19 @@ import fs from "node:fs";
 const worker = fs.readFileSync(new URL("../chrome-extension/service-worker.js", import.meta.url), "utf8");
 assert.match(worker, /const MAX_CHATGPT_TABS = 3;/, "Chrome worker must cap ChatGPT tabs at three");
 assert.match(worker, /CHAT_TAB_LIMIT_REACHED/, "worker must fail closed when all three tabs are protected");
-assert.match(worker, /recover_chat_tab[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\}\)/, "fresh-chat recovery must use the capped tab creator");
-assert.match(worker, /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:false\}\)/, "new chat requests must use the capped tab creator");
-assert.match(worker, /tab=await createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/c\/'\+conversationId,active:false\}\)/, "conversation opens for send must use the capped tab creator");
-assert.match(worker, /tab=await createChatGptTab\(\{url:`https:\/\/chatgpt\.com\/c\/\$\{conversationId\}`,active:false\}\)/, "conversation opens for response reads must use the capped tab creator");
+assert.match(worker, /const TAB_AUDIT_STORAGE_KEY = 'codexproTabAuditV1';/, "tab lifecycle audit must persist in extension storage");
+assert.match(worker, /tab_audit:await tabAuditSnapshot\(80\)/, "list_tabs must expose recent tab lifecycle diagnostics");
+assert.match(worker, /chrome\.tabs\.onCreated\.addListener[\s\S]*?open_observed/, "tab audit must observe ChatGPT tab opens even outside CodexPro helpers");
+assert.match(worker, /chrome\.tabs\.onRemoved\.addListener[\s\S]*?close_observed/, "tab audit must observe ChatGPT tab closes even outside CodexPro helpers");
+assert.match(worker, /load_observed/, "tab audit must retain repeated ChatGPT load events for reload-loop diagnosis");
+assert.match(worker, /recover_chat_tab[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\},'recover_chat_tab_new'\)/, "fresh-chat recovery must use the capped tab creator");
+assert.match(worker, /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:false\},'send_chat_request_new'\)/, "new chat requests must use the capped tab creator");
+assert.match(worker, /tab=await createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/c\/'\+conversationId,active:false\},'send_chat_request_existing'\)/, "conversation opens for send must use the capped tab creator");
+assert.match(worker, /tab=await createChatGptTab\(\{url:`https:\/\/chatgpt\.com\/c\/\$\{conversationId\}`,active:false\},'get_chat_response'\)/, "conversation opens for response reads must use the capped tab creator");
 assert.match(worker, /if\(action==='open_tab'\)\{const tab=await createChatGptTab/, "browser open_tab must use the capped tab creator");
-assert.match(worker, /const tab=reusable[\s\S]*?: await createChatGptTab\(\{url,active:true\}\)/, "ChatGPT route opens must use the capped tab creator");
+assert.match(worker, /const tab=reusable[\s\S]*?: await createChatGptTab\(\{url,active:true\},'openChatGpt'\)/, "ChatGPT route opens must use the capped tab creator");
 assert.match(worker, /checkConnectorInstalled[\s\S]*?const tab=await createChatGptTab\(/, "connector checks must use the capped tab creator");
-assert.match(worker, /replaceUnresponsiveChatTab[\s\S]*?serializeChatGptTabCreation[\s\S]*?current\.length>=MAX_CHATGPT_TABS[\s\S]*?chrome\.tabs\.remove\(replacedTabId\)[\s\S]*?chrome\.tabs\.create\(createArgs\)/, "renderer replacement must remove the dead tab before creating a replacement when already at the cap");
+assert.match(worker, /replaceUnresponsiveChatTab[\s\S]*?serializeChatGptTabCreation[\s\S]*?current\.length>=MAX_CHATGPT_TABS[\s\S]*?auditedRemoveTab\(replacedTabId,'replaceUnresponsiveChatTab','remove_old_tab'\)[\s\S]*?auditedCreateTab\(createArgs,'chat_tab_create'\)/, "renderer replacement must remove the dead tab before creating a replacement when already at the cap");
 
 const helperSource = worker.slice(
   worker.indexOf("async function serializeChatGptTabCreation"),
@@ -52,6 +57,7 @@ function makeHarness(initialTabs) {
   const isChatGptTabUrl = value => {
     try { return new URL(String(value || "")).origin === "https://chatgpt.com"; } catch { return false; }
   };
+  const auditedCreateTab = async args => await chrome.tabs.create(args);
   const factory = Function(
     "chrome",
     "MAX_CHATGPT_TABS",
@@ -59,9 +65,10 @@ function makeHarness(initialTabs) {
     "tabList",
     "recentConversationList",
     "cleanupChatGptTabs",
+    "auditedCreateTab",
     `let chatTabCreationTail = Promise.resolve(); ${helperSource}; return { createChatGptTab };`
   );
-  const { createChatGptTab } = factory(chrome, 3, isChatGptTabUrl, tabList, recentConversationList, cleanupChatGptTabs);
+  const { createChatGptTab } = factory(chrome, 3, isChatGptTabUrl, tabList, recentConversationList, cleanupChatGptTabs, auditedCreateTab);
   return {
     createChatGptTab,
     state: () => ({ count: tabs.length, maxObserved, creates, tabs: tabs.map(tab => ({ ...tab })) })
