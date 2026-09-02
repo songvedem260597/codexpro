@@ -8,136 +8,173 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">FLORA DESKTOP</p>
-          <h1>Image Generator</h1>
+    <main class="app-shell">
+      <header class="app-header">
+        <div class="brand-block">
+          <span class="brand-mark" aria-hidden="true">F</span>
+          <div>
+            <h1>FLORA Generator</h1>
+            <p>Desktop image workspace</p>
+          </div>
         </div>
-        <div class="auth-wrap">
-          <span id="authBadge" class="badge">Checking session…</span>
-          <button id="loginBtn" class="ghost">Outlook sign in</button>
-          <button id="logoutBtn" class="ghost subtle" hidden>Sign out</button>
+        <div class="session-actions">
+          <span id="authBadge" class="status-badge" data-tone="off">Checking account...</span>
+          <button id="loginBtn" class="button secondary" type="button">Outlook sign in</button>
+          <button id="logoutBtn" class="button tertiary" type="button" hidden>Sign out</button>
         </div>
       </header>
 
-      <section id="credentialPanel" class="auth-panel">
-        <div class="auth-panel-head">
+      <section class="accounts-bar" aria-labelledby="accountsTitle">
+        <div class="section-title compact-title">
           <div>
-            <p class="eyebrow">AUTO SIGN IN</p>
-            <h2>FLORA account</h2>
+            <h2 id="accountsTitle">Accounts</h2>
+            <p id="accountHint">Each account keeps an isolated FLORA session.</p>
           </div>
-          <span id="authHint" class="auth-hint">Use Microsoft / Outlook sign in, or enter your FLORA email and password below.</span>
+          <span id="accountCount" class="count-label">1 account</span>
         </div>
-        <form id="credentialForm" class="credential-form">
-          <label class="credential-field">
+
+        <div class="account-controls">
+          <label class="field account-select-field">
+            <span>Active account</span>
+            <select id="accountSelect" aria-label="Active FLORA account"></select>
+          </label>
+          <span id="accountCreditBadge" class="status-badge account-credit" data-tone="off">Checking...</span>
+          <button id="addAccountBtn" class="button secondary" type="button">Add account</button>
+          <button id="retryAccountBtn" class="button tertiary" type="button" hidden>Retry credits</button>
+          <button id="removeAccountBtn" class="button tertiary danger" type="button">Remove</button>
+        </div>
+
+        <label class="toggle-row">
+          <input id="autoSwitchAccounts" type="checkbox" checked />
+          <span class="toggle-copy">
+            <strong>Auto-switch on credit limit</strong>
+            <small>Retry the same generation on the next signed-in account when FLORA reports exhausted credits.</small>
+          </span>
+        </label>
+      </section>
+
+      <section id="credentialPanel" class="signin-panel">
+        <div class="section-title signin-title">
+          <div>
+            <h2 id="selectedAccountTitle">FLORA account</h2>
+            <p id="authHint">Use Microsoft / Outlook sign in, or enter your FLORA email and password below.</p>
+          </div>
+        </div>
+        <form id="credentialForm" class="signin-form">
+          <label class="field">
             <span>Email</span>
             <input id="loginEmail" type="email" placeholder="you@example.com" autocomplete="username" required />
           </label>
-          <label class="credential-field">
+          <label class="field">
             <span>Password</span>
             <input id="loginPassword" type="password" placeholder="FLORA password" autocomplete="current-password" required />
           </label>
-          <div class="credential-actions">
-            <button id="autoLoginBtn" class="primary auth-primary" type="submit">Auto sign in</button>
-            <button id="outlookLoginBtn" class="ghost auth-oauth" type="button">Outlook</button>
+          <div class="signin-actions">
+            <button id="autoLoginBtn" class="button primary" type="submit">Sign in</button>
+            <button id="outlookLoginBtn" class="button secondary" type="button">Outlook</button>
           </div>
         </form>
       </section>
 
-      <section class="grid">
-        <section class="panel form-panel">
-          <div class="panel-head">
+      <section class="workspace">
+        <section class="workspace-panel compose-panel" aria-labelledby="inputTitle">
+          <div class="panel-header">
             <div>
-              <p class="eyebrow">INPUT</p>
-              <h2>Create from reference</h2>
+              <span class="section-kicker">Input</span>
+              <h2 id="inputTitle">Create from reference</h2>
             </div>
+            <span class="panel-meta">Image to image</span>
           </div>
 
-          <div class="field">
+          <div class="field reference-field">
             <span>Reference image</span>
-            <div class="image-picker-row">
-              <button id="chooseImageBtn" class="ghost choose-image">Choose local image</button>
+            <div class="source-actions">
+              <button id="chooseImageBtn" class="button secondary" type="button">Choose local image</button>
               <span id="selectedImageName" class="selected-file">No file selected</span>
             </div>
-            <input id="imageUrl" type="url" placeholder="Or paste https://media.flora.ai/node-inputs/..." autocomplete="off" />
-            <small>Local images upload through your signed-in FLORA session; an existing FLORA/media URL can be used directly.</small>
+            <div class="url-row">
+              <input id="imageUrl" type="url" placeholder="Or paste a direct http(s) image URL" autocomplete="off" />
+              <span id="urlLoadState" class="url-state" aria-live="polite"></span>
+            </div>
+            <div id="referencePreview" class="reference-preview" hidden>
+              <img id="referencePreviewImage" alt="Reference image preview" />
+              <div class="preview-caption">
+                <strong id="referencePreviewTitle">Reference image</strong>
+                <span id="referencePreviewMeta"></span>
+              </div>
+            </div>
+            <p id="referencePreviewError" class="inline-error" hidden></p>
+            <small>Local files are previewed before upload. URL preview also verifies the image can be decoded by the app.</small>
           </div>
 
-          <label class="field">
+          <label class="field prompt-field">
             <span>Prompt</span>
-            <textarea id="prompt" rows="8" placeholder="Describe the edit or the image you want…"></textarea>
+            <textarea id="prompt" rows="8" placeholder="Describe the edit or image you want..."></textarea>
           </label>
 
-          <div class="row three">
-            <label class="field compact">
+          <div class="settings-grid">
+            <label class="field">
               <span>Aspect ratio</span>
-              <select id="aspectRatio" disabled>
-                <option value="source">Source image</option>
-              </select>
+              <select id="aspectRatio" disabled><option value="source">Source image</option></select>
             </label>
-
-            <label class="field compact">
+            <label class="field">
               <span>Resolution</span>
-              <select id="resolution" disabled>
-                <option value="1k">1K</option>
-              </select>
+              <select id="resolution" disabled><option value="1k">1K</option></select>
             </label>
-
-            <label class="field compact">
+            <label class="field">
               <span>Model</span>
-              <select id="model">
-                <option value="grok-imagine-image">Grok Imagine</option>
-              </select>
+              <select id="model"><option value="grok-imagine-image">Grok Imagine</option></select>
             </label>
           </div>
 
-          <details class="advanced">
-            <summary>Advanced</summary>
-            <label class="field compact">
+          <details class="advanced-panel">
+            <summary>Advanced settings</summary>
+            <label class="field advanced-field">
               <span>Endpoint ID</span>
               <input id="endpointId" value="i2i-xai-imagine" autocomplete="off" readonly />
             </label>
           </details>
 
-          <button id="generateBtn" class="primary">Generate image</button>
-          <p id="errorText" class="error" hidden></p>
+          <p id="errorText" class="inline-error main-error" role="alert" hidden></p>
+          <button id="generateBtn" class="button primary generate-button" type="button">Generate image</button>
         </section>
 
-        <section class="panel result-panel">
-          <div class="panel-head">
+        <section class="workspace-panel output-panel" aria-labelledby="outputTitle">
+          <div class="panel-header">
             <div>
-              <p class="eyebrow">OUTPUT</p>
-              <h2>Generated image</h2>
+              <span class="section-kicker">Output</span>
+              <h2 id="outputTitle">Generated image</h2>
             </div>
-            <span id="generationId" class="mono"></span>
+            <span id="generationId" class="generation-id"></span>
           </div>
 
-          <div id="emptyState" class="empty-state">
-            <div class="orb"></div>
-            <p>Your generated image will appear here.</p>
-          </div>
-
-          <div id="resultWrap" class="result-wrap" hidden>
-            <img id="resultImage" alt="Generated FLORA output" />
-            <a id="openOutput" class="output-link" target="_blank" rel="noreferrer">Open full image</a>
-          </div>
-
-          <div class="progress-card">
-            <div class="progress-head">
-              <span>Status</span>
-              <span id="statusText">Idle</span>
+          <div class="output-stage">
+            <div id="emptyState" class="empty-state">
+              <div class="empty-frame" aria-hidden="true"></div>
+              <strong>No output yet</strong>
+              <p>Add a reference image and prompt, then start a generation.</p>
             </div>
-            <div id="progressLog" class="progress-log"></div>
+            <div id="resultWrap" class="result-wrap" hidden>
+              <img id="resultImage" alt="Generated FLORA output" />
+              <a id="openOutput" class="output-link" target="_blank" rel="noreferrer">Open full image</a>
+            </div>
           </div>
+
+          <section class="activity-panel" aria-label="Generation activity">
+            <div class="activity-head">
+              <span>Generation status</span>
+              <strong id="statusText">Idle</strong>
+            </div>
+            <div id="progressLog" class="progress-log" aria-live="polite"></div>
+          </section>
         </section>
       </section>
 
-      <footer>
-        <span>Session stays inside this app profile.</span>
-        <span>No HAR token replay.</span>
+      <footer class="app-footer">
+        <span>Account sessions stay isolated inside this app profile.</span>
+        <span>FLORA Desktop Generator</span>
       </footer>
     </main>
-    <script src="renderer.js"></script>
+    <script type="module" src="renderer/app.mjs"></script>
   </body>
 </html>

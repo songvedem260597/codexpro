@@ -6,7 +6,9 @@
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer.js",
+    "check": "node --check main.cjs && node --check preload.cjs && node --check renderer/core.mjs && node --check renderer/view.mjs && node --check renderer/accounts.mjs && node --check renderer/reference.mjs && node --check renderer/generation.mjs && node --check renderer/app.mjs",
+    "test": "node --test test/*.test.mjs",
+    "verify": "npm run check && npm test",
     "dist": "electron-builder --win portable --x64"
   },
   "devDependencies": {
@@ -18,7 +20,7 @@
     "productName": "FLORA Desktop Generator",
     "artifactName": "FLORA-Desktop-Generator-${version}.${ext}",
     "directories": { "output": "release" },
-    "files": ["main.cjs", "preload.cjs", "renderer.js", "index.html", "styles.css", "package.json"],
+    "files": ["main.cjs", "preload.cjs", "renderer/**/*", "index.html", "styles.css", "package.json"],
     "asar": true,
     "win": { "target": ["portable"] }
   }

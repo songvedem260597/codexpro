@@ -1,18 +1,204 @@
-const { app, BrowserWindow, ipcMain, session, net, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, session, net, dialog, nativeImage } = require('electron');
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
 
-const FLORA_PARTITION = 'persist:flora-auth';
+const LEGACY_FLORA_PARTITION = 'persist:flora-auth';
 const FLORA_MEDIA_ORIGIN = 'https://media.flora.ai';
 const FLORA_CONVEX_URL = 'https://energized-vulture-906.convex.cloud';
 const FLORA_CONVEX_CLIENT = 'npm-1.42.1';
+const ACCOUNTS_FILE = 'flora-accounts.json';
+const MAX_PREVIEW_BYTES = 20 * 1024 * 1024;
 const selectedImages = new Map();
 let mainWindow;
 let loginWindow;
+let loginAccountId = '';
+let accountsStoreCache = null;
 
 function randomId(prefix = '') {
   return prefix + crypto.randomBytes(18).toString('base64url').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 32);
+}
+
+function accountsFilePath() {
+  return path.join(app.getPath('userData'), ACCOUNTS_FILE);
+}
+
+function createDefaultAccountsStore() {
+  return {
+    version: 1,
+    activeAccountId: 'primary',
+    autoSwitchOnCredits: true,
+    accounts: [
+      {
+        id: 'primary',
+        label: 'Primary account',
+        email: '',
+        partition: LEGACY_FLORA_PARTITION,
+        authenticated: false,
+        exhaustedAt: null,
+        createdAt: Date.now(),
+        lastUsedAt: null,
+      },
+    ],
+  };
+}
+
+function normalizeAccountsStore(value) {
+  const fallback = createDefaultAccountsStore();
+  if (!value || typeof value !== 'object' || !Array.isArray(value.accounts)) return fallback;
+  const seen = new Set();
+  const accounts = value.accounts
+    .map((account, index) => {
+      const id = String(account?.id || '').trim();
+      if (!id || seen.has(id)) return null;
+      seen.add(id);
+      return {
+        id,
+        label: String(account?.label || account?.email || `Account ${index + 1}`).trim() || `Account ${index + 1}`,
+        email: String(account?.email || '').trim(),
+        partition: String(account?.partition || `persist:flora-auth-${id}`).trim(),
+        authenticated: Boolean(account?.authenticated),
+        exhaustedAt: Number(account?.exhaustedAt) || null,
+        createdAt: Number(account?.createdAt) || Date.now(),
+        lastUsedAt: Number(account?.lastUsedAt) || null,
+      };
+    })
+    .filter(Boolean);
+
+  if (!accounts.length) return fallback;
+  const requestedActive = String(value.activeAccountId || '').trim();
+  return {
+    version: 1,
+    activeAccountId: accounts.some((account) => account.id === requestedActive) ? requestedActive : accounts[0].id,
+    autoSwitchOnCredits: value.autoSwitchOnCredits !== false,
+    accounts,
+  };
+}
+
+function loadAccountsStore() {
+  if (accountsStoreCache) return accountsStoreCache;
+  try {
+    const raw = fs.readFileSync(accountsFilePath(), 'utf8');
+    accountsStoreCache = normalizeAccountsStore(JSON.parse(raw));
+  } catch {
+    accountsStoreCache = createDefaultAccountsStore();
+  }
+  return accountsStoreCache;
+}
+
+function saveAccountsStore() {
+  const store = loadAccountsStore();
+  const target = accountsFilePath();
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const temporary = `${target}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify(store, null, 2)}\n`, 'utf8');
+  fs.renameSync(temporary, target);
+}
+
+function accountById(accountId = '') {
+  const store = loadAccountsStore();
+  const requested = String(accountId || '').trim();
+  return store.accounts.find((account) => account.id === requested)
+    || store.accounts.find((account) => account.id === store.activeAccountId)
+    || store.accounts[0];
+}
+
+function requireAccountById(accountId) {
+  const requested = String(accountId || '').trim();
+  const account = loadAccountsStore().accounts.find((candidate) => candidate.id === requested);
+  if (!account) throw new Error('FLORA account was not found.');
+  return account;
+}
+
+function publicAccount(account) {
+  const store = loadAccountsStore();
+  return {
+    id: account.id,
+    label: account.label,
+    email: account.email,
+    authenticated: Boolean(account.authenticated),
+    exhausted: Boolean(account.exhaustedAt),
+    exhaustedAt: account.exhaustedAt,
+    lastUsedAt: account.lastUsedAt,
+    active: store.activeAccountId === account.id,
+  };
+}
+
+function accountsState() {
+  const store = loadAccountsStore();
+  return {
+    activeAccountId: store.activeAccountId,
+    autoSwitchOnCredits: store.autoSwitchOnCredits !== false,
+    accounts: store.accounts.map(publicAccount),
+  };
+}
+
+function notifyAccountsChanged() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('flora:accounts-changed', accountsState());
+  mainWindow.webContents.send('flora:auth-changed');
+}
+
+function setActiveAccount(accountId) {
+  const store = loadAccountsStore();
+  const account = store.accounts.find((candidate) => candidate.id === String(accountId || '').trim());
+  if (!account) throw new Error('FLORA account was not found.');
+  store.activeAccountId = account.id;
+  account.lastUsedAt = Date.now();
+  saveAccountsStore();
+  notifyAccountsChanged();
+  return account;
+}
+
+function addAccountRecord() {
+  const store = loadAccountsStore();
+  const id = randomId('acct-');
+  const account = {
+    id,
+    label: `Account ${store.accounts.length + 1}`,
+    email: '',
+    partition: `persist:flora-auth-${id}`,
+    authenticated: false,
+    exhaustedAt: null,
+    createdAt: Date.now(),
+    lastUsedAt: Date.now(),
+  };
+  store.accounts.push(account);
+  store.activeAccountId = id;
+  saveAccountsStore();
+  notifyAccountsChanged();
+  return account;
+}
+
+function markAccountIdentity(account, identity = {}) {
+  const email = String(identity.email || '').trim();
+  const displayName = String(identity.name || '').trim();
+  account.authenticated = Boolean(identity.hasSession);
+  if (email) account.email = email;
+  if (email) account.label = email;
+  else if (displayName && /^Account \d+$/.test(account.label)) account.label = displayName;
+  if (identity.hasSession) account.lastUsedAt = Date.now();
+  saveAccountsStore();
+}
+
+function markAccountExhausted(account, exhausted = true) {
+  account.exhaustedAt = exhausted ? Date.now() : null;
+  saveAccountsStore();
+  notifyAccountsChanged();
+}
+
+function removeAccountRecord(accountId) {
+  const store = loadAccountsStore();
+  if (store.accounts.length <= 1) throw new Error('Keep at least one FLORA account.');
+  const index = store.accounts.findIndex((account) => account.id === String(accountId || '').trim());
+  if (index < 0) throw new Error('FLORA account was not found.');
+  const [removed] = store.accounts.splice(index, 1);
+  if (store.activeAccountId === removed.id) {
+    store.activeAccountId = store.accounts[Math.min(index, store.accounts.length - 1)].id;
+  }
+  saveAccountsStore();
+  notifyAccountsChanged();
+  return removed;
 }
 
 function createMainWindow() {
@@ -47,8 +233,9 @@ function forceMicrosoftLoginPrompt(url) {
   }
 }
 
-async function clearMicrosoftLoginCookies() {
-  const authSession = session.fromPartition(FLORA_PARTITION);
+async function clearMicrosoftLoginCookies(accountId = '') {
+  const account = accountId ? requireAccountById(accountId) : accountById();
+  const authSession = session.fromPartition(account.partition);
   const cookies = await authSession.cookies.get({});
   const microsoftCookies = cookies.filter((cookie) => {
     const domain = String(cookie.domain || '').replace(/^\./, '').toLowerCase();
@@ -95,31 +282,54 @@ async function clickMicrosoftSignIn(win) {
   }
 }
 
-async function syncLoginWindowAuth(win) {
+async function readFloraIdentity(win, attempts = 40) {
+  if (!win || win.isDestroyed()) return { hasSession: false, email: '', name: '' };
+  const serializedAttempts = Math.max(1, Number(attempts) || 1);
+  try {
+    return await win.webContents.executeJavaScript(`
+      (async () => {
+        for (let attempt = 0; attempt < ${serializedAttempts}; attempt += 1) {
+          const session = window.Clerk?.session;
+          if (session?.status === 'active') {
+            const user = window.Clerk?.user || session.user || null;
+            const email = user?.primaryEmailAddress?.emailAddress
+              || user?.emailAddresses?.[0]?.emailAddress
+              || '';
+            const name = user?.fullName || user?.firstName || user?.username || '';
+            return { hasSession: true, email, name };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 125));
+        }
+        return { hasSession: false, email: '', name: '' };
+      })()
+    `, true);
+  } catch {
+    return { hasSession: false, email: '', name: '' };
+  }
+}
+
+async function syncLoginWindowAuth(win, account) {
   if (!win || win.isDestroyed()) return;
   if (!win.webContents.getURL().startsWith('https://app.flora.ai/')) return;
 
-  try {
-    const hasSession = await win.webContents.executeJavaScript(`
-      (async () => {
-        for (let attempt = 0; attempt < 40; attempt += 1) {
-          if (window.Clerk?.session?.status === 'active') return true;
-          await new Promise((resolve) => setTimeout(resolve, 125));
-        }
-        return false;
-      })()
-    `, true);
-    if (hasSession) {
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('flora:auth-changed');
-      setTimeout(() => {
-        if (win === loginWindow && !win.isDestroyed()) win.close();
-      }, 250);
-    }
-  } catch {}
+  const identity = await readFloraIdentity(win, 40);
+  if (identity.hasSession) {
+    markAccountIdentity(account, identity);
+    notifyAccountsChanged();
+    setTimeout(() => {
+      if (win === loginWindow && !win.isDestroyed()) win.close();
+    }, 250);
+  }
 }
 
-async function openLoginWindow(provider = '') {
-  if (provider === 'microsoft') await clearMicrosoftLoginCookies();
+async function openLoginWindow(provider = '', accountId = '') {
+  const account = accountId ? requireAccountById(accountId) : accountById();
+  if (provider === 'microsoft') await clearMicrosoftLoginCookies(account.id);
+
+  if (loginWindow && !loginWindow.isDestroyed() && loginAccountId !== account.id) {
+    loginWindow.close();
+    loginWindow = null;
+  }
 
   if (loginWindow && !loginWindow.isDestroyed()) {
     loginWindow.show();
@@ -127,20 +337,21 @@ async function openLoginWindow(provider = '') {
     if (provider === 'microsoft') {
       await loginWindow.loadURL('https://app.flora.ai/');
       const started = await clickMicrosoftSignIn(loginWindow);
-      return { ok: started, provider: 'microsoft', message: started ? '' : 'Microsoft sign in is not available on the current FLORA page.' };
+      return { ok: started, provider: 'microsoft', account: publicAccount(account), message: started ? '' : 'Microsoft sign in is not available on the current FLORA page.' };
     }
-    return { ok: true };
+    return { ok: true, account: publicAccount(account) };
   }
 
+  loginAccountId = account.id;
   loginWindow = new BrowserWindow({
     width: 1040,
     height: 760,
     parent: mainWindow,
     modal: false,
-    title: provider === 'microsoft' ? 'Sign in to FLORA with Outlook' : 'Sign in to FLORA',
+    title: provider === 'microsoft' ? `Sign in ${account.label} with Outlook` : `Sign in ${account.label}`,
     backgroundColor: '#111318',
     webPreferences: {
-      partition: FLORA_PARTITION,
+      partition: account.partition,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -156,23 +367,25 @@ async function openLoginWindow(provider = '') {
   loginWindow.webContents.on('will-navigate', redirectMicrosoftPrompt);
   loginWindow.webContents.on('will-redirect', redirectMicrosoftPrompt);
   loginWindow.webContents.on('did-finish-load', () => {
-    void syncLoginWindowAuth(loginWindow);
+    void syncLoginWindowAuth(loginWindow, account);
   });
 
   await loginWindow.loadURL('https://app.flora.ai/');
   loginWindow.on('closed', () => {
     loginWindow = null;
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('flora:auth-changed');
+    loginAccountId = '';
+    notifyAccountsChanged();
   });
 
   if (provider === 'microsoft') {
     const started = await clickMicrosoftSignIn(loginWindow);
-    return { ok: started, provider: 'microsoft', message: started ? '' : 'Could not find the Microsoft sign-in option on FLORA.' };
+    return { ok: started, provider: 'microsoft', account: publicAccount(account), message: started ? '' : 'Could not find the Microsoft sign-in option on FLORA.' };
   }
-  return { ok: true };
+  return { ok: true, account: publicAccount(account) };
 }
 
-async function autoLoginWithPassword(credentials) {
+async function autoLoginWithPassword(credentials, accountId = '') {
+  const account = accountId ? requireAccountById(accountId) : accountById();
   const email = String(credentials?.email || '').trim();
   const password = String(credentials?.password || '');
 
@@ -182,7 +395,7 @@ async function autoLoginWithPassword(credentials) {
   const win = new BrowserWindow({
     show: false,
     webPreferences: {
-      partition: FLORA_PARTITION,
+      partition: account.partition,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -283,38 +496,41 @@ async function autoLoginWithPassword(credentials) {
       })()
     `, true);
 
-    if (result?.ok && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('flora:auth-changed');
+    if (result?.ok) {
+      const identity = await readFloraIdentity(win, 20);
+      markAccountIdentity(account, { ...identity, hasSession: true, email: identity.email || email });
+      account.exhaustedAt = null;
+      saveAccountsStore();
+      notifyAccountsChanged();
     }
-    return result || { ok: false, message: 'FLORA sign in returned no result.' };
+    return result ? { ...result, account: publicAccount(account) } : { ok: false, message: 'FLORA sign in returned no result.' };
   } finally {
     if (!win.isDestroyed()) win.destroy();
   }
 }
 
-async function getAuthState() {
-  const win = await createFloraContext();
+async function getAuthState(accountId = '', attempts = 40) {
+  const account = accountId ? requireAccountById(accountId) : accountById();
+  const win = await createFloraContext(account);
   try {
-    const hasSession = await win.webContents.executeJavaScript(`
-      (async () => {
-        for (let attempt = 0; attempt < 40; attempt += 1) {
-          if (window.Clerk?.session?.status === 'active') return true;
-          await new Promise((resolve) => setTimeout(resolve, 125));
-        }
-        return false;
-      })()
-    `, true);
-    return { hasSession: Boolean(hasSession) };
+    const identity = await readFloraIdentity(win, attempts);
+    markAccountIdentity(account, identity);
+    return { hasSession: Boolean(identity.hasSession), account: publicAccount(account) };
   } finally {
     if (!win.isDestroyed()) win.destroy();
   }
 }
 
-async function createFloraContext() {
+async function createFloraContext(accountOrId = '') {
+  const account = typeof accountOrId === 'object' && accountOrId
+    ? accountOrId
+    : accountOrId
+      ? requireAccountById(accountOrId)
+      : accountById();
   const win = new BrowserWindow({
     show: false,
     webPreferences: {
-      partition: FLORA_PARTITION,
+      partition: account.partition,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -383,8 +599,8 @@ async function invokeFloraConvexMutation(win, functionPath, args) {
   return result.value;
 }
 
-async function createFloraGenerationRecord({ prompt, endpointId, modelName, modelParameters, imageUrl, onProgress }) {
-  const win = await createFloraContext();
+async function createFloraGenerationRecord({ prompt, endpointId, modelName, modelParameters, imageUrl, onProgress, account }) {
+  const win = await createFloraContext(account);
   try {
     onProgress?.({ label: 'Creating FLORA generation run' });
     const run = await invokeFloraConvexMutation(
@@ -464,8 +680,8 @@ function mediaUrlForObjectKey(objectKey) {
   return `${FLORA_MEDIA_ORIGIN}/${String(objectKey || '').replace(/^\/+/, '')}`;
 }
 
-async function uploadImageToFlora(image, onProgress) {
-  const win = await createFloraContext();
+async function uploadImageToFlora(image, onProgress, account) {
+  const win = await createFloraContext(account);
   try {
     onProgress?.({ label: 'Creating FLORA upload reservation' });
     const reservation = await invokeFloraJsonApi(
@@ -522,8 +738,8 @@ async function uploadImageToFlora(image, onProgress) {
   }
 }
 
-async function invokeXaiGeneration({ generationId, nodeId, endpointId, modelParameters }, onProgress) {
-  const win = await createFloraContext();
+async function invokeXaiGeneration({ generationId, nodeId, endpointId, modelParameters }, onProgress, account) {
+  const win = await createFloraContext(account);
   try {
     onProgress?.({ label: 'Submitting to FLORA xAI provider', endpointId });
     const result = await invokeFloraJsonApi(
@@ -604,8 +820,8 @@ function describeFloraGenerationFailure(status) {
   return messages[status] || `FLORA generation ended with status ${status}.`;
 }
 
-async function waitForFloraGeneration(generationId, onProgress, attempts = 90) {
-  const win = await createFloraContext();
+async function waitForFloraGeneration(generationId, onProgress, attempts = 90, account) {
+  const win = await createFloraContext(account);
   try {
     let previousStatus = null;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -619,7 +835,10 @@ async function waitForFloraGeneration(generationId, onProgress, attempts = 90) {
 
       if (generation.mediaUrl) return generation;
       if (generation.status === 29 || generation.status >= 40) {
-        throw new Error(describeFloraGenerationFailure(generation.status));
+        const error = new Error(describeFloraGenerationFailure(generation.status));
+        error.floraStatus = generation.status;
+        error.creditExhausted = generation.status === 52 || generation.status === 59;
+        throw error;
       }
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
@@ -629,13 +848,68 @@ async function waitForFloraGeneration(generationId, onProgress, attempts = 90) {
   }
 }
 
-ipcMain.handle('flora:open-login', async () => openLoginWindow());
+function isCreditExhaustionError(error) {
+  if (error?.creditExhausted || error?.floraStatus === 52 || error?.floraStatus === 59) return true;
+  const message = String(error?.message || error || '');
+  return /not enough.*(?:credit|token)|insufficient.*(?:credit|balance|funds)|credit.*(?:limit|exceed|exhaust)|quota.*(?:exceed|exhaust)|out of credits?/i.test(message);
+}
 
-ipcMain.handle('flora:open-microsoft-login', async () => openLoginWindow('microsoft'));
+async function findNextUsableAccount(excludedIds = new Set()) {
+  const store = loadAccountsStore();
+  const currentIndex = Math.max(0, store.accounts.findIndex((account) => account.id === store.activeAccountId));
+  const ordered = [
+    ...store.accounts.slice(currentIndex + 1),
+    ...store.accounts.slice(0, currentIndex + 1),
+  ];
 
-ipcMain.handle('flora:auto-login', async (_event, credentials) => autoLoginWithPassword(credentials));
+  for (const candidate of ordered) {
+    if (excludedIds.has(candidate.id) || candidate.exhaustedAt) continue;
+    try {
+      const state = await getAuthState(candidate.id, 12);
+      if (state.hasSession) return requireAccountById(candidate.id);
+    } catch {}
+  }
+  return null;
+}
 
-ipcMain.handle('flora:auth-state', getAuthState);
+function imagePreviewPayload(image) {
+  if (!image || image.isEmpty()) throw new Error('The selected file could not be decoded as an image.');
+  const original = image.getSize();
+  const scale = Math.min(1, 760 / Math.max(1, original.width), 480 / Math.max(1, original.height));
+  const preview = scale < 1
+    ? image.resize({
+      width: Math.max(1, Math.round(original.width * scale)),
+      height: Math.max(1, Math.round(original.height * scale)),
+      quality: 'good',
+    })
+    : image;
+  return {
+    previewDataUrl: preview.toDataURL(),
+    width: original.width,
+    height: original.height,
+  };
+}
+
+async function previewRemoteImage(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  let parsed;
+  try { parsed = new URL(value); }
+  catch { throw new Error('Enter a valid image URL.'); }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Image URL must use http or https.');
+
+  const response = await net.fetch(parsed.toString());
+  if (!response.ok) throw new Error(`Image URL returned HTTP ${response.status}.`);
+  const declaredLength = Number(response.headers.get('content-length') || 0);
+  if (declaredLength > MAX_PREVIEW_BYTES) throw new Error('Image preview exceeds the 20 MB preview limit.');
+  const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+  if (contentType && !contentType.startsWith('image/')) throw new Error(`URL returned ${contentType}, not an image.`);
+
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length) throw new Error('Image URL returned an empty file.');
+  if (bytes.length > MAX_PREVIEW_BYTES) throw new Error('Image preview exceeds the 20 MB preview limit.');
+  const preview = imagePreviewPayload(nativeImage.createFromBuffer(bytes));
+  return { ok: true, url: response.url || parsed.toString(), contentType, ...preview };
+}
 
 async function registerSelectedImage(filePath) {
   const ext = path.extname(filePath).toLowerCase();
@@ -651,6 +925,7 @@ async function registerSelectedImage(filePath) {
     mime,
     size: stat.size,
   });
+  const preview = imagePreviewPayload(nativeImage.createFromPath(filePath));
 
   return {
     canceled: false,
@@ -658,28 +933,11 @@ async function registerSelectedImage(filePath) {
     name: path.basename(filePath),
     mime,
     size: stat.size,
+    ...preview,
   };
 }
 
-ipcMain.handle('flora:select-image', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Choose reference image',
-    properties: ['openFile'],
-    filters: [
-      { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
-    ],
-  });
-  if (result.canceled || !result.filePaths[0]) return { canceled: true };
-  return registerSelectedImage(result.filePaths[0]);
-});
-
-ipcMain.handle('flora:logout', async () => {
-  const ses = session.fromPartition(FLORA_PARTITION);
-  await ses.clearStorageData();
-  return { ok: true };
-});
-
-ipcMain.handle('flora:generate', async (event, input) => {
+async function generateForAccount(event, input, account) {
   const prompt = String(input?.prompt || '').trim();
   const imageHandle = String(input?.imageHandle || '').trim();
   let imageUrl = String(input?.imageUrl || '').trim();
@@ -688,13 +946,14 @@ ipcMain.handle('flora:generate', async (event, input) => {
   const resolution = String(input?.resolution || '1k').trim();
 
   if (!prompt) throw new Error('Prompt is required.');
+  event.sender.send('flora:progress', { label: `Using ${account.label}`, accountId: account.id });
 
   if (imageHandle) {
     const image = selectedImages.get(imageHandle);
     if (!image) throw new Error('Selected local image is no longer available. Choose it again.');
     imageUrl = await uploadImageToFlora(image, (progressEvent) => {
       event.sender.send('flora:progress', progressEvent);
-    });
+    }, account);
     event.sender.send('flora:progress', { label: 'Reference image uploaded to FLORA' });
   }
 
@@ -715,40 +974,158 @@ ipcMain.handle('flora:generate', async (event, input) => {
     modelName,
     modelParameters: runModelParameters,
     imageUrl,
-    onProgress: (progressEvent) => {
-      event.sender.send('flora:progress', progressEvent);
-    },
+    account,
+    onProgress: (progressEvent) => event.sender.send('flora:progress', progressEvent),
   });
   const { generationId, nodeId } = generationRecord;
-
-  const modelParameters = {
-    ...runModelParameters,
-    image_url: imageUrl,
-  };
+  const modelParameters = { ...runModelParameters, image_url: imageUrl };
 
   event.sender.send('flora:progress', { label: 'Submitting generation', generationId });
   const providerResult = await invokeXaiGeneration(
     { generationId, nodeId, endpointId, modelParameters },
-    (progressEvent) => event.sender.send('flora:progress', progressEvent)
+    (progressEvent) => event.sender.send('flora:progress', progressEvent),
+    account
   );
   event.sender.send('flora:progress', { label: 'FLORA provider response', data: providerResult });
 
   event.sender.send('flora:progress', { label: 'Waiting for FLORA generation result' });
   const completedGeneration = await waitForFloraGeneration(
     generationId,
-    (progressEvent) => event.sender.send('flora:progress', progressEvent)
+    (progressEvent) => event.sender.send('flora:progress', progressEvent),
+    90,
+    account
   );
-  const outputUrl = completedGeneration.mediaUrl;
+
+  account.authenticated = true;
+  account.exhaustedAt = null;
+  account.lastUsedAt = Date.now();
+  saveAccountsStore();
+  notifyAccountsChanged();
 
   return {
     ok: true,
     generationId,
-    outputUrl,
+    outputUrl: completedGeneration.mediaUrl,
     available: true,
     providerResult,
     status: completedGeneration.status,
     generationCost: completedGeneration.generationCost ?? null,
+    account: publicAccount(account),
   };
+}
+
+ipcMain.handle('flora:accounts-state', async () => accountsState());
+
+ipcMain.handle('flora:add-account', async () => {
+  const account = addAccountRecord();
+  return { ok: true, account: publicAccount(account), state: accountsState() };
+});
+
+ipcMain.handle('flora:switch-account', async (_event, accountId) => {
+  const account = setActiveAccount(accountId);
+  return { ok: true, account: publicAccount(account), state: accountsState() };
+});
+
+ipcMain.handle('flora:remove-account', async (_event, accountId) => {
+  const account = accountId ? requireAccountById(accountId) : accountById();
+  if (loginWindow && !loginWindow.isDestroyed() && loginAccountId === account.id) loginWindow.close();
+  const removed = removeAccountRecord(account.id);
+  await session.fromPartition(removed.partition).clearStorageData();
+  return { ok: true, state: accountsState() };
+});
+
+ipcMain.handle('flora:retry-account', async (_event, accountId) => {
+  const account = accountId ? requireAccountById(accountId) : accountById();
+  markAccountExhausted(account, false);
+  return { ok: true, account: publicAccount(account), state: accountsState() };
+});
+
+ipcMain.handle('flora:set-auto-switch', async (_event, enabled) => {
+  const store = loadAccountsStore();
+  store.autoSwitchOnCredits = Boolean(enabled);
+  saveAccountsStore();
+  notifyAccountsChanged();
+  return accountsState();
+});
+
+ipcMain.handle('flora:open-login', async (_event, accountId) => openLoginWindow('', accountId));
+
+ipcMain.handle('flora:open-microsoft-login', async (_event, accountId) => openLoginWindow('microsoft', accountId));
+
+ipcMain.handle('flora:auto-login', async (_event, credentials, accountId) => autoLoginWithPassword(credentials, accountId));
+
+ipcMain.handle('flora:auth-state', async (_event, accountId) => getAuthState(accountId));
+
+ipcMain.handle('flora:select-image', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose reference image',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
+    ],
+  });
+  if (result.canceled || !result.filePaths[0]) return { canceled: true };
+  return registerSelectedImage(result.filePaths[0]);
+});
+
+ipcMain.handle('flora:preview-image-url', async (_event, url) => previewRemoteImage(url));
+
+ipcMain.handle('flora:logout', async (_event, accountId) => {
+  const account = accountId ? requireAccountById(accountId) : accountById();
+  const ses = session.fromPartition(account.partition);
+  await ses.clearStorageData();
+  account.authenticated = false;
+  account.exhaustedAt = null;
+  saveAccountsStore();
+  notifyAccountsChanged();
+  return { ok: true, account: publicAccount(account), state: accountsState() };
+});
+
+ipcMain.handle('flora:generate', async (event, input) => {
+  const store = loadAccountsStore();
+  let account = input?.accountId
+    ? requireAccountById(input.accountId)
+    : requireAccountById(store.activeAccountId);
+  const attempted = new Set();
+  let lastError = null;
+
+  while (account && !attempted.has(account.id)) {
+    attempted.add(account.id);
+    try {
+      return await generateForAccount(event, input, account);
+    } catch (error) {
+      lastError = error;
+      if (!isCreditExhaustionError(error)) throw error;
+
+      markAccountExhausted(account, true);
+      event.sender.send('flora:progress', {
+        label: `${account.label} has no available FLORA credits`,
+        accountId: account.id,
+      });
+
+      if (store.autoSwitchOnCredits === false) {
+        const disabledError = new Error(`${error.message} Auto account switching is disabled.`);
+        disabledError.creditExhausted = true;
+        throw disabledError;
+      }
+
+      const nextAccount = await findNextUsableAccount(attempted);
+      if (!nextAccount) {
+        const unavailableError = new Error(`${error.message} No other signed-in FLORA account with available credits was found.`);
+        unavailableError.creditExhausted = true;
+        throw unavailableError;
+      }
+
+      setActiveAccount(nextAccount.id);
+      account = nextAccount;
+      event.sender.send('flora:progress', {
+        label: `Switched to ${account.label}; retrying generation`,
+        accountId: account.id,
+      });
+    }
+  }
+
+  throw lastError || new Error('No FLORA account is available for generation.');
 });
 
 app.whenReady().then(() => {
