@@ -850,7 +850,8 @@ function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChoo
     if (!root && projects[0]?.root) setRoot(projects[0].root);
   }, [projects, root]);
   if (!worker) return null;
-  const working = sending || worker.activity === "working";
+  const processing = worker.activity === "working";
+  const working = sending || processing;
   const allAllowedScope = root === ALL_ALLOWED_WORKSPACES;
   const displayedRequest = lastRequest || worker.last_request || "";
   const valid = Boolean(root && (request.trim() || attachments.length) && worker.connected && !working);
@@ -897,8 +898,8 @@ function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChoo
 
           <label className="request-label request-section-label">Tin nhắn gần nhất</label>
           <LatestMessagePanel
-            working={working}
-            headline={working ? "CodexPro đang xử lý…" : ""}
+            working={processing}
+            headline={sending ? "Đang gửi tin nhắn…" : processing ? "CodexPro đang xử lý…" : ""}
             title={worker.current_task_title || worker.last_task_title || ""}
             requestText={displayedRequest}
             responseText={worker.stream_text || worker.last_result || ""}
@@ -4202,6 +4203,7 @@ function App() {
       awaitingAssistant: responseCurrent && transcriptAwaitingAssistant(materializeTranscriptMessages(response, selectedTarget)),
       finalityPending: responseCurrent && response?.finalityPending
     });
+    const responseBorderActive = selectedBusy || selectedSettling;
     const responseTurnActive = selectedRecoveringNetworkAbort || Boolean(sending || selectedBusy || selectedSettling || (responseCurrent && (response?.busy || response?.loading)));
     const latestTurnProvisionalAssistant = latestTurnHasProvisionalAssistant(displayResponseMessages);
     const showSyntheticThinking = Boolean(responseTurnActive && !(response?.networkStreamAvailable && hasResponseContent) && !latestTurnProvisionalAssistant);
@@ -4278,7 +4280,7 @@ function App() {
             <label className="request-label">Đoạn chat <small>giữ nguyên lựa chọn khi làm mới</small></label>
             <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => selectRequestConversation(profile, id)} disabled={!profile.connected || !conversations.length || sending} />
             <label className="request-label request-section-label">Tin nhắn gần nhất</label>
-            <div className={`chat-response is-inline ${sending ? "is-sending" : selectedBusy ? "is-streaming" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-transcript-loading={responseCurrent && response?.transcriptLoading ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
+            <div className={`chat-response is-inline ${responseBorderActive ? "is-streaming" : sending ? "is-sending" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-transcript-loading={responseCurrent && response?.transcriptLoading ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
               <div className="chat-response-head">
                 <div><span className="response-status-dot" /><strong title={responseHeadline}>{responseHeadline}</strong>{sending && <span className="chat-response-send-state"><span>Đang gửi tin nhắn</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span>}{!sending && !isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
                 <div className="response-head-actions">
