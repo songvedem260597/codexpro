@@ -16,7 +16,7 @@ const home = mkdtempSync(path.join(tmpdir(), 'codexpro-profile-persist-'));
 const childPath = path.join(home, 'bridge-child.mjs');
 const bridgeUrl = pathToFileURL(path.resolve('dist/browserExtensionBridge.js')).href;
 writeFileSync(childPath, `
-import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds } from ${JSON.stringify(bridgeUrl)};
+import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds } from ${JSON.stringify(bridgeUrl)};
 const mode = process.argv[2];
 const port = Number(process.env.CODEXPRO_BROWSER_EXTENSION_BRIDGE_PORT);
 ensureBrowserExtensionBridge();
@@ -49,6 +49,8 @@ if (mode === 'register' || mode === 'disable') {
   console.log(JSON.stringify(await response.json()));
 } else if (mode === 'list') {
   console.log(JSON.stringify({ profiles: listBrowserExtensionProfiles(), disabled_profile_ids: listDisabledBrowserExtensionProfileIds() }));
+} else if (mode === 'forget') {
+  console.log(JSON.stringify({ forgotten: forgetBrowserExtensionProfile('persist-smoke-profile') }));
 } else {
   throw new Error('unknown mode');
 }
@@ -92,6 +94,12 @@ try {
   const disabledSnapshot = JSON.parse(run('list', seed + 3));
   assert.deepEqual(disabledSnapshot.profiles, [], 'disabled profiles must stay hidden after bridge restart');
   assert.deepEqual(disabledSnapshot.disabled_profile_ids, ['persist-smoke-profile'], 'bridge snapshots must identify explicit disabled removals');
+  assert.equal(JSON.parse(run('forget', seed + 4)).forgotten, true, 'a stale profile must be removable without reconnecting its extension');
+  const forgottenRegistry = JSON.parse(readFileSync(path.join(home, 'browser-profiles.json'), 'utf8'));
+  assert.deepEqual(forgottenRegistry.profiles, [], 'forgetting a profile must immediately persist the empty registry');
+  const forgottenSnapshot = JSON.parse(run('list', seed + 5));
+  assert.deepEqual(forgottenSnapshot.profiles, [], 'a forgotten profile must stay absent after bridge restart');
+  assert.deepEqual(forgottenSnapshot.disabled_profile_ids, [], 'forgetting must remove stale disabled metadata too');
   console.log('✓ Browser profile registry survives runtime restart and reconnect state is safe');
 } finally {
   rmSync(home, { recursive: true, force: true });

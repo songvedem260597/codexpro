@@ -1230,6 +1230,41 @@ export function listDisabledBrowserExtensionProfileIds(): string[] {
     .sort((left, right) => left.localeCompare(right));
 }
 
+export function forgetBrowserExtensionProfile(profileId: string): boolean {
+  const id = String(profileId || "").trim().slice(0, 160);
+  if (!id) return false;
+  const state = ensureBrowserExtensionBridge();
+  const profile = state.profiles.get(id);
+  if (!profile) return false;
+  if (profile.waiter) {
+    profile.waiter.statusCode = 410;
+    profile.waiter.end(JSON.stringify({ error: "Chrome profile was forgotten by CodexPro Manager." }));
+    clearWaiter(profile);
+  }
+  for (const command of profile.queued) {
+    const pending = state.pending.get(command.id);
+    if (!pending) continue;
+    if (pending.timer) clearTimeout(pending.timer);
+    state.pending.delete(command.id);
+    pending.reject(new CodexProError(`Chrome profile ${profile.label || id} was forgotten by CodexPro Manager.`));
+  }
+  state.profiles.delete(id);
+  profileWorkspaceRoots.delete(id);
+  profileWorkspaceBindings.delete(id);
+  profileTaskIds.delete(id);
+  profileTaskTitles.delete(id);
+  profileTaskConversationIds.delete(id);
+  profileTaskUpdatedAt.delete(id);
+  profilePendingTasks.delete(id);
+  profileTaskEventSignatures.delete(id);
+  if (state.activeProfileId === id) state.activeProfileId = undefined;
+  persistBrowserProfileRegistry(state);
+  persistBrowserProfileTasks();
+  scheduleProfileNotification(state);
+  scheduleProfileExpiryNotification(state);
+  return true;
+}
+
 export function subscribeBrowserExtensionProfiles(listener: (profiles: ExtensionProfileSummary[]) => void): () => void {
   const state = ensureBrowserExtensionBridge();
   state.profileListeners.add(listener);

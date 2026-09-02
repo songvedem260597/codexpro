@@ -22,7 +22,7 @@ import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges }
 import { projectCompactGraph } from "./analysis/projection.js";
 import { createRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import { runBrowserControl } from "./browserOps.js";
-import { ensureBrowserExtensionBridge, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, workerJobPublicRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
@@ -3718,7 +3718,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       description:
         "Fast browser-agent control for the Chrome profile explicitly marked ACTIVE, with dedicated port-9223 Chrome as fallback. Supports persistent CDP/debugger sessions, trusted input, batch actions, wait_for, inspect_element, evaluate, hover/scroll, screenshots, and existing ChatGPT-specific actions.",
       inputSchema: {
-        action: z.enum(["status", "list_profiles", "select_workspace", "check_chatgpt", "setup_chatgpt", "reload_extension", "stop_chat_generation", "audit_long_running_chat", "recover_chat_tab", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch", "screenshot"]),
+        action: z.enum(["status", "list_profiles", "forget_profile", "select_workspace", "check_chatgpt", "setup_chatgpt", "reload_extension", "stop_chat_generation", "audit_long_running_chat", "recover_chat_tab", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch", "screenshot"]),
         profile_id: z.string().optional().describe("Optional extension profile id. Omit to use the profile marked ACTIVE. Ignored for the dedicated fallback browser."),
         root: z.string().optional().describe("Workspace root for select_workspace. The selected profile is locked to this root until changed by CodexPro Manager."),
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
@@ -3792,6 +3792,14 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const profiles = listBrowserExtensionProfiles();
       if (args.action === "list_profiles") {
         return textResult(`# Browser Profiles\n\n${profiles.length ? profiles.map((profile) => `- ${profile.active ? "ACTIVE" : "idle"} · ${profile.label} · ${profile.connected ? "online" : "offline"} · ${profile.profile_id}`).join("\n") : "No extension profiles connected."}`, { action: args.action, profiles });
+      }
+      if (args.action === "forget_profile") {
+        if (!args.profile_id) throw new CodexProError("Chrome profile id is required before forgetting a profile.");
+        const forgotten = forgetBrowserExtensionProfile(args.profile_id);
+        return textResult(
+          forgotten ? "Chrome profile hidden from CodexPro Manager." : "Chrome profile was already absent.",
+          { action: args.action, profile_id: args.profile_id, forgotten }
+        );
       }
       if (args.action === "status") {
         let dedicated: Record<string, any>;

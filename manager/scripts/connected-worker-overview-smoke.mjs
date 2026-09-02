@@ -4,6 +4,7 @@ import fs from "node:fs";
 const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const electronSource = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
+const preloadSource = fs.readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
 assert.match(source, /Hãy kết nối API worker và Chrome profile của bạn/, "connected workers section must use the concise connection guidance");
 assert.match(styles, /\.profile-worker \{[^}]*aspect-ratio:\s*1\s*\/\s*1;/, "worker GIF frames must enforce a square aspect ratio");
 assert.match(styles, /\.profile-worker img \{[^}]*max-width:\s*100%;[^}]*max-height:\s*100%;[^}]*object-fit:\s*contain;/, "worker GIFs must stay contained inside their frame");
@@ -31,5 +32,10 @@ assert.match(electronSource, /status\.workerSnapshotAvailable === false[\s\S]*?m
 assert.match(source, /connectorAutoMigrationInFlight\.current[\s\S]*?connector_update_required !== true[\s\S]*?profileSafeForWorkerUpdate\(profile\)[\s\S]*?api\.setupProfile\(profileId\)/, "outdated profile-bound connectors must auto-migrate sequentially only after the worker becomes idle");
 assert.match(source, /CONNECTOR_AUTO_MIGRATION_RETRY_MS[\s\S]*?connectorAutoMigrationAttempts\.current\.get\(profile\.profile_id\)/, "failed automatic connector migration must use retry backoff");
 assert.match(source, /autoMigratingProfileId === profile\.profile_id[\s\S]*?Đang cập nhật \+ test/, "the card must surface automatic connector migration as an in-progress update");
+assert.match(source, /async function forgetProfile\(profile\)[\s\S]*?api\.forgetProfile\(profile\.profile_id\)[\s\S]*?browserProfiles:[\s\S]*?\.filter/, "the Manager must remove a forgotten offline profile immediately");
+assert.match(source, /\{hung && \([\s\S]*?forget-profile[\s\S]*?Ẩn khỏi danh sách/, "only a disconnected Chrome profile card must offer the forget action");
+assert.match(source, /\{profile\.connected && !ready && <span className="update-needed">/, "an offline or disabled profile must not be presented as updateable");
+assert.match(preloadSource, /forgetProfile: \(profileId\) => invoke\("codexpro:forget-profile", profileId\)/, "the preload must expose the forget-profile action");
+assert.match(electronSource, /codexpro:forget-profile[\s\S]*?action: "forget_profile"/, "the main process must route profile forgetting through the local MCP runtime");
 
 console.log("✓ Connected worker overview, queued refresh, and connector auto-migration smoke test passed");
