@@ -64,7 +64,8 @@ const config = {
   bashMode: "full",
   requireBashSession: false,
   inheritEnv: true,
-  maxOutputBytes: 100_000
+  maxOutputBytes: 100_000,
+  maxBashTimeoutMs: 180_000
 };
 
 async function runTask(task, record, command, timeoutMs = 30_000) {

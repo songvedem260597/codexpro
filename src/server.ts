@@ -550,11 +550,6 @@ function assertRepoTaskGate(server: McpServer, name: string): void {
   }
 }
 
-function activeRepoTaskForServer(server: McpServer): ActiveRepoTask | undefined {
-  const profileId = repoTaskGateProfileByServer.get(server as object) || "";
-  return profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
-}
-
 function repoTaskWorktree(active: ActiveRepoTask): { root?: string; branch?: string } {
   if (active.worktreeRoot && fs.existsSync(active.worktreeRoot)) {
     return { root: active.worktreeRoot, branch: active.worktreeBranch };

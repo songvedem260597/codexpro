@@ -174,7 +174,7 @@ try {
   assert.match(headlessLock, /\['click', 'pointerdown', 'submit', 'beforeinput', 'paste', 'drop', 'keydown'\]/, "locked source ChatGPT tabs must block direct user interaction as well as task submission");
   assert.match(networkCapture, /codexproHeadlessLocked[\s\S]*?isGenerationEndpoint[\s\S]*?throw new Error/, "MAIN-world ChatGPT generation fetches must fail closed while the source profile is locked by headless");
   assert.ok(serverSource.includes("if (gateProfileId) await assertBrowserControlHeadlessExclusive(gateProfileId);"), "begin_repo_task must reject source/headless task overlap before a task gate opens");
-  assert.ok(serverSource.includes("if (args.action !== \"close_profile\") await assertBrowserControlHeadlessExclusive(selectedProfile!);"), "direct runtime browser_control must enforce headless exclusivity too");
+  assert.match(serverSource, /if \(!\["close_profile", "set_headless_lock", "clear_headless_lock"\]\.includes\(args\.action\)\) await assertBrowserControlHeadlessExclusive\(selectedProfile!\);/, "direct runtime browser_control must enforce headless exclusivity except for explicit lock-management and close actions");
 
   console.log("✓ headless worker source-Chrome warning/exclusivity smoke test passed");
 } finally {

@@ -14,7 +14,6 @@ assert.match(source, /<h2>Worker đã kết nối<\/h2>/, "overview must use the
 assert.doesNotMatch(source, /<h2>Profile đã kết nối<\/h2>/, "legacy Chrome-only heading must be removed");
 assert.match(source, /header-server-actions[\s\S]*?profile-count[\s\S]*?profileSummary\.working[\s\S]*?profileSummary\.idle[\s\S]*?profileSummary\.hung[\s\S]*?profileSummary\.missing/, "overview must retain the worker state summary");
 assert.doesNotMatch(source, /header-action-row/, "overview header must not reserve vertical space for extension and runtime action buttons");
-const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 assert.match(styles, /\.page-overview #overview \.status-card \{ min-height: 92px;/, "overview runtime status cards must stay compact");
 assert.match(styles, /\.page-overview #profiles \.profile-list\.is-card-layout \.profile-worker \{ width: 120px; height: 132px;/, "overview worker images must leave enough vertical room for the complete cards");
 assert.match(styles, /\.page-overview \.header-server-actions \{ width: auto;[\s\S]*?\.profile-count \{ min-height: 34px;/, "overview worker totals must stay compact instead of stretching to the heading height");

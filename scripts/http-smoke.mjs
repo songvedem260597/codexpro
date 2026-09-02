@@ -246,7 +246,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const actionNames = Array.isArray(actions?.structuredContent?.actions) ? actions.structuredContent.actions : [];
     if (actionNames.includes('prepare_repo_task')) throw new Error('gated ChatGPT session must not expose prepare_repo_task');
     const preBeginCoordination = await callTool(gated, 'codexpro', { action: 'workspace_coordination_status', args: { root: taskRoot } });
-    if (path.resolve(preBeginCoordination.structuredContent.root) !== path.resolve(taskRoot) || !Array.isArray(preBeginCoordination.structuredContent.tasks)) {
+    if (await canonicalPath(preBeginCoordination.structuredContent.root) !== await canonicalPath(taskRoot) || !Array.isArray(preBeginCoordination.structuredContent.tasks)) {
       throw new Error(`workspace coordination status must remain observable before begin_repo_task: ${JSON.stringify(preBeginCoordination.structuredContent)}`);
     }
     await expectToolErrorCode(gated, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
