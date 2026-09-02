@@ -1672,7 +1672,9 @@ function createWindow() {
   const devUrl = process.env.CODEXPRO_MANAGER_DEV_URL;
   if (devUrl) void win.loadURL(devUrl);
   else void win.loadFile(path.join(here, "..", "dist", "index.html"), process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "requests" ? { query: { page: "requests" } } : undefined);
-  win.webContents.on("did-finish-load", () => startBrowserProfileEventStream(win));
+  win.webContents.on("did-finish-load", () => {
+    if (process.env.CODEXPRO_MANAGER_SMOKE_FLIGHT_RECORDER !== "1") startBrowserProfileEventStream(win);
+  });
 
   if (smokeMode) {
     win.webContents.once("did-finish-load", async () => {
