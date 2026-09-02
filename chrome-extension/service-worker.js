@@ -362,18 +362,21 @@ function recordChatPost(details,phase,statusCode=0,error='') {
   const endpoint=safeChatRequestEndpoint(details.url);
   if(!endpoint)return;
   const current=chatNetworkPostLogByTab.get(details.tabId)||[];
+  const observedAtMs=Date.now();
+  const phaseName=String(phase||'');
   const entry={
     request_id:String(details.requestId||''),
     endpoint,
     resource_type:String(details.type||''),
-    phase:String(phase||''),
+    phase:phaseName,
     matched_generation:isChatGenerationRequest(details),
     status_code:Number(statusCode)||0,
     error:String(error||'').slice(0,200),
-    observed_at_ms:Date.now()
+    started_at_ms:/^(?:started|cdp-started)$/.test(phaseName)?observedAtMs:0,
+    observed_at_ms:observedAtMs
   };
   const index=current.findIndex(item=>item.request_id&&item.request_id===entry.request_id);
-  if(index>=0)current[index]={...current[index],...entry};
+  if(index>=0)current[index]={...current[index],...entry,started_at_ms:Number(current[index].started_at_ms)||Number(entry.started_at_ms)||0};
   else current.push(entry);
   chatNetworkPostLogByTab.set(details.tabId,current.slice(-60));
   chatNetworkPostVersionByTab.set(details.tabId,(chatNetworkPostVersionByTab.get(details.tabId)||0)+1);
@@ -382,8 +385,9 @@ function recordChatPost(details,phase,statusCode=0,error='') {
 }
 
 function recentChatPostEvidence(tabId,startedAfterMs=0) {
+  const cutoff=Number(startedAfterMs||0);
   return (chatNetworkPostLogByTab.get(tabId)||[])
-    .filter(item=>Number(item.observed_at_ms||0)>=Number(startedAfterMs||0))
+    .filter(item=>!cutoff||Number(item.started_at_ms||0)>=cutoff)
     .map(item=>({
       endpoint:item.endpoint,
       resource_type:item.resource_type,
@@ -2569,7 +2573,8 @@ async function execute(command) {
     const text=String(args.text||'').trim();
     const attachments=Array.isArray(args.attachments)?args.attachments.slice(0,4).map(file=>({name:String(file?.name||'').trim().slice(0,255),mime_type:String(file?.mime_type||'application/octet-stream').trim().slice(0,160),data_base64:String(file?.data_base64||'')})):[];
     const newChat=Boolean(args.new_chat);
-    const allowBusyFollowup=Boolean(!newChat&&args.allow_busy_followup===true);
+    // Older live MCP runtimes can strip allow_busy_followup until they restart; Manager also sends a legacy-safe title sentinel.
+    const allowBusyFollowup=Boolean(!newChat&&(args.allow_busy_followup===true||args.title==='__codexpro_allow_busy_followup__'));
     const oneShotRecovery=Boolean(args.one_shot_recovery);
     if(!text&&!attachments.length)throw new Error('Yêu cầu và file đính kèm không được cùng để trống.');
     if(text.length>20000)throw new Error('Yêu cầu dài quá 20.000 ký tự.');
@@ -2619,14 +2624,31 @@ async function execute(command) {
     const networkCaptureInstalled=Boolean(networkCaptureProbe?.capture_installed||networkCaptureProbe?.available);
     if(conversationLimit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(conversationLimit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
     const followupWhileGenerating=Boolean(allowBusyFollowup&&(requestState.busy&&requestState.network_state==='generating'||networkCaptureProbe?.in_progress===true));
-    if(requestState.busy&&!followupWhileGenerating)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
-    if(domActivity.busy&&!followupWhileGenerating){
+    if(requestState.busy&&!allowBusyFollowup)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
+    if(domActivity.busy&&!allowBusyFollowup){
       // ChatGPT can leave a stale stop/interrupted DOM marker after the canonical turn is complete.
       // Re-check the authoritative conversation before rejecting a new send, regardless of the DOM busy subtype.
       const canonical=await timedSendPhase('stale_busy_canonical_ms',()=>probeCanonicalActivity(tab.id,targetConversationId,true));
       const canonicalCompleted=Boolean(canonical?.response_ready&&!canonical.busy);
       if(canonicalCompleted)await reconcileChatNetworkCompletion(tab.id,targetConversationId,'send_preflight_canonical');
       else throw new Error('Đoạn chat vẫn đang hoàn tất lượt trước. Chờ ChatGPT về trạng thái rảnh để không nhập tin nhắn mới vào turn cũ.');
+    }
+    let followupSteering={followup_stop_attempted:false,followup_generation_stopped:false};
+    if(followupWhileGenerating){
+      let stopResult={ok:false,stopped:false,reason:''};
+      try{
+        const [stopped]=await timedSendPhase('followup_stop_ms',()=>promiseWithTimeout(
+          chrome.scripting.executeScript({target:{tabId:tab.id},func:stopChatGenerationPage}),
+          5000,
+          'Chrome renderer không phản hồi khi dừng lượt cũ trước manual follow-up.'
+        ));
+        if(stopped?.result&&typeof stopped.result==='object')stopResult=stopped.result;
+      }catch(error){stopResult={ok:false,stopped:false,reason:String(error?.message||error).slice(0,300)};}
+      if(stopResult.stopped){
+        await new Promise(resolve=>setTimeout(resolve,550));
+        await reconcileChatNetworkCompletion(tab.id,targetConversationId,'manual_followup_stop').catch(()=>false);
+      }
+      followupSteering={followup_stop_attempted:true,followup_generation_stopped:Boolean(stopResult.stopped),followup_stop_reason:String(stopResult.reason||'')};
     }
     const targetTemporarilyActivated=false;
     const submitStartedAt=Date.now();
@@ -2781,7 +2803,7 @@ async function execute(command) {
       return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'failed',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'command-expired-pre-dispatch',submit_path:'command-expired-pre-dispatch',path_attempted:['prepare'],send_uncertain:false,error:'COMMAND_EXPIRED_PRE_DISPATCH: Lệnh hết hạn sau bước chuẩn bị nhưng trước trusted input; chưa gửi và có thể thử lại an toàn.',attempt_id:attemptId,command_queued_ms:commandQueuedMs,cleanup,...sendTimingPayload()};
     }
     const preparationPath=preparationRecovery.renderer_replaced?['prepare','replace-tab','prepare']:preparationRecovery.prepare_waited?['prepare','wait','prepare']:[];
-    let submitResult={...injected.result,...preparationRecovery,submit_path:'trusted-enter',path_attempted:[...preparationPath,'trusted-enter'],trusted_enter_dispatched:false,trusted_click_dispatched:false,submitted_by:'trusted-enter'};
+    let submitResult={...injected.result,...preparationRecovery,...followupSteering,submit_path:'trusted-enter',path_attempted:[...preparationPath,'trusted-enter'],trusted_enter_dispatched:false,trusted_click_dispatched:false,submitted_by:'trusted-enter'};
     if(injected.result.requires_trusted_submit){
       if(attachments.length&&!injected.result.attachment_reused){
         try{

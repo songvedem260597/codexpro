@@ -4497,6 +4497,7 @@ async function sendProfileRequestUnlocked(payload) {
     text: taskText,
     attachments,
     allow_busy_followup: allowBusyFollowup,
+    title: allowBusyFollowup ? "__codexpro_allow_busy_followup__" : undefined,
     one_shot_recovery: payload?.oneShotRecovery === true
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
