@@ -273,6 +273,30 @@ function ChatGalaxyButtonContent() {
   );
 }
 
+function TitleGalaxyAccent() {
+  return (
+    <span
+      className="title-accent title-galaxy-accent"
+    >
+      <span className="chat-galaxy-backdrop" aria-hidden="true" />
+      <span className="chat-galaxy-spark" aria-hidden="true" />
+      <span className="chat-galaxy-static" aria-hidden="true">
+        {CHAT_GALAXY_STATIC_STARS.map((star, index) => (
+          <span key={`title-static-${index}`} className="chat-galaxy-star is-static" style={{ "--x": `${star.x}%`, "--y": `${star.y}%`, "--size": `${star.size}px`, "--alpha": star.alpha }} />
+        ))}
+      </span>
+      <span className="chat-galaxy-orbit" aria-hidden="true">
+        <span className="chat-galaxy-ring">
+          {CHAT_GALAXY_ORBIT_STARS.map((star, index) => (
+            <span key={`title-orbit-${index}`} className="chat-galaxy-star" style={{ "--size": `${star.size}px`, "--alpha": star.alpha, "--distance": `${star.distance}px`, "--duration": `${star.duration}s`, "--delay": `${star.delay}s` }} />
+          ))}
+        </span>
+      </span>
+      <span className="title-galaxy-label">Multi</span>
+    </span>
+  );
+}
+
 function SettingsDropdown({ value, options, disabled, onChange, ariaLabel = "Chọn font chữ", selectedHint = "" }) {
   return (
     <AppDropdown
@@ -4513,7 +4537,7 @@ function App() {
         <header>
           <div>
             <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : activePage === "plugins" ? "APP PLUGINS" : activePage === "workflows" ? "TASK WORKFLOWS" : activePage === "control" ? "AGENT OPERATIONS" : "WINDOWS CONTROL CENTER"}</p>
-            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "plugins" ? "Plugin" : activePage === "workflows" ? "Trung tâm quy trình" : activePage === "control" ? "Trung tâm điều phối" : <>CodexPro <span className="title-accent">Multi</span> Agent</>}</h1>
+            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "plugins" ? "Plugin" : activePage === "workflows" ? "Trung tâm quy trình" : activePage === "control" ? "Trung tâm điều phối" : <>CodexPro <TitleGalaxyAccent /> Agent</>}</h1>
             <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : activePage === "plugins" ? "Tích hợp giao diện từ repo khác mà không đóng Manager hay gián đoạn worker." : activePage === "workflows" ? "Giao task theo checklist có sẵn và theo dõi từng bước bằng bằng chứng của worker." : activePage === "control" ? "Theo dõi task, hiệu suất, tự phục hồi, phiên bản và an toàn repo trong một màn hình." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
           </div>
           {activePage === "overview" && (
