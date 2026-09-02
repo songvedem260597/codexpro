@@ -650,6 +650,7 @@ const MANAGER_WORKING_BORDER_STYLES = new Set(["shine", "beam"]);
 const WORKER_IMAGE_STATES = new Set(["idle", "working", "hung"]);
 const WORKER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const MAX_WORKER_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_APP_BACKGROUND_BYTES = 25 * 1024 * 1024;
 const MAX_WORKER_IMAGE_PACKS = 20;
 const DEFAULT_WORKER_PACK_ID = "default";
 
@@ -717,6 +718,9 @@ function defaultManagerSettings() {
     autoRecovery: false,
     autoUpdateWorkers: false,
     taskNotifications: true,
+    appBackground: "",
+    appBackgroundBlur: 6,
+    appBackgroundDim: 54,
     globalRules: readGlobalRulesFile(),
     repoSelections: {},
     selectedWorkerPackId: DEFAULT_WORKER_PACK_ID,
@@ -755,6 +759,9 @@ function readManagerSettings() {
       autoRecovery: parsed?.autoRecovery === true,
       autoUpdateWorkers: parsed?.autoUpdateWorkers === true,
       taskNotifications: parsed?.taskNotifications !== false,
+      appBackground: typeof parsed?.appBackground === "string" ? parsed.appBackground : defaults.appBackground,
+      appBackgroundBlur: Number.isFinite(Number(parsed?.appBackgroundBlur)) ? Math.max(0, Math.min(24, Number(parsed.appBackgroundBlur))) : defaults.appBackgroundBlur,
+      appBackgroundDim: Number.isFinite(Number(parsed?.appBackgroundDim)) ? Math.max(0, Math.min(85, Number(parsed.appBackgroundDim))) : defaults.appBackgroundDim,
       globalRules: readGlobalRulesFile(),
       repoSelections: Object.fromEntries(Object.entries(parsed?.repoSelections && typeof parsed.repoSelections === "object" ? parsed.repoSelections : {})
         .filter(([profileId, root]) => /^[A-Za-z0-9._-]{1,160}$/.test(profileId) && typeof root === "string" && root.trim())
@@ -868,14 +875,14 @@ function saveManagerChatCacheEntry(payload) {
   return saved;
 }
 
-function imageDataUrl(filePath) {
+function imageDataUrl(filePath, maxBytes = MAX_WORKER_IMAGE_BYTES) {
   if (!filePath) return "";
   try {
     const resolved = path.resolve(filePath);
     const extension = path.extname(resolved).toLowerCase();
     if (!WORKER_IMAGE_EXTENSIONS.has(extension)) return "";
     const stat = fs.statSync(resolved);
-    if (!stat.isFile() || stat.size > MAX_WORKER_IMAGE_BYTES) return "";
+    if (!stat.isFile() || stat.size > maxBytes) return "";
     const mimeType = mimeTypeForFile(resolved);
     return `data:${mimeType};base64,${fs.readFileSync(resolved).toString("base64")}`;
   } catch {
@@ -896,6 +903,7 @@ function managerSettingsPayload() {
   }));
   return {
     ...settings,
+    appBackgroundDataUrl: imageDataUrl(settings.appBackground, MAX_APP_BACKGROUND_BYTES),
     workerImagePacks,
     workerImageDataUrls: {
       idle: imageDataUrl(settings.workerImages.idle),
@@ -948,6 +956,8 @@ function saveManagerSettingsPatch(patch = {}) {
   if (Object.prototype.hasOwnProperty.call(patch, "autoRecovery")) next.autoRecovery = patch.autoRecovery === true;
   if (Object.prototype.hasOwnProperty.call(patch, "autoUpdateWorkers")) next.autoUpdateWorkers = patch.autoUpdateWorkers === true;
   if (Object.prototype.hasOwnProperty.call(patch, "taskNotifications")) next.taskNotifications = patch.taskNotifications !== false;
+  if (Object.prototype.hasOwnProperty.call(patch, "appBackgroundBlur")) next.appBackgroundBlur = Math.max(0, Math.min(24, Number(patch.appBackgroundBlur) || 0));
+  if (Object.prototype.hasOwnProperty.call(patch, "appBackgroundDim")) next.appBackgroundDim = Math.max(0, Math.min(85, Number(patch.appBackgroundDim) || 0));
   if (Object.prototype.hasOwnProperty.call(patch, "globalRules")) {
     next.globalRules = normalizeGlobalRules(patch.globalRules);
   }
@@ -1068,9 +1078,48 @@ function resetWorkerImage(packId, state) {
   return managerSettingsPayload();
 }
 
+async function chooseAppBackground() {
+  const result = await dialog.showOpenDialog({
+    title: "Chọn hình nền CodexPro",
+    properties: ["openFile"],
+    filters: [{ name: "Hình nền", extensions: ["png", "jpg", "jpeg", "gif", "webp"] }]
+  });
+  if (result.canceled || !result.filePaths[0]) return managerSettingsPayload();
+  const source = path.resolve(result.filePaths[0]);
+  const stat = fs.statSync(source);
+  if (!stat.isFile()) throw new Error("Hình nền không hợp lệ.");
+  if (stat.size > MAX_APP_BACKGROUND_BYTES) throw new Error("Hình nền được tối đa 25 MB.");
+  const extension = path.extname(source).toLowerCase();
+  if (!WORKER_IMAGE_EXTENSIONS.has(extension)) throw new Error("Chỉ hỗ trợ PNG, JPG, GIF hoặc WEBP.");
+  fs.mkdirSync(managerAssetsDir, { recursive: true });
+  const settings = readManagerSettings();
+  const previousPath = settings.appBackground;
+  const destination = path.join(managerAssetsDir, `app-background${extension}`);
+  if (path.resolve(source) !== path.resolve(destination)) {
+    for (const candidate of fs.readdirSync(managerAssetsDir, { withFileTypes: true })) {
+      if (candidate.isFile() && candidate.name.startsWith("app-background.")) fs.rmSync(path.join(managerAssetsDir, candidate.name), { force: true });
+    }
+    fs.copyFileSync(source, destination);
+  }
+  if (previousPath && path.resolve(previousPath) !== path.resolve(destination)) removeManagedWorkerImage(previousPath);
+  settings.appBackground = destination;
+  writeManagerSettings(settings);
+  return managerSettingsPayload();
+}
+
+function resetAppBackground() {
+  const settings = readManagerSettings();
+  const currentPath = settings.appBackground;
+  settings.appBackground = "";
+  writeManagerSettings(settings);
+  removeManagedWorkerImage(currentPath);
+  return managerSettingsPayload();
+}
+
 function resetManagerSettings() {
   const current = readManagerSettings();
   for (const pack of current.workerImagePacks || []) Object.values(pack.images || {}).forEach(removeManagedWorkerImage);
+  removeManagedWorkerImage(current.appBackground);
   const defaults = { ...defaultManagerSettings(), repoSelections: { ...(current.repoSelections || {}) } };
   writeManagerSettings(defaults);
   return managerSettingsPayload();
@@ -4269,6 +4318,8 @@ diagnosticIpcHandle("codexpro:select-worker-image-pack", { category: "settings",
 diagnosticIpcHandle("codexpro:delete-worker-image-pack", { category: "settings", action: "delete-worker-image-pack", failureMessage: "Xóa bộ ảnh worker thất bại" }, (_event, packId) => deleteWorkerImagePack(packId));
 diagnosticIpcHandle("codexpro:choose-worker-image", { category: "settings", action: "choose-worker-image", failureMessage: "Chọn ảnh worker thất bại", details: (payload) => ({ state: String(payload?.state || "") }) }, (_event, payload) => chooseWorkerImage(payload?.packId, payload?.state));
 diagnosticIpcHandle("codexpro:reset-worker-image", { category: "settings", action: "reset-worker-image", failureMessage: "Khôi phục ảnh worker thất bại", details: (payload) => ({ state: String(payload?.state || "") }) }, (_event, payload) => resetWorkerImage(payload?.packId, payload?.state));
+diagnosticIpcHandle("codexpro:choose-app-background", { category: "settings", action: "choose-app-background", failureMessage: "Chọn hình nền thất bại" }, () => chooseAppBackground());
+diagnosticIpcHandle("codexpro:reset-app-background", { category: "settings", action: "reset-app-background", failureMessage: "Xóa hình nền thất bại" }, () => resetAppBackground());
 diagnosticIpcHandle("codexpro:reset-manager-settings", {
   category: "settings",
   action: "reset-manager-settings",

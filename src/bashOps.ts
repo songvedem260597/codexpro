@@ -7,6 +7,7 @@ import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { redactSensitiveText } from "./redact.js";
+import { acquireWorkspaceIntegrationLease, preflightWorkspaceCommit, preflightWorkspaceGitAdd, preflightWorkspacePush, recordWorkspaceCommit, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 export interface BashResult {
   command: string;
@@ -260,6 +261,34 @@ function parseSafeGitWrite(command: string): SafeGitWrite | undefined {
   return undefined;
 }
 
+function assertRepoTaskCommandPolicy(command: string, safeGitWrite: SafeGitWrite | undefined): void {
+  const normalized = compact(command);
+  const directGitMutation = /^git(?:\.exe)?\s+(?:add|commit|push|reset|clean|checkout|switch|restore|apply)\b/i.test(normalized);
+  if (directGitMutation && !safeGitWrite) {
+    throw new CodexProError(
+      "WORKSPACE_GIT_WRITE_SHAPE_BLOCKED: profile-bound code tasks must use explicit-file git add, a plain git commit -m, or git push origin <branch>. Destructive/ambiguous Git writes are blocked.",
+      { code: "WORKSPACE_GIT_WRITE_SHAPE_BLOCKED" }
+    );
+  }
+  const sourceMutation = [
+    /(?:^|\s)(?:Set-Content|Add-Content|Out-File|Remove-Item|Move-Item|Copy-Item|Rename-Item|Clear-Content)(?:\s|$)/i,
+    /(?:^|\s)(?:sed|perl)\b[^\r\n]*(?:\s-i\b|-pi\b)/i,
+    /(?:^|\s)node(?:\.exe)?\b[^\r\n]*\s-e\s[^\r\n]*(?:writeFile|appendFile|createWriteStream|truncate|unlink|rename|copyFile|rm|rmdir|mkdir|symlink|link)\w*\s*\(/i,
+    /(?:^|\s)(?:python|python3|py)(?:\.exe)?\b[^\r\n]*\s-c\s[^\r\n]*(?:\bopen\s*\([^)]*,\s*['\"][^'\"]*[wax+]|\.(?:write_text|write_bytes|unlink|rename|replace|mkdir|rmdir)\s*\(|\b(?:os|shutil)\.(?:remove|unlink|rename|replace|mkdir|rmdir|makedirs|removedirs|copy|copy2|copyfile|move|rmtree)\s*\()/i,
+    /(?:^|\s)(?:ruby|perl)\b[^\r\n]*\s-e\s/i,
+    /(?:^|\s)(?:powershell|pwsh|cmd|bash|sh)\b[^\r\n]*(?:\s-c\s|\s\/c\s)/i,
+    /(?:^|\s)git\s+apply\b/i,
+    /(?:^|\s)(?:echo|printf)\b[^\r\n]*>{1,2}/i,
+    /(?:^|\s)>\s*[^\s]/
+  ];
+  if (!safeGitWrite && sourceMutation.some((pattern) => pattern.test(command))) {
+    throw new CodexProError(
+      "WORKSPACE_SOURCE_MUTATION_BLOCKED: source mutations for profile-bound code tasks must use write/edit/apply_patch so CodexPro can enforce task ownership.",
+      { code: "WORKSPACE_SOURCE_MUTATION_BLOCKED" }
+    );
+  }
+}
+
 function emptyGitHooksDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-empty-git-hooks-"));
 }
@@ -307,7 +336,7 @@ function assertSafePushTarget(executable: string, branch: string, cwd: string, w
   }
 }
 
-function directGitInvocation(command: SafeGitWrite, cwd: string, workspaceRoot: string): DirectInvocation {
+function directGitInvocation(command: SafeGitWrite, cwd: string, workspaceRoot: string, taskId = ""): DirectInvocation {
   const executable = process.platform === "win32" ? "git.exe" : "git";
   if (command.kind === "add") {
     assertExplicitGitFiles(command.args, cwd, workspaceRoot);
@@ -322,7 +351,7 @@ function directGitInvocation(command: SafeGitWrite, cwd: string, workspaceRoot: 
   const hooksDir = emptyGitHooksDir();
   return {
     executable,
-    args: ["-c", `core.hooksPath=${hooksDir}`, "commit", "--no-gpg-sign", "--no-verify", "-m", command.message],
+    args: ["-c", `core.hooksPath=${hooksDir}`, "commit", "--no-gpg-sign", "--no-verify", "-m", command.message, ...(taskId ? ["-m", `CodexPro-Task: ${taskId}`] : [])],
     cleanupDir: hooksDir
   };
 }
@@ -585,7 +614,7 @@ export async function runBash(
   guard: PathGuard,
   workspace: Workspace,
   command: string,
-  options: { cwd?: string; timeoutMs?: number; sessionId?: string } = {}
+  options: { cwd?: string; timeoutMs?: number; sessionId?: string; repoTask?: WorkspaceTaskContext } = {}
 ): Promise<BashResult> {
   if (!command?.trim()) throw new CodexProError("command is required.");
   const bashSessionId = assertBashSession(config, options.sessionId);
@@ -593,12 +622,39 @@ export async function runBash(
   const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
   const cwd = cwdResolved.absPath;
   assertSensitiveGitProtection(command, cwd);
+  const safeGitWrite = parseSafeGitWrite(command);
+  let releaseIntegrationLease: (() => Promise<void>) | undefined;
+  if (options.repoTask) {
+    assertRepoTaskCommandPolicy(command, safeGitWrite);
+    if (safeGitWrite) {
+      releaseIntegrationLease = await acquireWorkspaceIntegrationLease(options.repoTask);
+      try {
+        if (safeGitWrite.kind === "add") {
+          await preflightWorkspaceGitAdd(options.repoTask, cwd, safeGitWrite.args);
+        } else if (safeGitWrite.kind === "commit") {
+          await preflightWorkspaceCommit(options.repoTask);
+        } else {
+          await preflightWorkspacePush(options.repoTask, safeGitWrite.branch);
+        }
+      } catch (error) {
+        await releaseIntegrationLease();
+        releaseIntegrationLease = undefined;
+        throw error;
+      }
+    }
+  }
   const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 30_000, 180_000));
   const start = Date.now();
 
+  let directInvocation: DirectInvocation | undefined;
+  try {
+    directInvocation = safeGitWrite ? directGitInvocation(safeGitWrite, cwd, workspace.root, options.repoTask?.taskId || "") : directPackageInvocation(command);
+  } catch (error) {
+    await releaseIntegrationLease?.();
+    throw error;
+  }
+
   return new Promise((resolve, reject) => {
-    const safeGitWrite = parseSafeGitWrite(command);
-    const directInvocation = safeGitWrite ? directGitInvocation(safeGitWrite, cwd, workspace.root) : directPackageInvocation(command);
     const child = spawn(directInvocation?.executable ?? shellExecutable(), directInvocation?.args ?? shellArgs(command), {
       cwd,
       env: makeEnv(config),
@@ -658,13 +714,27 @@ export async function runBash(
     });
     child.on("error", (error) => {
       cleanup();
-      reject(error);
+      void releaseIntegrationLease?.().finally(() => reject(error));
     });
-    child.on("close", (exitCode, signal) => {
+    child.on("close", async (exitCode, signal) => {
       closed = true;
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       cleanup();
+      let coordinationError: unknown;
+      try {
+        if (exitCode === 0 && safeGitWrite?.kind === "commit" && options.repoTask) {
+          await recordWorkspaceCommit(options.repoTask);
+        }
+      } catch (error) {
+        coordinationError = error;
+      } finally {
+        await releaseIntegrationLease?.();
+      }
+      if (coordinationError) {
+        reject(coordinationError);
+        return;
+      }
       if (killedByTimeout) {
         stderr += `\n[codexpro] Command timed out after ${timeoutMs} ms.`;
       }

@@ -1,4 +1,5 @@
 const browserProfileSignatureCache = new WeakMap();
+export const EMPTY_BROWSER_PROFILE_GRACE_MS = 15_000;
 
 export function browserProfileUiSignature(profile) {
   if (!profile || typeof profile !== "object") return "";
@@ -29,6 +30,41 @@ export function mergeBrowserProfilePayload(previousProfiles, incomingProfiles) {
   });
   if (!changed && incoming.every((profile) => previousById.has(profile.profile_id))) return previous;
   return merged;
+}
+
+export function stabilizeEmptyBrowserProfileSnapshot(previousProfiles, incomingProfiles, options = {}) {
+  const previous = Array.isArray(previousProfiles) ? previousProfiles : [];
+  const incoming = Array.isArray(incomingProfiles) ? incomingProfiles : [];
+  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+  const graceMs = Number.isFinite(options.graceMs) ? Math.max(0, options.graceMs) : EMPTY_BROWSER_PROFILE_GRACE_MS;
+  const emptySinceMs = Number.isFinite(options.emptySinceMs) ? Math.max(0, options.emptySinceMs) : 0;
+
+  if (incoming.length || !previous.length) {
+    return {
+      profiles: mergeBrowserProfilePayload(previous, incoming),
+      emptySinceMs: 0,
+      preserved: false,
+      retryAfterMs: 0
+    };
+  }
+
+  const startedAt = emptySinceMs || nowMs;
+  const elapsedMs = Math.max(0, nowMs - startedAt);
+  if (elapsedMs < graceMs) {
+    return {
+      profiles: previous,
+      emptySinceMs: startedAt,
+      preserved: true,
+      retryAfterMs: Math.max(1, graceMs - elapsedMs)
+    };
+  }
+
+  return {
+    profiles: [],
+    emptySinceMs: 0,
+    preserved: false,
+    retryAfterMs: 0
+  };
 }
 
 export function mergeRuntimeStatus(previousStatus, incomingStatus) {

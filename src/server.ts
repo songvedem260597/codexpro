@@ -26,6 +26,7 @@ import { ensureBrowserExtensionBridge, getBrowserExtensionPendingTaskOwner, getB
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, workerJobPublicRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
+import { claimWorkspacePaths, finalizeWorkspaceTask, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const CODEXPRO_GLOBAL_RULES_FILE = "CODEXPRO.md";
@@ -436,6 +437,18 @@ function assertRepoTaskGate(server: McpServer, name: string): void {
     repoTaskWorkspaceSelectorByServer.get(server as object)?.(active.root);
     activeRepoTaskByServer.set(server as object, active);
   }
+}
+
+function workspaceTaskContextForServer(server: McpServer, workspace: Workspace): WorkspaceTaskContext | undefined {
+  const profileId = repoTaskGateProfileByServer.get(server as object) || "";
+  const active = profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
+  if (!active || !sameResolvedRoot(active.root, workspace.root)) return undefined;
+  return {
+    taskId: active.taskId,
+    workerId: profileId || `direct.${active.taskId}`,
+    title: active.taskTitle,
+    root: workspace.root
+  };
 }
 
 function rememberRegisteredToolHandler(server: McpServer, name: string, handler: CodexToolHandler): void {
@@ -2156,6 +2169,12 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       if (gateProfileId) {
         activeRepoTaskByProfile.delete(gateProfileId);
         activeRepoTaskByProfile.set(gateProfileId, activeTask);
+        await registerWorkspaceTask({
+          taskId: proof.taskId,
+          workerId: gateProfileId,
+          title: proof.taskTitle,
+          root: proof.root
+        });
       }
       return textResult(withGlobalRules(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}\nCodexGraph: active (${codexGraph.coverage.symbolCount} symbols, ${codexGraph.coverage.relationshipCount} relationships)`, globalRules), {
         task_id: proof.taskId,
@@ -2325,6 +2344,15 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           summary: args.summary,
           error: args.error
         });
+        if (record.root) {
+          const coordinationStatus = record.status === "completed" || record.status === "failed" || record.status === "cancelled" ? record.status : args.outcome;
+          await finalizeWorkspaceTask({
+            taskId: record.jobId,
+            workerId: gateProfileId,
+            title: record.title,
+            root: record.root
+          }, coordinationStatus);
+        }
         return textResult(`# Worker Job Finalized\n\n${record.jobId}: ${record.status}`, {
           finalized: true,
           policy_version: record.policyVersion,
@@ -2788,12 +2816,24 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
+      const taskContext = workspaceTaskContextForServer(server, workspace);
+      if (taskContext) await claimWorkspacePaths(taskContext, [resolved.relPath]);
       const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]);
-      const result = await writeTextFile(config, guard, workspace, args.path, String(args.content ?? ""), {
-        createDirs: args.create_dirs !== false,
-        overwrite: args.overwrite !== false,
-        expectedSha256: args.expected_sha256
-      });
+      let result;
+      try {
+        result = await writeTextFile(config, guard, workspace, args.path, String(args.content ?? ""), {
+          createDirs: args.create_dirs !== false,
+          overwrite: args.overwrite !== false,
+          expectedSha256: args.expected_sha256
+        });
+      } catch (error) {
+        if (taskContext) await releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
+        throw error;
+      }
+      if (taskContext) {
+        if (result.diff.changed) await recordWorkspacePathsTouched(taskContext, [resolved.relPath]);
+        else await releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
+      }
       if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
       const codexGraphAfter = result.diff.changed ? await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]) : codexGraphBefore;
       const text = `# Write File\n\nPath: ${result.path}\nExisted before: ${result.existed}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
@@ -2839,12 +2879,24 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
+      const taskContext = workspaceTaskContextForServer(server, workspace);
+      if (taskContext) await claimWorkspacePaths(taskContext, [resolved.relPath]);
       const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]);
-      const result = await editTextFile(config, guard, workspace, args.path, String(args.old_text ?? ""), String(args.new_text ?? ""), {
-        replaceAll: parseBool(args.replace_all, false),
-        expectedReplacements: args.expected_replacements,
-        expectedSha256: args.expected_sha256
-      });
+      let result;
+      try {
+        result = await editTextFile(config, guard, workspace, args.path, String(args.old_text ?? ""), String(args.new_text ?? ""), {
+          replaceAll: parseBool(args.replace_all, false),
+          expectedReplacements: args.expected_replacements,
+          expectedSha256: args.expected_sha256
+        });
+      } catch (error) {
+        if (taskContext) await releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
+        throw error;
+      }
+      if (taskContext) {
+        if (result.diff.changed) await recordWorkspacePathsTouched(taskContext, [resolved.relPath]);
+        else await releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
+      }
       if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
       const codexGraphAfter = result.diff.changed ? await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]) : codexGraphBefore;
       const text = `# Edit File\n\nPath: ${result.path}\nReplacements: ${result.replacements}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
@@ -2886,8 +2938,20 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const patchText = String(args.patch ?? "");
       const codexGraphPaths = patchTouchedPaths(patchText);
+      const taskContext = workspaceTaskContextForServer(server, workspace);
+      if (taskContext && codexGraphPaths.length) await claimWorkspacePaths(taskContext, codexGraphPaths);
       const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, codexGraphPaths);
-      const result = await applyWorkspacePatch(config, guard, workspace, patchText);
+      let result;
+      try {
+        result = await applyWorkspacePatch(config, guard, workspace, patchText);
+      } catch (error) {
+        if (taskContext && codexGraphPaths.length) await releaseWorkspacePaths(taskContext, codexGraphPaths, { onlyUntouched: true });
+        throw error;
+      }
+      if (taskContext && codexGraphPaths.length) {
+        if (result.changed) await recordWorkspacePathsTouched(taskContext, codexGraphPaths);
+        else await releaseWorkspacePaths(taskContext, codexGraphPaths, { onlyUntouched: true });
+      }
       if (result.changed) invalidateWorkspaceAnalysis(workspace.id);
       const codexGraphAfter = result.changed ? await mutationCodexGraphImpact(config, guard, workspace, result.paths) : codexGraphBefore;
       const text = [
@@ -2940,6 +3004,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const result = await runBash(config, guard, workspace, String(args.command ?? ""), {
+        repoTask: workspaceTaskContextForServer(server, workspace),
         cwd: args.cwd,
         timeoutMs: args.timeout_ms,
         sessionId: args.session_id
@@ -3782,6 +3847,14 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             summary: terminalOutcome === "completed" ? "ChatGPT response finalized." : undefined,
             error: terminalOutcome === "failed" ? String(result.network_error || result.error || "ChatGPT generation failed.") : undefined
           });
+          if (finalized.root) {
+            await finalizeWorkspaceTask({
+              taskId: finalized.jobId,
+              workerId: selectedProfile,
+              title: finalized.title,
+              root: finalized.root
+            }, terminalOutcome);
+          }
           result.worker_job_finalized = true;
           result.worker_job_status = finalized.status;
           result.worker_job_finished_at = finalized.finishedAt;
