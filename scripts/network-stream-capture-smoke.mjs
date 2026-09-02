@@ -24,6 +24,9 @@ const responses = [
   ],
   [
     { conversation_id: "conversation-tools-3456", message: { id: "assistant-tool", author: { role: "assistant" }, status: "in_progress", content: { content_type: "text", parts: [JSON.stringify({ path: "/CodexPro/read", args: { path: "src/editor.js" } })] } } }
+  ],
+  [
+    { conversation_id: "conversation-prepare-9999", message: { id: "assistant-prepare", author: { role: "assistant" }, status: "in_progress", content: { content_type: "text", parts: ["Không được capture"] } } }
   ]
 ];
 let call = 0;
@@ -124,6 +127,15 @@ const settledToolPush = postedMessages.filter((message) => message?.event?.conve
 assert.equal(settledToolPush?.kind, "settled");
 assert.equal(settledToolPush?.text, "", "terminal tool-only events must not republish raw tool-call JSON");
 assert.equal(settledToolPush?.activity_text, "", "terminal tool-only events must clear the live activity label");
+
+const prepareResponse = await context.fetch("https://chatgpt.com/backend-api/f/conversation/prepare", {
+  method: "POST",
+  body: JSON.stringify({ conversation_id: "conversation-prepare-9999" })
+});
+await prepareResponse.text();
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(context.__codexproNetworkStreamCaptureV1.read("conversation-prepare-9999").available, false, "conversation prepare must never be classified as a generation stream");
+assert.equal(postedMessages.some((message) => message?.event?.conversation_id === "conversation-prepare-9999"), false, "conversation prepare must not emit realtime assistant stream events");
 
 assert.equal(context.__codexproNetworkStreamCaptureV1.read("missing-conversation").available, false);
 console.log("✓ ChatGPT live network stream capture smoke test passed");

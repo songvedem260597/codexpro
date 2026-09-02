@@ -351,7 +351,7 @@ async function waitForAttachmentUploadNetwork(tabId,startedAfterMs,timeoutMs=ATT
 }
 
 function shouldUseTrustedClickFallback(attemptState,evidence=[]) {
-  return Boolean(attemptState?.draft_owned&&attemptState?.draft_present&&!evidence.some(isChatSubmitLifecycleEvidence));
+  return Boolean(attemptState?.draft_owned&&attemptState?.draft_present&&!evidence.some(isChatSubmissionAckEvidence));
 }
 
 async function ensureChatNetworkStateLoaded() {
@@ -2170,6 +2170,18 @@ async function execute(command) {
     if(!tab?.id)throw new Error('Profile này không có đoạn chat dự án đang mở.');
     sendPhaseTimings.find_tab_ms=Math.max(0,Date.now()-findTabStartedAt);
     const targetConversationId=newChat?'':conversationId||conversationIdFromUrl(tab.url);
+    const rebindMissingConversationTab=async()=>{
+      if(newChat||!conversationId||!tab?.id)return null;
+      try{await chrome.tabs.get(tab.id);return null;}catch{}
+      const previousTabId=tab.id;
+      const candidates=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(candidate=>candidate?.id&&candidate.id!==previousTabId&&conversationIdFromUrl(candidate.url)===conversationId);
+      const replacement=candidates.find(candidate=>candidate.active)||candidates[0];
+      if(!replacement?.id)return null;
+      tab=replacement;
+      pendingConversationByTab.delete(previousTabId);
+      pendingConversationByTab.set(tab.id,{conversation_id:conversationId,source:'codexpro-rebound',at:Date.now()});
+      return {previous_tab_id:previousTabId,replacement_tab_id:tab.id};
+    };
     const [networkCaptureProbe,requestState,domActivity,staleAttachmentOwnership,conversationLimit]=await Promise.all([
       timedSendPhase('network_capture_probe_ms',()=>chatNetworkStreamCapture(tab.id,targetConversationId)),
       timedSendPhase('network_state_ms',()=>chatRequestState(tab.id,conversationId)),
@@ -2411,7 +2423,7 @@ async function execute(command) {
       const submitActivity=earlyEvidence.filter(isChatSubmitLifecycleEvidence);
       const safeClickFallback=remainingCommandMs()>1500&&shouldUseTrustedClickFallback(attemptState?.result,earlyEvidence);
       if(!attachmentSubmit&&safeClickFallback){
-        const fallbackReason='Trusted Enter đã dispatch nhưng draft vẫn nguyên và không có request submit nào; dùng trusted click cuối cùng.';
+        const fallbackReason='Trusted Enter đã dispatch nhưng draft vẫn nguyên và chưa có submission ACK/generation; dùng trusted click cuối cùng.';
         const [fallbackReady]=await timedSendPhase('fallback_prepare_ms',()=>promiseWithTimeout(
           chrome.scripting.executeScript({target:{tabId:tab.id},func:prepareTrustedClickFallbackPage,args:[attemptId,text]}),
           DOM_ACTION_TIMEOUT_MS,
@@ -2445,7 +2457,15 @@ async function execute(command) {
       }
     }
     let networkAck=null;
+    let targetRebound=null;
     try{if(remainingCommandMs()>500)networkAck=await timedSendPhase('network_ack_ms',()=>waitForNetworkGeneration(tab.id,submitStartedAt-100,Math.max(100,Math.min(NETWORK_START_TIMEOUT_MS,remainingCommandMs()-500))));}catch{}
+    if(!networkAck&&!newChat){
+      try{targetRebound=await timedSendPhase('tab_rebind_ms',()=>rebindMissingConversationTab());}catch{}
+      if(targetRebound&&remainingCommandMs()>500){
+        try{networkAck=await timedSendPhase('rebound_network_ack_ms',()=>waitForNetworkGeneration(tab.id,submitStartedAt-100,Math.max(100,Math.min(2500,remainingCommandMs()-500))));}catch{}
+        if(networkAck)return await resultForNetwork(networkAck,{...submitResult,target_temporarily_activated:targetTemporarilyActivated,...targetRebound});
+      }
+    }
     if(!networkAck){
       const evidence=recentChatPostEvidence(tab.id,submitStartedAt-100);
       let attemptState=null;
