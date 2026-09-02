@@ -488,6 +488,38 @@ function conversationIdFromTab(tab) {
   return String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
 }
 
+function normalizedTaskTitleTokens(value) {
+  const ignored = new Set(["task", "chat", "codexpro", "dong", "bo", "cap", "nhat", "sua", "them", "fix"]);
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("vi-VN")
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 3 && !ignored.has(token));
+}
+
+function taskConversationIdForProfile(profile) {
+  const persisted = String(profile?.current_task_conversation_id || "").trim();
+  if (/^[A-Za-z0-9-]{8,160}$/.test(persisted)) return persisted;
+  const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+  const liveTab = tabs.find((tab) =>
+    Boolean(conversationIdFromTab(tab))
+    && (tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating" || tab?.network_stream_in_progress)
+  );
+  if (liveTab) return conversationIdFromTab(liveTab);
+  const taskTokens = normalizedTaskTitleTokens(profile?.current_task_title);
+  if (taskTokens.length < 2) return "";
+  const taskTokenSet = new Set(taskTokens);
+  const candidates = [
+    ...tabs.map((tab) => ({ id: conversationIdFromTab(tab), title: tab?.title || "" })),
+    ...(Array.isArray(profile?.recent_conversations) ? profile.recent_conversations : []).map((chat) => ({ id: String(chat?.id || ""), title: chat?.title || "" }))
+  ]
+    .filter((item) => /^[A-Za-z0-9-]{8,160}$/.test(item.id))
+    .map((item) => ({ ...item, overlap: normalizedTaskTitleTokens(item.title).filter((token) => taskTokenSet.has(token)).length }))
+    .sort((left, right) => right.overlap - left.overlap);
+  return candidates[0]?.overlap >= 2 ? candidates[0].id : "";
+}
+
 function profileRequestChats(profile, preferredId = "") {
   const recent = Array.isArray(profile?.recent_conversations) ? profile.recent_conversations : [];
   const tabs = (profile?.conversation_tabs || []).map((tab) => {
@@ -3111,15 +3143,18 @@ function App() {
   }
 
   function openChat(profile) {
-    const conversations = profileRequestChats(profile);
+    const taskConversationId = taskConversationIdForProfile(profile);
+    const conversations = profileRequestChats(profile, taskConversationId);
     const pinnedConversationId = String(requestTargetsRef.current[profile.profile_id] || "");
     const activeTab = (profile.conversation_tabs || []).find((tab) => tab.active);
     const activeConversationId = conversationIdFromTab(activeTab);
     const activeTabReady = Boolean(activeConversationId && !activeTab?.busy && !activeTab?.settling && String(activeTab?.network_state || "") !== "generating");
-    const conversationId = String(activeTabReady ? activeConversationId : pinnedConversationId || activeConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
-    const selectionReason = activeTabReady
-      ? (pinnedConversationId && pinnedConversationId !== activeConversationId ? "open_active_idle_tab_overrode_pinned" : "open_active_idle_tab")
-      : pinnedConversationId ? "reopen_pinned_selection" : "initial_open";
+    const conversationId = String(taskConversationId || (activeTabReady ? activeConversationId : pinnedConversationId || activeConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET));
+    const selectionReason = taskConversationId
+      ? (String(profile?.current_task_conversation_id || "").trim() === taskConversationId ? "open_task_bound_conversation" : "open_task_inferred_conversation")
+      : activeTabReady
+        ? (pinnedConversationId && pinnedConversationId !== activeConversationId ? "open_active_idle_tab_overrode_pinned" : "open_active_idle_tab")
+        : pinnedConversationId ? "reopen_pinned_selection" : "initial_open";
     if (conversationId) {
       requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: conversationId };
       requestTargetReasons.current.set(profile.profile_id, selectionReason);

@@ -55,6 +55,7 @@ export interface ExtensionProfileSummary {
   current_workspace_root: string;
   current_task_id: string;
   current_task_title: string;
+  current_task_conversation_id: string;
   chatgpt_tabs: Array<{
     id: number;
     title: string;
@@ -238,6 +239,7 @@ const profileWorkspaceRoots = new Map<string, string>();
 const profileWorkspaceBindings = new Map<string, string>();
 const profileTaskIds = new Map<string, string>();
 const profileTaskTitles = new Map<string, string>();
+const profileTaskConversationIds = new Map<string, string>();
 const profileTaskUpdatedAt = new Map<string, string>();
 const profilePendingTasks = new Map<string, { taskId: string; root: string; scope: "workspace" | "all_allowed"; preparedAt: number }>();
 const profileTaskEventSignatures = new Map<string, { signature: string; at: number }>();
@@ -318,12 +320,44 @@ function validPersistedProfileId(value: string): boolean {
   return /^[A-Za-z0-9_-]{2,160}$/.test(value);
 }
 
+function conversationIdFromUrl(value: unknown): string {
+  try {
+    return new URL(String(value || "")).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function inferProfileTaskConversationId(profileId: string): string {
+  const profile = singleton?.profiles.get(profileId);
+  const tabs = Array.isArray(profile?.tabs)
+    ? profile.tabs.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value))
+    : [];
+  const candidates = tabs
+    .map((tab) => ({
+      id: conversationIdFromUrl(tab.url),
+      codexActivity: /^CodexPro đang\b/i.test(String(tab.activity_text || "").trim()),
+      working: tab.busy === true || tab.settling === true || tab.network_state === "generating" || tab.network_stream_in_progress === true,
+      active: tab.active === true,
+      startedAt: Date.parse(String(tab.network_last_started_at || "")) || 0
+    }))
+    .filter((tab) => Boolean(tab.id))
+    .sort((left, right) =>
+      Number(right.codexActivity && right.working) - Number(left.codexActivity && left.working)
+      || Number(right.working) - Number(left.working)
+      || Number(right.active) - Number(left.active)
+      || right.startedAt - left.startedAt
+    );
+  return candidates[0]?.id || "";
+}
+
 function loadBrowserProfileTasks(): void {
   try {
     const parsed = JSON.parse(fs.readFileSync(browserProfileTaskStatePath(), "utf8")) as {
       profiles?: Record<string, {
         task_id?: unknown;
         task_title?: unknown;
+        task_conversation_id?: unknown;
         updated_at?: unknown;
         pending_task_id?: unknown;
         pending_root?: unknown;
@@ -335,12 +369,14 @@ function loadBrowserProfileTasks(): void {
       if (!validPersistedProfileId(profileId)) continue;
       const taskId = String(value?.task_id || "").trim();
       const taskTitle = String(value?.task_title || "").trim();
+      const taskConversationId = String(value?.task_conversation_id || "").trim();
       const updatedAt = String(value?.updated_at || "").trim();
       if (/^cpt_[a-f0-9]{24}$/.test(taskId) && taskTitle.length >= 4 && taskTitle.length <= 56) {
         const wordCount = taskTitle.split(/\s+/).filter(Boolean).length;
         if (wordCount >= 2 && wordCount <= 6) {
           profileTaskIds.set(profileId, taskId);
           profileTaskTitles.set(profileId, taskTitle);
+          if (/^[A-Za-z0-9-]{8,160}$/.test(taskConversationId)) profileTaskConversationIds.set(profileId, taskConversationId);
           profileTaskUpdatedAt.set(profileId, updatedAt || new Date(0).toISOString());
         }
       }
@@ -364,7 +400,7 @@ function loadBrowserProfileTasks(): void {
 
 function persistBrowserProfileTasks(): void {
   try {
-    const profileIds = [...new Set([...profileTaskTitles.keys(), ...profilePendingTasks.keys()])];
+    const profileIds = [...new Set([...profileTaskTitles.keys(), ...profileTaskConversationIds.keys(), ...profilePendingTasks.keys()])];
     const profiles = profileIds
       .map((profileId) => {
         const pendingTask = profilePendingTasks.get(profileId);
@@ -372,6 +408,7 @@ function persistBrowserProfileTasks(): void {
           profileId,
           taskId: profileTaskIds.get(profileId) || "",
           taskTitle: profileTaskTitles.get(profileId) || "",
+          taskConversationId: profileTaskConversationIds.get(profileId) || "",
           updatedAt: profileTaskUpdatedAt.get(profileId) || new Date(0).toISOString(),
           pendingTaskId: pendingTask?.taskId || "",
           pendingRoot: pendingTask?.root || "",
@@ -393,6 +430,7 @@ function persistBrowserProfileTasks(): void {
         ...(entry.taskId && entry.taskTitle ? {
           task_id: entry.taskId,
           task_title: entry.taskTitle,
+          task_conversation_id: entry.taskConversationId,
           updated_at: entry.updatedAt
         } : {}),
         ...(entry.pendingTaskId && entry.pendingScope ? {
@@ -1040,6 +1078,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       current_workspace_root: profile.workspaceRoot,
       current_task_id: profileTaskIds.get(profile.id) || "",
       current_task_title: profileTaskTitles.get(profile.id) || "",
+      current_task_conversation_id: profileTaskConversationIds.get(profile.id) || "",
       chatgpt_tabs: chatgptTabSummaries,
       conversation_tabs: conversationSummaries,
       recent_conversations: recentConversations
@@ -1079,7 +1118,14 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
   const pendingTask = profilePendingTasks.get(id);
   const pendingCleared = Boolean(pendingTask && (!normalizedTaskId || pendingTask.taskId === normalizedTaskId));
   if (pendingCleared) profilePendingTasks.delete(id);
-  const changed = profileTaskIds.get(id) !== normalizedTaskId || profileTaskTitles.get(id) !== taskTitle;
+  const previousTaskId = profileTaskIds.get(id) || "";
+  const inferredConversationId = normalizedTaskId ? inferProfileTaskConversationId(id) : "";
+  const nextConversationId = normalizedTaskId === previousTaskId
+    ? inferredConversationId || profileTaskConversationIds.get(id) || ""
+    : inferredConversationId;
+  const changed = previousTaskId !== normalizedTaskId
+    || profileTaskTitles.get(id) !== taskTitle
+    || profileTaskConversationIds.get(id) !== nextConversationId;
   if (!changed) {
     if (pendingCleared) persistBrowserProfileTasks();
     if (singleton) scheduleProfileNotification(singleton);
@@ -1087,6 +1133,8 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
   }
   if (normalizedTaskId) profileTaskIds.set(id, normalizedTaskId);
   else profileTaskIds.delete(id);
+  if (nextConversationId) profileTaskConversationIds.set(id, nextConversationId);
+  else profileTaskConversationIds.delete(id);
   if (taskTitle) {
     profileTaskTitles.set(id, taskTitle);
     profileTaskUpdatedAt.set(id, new Date().toISOString());
@@ -1099,6 +1147,7 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
     profile_id: id,
     task_id: normalizedTaskId,
     task_title: taskTitle,
+    task_conversation_id: nextConversationId,
     task_title_source: "ai"
   });
   if (singleton) scheduleProfileNotification(singleton);
