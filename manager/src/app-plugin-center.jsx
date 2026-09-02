@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppDropdown } from "./app-dropdown.jsx";
+import { ProjectDropdown } from "./project-dropdown.jsx";
 import { classifyChromeTaskDispatch } from "./chrome-task-dispatch.js";
 import { buildPluginTaskPrompt, normalizePluginSkills } from "./plugin-task-prompt.js";
 import "./app-plugin-center.css";
@@ -342,7 +343,7 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
                     <button type="button" onClick={() => setSkillSelection([])} disabled={launching}>Xóa tất cả</button>
                   </div>
                   <div className="app-plugin-task-fields">
-                    <label><span>Bước 2 · Chọn dự án</span><AppDropdown value={workspaceRoot} options={projects.map((project) => ({ value: project.root, label: project.name, hint: project.root }))} onChange={setWorkspaceRoot} disabled={launching} ariaLabel="Chọn dự án áp dụng skill" searchable={projects.length > 5} placeholder="Chưa có dự án" /></label>
+                    <label><span>Bước 2 · Chọn dự án</span><ProjectDropdown value={workspaceRoot} projects={projects} onChange={setWorkspaceRoot} disabled={launching} includeAllAllowed={false} ariaLabel="Chọn dự án áp dụng skill" /></label>
                     <label><span>Bước 3 · Chọn worker</span><AppDropdown value={workerKey} options={[{ value: "", label: "Chưa có worker rảnh", disabled: true }, ...workers.map((worker) => ({ value: worker.key, label: worker.label, hint: worker.reason, disabled: !worker.ready }))]} onChange={setWorkerKey} disabled={launching} ariaLabel="Chọn worker thực hiện skill" searchable={workers.length > 6} /></label>
                     <label className="is-wide"><span>Bước 4 · Nhập yêu cầu</span><textarea value={requirement} onChange={(event) => setRequirement(event.target.value)} disabled={launching} placeholder="Ví dụ: redesign trang dashboard, giữ nguyên chức năng và chạy regression test." /></label>
                   </div>

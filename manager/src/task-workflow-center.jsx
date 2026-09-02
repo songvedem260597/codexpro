@@ -1,10 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { listTaskWorkflows } from "../electron/task-workflow-registry.mjs";
 import { AppDropdown } from "./app-dropdown.jsx";
+import { ALL_ALLOWED_WORKSPACES, ProjectDropdown } from "./project-dropdown.jsx";
 import { deriveTaskWorkflowProgress } from "./task-workflow-progress.js";
 import "./task-workflow-center.css";
-
-const ALL_ALLOWED_WORKSPACES = "__codexpro_all_allowed__";
 const POLL_MS = 2500;
 
 function taskId() {
@@ -229,13 +228,12 @@ export function TaskWorkflowCenter({ api, status, projects, notify, onError, onR
           </label>
           <label className="task-workflow-field">
             <span>Chọn workspace</span>
-            <AppDropdown
+            <ProjectDropdown
               value={workspaceRoot}
-              options={[...projects.map((project) => ({ value: project.root, label: project.name, hint: project.root })), { value: ALL_ALLOWED_WORKSPACES, label: "Tất cả vùng được cấp quyền" }]}
+              projects={projects}
               onChange={setWorkspaceRoot}
               disabled={launching || run?.status === "running"}
               ariaLabel="Chọn workspace"
-              searchable={projects.length > 5}
             />
           </label>
           <label className="task-workflow-field is-wide"><span>Phạm vi hoặc lưu ý thêm · không bắt buộc</span><textarea value={details} onChange={(event) => setDetails(event.target.value)} disabled={launching || run?.status === "running"} placeholder="Ví dụ: ưu tiên kiểm tra tunnel và các task chưa chốt trong 24 giờ gần nhất." /></label>
