@@ -372,6 +372,8 @@ assert.match(server, /task_title_source: "ai"/, "repo task results must identify
 assert.match(server, /title: "Register Profile Task"[\s\S]*?Registering the CodexPro task[\s\S]*?CodexPro task registered/, "the universal task-title call must not be mislabeled as a repo lock");
 assert.match(server, /task_id:[\s\S]*?optional\(\)[\s\S]*?task_title:[\s\S]*?task_kind:[\s\S]*?root:[\s\S]*?optional\(\)/, "direct profile ChatGPT tasks must begin with an AI title, task kind, and a server-generated id");
 assert.match(bridge, /browser-profile-tasks\.json/, "profile task titles must survive a runtime restart");
+assert.match(bridge, /function inferProfileTaskConversationId\(profileId: string\)[\s\S]*?codexActivity[\s\S]*?network_stream_in_progress[\s\S]*?startedAt/, "begin_repo_task must bind the AI task to the most relevant working ChatGPT conversation");
+assert.match(bridge, /task_conversation_id: entry\.taskConversationId[\s\S]*?current_task_conversation_id: profileTaskConversationIds\.get\(profile\.id\)/, "task conversation bindings must persist and be exposed to Manager after restart");
 assert.match(bridge, /profile-task-events\.jsonl/, "missing task titles must leave persistent profile/session diagnostics");
 assert.match(bridge, /connector_profile_bound:[\s\S]*?connector_update_required:/, "Manager profile summaries must expose connector/profile identity state");
 assert.match(bridge, /loadBrowserProfileTasks\(\)/, "profile task titles must load when the bridge starts");
