@@ -776,7 +776,7 @@ assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
 assert.match(worker, /if\(domActivity\.busy\)\{[\s\S]*?probeCanonicalActivity\(tab\.id,targetConversationId,true\)[\s\S]*?canonicalCompleted[\s\S]*?send_preflight_canonical/, "send preflight must clear a stale DOM busy guard when canonical proves the previous turn completed");
-assert.equal(manifest.version, "0.5.106");
+assert.equal(manifest.version, "0.5.107");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
@@ -787,7 +787,7 @@ assert.match(worker, /current\.active&&!allowActiveIdle[\s\S]*?current\.pinned\|
 assert.match(worker, /value==='codexpro'\|\|value\.startsWith\('codexpro '\)/, "worker must open a Settings plugin row whose accessible name includes the permission summary");
 assert.match(connectorInstaller, /value === 'codexpro' \|\| value\.startsWith\('codexpro '\)/, "connector installer must recognize ChatGPT's CodexPro Allow all row");
 assert.match(connectorInstaller, /function connectorCheckEvidence[\s\S]*?codexpro_candidate_count[\s\S]*?match_text[\s\S]*?match_aria/, "connector checks must return bounded selector evidence for false-positive and false-negative investigations");
-assert.match(connectorInstaller, /installed: true, diagnostic: connectorCheckEvidence\(connectorAction\)[\s\S]*?installed: false, diagnostic: connectorCheckEvidence\(\)/, "connector checks must preserve selector evidence for both installed and missing results");
+assert.match(connectorInstaller, /installed: true, diagnostic: connectorCheckEvidence\(connectorAction\)[\s\S]*?installed: false, definition_state: 'missing', diagnostic: connectorCheckEvidence\(\)/, "connector checks must preserve selector evidence for both installed and missing results");
 assert.match(worker, /value\.includes\('settings'\)\|\|value\.includes\('cai dat'\)/, "worker setup must recognize localized Settings dialogs");
 assert.match(worker, /value\.includes\('connection'\)\|\|value\.includes\('ket noi'\)/, "worker setup must recognize localized Connection details");
 assert.match(worker, /CODEXPRO_SETUP_EVIDENCE/, "worker setup failures must preserve bounded selector evidence for Manager diagnostics");

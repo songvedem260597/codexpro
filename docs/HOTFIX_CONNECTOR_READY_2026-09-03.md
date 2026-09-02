@@ -65,3 +65,42 @@ liên quan, giữ nguyên chính sách tab và tích hợp nền tảng.
 Build/test không thay thế xác minh live trên profile đang lỗi. Sau khi cập nhật
 app/runtime và worker 0.5.106, cần kiểm tra profile vắng connector hiện cảnh báo,
 profile đã kết nối hiện READY, đồng thời bản nháp và task khác không bị gián đoạn.
+
+## Kiểm tra sau cài và bổ sung 0.5.107
+
+- Sau khi cài 0.5.106, cả `1a5c4e8d` và `0261e4f4` đã heartbeat đúng version.
+  Runtime tự restart khi hai worker rảnh. Cấu hình/tài khoản Chrome không bị thay.
+- `1a5c4e8d` lúc `2026-09-02T20:30:25.413Z`: danh sách Plugins đã tải,
+  không có candidate CodexPro; trả `missing` và hiển thị “Profile này chưa thêm
+  CodexPro.”, không còn READY/Đã thêm từ cache.
+- Kiểm tra chéo `0261e4f4` có một candidate nhưng không match. Không coi đây là
+  bằng chứng chắc chắn vắng connector. Điều tra thấy 0.5.106 bỏ qua liên kết
+  definition và loại mọi `<article>`, dù plugin card có thể dùng chính markup này.
+  Test cho `<article><a href="/plugins/plugin_example">CodexPro</a></article>`
+  thất bại trước sửa, đạt sau sửa.
+- 0.5.107 cho phép link definition cùng origin trong đúng vùng danh sách, bỏ
+  chặn article chung nhưng vẫn chặn transcript. Diagnostic và nhận diện dùng
+  cùng scope; candidate không xác định được sẽ là `unknown`, không phải `missing`.
+  `installedConnectorId()` cũng chỉ lấy từ link đã được xác minh, không tìm toàn trang.
+- Các quyền, URL MCP và consent không được thêm/sửa trong thao tác kiểm tra.
+  Chỉ phép setup do người dùng yêu cầu mới được phép kết nối connector.
+
+### Kết quả cài 0.5.107
+
+- Đã cài đè `/Applications/CodexPro Manager.app`; SHA-256 installer trong app
+  trùng source (`e159259eaba4c0891b0f94e1d4eb166f5fb2b8e5d6eee00dd78f055ccff371b7`).
+  Hai worker đang mở heartbeat 0.5.107; profile đang đóng không bị tự mở.
+- `1a5c4e8d`, `2026-09-02T20:46:04.013Z`: danh sách đã tải, đúng scope,
+  0 candidate CodexPro, trạng thái `missing`. Manager không còn báo READY giả.
+- `0261e4f4`, `2026-09-02T20:45:40.493Z`: đã nhận đúng nút
+  “Hành động cho CodexPro”, xác minh heading chi tiết; chưa đọc được trạng thái
+  Connection nên trả `unknown`, không kết luận chưa cài hoặc READY.
+  Chưa hoàn tất xác minh live profile này. Browser kiểm tra trực tiếp vẫn trả
+  `Debugger unattached`; không thay bằng đọc cookie/profile store hoặc tự Connect.
+- 0.5.107 đạt các smoke connector-verification, browser-agent, chat-link,
+  chat-tab-limit, chat-tab-lifecycle; syntax check hai file extension;
+  `npm run build`, `npm run manager:build`, `npm run manager:check` và
+  `npx electron-builder --mac --dir` đạt.
+- `npm run smoke` của lần 0.5.107 **không đạt**: dừng tại
+  `scripts/smoke.mjs:50`, `timeout waiting for tools/call:apply_patch` (exit 1).
+  Không tính kết quả full smoke của 0.5.106 thay cho lần này.

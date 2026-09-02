@@ -3576,8 +3576,8 @@ async function checkConnectorInstalled() {
     await assertOwned();
     const saved={
       ok:Boolean(result.installed&&connection?.connected),
-      verification_state:result.installed?(connection.connection_state||'unknown'):'missing',
-      message:result.installed?connection.message:'Profile này chưa thêm CodexPro.',
+      verification_state:result.installed?(connection.connection_state||'unknown'):(result.definition_state==='unknown'?'unknown':'missing'),
+      message:result.installed?connection.message:(result.message||'Profile này chưa thêm CodexPro.'),
       at:new Date().toISOString(),
       ...(profile.connector_install?.worker_id?{worker_id:String(profile.connector_install.worker_id)}:{})
     };

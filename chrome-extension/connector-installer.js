@@ -1,5 +1,5 @@
 (() => {
-  const INSTALLER_REVISION = '2026-09-03-28';
+  const INSTALLER_REVISION = '2026-09-03-29';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
   document.querySelector('#codexpro-setup-status')?.remove();
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
@@ -163,6 +163,22 @@
     return null;
   }
 
+  function connectorListRoot() {
+    const settings = settingsDialog();
+    if (settings) return settings;
+    const search = document.querySelector('#plugin-search');
+    if (!/^\/plugins\/?$/.test(location.pathname) || !search || !visible(search)) return null;
+    return search.closest('main,[role="main"]') || document.querySelector('main,[role="main"]');
+  }
+
+  function connectorDefinitionLink(element) {
+    if (String(element?.tagName || '').toLowerCase() !== 'a') return false;
+    try {
+      const url = new URL(element.getAttribute('href') || '', location.origin);
+      return url.origin === location.origin && /^\/plugins\/plugin_[A-Za-z0-9_-]+\/?$/.test(url.pathname);
+    } catch { return false; }
+  }
+
   function connectorActionLabelMatches(aria, value, interactive) {
     if (aria === 'actions for codexpro' || aria === 'hanh dong cho codexpro' ||
       aria === 'thao tac voi codexpro') return true;
@@ -173,14 +189,12 @@
   function installedConnectorAction() {
     // Never search a conversation/sidebar for a plugin definition. Tool pills
     // and historical chat buttons can also start with the word CodexPro.
-    const search = document.querySelector('#plugin-search');
-    const root = settingsDialog() || (/^\/plugins\/?$/.test(location.pathname) && search && visible(search)
-      ? search.closest('main,[role="main"]') : null);
+    const root = connectorListRoot();
     if (!root) return null;
-    return candidates(root).find(element => !element.closest('[data-message-author-role],article') && connectorActionLabelMatches(
+    return candidates(root).find(element => !element.closest('[data-message-author-role],[data-testid^="conversation-turn-"]') && connectorActionLabelMatches(
       normalize(element.getAttribute?.('aria-label') || ''),
       text(element),
-      element.matches('button,[role="button"],[role="menuitem"],[role="option"]')
+      element.matches('button,[role="button"],[role="menuitem"],[role="option"]') || connectorDefinitionLink(element)
     )) || null;
   }
 
@@ -189,7 +203,8 @@
   }
 
   function connectorCheckEvidence(match = installedConnectorAction()) {
-    const allCandidates = candidates();
+    const root = connectorListRoot();
+    const allCandidates = root ? candidates(root).filter(element => !element.closest('[data-message-author-role],[data-testid^="conversation-turn-"]')) : [];
     const codexProCandidates = allCandidates.filter(element => {
       const value = `${text(element)} ${normalize(element.getAttribute?.('aria-label') || '')}`.trim();
       return value === 'codexpro' || value.startsWith('codexpro ') || value.includes(' actions for codexpro') || value.includes(' hanh dong cho codexpro');
@@ -200,8 +215,10 @@
       hash: location.hash,
       language: String(document.documentElement.lang || ''),
       plugin_search_present: Boolean(document.querySelector('#plugin-search')),
+      list_root_found: Boolean(root),
       candidate_count: allCandidates.length,
       codexpro_candidate_count: codexProCandidates.length,
+      codexpro_candidates: codexProCandidates.slice(0, 3).map(element => ({ tag: String(element.tagName || '').toLowerCase(), role: element.getAttribute('role') || '', text: text(element).slice(0, 120), aria: normalize(element.getAttribute('aria-label') || '').slice(0, 120), definition_link: connectorDefinitionLink(element) })),
       matched: Boolean(match),
       match_tag: String(match?.tagName || '').toLowerCase(),
       match_role: String(match?.getAttribute?.('role') || ''),
@@ -211,9 +228,8 @@
   }
 
   function installedConnectorId() {
-    const link = [...document.querySelectorAll('a[href*="/plugins/plugin_"]')]
-      .filter(visible)
-      .find(element => text(element).includes('codexpro') || normalize(element.getAttribute('aria-label') || '').includes('codexpro'));
+    const action = installedConnectorAction();
+    const link = connectorDefinitionLink(action) ? action : null;
     const href = String(link?.getAttribute('href') || '');
     const match = href.match(/\/(plugin_[^/?#]+)/i);
     return match?.[1] || '';
@@ -613,6 +629,7 @@
       throw new Error('Profile Chrome này chưa đăng nhập ChatGPT.');
     }
     await preparePluginSearch();
+    if (!connectorListRoot()) throw new Error('Chưa xác minh được vùng danh sách Plugins.');
     if (connectorAlreadyListed()) {
       return {ok: true, alreadyInstalled: true, migrationRequired: true, connectorId: installedConnectorId()};
     }
@@ -638,10 +655,15 @@
     await preparePluginSearch();
     const connectorAction = installedConnectorAction();
     if (connectorAction) return {ok: true, installed: true, diagnostic: connectorCheckEvidence(connectorAction)};
+    const evidence = connectorCheckEvidence();
+    if (!evidence.list_root_found || evidence.codexpro_candidate_count > 0) return {
+      ok: true, installed: false, definition_state: 'unknown',
+      message: 'Chưa xác minh được mục CodexPro trong danh sách Plugins.', diagnostic: evidence
+    };
     const createLabels = ['Create', 'New plugin', 'Add plugin', 'Create app', 'Add custom connector', 'Tạo', 'Thêm plugin', 'Tạo ứng dụng'];
     const settingsReady = Boolean(document.querySelector('button[aria-label="Create app"]') || findAction(createLabels));
     if (!settingsReady) throw new Error('ChatGPT chưa tải xong danh sách Plugins hoặc profile không có quyền tạo app.');
-    return {ok: true, installed: false, diagnostic: connectorCheckEvidence()};
+    return {ok: true, installed: false, definition_state: 'missing', diagnostic: connectorCheckEvidence()};
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

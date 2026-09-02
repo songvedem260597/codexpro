@@ -14,10 +14,19 @@ assert.equal(matches('actions for codexpro', '', true), true);
 assert.equal(matches('', 'codexpro allow all', true), true);
 assert.equal(matches('', 'codexpro conversation', false), false);
 
-const findAction = Function('document', 'location', 'settingsDialog', 'visible', 'candidates', 'connectorActionLabelMatches', `${section(installer, 'function installedConnectorAction', 'function connectorAlreadyListed')}; return installedConnectorAction;`);
+const findAction = Function('document', 'location', 'settingsDialog', 'visible', 'candidates', 'connectorActionLabelMatches', 'normalize', 'text', `${section(installer, 'function connectorListRoot', 'function connectorAlreadyListed')}; return installedConnectorAction;`);
 const historicalButton = { closest: () => null, getAttribute: () => '', matches: () => true, innerText: 'CodexPro old tool result' };
 assert.equal(findAction({ querySelector: () => null }, { pathname: '/c/old' }, () => null, () => true, () => [historicalButton], matches)(), null,
   'historical interactive CodexPro text outside plugin settings must not be installation evidence');
+const cardLink = { tagName: 'A', value: 'codexpro', closest: selector => selector.includes(',article') ? {} : null,
+  matches: () => false, getAttribute: name => name === 'href' ? '/plugins/plugin_example' : '' };
+const cardRoot = {};
+const detectCard = link => findAction({ querySelector: () => ({ closest: () => cardRoot }) }, { pathname: '/plugins', origin: 'https://chatgpt.com' }, () => null,
+  () => true, root => root === cardRoot ? [link] : [], matches, value => value, element => element?.value || '')();
+assert.equal(detectCard(cardLink), cardLink, 'a legitimate CodexPro plugin link inside an article card is a listed definition');
+assert.equal(detectCard({ ...cardLink, getAttribute: name => name === 'href' ? 'https://example.com/plugins/plugin_fake' : '' }), null);
+assert.equal(detectCard({ ...cardLink, getAttribute: name => name === 'href' ? '/c/conversation' : '' }), null);
+assert.equal(detectCard({ ...cardLink, closest: () => ({}) }), null, 'actual transcript containers remain excluded');
 
 const connectionStatus = Function(`${section(installer, 'function connectorConnectionStatus', 'async function checkConnectorConnection')}; return connectorConnectionStatus;`)();
 for (const value of ['connection disconnected', 'connection not connected', 'ket noi chua ket noi', 'connection connect', 'ket noi ket noi']) {
