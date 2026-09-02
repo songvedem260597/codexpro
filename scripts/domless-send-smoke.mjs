@@ -466,7 +466,7 @@ assert.match(bridge, /expires_at_ms: number/, "bridge commands must carry an exp
 assert.match(bridge, /profile\.queued = profile\.queued\.filter\(\(queued\) => queued\.id !== command\.id\)/, "timed-out commands must be removed from the extension queue");
 assert.match(bridge, /command\.expires_at_ms<=Date\.now\(\)\|\|!state\.pending\.has\(command\.id\)/, "poll must discard expired or orphaned commands before delivery");
 assert.match(sendBlock, /const allowBusyFollowup=Boolean\(!newChat&&args\.allow_busy_followup===true\)/, "only an explicit existing-chat follow-up may bypass the normal busy preflight");
-assert.match(sendBlock, /const followupWhileGenerating=Boolean\(allowBusyFollowup&&requestState\.busy&&requestState\.network_state==='generating'\)/, "busy follow-ups must require authoritative network generation rather than a stale DOM busy marker");
+assert.match(sendBlock, /const followupWhileGenerating=Boolean\(allowBusyFollowup&&\(requestState\.busy&&requestState\.network_state==='generating'\|\|networkCaptureProbe\?\.in_progress===true\)\)/, "busy follow-ups must accept authoritative live request state or an in-progress captured stream rather than relying on stale DOM busy alone");
 assert.match(sendBlock, /if\(requestState\.busy&&!followupWhileGenerating\)throw new Error/, "ordinary automated sends must remain blocked while another generation is active");
 assert.match(sendBlock, /const networkAckStartedAfterMs=submitStartedAt;/, "follow-up ACK detection must ignore the generation that was already running before the new send started");
 assert.match(sendBlock, /SEND_POST_ACK_STABILITY_MS/, "successful sends must wait through the post-ACK stability window before the profile send lock is released");

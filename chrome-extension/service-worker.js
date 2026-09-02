@@ -2618,7 +2618,7 @@ async function execute(command) {
     ]);
     const networkCaptureInstalled=Boolean(networkCaptureProbe?.capture_installed||networkCaptureProbe?.available);
     if(conversationLimit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(conversationLimit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
-    const followupWhileGenerating=Boolean(allowBusyFollowup&&requestState.busy&&requestState.network_state==='generating');
+    const followupWhileGenerating=Boolean(allowBusyFollowup&&(requestState.busy&&requestState.network_state==='generating'||networkCaptureProbe?.in_progress===true));
     if(requestState.busy&&!followupWhileGenerating)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
     if(domActivity.busy&&!followupWhileGenerating){
       // ChatGPT can leave a stale stop/interrupted DOM marker after the canonical turn is complete.
