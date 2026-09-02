@@ -1562,27 +1562,62 @@ async function readChatResponsePage() {
     if(!src)return null;
     const cache=globalThis.__codexproGeneratedImagePreviewCache||(globalThis.__codexproGeneratedImagePreviewCache={});
     if(cache[src]?.data_url)return cache[src];
-    const sourceWidth=Math.max(1,Number(image?.naturalWidth)||Number(image?.width)||1);
-    const sourceHeight=Math.max(1,Number(image?.naturalHeight)||Number(image?.height)||1);
+    let sourceWidth=Math.max(1,Number(image?.naturalWidth)||Number(image?.width)||1);
+    let sourceHeight=Math.max(1,Number(image?.naturalHeight)||Number(image?.height)||1);
     const maximumSide=1200;
-    const scale=Math.min(1,maximumSide/Math.max(sourceWidth,sourceHeight));
-    const width=Math.max(1,Math.round(sourceWidth*scale));
-    const height=Math.max(1,Math.round(sourceHeight*scale));
-    let dataUrl='',mimeType='image/jpeg';
-    try{
+    const encodeDrawable=(drawable,inputWidth,inputHeight)=>{
+      const scale=Math.min(1,maximumSide/Math.max(inputWidth,inputHeight));
+      const width=Math.max(1,Math.round(inputWidth*scale));
+      const height=Math.max(1,Math.round(inputHeight*scale));
       const canvas=document.createElement('canvas');
       canvas.width=width;canvas.height=height;
       const context=canvas.getContext('2d',{alpha:false});
       if(!context)throw new Error('canvas context unavailable');
-      context.drawImage(image,0,0,width,height);
-      dataUrl=canvas.toDataURL('image/jpeg',0.9);
+      context.drawImage(drawable,0,0,width,height);
+      try{
+        const probe=document.createElement('canvas');
+        probe.width=12;probe.height=12;
+        const probeContext=probe.getContext('2d',{willReadFrequently:true});
+        if(probeContext){
+          probeContext.drawImage(canvas,0,0,probe.width,probe.height);
+          const pixels=probeContext.getImageData(0,0,probe.width,probe.height).data;
+          let min=255,max=0;
+          for(let offset=0;offset<pixels.length;offset+=4){
+            const luminance=(pixels[offset]+pixels[offset+1]+pixels[offset+2])/3;
+            min=Math.min(min,luminance);max=Math.max(max,luminance);
+          }
+          if(max<=8||(max-min<=1&&max<18))throw new Error('canvas preview blank');
+        }
+      }catch(error){
+        if(String(error?.message||'')==='canvas preview blank')throw error;
+      }
+      return {dataUrl:canvas.toDataURL('image/jpeg',0.9),width,height};
+    };
+    const readBlobAsDataUrl=blob=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result||''));reader.onerror=()=>reject(reader.error||new Error('read failed'));reader.readAsDataURL(blob);});
+    let width=Math.max(1,Number(image?.width)||sourceWidth),height=Math.max(1,Number(image?.height)||sourceHeight),dataUrl='',mimeType='image/jpeg';
+    try{
+      try{await image?.decode?.();}catch{}
+      const encoded=encodeDrawable(image,sourceWidth,sourceHeight);
+      dataUrl=encoded.dataUrl;width=encoded.width;height=encoded.height;
     }catch{
       try{
         const response=await fetch(src,{credentials:'include',cache:'force-cache'});
         if(!response.ok)throw new Error(`HTTP ${response.status}`);
         const blob=await response.blob();
         mimeType=String(blob.type||'image/png');
-        dataUrl=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result||''));reader.onerror=()=>reject(reader.error||new Error('read failed'));reader.readAsDataURL(blob);});
+        let bitmap=null;
+        try{
+          if(typeof createImageBitmap!=='function')throw new Error('createImageBitmap unavailable');
+          bitmap=await createImageBitmap(blob);
+          sourceWidth=Math.max(1,Number(bitmap.width)||sourceWidth);
+          sourceHeight=Math.max(1,Number(bitmap.height)||sourceHeight);
+          const encoded=encodeDrawable(bitmap,sourceWidth,sourceHeight);
+          dataUrl=encoded.dataUrl;width=encoded.width;height=encoded.height;mimeType='image/jpeg';
+        }catch{
+          dataUrl=await readBlobAsDataUrl(blob);
+          width=Math.max(1,Math.min(maximumSide,sourceWidth));
+          height=Math.max(1,Math.round(sourceHeight*(width/sourceWidth)));
+        }finally{try{bitmap?.close?.();}catch{}}
       }catch{return null;}
     }
     if(!dataUrl.startsWith('data:image/'))return null;
