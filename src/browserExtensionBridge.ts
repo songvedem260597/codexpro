@@ -1386,6 +1386,16 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
     .sort((a, b) => Number(b.active) - Number(a.active) || b.last_seen.localeCompare(a.last_seen));
 }
 
+export function listDisabledBrowserExtensionProfileIds(): string[] {
+  const state = ensureBrowserExtensionBridge();
+  const now = Date.now();
+  pruneExpiredProfiles(state, now);
+  return [...state.profiles.values()]
+    .filter((profile) => !profile.enabled && browserProfileRetentionState(profile, now).visible)
+    .map((profile) => profile.id)
+    .sort((left, right) => left.localeCompare(right));
+}
+
 export function subscribeBrowserExtensionProfiles(listener: (profiles: ExtensionProfileSummary[]) => void): () => void {
   const state = ensureBrowserExtensionBridge();
   state.profileListeners.add(listener);

@@ -1031,6 +1031,20 @@ async function headlessExclusiveLockStatus(){
   }
 }
 
+async function publishPendingWorkerDisable(profile) {
+  const stored=await chrome.storage.local.get(['workerEnabled','workerEnabledUpdatedAt','workerDisablePending']);
+  if(stored.workerEnabled!==false||stored.workerDisablePending===false)return false;
+  const workerEnabledUpdatedAt=Math.max(0,Number(stored.workerEnabledUpdatedAt)||0);
+  const disabledProfile={...profile,enabled:false,active:false,worker_enabled_updated_at:workerEnabledUpdatedAt};
+  const response=await fetch(`${BRIDGE}/register`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile:disabledProfile})});
+  if(!response.ok)throw new Error(`Bridge HTTP ${response.status}`);
+  const current=await chrome.storage.local.get(['workerEnabled','workerEnabledUpdatedAt']);
+  if(current.workerEnabled===false&&Math.max(0,Number(current.workerEnabledUpdatedAt)||0)===workerEnabledUpdatedAt){
+    await chrome.storage.local.set({workerDisablePending:false});
+  }
+  return true;
+}
+
 async function confirmConnectorFromLiveToolActivity(tabs) {
   const observed=Array.isArray(tabs)&&tabs.some(tab=>Boolean(tab?.busy||tab?.settling)&&/^CodexPro đang\b/i.test(String(tab?.activity_text||'').trim()));
   if(!observed)return false;
@@ -3677,7 +3691,7 @@ async function pollLoop() {
     while(true){
       try{
         const profile=await profileInfo();
-        if(!profile.enabled){await new Promise(resolve=>setTimeout(resolve,2000));continue;}
+        if(!profile.enabled){await publishPendingWorkerDisable(profile).catch(()=>{});await new Promise(resolve=>setTimeout(resolve,2000));continue;}
         let [tabs,recentConversations]=await Promise.all([tabList(),recentConversationList(3)]);
         const tabCleanup=await cleanupChatGptTabs(tabs,recentConversations);
         if(tabCleanup.closed_count)tabs=await tabList();

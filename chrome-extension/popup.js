@@ -67,6 +67,15 @@ async function main() {
     const registeredProfile = {...profile,enabled,active:enabled ? profile.active : false};
     return await fetch(`${BRIDGE}/register`, {method:'POST',headers:HEADERS,body:JSON.stringify({profile:registeredProfile})});
   };
+  const acknowledgeWorkerDisable = async () => {
+    const response = await registerProfile(false);
+    if (!response.ok) return response;
+    const current = await chrome.storage.local.get(['workerEnabled','workerEnabledUpdatedAt']);
+    if (current.workerEnabled === false && Number(current.workerEnabledUpdatedAt) === profile.worker_enabled_updated_at) {
+      await chrome.storage.local.set({workerDisablePending:false});
+    }
+    return response;
+  };
 
   setActiveState(profile.active);
   setWorkerState(profile.enabled);
@@ -84,7 +93,8 @@ async function main() {
       setBridgeStatus('Bridge offline', 'error');
     }
   } else {
-    void registerProfile(false).catch(() => {});
+    await chrome.storage.local.set({workerDisablePending:true});
+    void acknowledgeWorkerDisable().catch(() => {});
   }
 
   workerToggle.addEventListener('click', async () => {
@@ -96,13 +106,13 @@ async function main() {
       profile.worker_enabled_updated_at = workerEnabledUpdatedAt;
       if (!workerEnabled) {
         profile.active = false;
-        await chrome.storage.local.set({workerEnabled:false,workerEnabledUpdatedAt,active:false});
+        await chrome.storage.local.set({workerEnabled:false,workerEnabledUpdatedAt,workerDisablePending:true,active:false});
         setActiveState(false);
         setWorkerState(false);
-        const response = await fetch(`${BRIDGE}/register`, {method:'POST',headers:HEADERS,body:JSON.stringify({profile:{...profile,enabled:false,active:false}})});
+        const response = await acknowledgeWorkerDisable();
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
       } else {
-        await chrome.storage.local.set({workerEnabled:true,workerEnabledUpdatedAt});
+        await chrome.storage.local.set({workerEnabled:true,workerEnabledUpdatedAt,workerDisablePending:false});
         setWorkerState(true);
         const response = await registerProfile(true);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);

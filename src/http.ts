@@ -22,7 +22,7 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
-import { ensureBrowserExtensionBridge, getBrowserExtensionProfilePendingTask, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles, subscribeBrowserExtensionStreams } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionProfilePendingTask, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles, subscribeBrowserExtensionStreams } from "./browserExtensionBridge.js";
 
 const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
 const RUNTIME_STARTED_AT = new Date().toISOString();
@@ -1883,7 +1883,8 @@ async function main(): Promise<void> {
     res.flushHeaders?.();
     const send = (profiles = listBrowserExtensionProfiles()) => {
       if (res.writableEnded) return;
-      res.write(`event: browser-profiles\ndata: ${JSON.stringify({ checked_at: new Date().toISOString(), profiles })}\n\n`);
+      const disabled_profile_ids = listDisabledBrowserExtensionProfileIds();
+      res.write(`event: browser-profiles\ndata: ${JSON.stringify({ checked_at: new Date().toISOString(), profiles, disabled_profile_ids })}\n\n`);
     };
     send();
     const unsubscribe = subscribeBrowserExtensionProfiles(send);

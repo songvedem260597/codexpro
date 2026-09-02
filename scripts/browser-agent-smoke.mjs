@@ -810,7 +810,7 @@ assert.match(popupJs, /button\.hidden=isActive[\s\S]*?activeState\.hidden=!isAct
 assert.match(popupJs, /installButton\.hidden=true/, "the reinstall action must disappear when CodexPro is already ready");
 assert.doesNotMatch(popupHtml + popupJs, /CÀI LẠI \/ KIỂM TRA LẠI/, "the ready popup must not keep a redundant reinstall button");
 assert.match(popupHtml, /id="workerToggle"[\s\S]*?role="switch"/, "the popup must expose an accessible worker connection toggle");
-assert.match(popupJs, /workerEnabled[\s\S]*?BRIDGE}\/register[\s\S]*?enabled:false/, "disabling a worker must immediately publish a hidden profile state to the Bridge");
+assert.match(popupJs, /const acknowledgeWorkerDisable = async \(\) => \{[\s\S]*?registerProfile\(false\)/, "disabling a worker must immediately publish a hidden profile state to the Bridge");
 assert.match(worker, /if\(!profile\.enabled\)[\s\S]*?setTimeout\(resolve,2000\)[\s\S]*?continue/, "a disabled extension must stop polling the Bridge");
 assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && browserProfileRetentionState\(profile, now\)\.visible/, "disabled profiles must be retained internally but excluded while enabled source profiles survive temporary heartbeat loss");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");

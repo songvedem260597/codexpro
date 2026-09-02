@@ -21,10 +21,11 @@ assert.match(popupHtml, /id="disabledState"[\s\S]*?không xuất hiện trong da
 assert.match(popupJs, /button\.hidden=isActive[\s\S]*?activeState\.hidden=!isActive/, "activate action must disappear after activation");
 assert.match(popupJs, /installButton\.hidden=true/, "ready connector must hide the redundant reinstall action");
 assert.doesNotMatch(popupHtml + popupJs, /CÀI LẠI \/ KIỂM TRA LẠI/, "popup must not retain the redundant reinstall label");
-assert.match(popupJs, /workerEnabled[\s\S]*?BRIDGE}\/register[\s\S]*?enabled:false/, "disable must immediately publish a hidden profile state");
+assert.match(popupJs, /const acknowledgeWorkerDisable = async \(\) => \{[\s\S]*?registerProfile\(false\)/, "disable must immediately publish a hidden profile state");
 assert.match(worker, /if\(!profile\.enabled\)[\s\S]*?setTimeout\(resolve,2000\)[\s\S]*?continue/, "disabled extension must stop polling the Bridge");
 assert.match(worker, /if\(!profile\.enabled\)return;[\s\S]*?BRIDGE}\/register/, "disabled extension must suppress realtime heartbeat pushes");
 assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && browserProfileRetentionState\(profile, now\)\.visible/, "Bridge must hide disabled profiles while retaining enabled source profiles through temporary heartbeat loss");
+assert.match(worker, /async function publishPendingWorkerDisable[\s\S]*?workerDisablePending[\s\S]*?enabled:false[\s\S]*?BRIDGE}\/register/, "disabled extension must retain and retry its Bridge tombstone");
 assert.deepEqual(manifest.icons, {
   16: "icons/icon16.png",
   32: "icons/icon32.png",
@@ -116,5 +117,46 @@ assert.equal(elements.workerDetails.hidden, true, "turning off the switch must h
 assert.equal(elements.disabledState.hidden, false, "turning off the switch must reveal the disabled explanation");
 assert.equal(registerPayloads.at(-1).profile.enabled, false, "turning off the switch must immediately unregister the visible worker");
 assert.ok(storageWrites.some((value) => value.workerEnabled === false && value.active === false), "disabled worker state must also clear active routing");
+assert.ok(storageWrites.some((value) => value.workerDisablePending === true), "turning off must persist a pending disable tombstone before publishing it");
+assert.equal(storedProfile.workerDisablePending, false, "a successful disable registration must acknowledge the pending tombstone");
+
+const workerDisableStart = worker.indexOf("async function publishPendingWorkerDisable");
+const workerDisableEnd = worker.indexOf("\nasync function confirmConnectorFromLiveToolActivity", workerDisableStart);
+assert.ok(workerDisableStart >= 0 && workerDisableEnd > workerDisableStart, "worker disable retry helper must be independently testable");
+const workerDisableState = {
+  workerEnabled: false,
+  workerEnabledUpdatedAt: 42,
+  workerDisablePending: true
+};
+let disablePublishAttempts = 0;
+const workerDisableContext = vm.createContext({
+  BRIDGE: "http://127.0.0.1:9224",
+  HEADERS: {},
+  chrome: {
+    storage: {
+      local: {
+        async get(keys) {
+          return Object.fromEntries(keys.filter((key) => key in workerDisableState).map((key) => [key, workerDisableState[key]]));
+        },
+        async set(value) { Object.assign(workerDisableState, value); }
+      }
+    }
+  },
+  async fetch() {
+    disablePublishAttempts += 1;
+    return { ok: disablePublishAttempts > 1, status: 503 };
+  }
+});
+vm.runInContext(worker.slice(workerDisableStart, workerDisableEnd), workerDisableContext);
+const publishPendingWorkerDisable = vm.runInContext("publishPendingWorkerDisable", workerDisableContext);
+await assert.rejects(
+  publishPendingWorkerDisable({ id: "profile-popup-smoke", enabled: false, worker_enabled_updated_at: 42 }),
+  /Bridge HTTP 503/,
+  "a failed disable publish must remain retryable"
+);
+assert.equal(workerDisableState.workerDisablePending, true, "a failed disable publish must keep its pending tombstone");
+await publishPendingWorkerDisable({ id: "profile-popup-smoke", enabled: false, worker_enabled_updated_at: 42 });
+assert.equal(disablePublishAttempts, 2, "the service worker must retry a failed disable publish");
+assert.equal(workerDisableState.workerDisablePending, false, "a successful retry must acknowledge the tombstone");
 
 console.log("✓ Extension popup UI and worker enable toggle smoke test passed");

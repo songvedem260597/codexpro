@@ -30,6 +30,9 @@ assert.match(source, /headless-source-option-copy[\s\S]*?chromeProfileIdLabel\(p
 assert.match(source, /ID nguồn:[\s\S]*?chromeProfileIdLabel\(worker\.sourceProfileId\)/, "headless worker details must retain the source Chrome profile id after cloning");
 assert.match(source, /Clone từ <b>[\s\S]*?chromeProfileIdLabel\(profile\.source_profile_id\)/, "connected headless worker cards must show the short source Chrome id alongside clone metadata");
 assert.match(styles, /\.profile-meta > \.headless-clone-source[\s\S]*?\.profile-list\.is-card-layout \.headless-clone-source/, "headless clone-source metadata must stay readable in row and card layouts");
+assert.match(source, /const visibleBrowserProfiles = useMemo\([\s\S]*?filter\(profileVisibleInWorkerList\)/, "the renderer must derive one canonical visible Chrome profile list");
+assert.match(source, /!visibleBrowserProfiles\.length[\s\S]*?Chưa có worker nào kết nối/, "the empty state must use the visible profile list rather than hidden raw records");
+assert.match(source, /visibleBrowserProfiles[\s\S]*?\.sort\([\s\S]*?\.map\(\(profile\)/, "the connected worker cards must render the canonical visible profile list");
 assert.match(source, /function profileSafeForWorkerUpdate\(profile\)[\s\S]*?\["idle", "no_chatgpt"\]\.includes\(profile\?\.activity\)/, "a hidden background profile must remain safe to update while it has no work");
 assert.match(electronSource, /const safeToReload = \(profile\)[\s\S]*?\["idle", "no_chatgpt"\]\.includes\(profile\.activity\)/, "the backend must reload an outdated background profile that has no work");
 assert.match(source, /if \(refreshInFlight\.current\) \{[\s\S]*?refreshQueued\.current = true;[\s\S]*?void refresh\(queuedForeground\);/, "a refresh requested while saving must be queued instead of dropped");

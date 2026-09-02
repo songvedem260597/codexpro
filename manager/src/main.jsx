@@ -2224,7 +2224,10 @@ function App() {
       const profiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
       setStatus((current) => {
         if (!current) return current;
-        const stabilized = stabilizeEmptyBrowserProfileSnapshot(current.browserProfiles, profiles, { emptySinceMs: emptyBrowserSnapshotSince.current });
+        const stabilized = stabilizeEmptyBrowserProfileSnapshot(current.browserProfiles, profiles, {
+          emptySinceMs: emptyBrowserSnapshotSince.current,
+          removedProfileIds: payload?.disabled_profile_ids
+        });
         const firstTransientEmpty = stabilized.preserved && !emptyBrowserSnapshotSince.current;
         emptyBrowserSnapshotSince.current = stabilized.emptySinceMs;
         if (stabilized.preserved && firstTransientEmpty) logRendererDiagnostic(api, "warn", "status", "Luồng realtime trả danh sách worker rỗng; giữ dữ liệu gần nhất để xác minh", { action: "worker-empty-snapshot-grace", retry_after_ms: stabilized.retryAfterMs });
@@ -2849,25 +2852,29 @@ function App() {
     };
   }, [chatProfileId, attachmentPreview]);
 
+  const visibleBrowserProfiles = useMemo(
+    () => (status?.browserProfiles || []).filter(profileVisibleInWorkerList),
+    [status?.browserProfiles]
+  );
+
   const profileSummary = useMemo(() => {
     const allProfiles = status?.browserProfiles || [];
-    const visibleProfiles = allProfiles.filter(profileVisibleInWorkerList);
-    const profiles = visibleProfiles.filter((profile) => profile.connected);
+    const profiles = visibleBrowserProfiles.filter((profile) => profile.connected);
     const connectedProfiles = allProfiles.filter((profile) => profile.connected);
     const apiWorkers = (status?.workers || []).filter((worker) => worker.worker_type === "api");
     const outdated = connectedProfiles.filter((profile) => !extensionReady(profile.extension_version));
     return {
       working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length + apiWorkers.filter((worker) => worker.connected && worker.activity === "working").length,
       idle: profiles.filter((profile) => profile.activity === "idle").length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
-      stopped: visibleProfiles.filter((profile) => profileConnectionState(profile) === "stopped").length,
-      hung: visibleProfiles.filter((profile) => profileConnectionState(profile) === "disconnected").length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
+      stopped: visibleBrowserProfiles.filter((profile) => profileConnectionState(profile) === "stopped").length,
+      hung: visibleBrowserProfiles.filter((profile) => profileConnectionState(profile) === "disconnected").length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
       missing: profiles.filter((profile) => confirmedMissingProfiles.includes(profile.profile_id)
         && profile.connector_verification_state === "missing").length,
       reload: outdated.filter(profileSafeForWorkerUpdate).length,
       deferredUpdate: outdated.filter((profile) => !profileSafeForWorkerUpdate(profile)).length,
       outdated: outdated.length
     };
-  }, [status?.browserProfiles, status?.workers, confirmedMissingProfiles]);
+  }, [status?.browserProfiles, status?.workers, confirmedMissingProfiles, visibleBrowserProfiles]);
 
   async function copyLink() {
     if (!status?.mcpLink) return;
@@ -4774,7 +4781,7 @@ function App() {
             </div>
           )}
           <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout working-border-${managerSettings.workingBorderStyle}`}>
-            {!(status?.workers || []).some((worker) => worker.worker_type === "api") && !status?.browserProfiles?.length && (
+            {!(status?.workers || []).some((worker) => worker.worker_type === "api") && !visibleBrowserProfiles.length && (
               <div className="empty">Chưa có worker nào kết nối. Hãy lưu API worker hoặc Load unpacked extension CodexPro trong Chrome profile cần dùng.</div>
             )}
             <ApiWorkerCards
@@ -4786,8 +4793,7 @@ function App() {
                 catch (workerError) { reportApiWorkerError(workerError); }
               }}
             />
-            {[...(status?.browserProfiles || [])]
-              .filter(profileVisibleInWorkerList)
+            {[...visibleBrowserProfiles]
               .sort((left, right) => {
                 const rank = (profile) => {
                   if (!profile.connected) return 3;
