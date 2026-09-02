@@ -2323,13 +2323,10 @@ async function execute(command) {
     if(conversationLimit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(conversationLimit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
     if(requestState.busy)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
     if(domActivity.busy){
-      let staleRecoveryBusy=false;
-      if(domActivity.connection_interrupted||domActivity.message_delivery_timed_out){
-        const canonical=await timedSendPhase('stale_busy_canonical_ms',()=>probeCanonicalActivity(tab.id,targetConversationId,true));
-        staleRecoveryBusy=Boolean(canonical?.ok&&canonical.response_ready&&!canonical.busy);
-        if(staleRecoveryBusy)await reconcileChatNetworkCompletion(tab.id,targetConversationId,'send_preflight_canonical');
-      }
-      if(!staleRecoveryBusy)throw new Error('Đoạn chat vẫn đang hoàn tất lượt trước. Chờ ChatGPT về trạng thái rảnh để không nhập tin nhắn mới vào turn cũ.');
+      const canonical=await timedSendPhase('stale_busy_canonical_ms',()=>probeCanonicalActivity(tab.id,targetConversationId,true));
+      const canonicalCompleted=Boolean(canonical?.response_ready&&!canonical.busy);
+      if(canonicalCompleted)await reconcileChatNetworkCompletion(tab.id,targetConversationId,'send_preflight_canonical');
+      else throw new Error('Đoạn chat vẫn đang hoàn tất lượt trước. Chờ ChatGPT về trạng thái rảnh để không nhập tin nhắn mới vào turn cũ.');
     }
     const targetTemporarilyActivated=false;
     const submitStartedAt=Date.now();
