@@ -19,6 +19,7 @@ assert.match(titleAccent, /-webkit-text-fill-color:\s*transparent/, "Multi must 
 assert.match(titleAccent, /radial-gradient\(130% 180% at 112% 128%/, "Multi text fill must reuse the Chat hover violet galaxy lighting");
 assert.doesNotMatch(titleAccent, /border\s*:/, "Multi text must not render as a bordered badge");
 assert.doesNotMatch(titleAccent, /padding\s*:/, "Multi text must not add badge padding around the glyphs");
+assert.match(styles, /@media \(prefers-reduced-motion: reduce\) \{ \.title-galaxy-accent \{ animation: none; \} \}/, "Multi text galaxy motion must honor reduced-motion preferences");
 assert.match(baseButton, /overflow:\s*hidden/, "galaxy paint must stay clipped inside the button");
 assert.match(baseButton, /box-shadow:\s*none/, "Chat button must not have an outer glow at rest");
 assert.match(activeButton, /box-shadow:\s*none/, "Chat button must not gain an outer glow on hover or focus");
