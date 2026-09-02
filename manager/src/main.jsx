@@ -4691,7 +4691,7 @@ function App() {
         <header>
           <div>
             <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : activePage === "plugins" ? "APP PLUGINS" : activePage === "workflows" ? "TASK WORKFLOWS" : activePage === "control" ? "AGENT OPERATIONS" : `${platform.toUpperCase()} CONTROL CENTER`}</p>
-            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "plugins" ? "Plugin" : activePage === "workflows" ? "Trung tâm quy trình" : activePage === "control" ? "Trung tâm điều phối" : "CodexPro Multi Agent"}</h1>
+            <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "plugins" ? "Plugin" : activePage === "workflows" ? "Trung tâm quy trình" : activePage === "control" ? "Trung tâm điều phối" : <>CodexPro <span className="title-accent">Multi</span> Agent</>}</h1>
             <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : activePage === "plugins" ? "Tích hợp giao diện từ repo khác mà không đóng Manager hay gián đoạn worker." : activePage === "workflows" ? "Giao task theo checklist có sẵn và theo dõi từng bước bằng bằng chứng của worker." : activePage === "control" ? "Theo dõi task, hiệu suất, tự phục hồi, phiên bản và an toàn repo trong một màn hình." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
           </div>
           {activePage === "overview" && (
@@ -4855,7 +4855,7 @@ function App() {
                     <div className="profile-meta">
                       <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Mất heartbeat extension"}</span>
                       <span>v{profile.extension_version || "cũ"}</span>
-                      <span>{chatGptTabCount} tab ChatGPT</span>
+                      <span>{chatGptTabCount} tab</span>
                       {profile.headless && (headlessSourceLabel || headlessSourceDirectory) && (
                         <span className="headless-clone-source" title={headlessSourceTitle || undefined}>
                           Clone từ <b>{headlessSourceLabel || headlessSourceDirectory}</b>
