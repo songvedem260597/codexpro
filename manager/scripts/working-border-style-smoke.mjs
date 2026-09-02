@@ -18,9 +18,11 @@ assert.match(styles, /working-border-shine[\s\S]*?conic-gradient/, "the existing
 assert.doesNotMatch(styles, /\.app-shell\s*\{[^}]*animation:\s*profile-border-shine/, "the rotating shine must not invalidate styles across the entire app shell");
 assert.match(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working::before,[\s\S]*?animation:\s*profile-border-shine/, "shine animation must be scoped to the pseudo-elements that actually render it");
 assert.match(styles, /@property --profile-border-shine-angle[\s\S]*?inherits:\s*false/, "shine angle must not inherit through the renderer tree");
-assert.match(styles, /\.chat-response\.is-streaming::before[^}]*animation:\s*profile-border-shine/, "streaming chat shine must remain animated on its own paint layer");
+assert.match(styles, /\.chat-response\.is-streaming::before,[\s\S]*?data-layout-settling="1"\]::before,[\s\S]*?data-layout-stream="1"\]::before[^}]*animation:\s*profile-border-shine/, "streaming chat shine must remain painted through transient busy-to-settling transitions");
 assert.match(renderer, /chat-response is-inline \$\{sending \? "is-sending" : selectedBusy \? "is-streaming" : ""\}/, "submission must use a stable sending border instead of restarting the streaming shine before ACK");
-assert.match(styles, /\.chat-response\.is-sending,\s*\.chat-response\.is-streaming\s*\{[^}]*border-color:/, "sending and streaming states must keep the same static border geometry");
+assert.match(styles, /\.chat-response\.is-sending,[\s\S]*?\.chat-response\.is-streaming,[\s\S]*?data-layout-settling="1"\],[\s\S]*?data-layout-stream="1"\]\s*\{[^}]*border-color:/, "sending, streaming, and settling states must keep the same static border geometry");
+assert.match(styles, /\.chat-response\.is-inline\s*\{[^}]*height:\s*260px;[^}]*min-height:\s*260px;[^}]*max-height:\s*260px;[^}]*flex:\s*0 0 260px;[^}]*contain:\s*layout paint;/, "latest-message geometry must stay fixed even while its content and paint layers change");
+assert.match(styles, /\.chat-modal \.chat-response\.is-inline\s*\{[^}]*height:\s*var\(--chat-response-height, 330px\);[^}]*flex-basis:\s*var\(--chat-response-height, 330px\);/, "chat modal must pin its flex basis to the configured latest-message height");
 assert.doesNotMatch(styles, /\.chat-response\.is-sending::before/, "the pre-ACK sending state must not create an animated border paint layer");
 assert.match(styles, /working-border-beam[\s\S]*?mask:[\s\S]*?offset-path:\s*rect\(/, "Border Beam must be clipped to the card ring and follow its perimeter");
 assert.match(styles, /width:\s*44px[\s\S]*?animation:\s*worker-border-beam-move\s+4\.4s/, "worker Border Beam must use the compact segment and gentle speed");
