@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Profile Summary Visual Fixture</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <style>
+      html, body { margin: 0; min-height: 100%; background: #0b0f16; color: #e8edf6; }
+      body { display: grid; place-items: center; min-height: 100vh; }
+      .visual-shell { width: min(720px, calc(100vw - 40px)); padding: 32px; border: 1px solid #2c3545; border-radius: 16px; background: #121823; box-sizing: border-box; }
+      .visual-title { margin-bottom: 18px; font: 600 16px/1.3 system-ui, sans-serif; }
+      .visual-row { display: flex; flex-wrap: wrap; align-items: center; gap: 18px 26px; }
+      .profile-summary-item { font-family: system-ui, sans-serif; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <div class="visual-shell">
+      <div class="visual-title">Worker status summary</div>
+      <div class="visual-row">
+        <span class="profile-summary-item is-working"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-working-bolt" d="m13.5 2-8 12h6l-1 8 8-12h-6l1-8Z"></path><circle class="summary-working-spark" cx="18.4" cy="5.2" r="1.25"></circle></svg></span><strong>2 working</strong></span>
+        <span class="profile-summary-item is-idle"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><circle class="summary-idle-ring" cx="12" cy="12" r="9"></circle><path class="summary-idle-check" d="m8 12 2.6 2.6L16.5 9"></path></svg></span><strong>4 idle</strong></span>
+        <span class="profile-summary-item is-hung"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-hung-triangle" d="M12 3 2.8 20h18.4L12 3Z"></path><path class="summary-hung-mark" d="M12 9v5"></path><circle class="summary-hung-dot" cx="12" cy="17.25" r=".75"></circle></svg></span><strong>1 hung</strong></span>
+        <span class="profile-summary-item is-missing"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-missing-plug" d="M8 3v5M12 3v5M6 8h8v2a4 4 0 0 1-4 4v3"></path><path class="summary-missing-plus" d="M16 16h6M19 13v6"></path></svg></span><strong>1 missing</strong></span>
+      </div>
+    </div>
+  </body>
+</html>

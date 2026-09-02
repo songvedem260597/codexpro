@@ -351,6 +351,23 @@ function inferProfileTaskConversationId(profileId: string): string {
   return candidates[0]?.id || "";
 }
 
+function profileTaskConversationCandidateLog(profileId: string): string {
+  const profile = singleton?.profiles.get(profileId);
+  const tabs = Array.isArray(profile?.tabs)
+    ? profile.tabs.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value))
+    : [];
+  return JSON.stringify(tabs.slice(0, 8).map((tab) => ({
+    id: conversationIdFromUrl(tab.url),
+    title: String(tab.title || "").slice(0, 120),
+    active: tab.active === true,
+    busy: tab.busy === true,
+    settling: tab.settling === true,
+    network_state: String(tab.network_state || ""),
+    network_stream_in_progress: tab.network_stream_in_progress === true,
+    activity_text: String(tab.activity_text || "").slice(0, 120)
+  }))).slice(0, 500);
+}
+
 function loadBrowserProfileTasks(): void {
   try {
     const parsed = JSON.parse(fs.readFileSync(browserProfileTaskStatePath(), "utf8")) as {
@@ -1148,6 +1165,8 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
     task_id: normalizedTaskId,
     task_title: taskTitle,
     task_conversation_id: nextConversationId,
+    task_conversation_binding_source: normalizedTaskId ? (inferredConversationId ? "live_tab_inference" : nextConversationId ? "persisted_existing" : "unbound") : "cleared",
+    task_conversation_candidates: profileTaskConversationCandidateLog(id),
     task_title_source: "ai"
   });
   if (singleton) scheduleProfileNotification(singleton);
