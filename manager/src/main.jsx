@@ -41,6 +41,7 @@ import { LatestMessagePanel } from "./latest-message-panel.jsx";
 import { WorkerRunningDuration } from "./worker-running-duration.jsx";
 import { playTaskCompletionSound } from "./task-completion-sound.js";
 import { pruneTimestampMap, trimMapEntries, trimSetEntries } from "./performance-retention.js";
+import { synchronizeWorkerBorderAnimations } from "./worker-border-sync.js";
 
 const loadResponseMarkdownModule = () => import("./response-markdown.jsx");
 const ResponseText = React.lazy(() => loadResponseMarkdownModule().then((module) => ({ default: module.ResponseText })));
@@ -1131,6 +1132,11 @@ function App() {
   const operationsNotificationState = useRef(new Map());
   const operationsLongTaskAudits = useRef(new Set());
   const operationsAutoUpdateAt = useRef(0);
+
+  useLayoutEffect(() => {
+    if (activePage !== "overview") return;
+    synchronizeWorkerBorderAnimations(document);
+  }, [activePage, managerSettings.profileLayout, managerSettings.workingBorderStyle, status]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {

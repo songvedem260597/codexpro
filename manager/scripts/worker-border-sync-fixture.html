@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="/src/styles.css" />
+  <style>
+    body { margin: 0; padding: 24px; background: #090d13; color: #dce3ee; font-family: Arial, sans-serif; }
+    .profile-list { grid-template-columns: repeat(3, minmax(260px, 1fr)); }
+    .browser-profile { min-height: 210px; display: grid; place-items: center; }
+    .fixture-copy { position: relative; z-index: 3; text-align: center; }
+    .fixture-copy strong { display: block; margin-bottom: 6px; }
+    .fixture-copy span { color: #8d99ad; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="workers" class="profile-list is-card-layout working-border-shine">
+    <article id="worker-a" class="browser-profile is-online"><span class="worker-active-border"></span><div class="fixture-copy"><strong>Worker A</strong><span>bắt đầu trước</span></div></article>
+    <article id="worker-b" class="browser-profile is-online"><span class="worker-active-border"></span><div class="fixture-copy"><strong>Worker B</strong><span>bắt đầu sau 650 ms</span></div></article>
+    <article id="worker-c" class="browser-profile is-online"><span class="worker-active-border"></span><div class="fixture-copy"><strong>Worker C</strong><span>bắt đầu sau 1400 ms</span></div></article>
+  </div>
+  <script type="module">
+    import { synchronizeWorkerBorderAnimations } from '/src/worker-border-sync.js';
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const cards = ['worker-a', 'worker-b', 'worker-c'].map((id) => document.getElementById(id));
+    const animationTimes = (name) => cards.map((card) => {
+      const animation = card.getAnimations({ subtree: true }).find((item) => item.animationName === name);
+      if (!animation) throw new Error(`missing ${name} animation on ${card.id}`);
+      const duration = Number(animation.effect?.getComputedTiming?.().duration) || 1;
+      const current = Number(animation.currentTime) || 0;
+      return { id: card.id, current, duration, startTime: Number(animation.startTime), phase: ((current % duration) + duration) % duration };
+    });
+    const assertSynchronized = (name, toleranceMs = 3) => {
+      const times = animationTimes(name);
+      const phases = times.map((item) => item.phase);
+      const spread = Math.max(...phases) - Math.min(...phases);
+      const duration = times[0].duration;
+      const wrappedSpread = Math.min(spread, duration - spread);
+      if (wrappedSpread > toleranceMs) throw new Error(`${name} phase spread ${wrappedSpread.toFixed(3)} ms: ${JSON.stringify(times)}`);
+      if (!times.every((item) => item.startTime === 0)) throw new Error(`${name} did not use the shared document epoch: ${JSON.stringify(times)}`);
+      return { times, spread: wrappedSpread };
+    };
+    const activate = async (card, delay) => {
+      await wait(delay);
+      card.classList.add('is-working');
+      synchronizeWorkerBorderAnimations(document);
+      await wait(50);
+    };
+    try {
+      await activate(cards[0], 0);
+      await activate(cards[1], 650);
+      await activate(cards[2], 750);
+      const shine = assertSynchronized('profile-border-shine');
+
+      const list = document.getElementById('workers');
+      list.classList.remove('working-border-shine');
+      list.classList.add('working-border-beam');
+      cards.forEach((card) => card.classList.remove('is-working'));
+      await wait(80);
+      await activate(cards[2], 0);
+      await activate(cards[0], 420);
+      await activate(cards[1], 530);
+      const beam = assertSynchronized('worker-border-beam-move');
+
+      list.classList.remove('working-border-beam');
+      list.classList.add('working-border-shine');
+      synchronizeWorkerBorderAnimations(document);
+      await wait(120);
+      const finalShine = assertSynchronized('profile-border-shine');
+      window.__workerBorderSyncResult = { ok: true, shine, beam, finalShine };
+    } catch (error) {
+      window.__workerBorderSyncResult = { ok: false, error: error?.stack || error?.message || String(error) };
+    }
+  </script>
+</body>
+</html>
