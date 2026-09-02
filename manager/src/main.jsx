@@ -274,27 +274,7 @@ function ChatGalaxyButtonContent() {
 }
 
 function TitleGalaxyAccent() {
-  return (
-    <span
-      className="title-accent title-galaxy-accent"
-    >
-      <span className="chat-galaxy-backdrop" aria-hidden="true" />
-      <span className="chat-galaxy-spark" aria-hidden="true" />
-      <span className="chat-galaxy-static" aria-hidden="true">
-        {CHAT_GALAXY_STATIC_STARS.map((star, index) => (
-          <span key={`title-static-${index}`} className="chat-galaxy-star is-static" style={{ "--x": `${star.x}%`, "--y": `${star.y}%`, "--size": `${star.size}px`, "--alpha": star.alpha }} />
-        ))}
-      </span>
-      <span className="chat-galaxy-orbit" aria-hidden="true">
-        <span className="chat-galaxy-ring">
-          {CHAT_GALAXY_ORBIT_STARS.map((star, index) => (
-            <span key={`title-orbit-${index}`} className="chat-galaxy-star" style={{ "--size": `${star.size}px`, "--alpha": star.alpha, "--distance": `${star.distance}px`, "--duration": `${star.duration}s`, "--delay": `${star.delay}s` }} />
-          ))}
-        </span>
-      </span>
-      <span className="title-galaxy-label">Multi</span>
-    </span>
-  );
+  return <span className="title-accent title-galaxy-accent">Multi</span>;
 }
 
 function SettingsDropdown({ value, options, disabled, onChange, ariaLabel = "Chọn font chữ", selectedHint = "" }) {
