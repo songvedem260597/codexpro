@@ -129,6 +129,7 @@ const GLOBAL_RULES_TEMPLATE = `# CodexPro Global Rules
 const DEFAULT_MANAGER_SETTINGS = {
   chatWidth: 940,
   chatHeight: 330,
+  showChatConversationSelector: true,
   fontFamily: "system",
   headingFontFamily: "inherit",
   monoFontFamily: "inherit",
@@ -289,6 +290,21 @@ function SettingsDropdown({ value, options, disabled, onChange, ariaLabel = "Ch�
       searchPlaceholder={`Tìm ${ariaLabel.toLocaleLowerCase("vi-VN")}…`}
       renderValue={(selected) => <span className="app-dropdown-value-copy"><strong>{selected?.label || "Chọn giá trị"}</strong><small>{selectedHint || selected?.hint || (selected?.value === "system" ? "Theo giao diện Windows" : "Áp dụng cho toàn bộ CodexPro")}</small></span>}
     />
+  );
+}
+
+function SettingsToggle({ checked, disabled = false, onChange, title, hint }) {
+  return (
+    <button
+      type="button"
+      className={`settings-toggle ${checked ? "is-on" : ""}`}
+      aria-pressed={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+    >
+      <span className="settings-toggle-track" aria-hidden="true"><i /></span>
+      <span className="settings-toggle-copy"><strong>{title}</strong><small>{hint}</small></span>
+    </button>
   );
 }
 
@@ -4331,8 +4347,12 @@ function App() {
             <label className="request-label">Chọn repo và đường dẫn</label>
             <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => changeProjectForProfile(profile, root)} disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating} />
             {!workspaceProjects.length && selectedProjectRoot !== ALL_ALLOWED_WORKSPACES && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
-            <label className="request-label">Đoạn chat <small>giữ nguyên lựa chọn khi làm mới</small></label>
-            <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => selectRequestConversation(profile, id)} disabled={!profile.connected || !conversations.length || sending} />
+            {managerSettings.showChatConversationSelector !== false && (
+              <>
+                <label className="request-label">Đoạn chat <small>giữ nguyên lựa chọn khi làm mới</small></label>
+                <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => selectRequestConversation(profile, id)} disabled={!profile.connected || !conversations.length || sending} />
+              </>
+            )}
             <label className="request-label request-section-label">Tin nhắn gần nhất</label>
             <div className={`chat-response is-inline ${responseBorderActive ? "is-streaming" : sending ? "is-sending" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-transcript-loading={responseCurrent && response?.transcriptLoading ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
               <div className="chat-response-head">
@@ -4965,6 +4985,13 @@ function App() {
                 <span>px</span>
               </div>
             </div>
+            <SettingsToggle
+              checked={managerSettings.showChatConversationSelector !== false}
+              disabled={settingsBusy === "save"}
+              title="Hiện mục Đoạn chat"
+              hint="Tắt để ẩn bộ chọn hội thoại trong popup Chat."
+              onChange={(value) => void saveManagerSetting({ showChatConversationSelector: value }, value ? "Đã hiện mục Đoạn chat" : "Đã ẩn mục Đoạn chat")}
+            />
             <div className="width-control">
               <button
                 type="button"

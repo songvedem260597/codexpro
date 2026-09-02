@@ -708,6 +708,7 @@ function defaultManagerSettings() {
   return {
     chatWidth: 940,
     chatHeight: 330,
+    showChatConversationSelector: true,
     fontFamily: "system",
     headingFontFamily: "inherit",
     monoFontFamily: "inherit",
@@ -749,6 +750,7 @@ function readManagerSettings() {
     return {
       chatWidth: Math.max(720, Math.min(1600, Number(parsed?.chatWidth) || defaults.chatWidth)),
       chatHeight: Math.max(180, Math.min(700, Number(parsed?.chatHeight) || defaults.chatHeight)),
+      showChatConversationSelector: parsed?.showChatConversationSelector !== false,
       fontFamily: MANAGER_FONT_CHOICES.has(String(parsed?.fontFamily || "")) ? String(parsed.fontFamily) : defaults.fontFamily,
       headingFontFamily: parsed?.headingFontFamily === "inherit" || MANAGER_FONT_CHOICES.has(String(parsed?.headingFontFamily || "")) ? String(parsed.headingFontFamily) : defaults.headingFontFamily,
       monoFontFamily: parsed?.monoFontFamily === "inherit" || MANAGER_FONT_CHOICES.has(String(parsed?.monoFontFamily || "")) ? String(parsed.monoFontFamily) : defaults.monoFontFamily,
@@ -927,6 +929,9 @@ function saveManagerSettingsPatch(patch = {}) {
   }
   if (Object.prototype.hasOwnProperty.call(patch, "chatHeight")) {
     next.chatHeight = Math.max(180, Math.min(700, Number(patch.chatHeight) || current.chatHeight));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "showChatConversationSelector")) {
+    next.showChatConversationSelector = patch.showChatConversationSelector !== false;
   }
   if (Object.prototype.hasOwnProperty.call(patch, "fontFamily") && MANAGER_FONT_CHOICES.has(String(patch.fontFamily))) {
     next.fontFamily = String(patch.fontFamily);
@@ -1589,8 +1594,14 @@ function createWindow() {
               };
             })()`, true);
             await win.webContents.executeJavaScript(`(async () => {
+              const chatSelectorToggle = [...document.querySelectorAll('.settings-toggle')].find((item) => /Hiện mục Đoạn chat/i.test(item.textContent || ''));
+              if (!chatSelectorToggle) throw new Error('Thiếu toggle Hiện mục Đoạn chat');
+              if (chatSelectorToggle.getAttribute('aria-pressed') !== 'false') {
+                chatSelectorToggle.click();
+                await new Promise((resolve) => setTimeout(resolve, 220));
+              }
               await window.codexpro.saveManagerSettings({ maxSubagents: 8, globalRules: '# CodexPro Global Rules\\n\\n- smoke-global-rule\\n', headingFontFamily: 'manrope', monoFontFamily: 'jetbrains-mono', fontWeight: 500 });
-              const range = document.querySelector('.settings-range:not(.chat-height-range):not(.font-weight-range)');
+              const range = document.querySelector('.settings-panel:has(input[aria-label="Độ rộng popup chat"]) .settings-range');
               const heightRange = document.querySelector('.chat-height-range');
               const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
               if (range) {
@@ -1629,7 +1640,13 @@ function createWindow() {
           const afterSettings = await win.webContents.executeJavaScript("window.codexpro.getManagerSettings().then((value) => JSON.parse(JSON.stringify(value)))", true);
           let chatModalWidth = 0;
           let chatResponseHeight = 0;
+          let chatConversationSelectorVisible = null;
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1") {
+            await win.webContents.executeJavaScript(`(() => {
+              const overview = [...document.querySelectorAll('nav button')].find((item) => /tổng quan/i.test(item.textContent || ''));
+              overview?.click();
+            })()`, true);
+            await new Promise((resolve) => setTimeout(resolve, 260));
             const chatButtonFound = await win.webContents.executeJavaScript(`(() => {
               const button = document.querySelector('.profile-chat:not(:disabled)');
               button?.click();
@@ -1639,9 +1656,19 @@ function createWindow() {
               await new Promise((resolve) => setTimeout(resolve, 350));
               chatModalWidth = await win.webContents.executeJavaScript("Math.round(document.querySelector('.chat-modal')?.getBoundingClientRect().width || 0)", true);
               chatResponseHeight = await win.webContents.executeJavaScript("Math.round(document.querySelector('.chat-modal .chat-response.is-inline')?.getBoundingClientRect().height || 0)", true);
+              chatConversationSelectorVisible = await win.webContents.executeJavaScript(`(() => {
+                const hasLabel = [...document.querySelectorAll('.chat-modal .request-label')].some((item) => /Đoạn chat/i.test(item.textContent || ''));
+                const hasDropdown = Boolean(document.querySelector('.chat-modal .app-dropdown.is-chat'));
+                return hasLabel || hasDropdown;
+              })()`, true);
               await win.webContents.executeJavaScript("document.querySelector('.chat-modal-head > button')?.click()", true);
               await new Promise((resolve) => setTimeout(resolve, 120));
             }
+            await win.webContents.executeJavaScript(`(() => {
+              const settingsButton = [...document.querySelectorAll('nav button')].find((item) => /cài đặt/i.test(item.textContent || ''));
+              settingsButton?.click();
+            })()`, true);
+            await new Promise((resolve) => setTimeout(resolve, 260));
           }
           const uiSettings = await win.webContents.executeJavaScript(`(() => {
             const settingsView = document.querySelector('.settings-view');
@@ -1652,10 +1679,11 @@ function createWindow() {
             const previewBeamHeadStyle = previewBeam ? getComputedStyle(previewBeam, '::before') : null;
             return {
               settingsVisible: !settingsView?.hidden,
-              rangeValue: document.querySelector('.settings-range:not(.chat-height-range)')?.value || '',
+              rangeValue: document.querySelector('.settings-panel:has(input[aria-label="Độ rộng popup chat"]) .settings-range')?.value || '',
               heightRangeValue: document.querySelector('.chat-height-range')?.value || '',
               numberValue: document.querySelector('input[aria-label="Độ rộng popup chat"]')?.value || '',
               heightNumberValue: document.querySelector('input[aria-label="Chiều cao khung chat bên trong"]')?.value || '',
+              chatSelectorTogglePressed: document.querySelector('.settings-toggle')?.getAttribute('aria-pressed') || '',
               subagentValue: document.querySelector('.subagent-limit-field input')?.value || '',
               globalRulesValue: document.querySelector('.global-rules-editor')?.value || '',
               fontValue: document.querySelectorAll('.font-setting-row .app-dropdown-value-copy strong')?.[0]?.textContent?.trim() || '',
@@ -1691,23 +1719,26 @@ function createWindow() {
           const profileCardHeightOk = process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (afterSettings.profileCardHeight === Number(uiSettings.profileCardHeightValue) && uiSettings.profileCardHeightVar === `${afterSettings.profileCardHeight}px` && (!uiSettings.profileCardMinHeight || Math.abs(uiSettings.profileCardMinHeight - afterSettings.profileCardHeight) <= 2));
           const workingBorderStyleOk = process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (afterSettings.workingBorderStyle === "beam" && /Tia chạy quanh viền/i.test(uiSettings.workingBorderStyleValue) && /working-border-beam/.test(uiSettings.profileLayoutClass) && uiSettings.previewBeamDisplay === "block" && parseFloat(uiSettings.previewBeamWidth) <= 44 && /worker-border-beam-move/.test(uiSettings.previewBeamAnimation));
           settingsProbe = {
-            ok: fontRolesOk && profileCardHeightOk && workingBorderStyleOk && Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && uiSettings.subagentValue === "1" && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.maxSubagents === 1 && /smoke-global-rule/.test(afterSettings.globalRules || '') && /smoke-global-rule/.test(uiSettings.globalRulesValue || '') && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.fontFamily === "be-vietnam-pro" && afterSettings.headingFontFamily === "manrope" && afterSettings.monoFontFamily === "jetbrains-mono" && afterSettings.profileLayout === "cards" && /Be Vietnam Pro/i.test(uiSettings.fontValue) && /Manrope/i.test(uiSettings.headingFontValue) && /JetBrains Mono/i.test(uiSettings.monoFontValue) && uiSettings.bundledFontLoaded && uiSettings.roleFontsLoaded && /Be Vietnam Pro/i.test(uiSettings.fontVar) && /Manrope/i.test(uiSettings.headingFontVar) && /JetBrains Mono/i.test(uiSettings.monoFontVar) && /Manrope/i.test(uiSettings.headingComputedFont) && /JetBrains Mono/i.test(uiSettings.monoComputedFont) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
-            before: { maxSubagents: beforeSettings.maxSubagents, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily, profileLayout: beforeSettings.profileLayout, profileCardHeight: beforeSettings.profileCardHeight, workingBorderStyle: beforeSettings.workingBorderStyle },
-            saved: { maxSubagents: afterSettings.maxSubagents, chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, fontFamily: afterSettings.fontFamily, headingFontFamily: afterSettings.headingFontFamily, monoFontFamily: afterSettings.monoFontFamily, profileLayout: afterSettings.profileLayout, profileCardHeight: afterSettings.profileCardHeight, workingBorderStyle: afterSettings.workingBorderStyle },
+            ok: fontRolesOk && profileCardHeightOk && workingBorderStyleOk && Boolean(uiSettings.settingsVisible) && Number(uiSettings.rangeValue) >= 720 && Number(uiSettings.heightRangeValue) >= 180 && uiSettings.workerCards === 3 && uiSettings.settingsWidth >= uiSettings.mainContentWidth - 4 && uiSettings.subagentValue === "1" && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (workerPackProbe?.ok && afterSettings.maxSubagents === 1 && /smoke-global-rule/.test(afterSettings.globalRules || '') && /smoke-global-rule/.test(uiSettings.globalRulesValue || '') && afterSettings.chatWidth === 1180 && afterSettings.chatHeight === 520 && afterSettings.showChatConversationSelector === false && uiSettings.chatSelectorTogglePressed === "false" && chatConversationSelectorVisible === false && afterSettings.fontFamily === "be-vietnam-pro" && afterSettings.headingFontFamily === "manrope" && afterSettings.monoFontFamily === "jetbrains-mono" && afterSettings.profileLayout === "cards" && /Be Vietnam Pro/i.test(uiSettings.fontValue) && /Manrope/i.test(uiSettings.headingFontValue) && /JetBrains Mono/i.test(uiSettings.monoFontValue) && uiSettings.bundledFontLoaded && uiSettings.roleFontsLoaded && /Be Vietnam Pro/i.test(uiSettings.fontVar) && /Manrope/i.test(uiSettings.headingFontVar) && /JetBrains Mono/i.test(uiSettings.monoFontVar) && /Manrope/i.test(uiSettings.headingComputedFont) && /JetBrains Mono/i.test(uiSettings.monoComputedFont) && /Thẻ dọc/i.test(uiSettings.profileLayoutValue) && /is-card-layout/.test(uiSettings.profileLayoutClass) && uiSettings.numberValue === "1180" && uiSettings.heightNumberValue === "520" && (!chatModalWidth || Math.abs(chatModalWidth - 1180) <= 3) && (!chatResponseHeight || Math.abs(chatResponseHeight - 520) <= 3))),
+            before: { maxSubagents: beforeSettings.maxSubagents, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, showChatConversationSelector: beforeSettings.showChatConversationSelector, fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily, profileLayout: beforeSettings.profileLayout, profileCardHeight: beforeSettings.profileCardHeight, workingBorderStyle: beforeSettings.workingBorderStyle },
+            saved: { maxSubagents: afterSettings.maxSubagents, chatWidth: afterSettings.chatWidth, chatHeight: afterSettings.chatHeight, showChatConversationSelector: afterSettings.showChatConversationSelector, fontFamily: afterSettings.fontFamily, headingFontFamily: afterSettings.headingFontFamily, monoFontFamily: afterSettings.monoFontFamily, profileLayout: afterSettings.profileLayout, profileCardHeight: afterSettings.profileCardHeight, workingBorderStyle: afterSettings.workingBorderStyle },
             chatModalWidth,
             chatResponseHeight,
+            chatConversationSelectorVisible,
             ui: uiSettings,
             workerPackProbe
           };
           if (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1" || fontRolesSmokeRequested) {
             const restorePatch = process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS === "1"
-              ? { maxSubagents: beforeSettings.maxSubagents, globalRules: beforeSettings.globalRules, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily, fontWeight: beforeSettings.fontWeight, profileLayout: beforeSettings.profileLayout, profileCardHeight: beforeSettings.profileCardHeight, workingBorderStyle: beforeSettings.workingBorderStyle }
+              ? { maxSubagents: beforeSettings.maxSubagents, globalRules: beforeSettings.globalRules, chatWidth: beforeSettings.chatWidth, chatHeight: beforeSettings.chatHeight, showChatConversationSelector: beforeSettings.showChatConversationSelector, fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily, fontWeight: beforeSettings.fontWeight, profileLayout: beforeSettings.profileLayout, profileCardHeight: beforeSettings.profileCardHeight, workingBorderStyle: beforeSettings.workingBorderStyle }
               : { fontFamily: beforeSettings.fontFamily, headingFontFamily: beforeSettings.headingFontFamily, monoFontFamily: beforeSettings.monoFontFamily };
             await win.webContents.executeJavaScript(`window.codexpro.saveManagerSettings(${JSON.stringify(restorePatch)})`, true);
             const restoredSettings = await win.webContents.executeJavaScript("window.codexpro.getManagerSettings().then((value) => JSON.parse(JSON.stringify(value)))", true);
-            settingsProbe.restored = { fontFamily: restoredSettings.fontFamily, headingFontFamily: restoredSettings.headingFontFamily, monoFontFamily: restoredSettings.monoFontFamily, profileCardHeight: restoredSettings.profileCardHeight, workingBorderStyle: restoredSettings.workingBorderStyle };
-            settingsProbe.ok = settingsProbe.ok && restoredSettings.fontFamily === beforeSettings.fontFamily && restoredSettings.headingFontFamily === beforeSettings.headingFontFamily && restoredSettings.monoFontFamily === beforeSettings.monoFontFamily && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (restoredSettings.profileCardHeight === beforeSettings.profileCardHeight && restoredSettings.workingBorderStyle === beforeSettings.workingBorderStyle));
+            settingsProbe.restored = { showChatConversationSelector: restoredSettings.showChatConversationSelector, fontFamily: restoredSettings.fontFamily, headingFontFamily: restoredSettings.headingFontFamily, monoFontFamily: restoredSettings.monoFontFamily, profileCardHeight: restoredSettings.profileCardHeight, workingBorderStyle: restoredSettings.workingBorderStyle };
+            settingsProbe.ok = settingsProbe.ok && restoredSettings.fontFamily === beforeSettings.fontFamily && restoredSettings.headingFontFamily === beforeSettings.headingFontFamily && restoredSettings.monoFontFamily === beforeSettings.monoFontFamily && (process.env.CODEXPRO_MANAGER_SMOKE_SETTINGS !== "1" || (restoredSettings.showChatConversationSelector === beforeSettings.showChatConversationSelector && restoredSettings.profileCardHeight === beforeSettings.profileCardHeight && restoredSettings.workingBorderStyle === beforeSettings.workingBorderStyle));
           }
+          await win.webContents.executeJavaScript("document.querySelector('.settings-toggle')?.scrollIntoView({ block: 'center' })", true);
+          await new Promise((resolve) => setTimeout(resolve, 180));
         }
         let diagnosticProbe = null;
         if (diagnosticSmokeMode) {
@@ -2278,6 +2309,9 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         const screenshot = process.env.CODEXPRO_MANAGER_SMOKE_SCREENSHOT;
         if (screenshot) {
           win.show();
+          if (settingsSmokeRequested) {
+            await win.webContents.executeJavaScript("document.querySelector('.settings-toggle')?.scrollIntoView({ block: 'center' })", true);
+          }
           await new Promise((resolve) => setTimeout(resolve, 350));
         }
         const image = await win.webContents.capturePage();
