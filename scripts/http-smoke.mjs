@@ -245,6 +245,10 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const actions = await callTool(gated, 'codexpro', { action: 'list_actions' });
     const actionNames = Array.isArray(actions?.structuredContent?.actions) ? actions.structuredContent.actions : [];
     if (actionNames.includes('prepare_repo_task')) throw new Error('gated ChatGPT session must not expose prepare_repo_task');
+    const preBeginCoordination = await callTool(gated, 'codexpro', { action: 'workspace_coordination_status', args: { root: taskRoot } });
+    if (path.resolve(preBeginCoordination.structuredContent.root) !== path.resolve(taskRoot) || !Array.isArray(preBeginCoordination.structuredContent.tasks)) {
+      throw new Error(`workspace coordination status must remain observable before begin_repo_task: ${JSON.stringify(preBeginCoordination.structuredContent)}`);
+    }
     await expectToolErrorCode(gated, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
     await expectToolErrorCode(gated, 'begin_repo_task', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa', task_title: 'Verify current repo gate', task_kind: 'code', root: taskRoot, scope: 'workspace' }, 'REPO_TASK_NOT_PREPARED');
 
@@ -292,7 +296,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (!preparedA.structuredContent.prepared) throw new Error('manager could not prepare repo task A');
     await expectToolErrorCode(gatedSibling, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
     for (const action of actionNames) {
-      if (['begin_repo_task', 'repo_task_status', 'worker_job_status', 'worker_job_history', 'finalize_worker_job'].includes(action)) continue;
+      if (['begin_repo_task', 'repo_task_status', 'workspace_coordination_status', 'worker_job_status', 'worker_job_history', 'finalize_worker_job'].includes(action)) continue;
       await expectToolErrorCode(gated, 'codexpro', { action, args: {} }, 'BEGIN_REPO_TASK_REQUIRED');
     }
     await expectToolErrorCode(gated, 'edit', { path: 'gate.txt', old_text: 'gate initial', new_text: 'gate changed' }, 'BEGIN_REPO_TASK_REQUIRED');

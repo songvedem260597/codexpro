@@ -31,7 +31,7 @@ import { ensureBrowserExtensionBridge, getBrowserExtensionPendingTaskOwner, getB
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, workerJobPublicRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
-import { claimWorkspacePaths, finalizeWorkspaceTask, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, type WorkspaceTaskContext } from "./workspaceCoordination.js";
+import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const CODEXPRO_GLOBAL_RULES_FILE = "CODEXPRO.md";
@@ -420,6 +420,8 @@ type ActiveRepoTask = {
   workspaceId: string;
   scope: "workspace" | "all_allowed";
   globalRulesSha256: string;
+  worktreeRoot?: string;
+  worktreeBranch?: string;
 };
 const activeRepoTaskByServer = new WeakMap<object, ActiveRepoTask>();
 const activeRepoTaskByProfile = new Map<string, ActiveRepoTask>();
@@ -496,6 +498,7 @@ const REPO_TASK_GATE_EXEMPT_TOOLS = new Set<string>([
   SUPERTOOL_NAME,
   "begin_repo_task",
   "repo_task_status",
+  "workspace_coordination_status",
   "worker_job_status",
   "worker_job_history",
   "finalize_worker_job"
@@ -547,15 +550,56 @@ function assertRepoTaskGate(server: McpServer, name: string): void {
   }
 }
 
+function activeRepoTaskForServer(server: McpServer): ActiveRepoTask | undefined {
+  const profileId = repoTaskGateProfileByServer.get(server as object) || "";
+  return profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
+}
+
+function repoTaskWorktree(active: ActiveRepoTask): { root?: string; branch?: string } {
+  if (active.worktreeRoot && fs.existsSync(active.worktreeRoot)) {
+    return { root: active.worktreeRoot, branch: active.worktreeBranch };
+  }
+  try {
+    const record = readWorkspaceCoordination(active.root).tasks[active.taskId];
+    if (record?.worktreeRoot && fs.existsSync(record.worktreeRoot)) {
+      active.worktreeRoot = record.worktreeRoot;
+      active.worktreeBranch = record.worktreeBranch;
+      return { root: record.worktreeRoot, branch: record.worktreeBranch };
+    }
+  } catch {
+    // Coordination state is best-effort here; normal workspace access remains available as a fallback.
+  }
+  return {};
+}
+
+function effectiveWorkspaceForServer(server: McpServer, workspace: Workspace): Workspace {
+  const active = activeRepoTaskForServer(server);
+  if (!active) return workspace;
+  const worktree = repoTaskWorktree(active);
+  if (!worktree.root) return workspace;
+  if (sameResolvedRoot(workspace.root, worktree.root)) return workspace;
+  if (!sameResolvedRoot(workspace.root, active.root)) return workspace;
+  return { ...workspace, root: worktree.root };
+}
+
+function workspaceForTool(server: McpServer, workspaces: WorkspaceManager, workspaceId?: string): Workspace {
+  return effectiveWorkspaceForServer(server, workspaces.getWorkspace(workspaceId));
+}
+
 function workspaceTaskContextForServer(server: McpServer, workspace: Workspace): WorkspaceTaskContext | undefined {
   const profileId = repoTaskGateProfileByServer.get(server as object) || "";
   const active = profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
-  if (!active || !sameResolvedRoot(active.root, workspace.root)) return undefined;
+  if (!active) return undefined;
+  const worktree = repoTaskWorktree(active);
+  const matchesPrimary = sameResolvedRoot(active.root, workspace.root);
+  const matchesWorktree = Boolean(worktree.root && sameResolvedRoot(worktree.root, workspace.root));
+  if (!matchesPrimary && !matchesWorktree) return undefined;
   return {
     taskId: active.taskId,
     workerId: profileId || `direct.${active.taskId}`,
     title: active.taskTitle,
-    root: workspace.root
+    root: active.root,
+    ...(worktree.root ? { worktreeRoot: worktree.root } : {})
   };
 }
 
@@ -767,6 +811,7 @@ const MINIMAL_TOOL_NAMES = [
   "prepare_repo_task",
   "begin_repo_task",
   "repo_task_status",
+  "workspace_coordination_status",
   "worker_job_status",
   "worker_job_history",
   "finalize_worker_job",
@@ -816,6 +861,7 @@ const FULL_TOOL_NAMES = [
   "prepare_repo_task",
   "begin_repo_task",
   "repo_task_status",
+  "workspace_coordination_status",
   "worker_job_status",
   "worker_job_history",
   "finalize_worker_job",
@@ -1762,7 +1808,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const started = Date.now();
       const checks: Array<{ name: string; status: "pass" | "warn" | "fail"; detail: string }> = [];
       const filesTouched: string[] = [];
@@ -1986,7 +2032,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const inventory = await codexproInventory(config, workspace, {
         includeGlobalSkills: parseBool(args.include_global_skills, true),
         includeMcpServers: parseBool(args.include_mcp_servers, true),
@@ -2032,7 +2078,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const requestedPath = typeof args.path === "string" ? args.path : undefined;
       const includeGlobalDefault =
         args.source === undefined ||
@@ -2111,7 +2157,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.selectDefaultWorkspace();
+      const workspace = effectiveWorkspaceForServer(server, workspaces.selectDefaultWorkspace());
       const globalRules = await readGlobalRulesSnapshot();
       const summary = await workspaceSummary(config, guard, workspace, {
         includeTree: parseBool(args.include_tree, false),
@@ -2440,24 +2486,26 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       if (!workspace || !globalRules || !codexGraph) {
         throw new CodexProError("REPO_TASK_CODE_CONTEXT_MISSING: code task activation requires a workspace, global rules, and CodexGraph.", { code: "REPO_TASK_CODE_CONTEXT_MISSING" });
       }
+      const coordinationTask = await registerWorkspaceTask({
+        taskId: proof.taskId,
+        workerId: gateProfileId || `direct.${proof.taskId}`,
+        title: proof.taskTitle,
+        root: proof.root
+      });
       const activeTask: ActiveRepoTask = {
         taskId: proof.taskId,
         taskTitle: proof.taskTitle,
         root: proof.root,
         workspaceId: proof.workspaceId,
         scope: proof.scope,
-        globalRulesSha256: proof.globalRulesSha256!
+        globalRulesSha256: proof.globalRulesSha256!,
+        worktreeRoot: coordinationTask.worktreeRoot,
+        worktreeBranch: coordinationTask.worktreeBranch
       };
       activeRepoTaskByServer.set(server as object, activeTask);
       if (gateProfileId) {
         activeRepoTaskByProfile.delete(gateProfileId);
         activeRepoTaskByProfile.set(gateProfileId, activeTask);
-        await registerWorkspaceTask({
-          taskId: proof.taskId,
-          workerId: gateProfileId,
-          title: proof.taskTitle,
-          root: proof.root
-        });
       }
       await recordServerRuntimeEvent(server, "task.started", {
         workspace,
@@ -2483,6 +2531,9 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         workspace_access: true,
         root: proof.root,
         workspace_id: proof.workspaceId,
+        worktree_root: coordinationTask.worktreeRoot,
+        worktree_branch: coordinationTask.worktreeBranch,
+        integration_status: coordinationTask.integrationStatus,
         started_at: proof.startedAt,
         scope: proof.scope,
         global_rules_loaded: true,
@@ -2518,6 +2569,14 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       const expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
       const active = gateProfileId ? activeRepoTaskByProfile.get(gateProfileId) : activeRepoTaskByServer.get(server as object);
       const rulesMatch = Boolean(active && readGlobalRulesSnapshotSync().sha256 === active.globalRulesSha256);
+      let coordinationTask;
+      if (proof?.taskKind === "code" && proof.root) {
+        try {
+          coordinationTask = readWorkspaceCoordination(proof.root).tasks[args.task_id];
+        } catch {
+          coordinationTask = undefined;
+        }
+      }
       const taskVerified = requireRepoTask
         ? Boolean(proof && expected && expected.taskId === args.task_id && expected.scope === proof.scope && repoTaskRootMatches(proof.root, expected))
         : Boolean(proof);
@@ -2552,10 +2611,41 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
           agents_files: proof.agentsFiles,
           agents_sha256: proof.agentsSha256,
           codexgraph_active: Boolean(proof.codexGraph),
-          codexgraph: proof.codexGraph
+          codexgraph: proof.codexGraph,
+          worktree_root: coordinationTask?.worktreeRoot,
+          worktree_branch: coordinationTask?.worktreeBranch,
+          integration_status: coordinationTask?.integrationStatus,
+          integration_branch: coordinationTask?.integrationBranch,
+          integration_requested_at: coordinationTask?.integrationRequestedAt,
+          integration_started_at: coordinationTask?.integrationStartedAt,
+          integration_finished_at: coordinationTask?.integrationFinishedAt,
+          integrated_head: coordinationTask?.integratedHead
         } : {}),
         policy_version: workerJob?.policyVersion || WORKER_POLICY_VERSION,
         worker_job: workerJobPublicRecord(workerJob)
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "workspace_coordination_status",
+    {
+      title: "Workspace Coordination Status",
+      description: "Read multi-agent workspace ownership, worktree, stale-base, conflict, and integration queue state for a repo.",
+      inputSchema: { root: z.string().min(1).optional() },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = workspaces.openWorkspace(args.root, { select: false });
+      const snapshot = readWorkspaceCoordinationStatus(workspace.root);
+      const activeTasks = snapshot.tasks.filter((task) => task.status === "running").length;
+      const conflicts = snapshot.tasks.filter((task) => task.integration_status === "conflict" || task.stale_base).length;
+      return textResult(`# Workspace Coordination\n\n${activeTasks} active task(s), ${snapshot.claims.length} claimed path(s), ${snapshot.integration_queue.length} queued integration(s).`, {
+        ...snapshot,
+        active_task_count: activeTasks,
+        conflict_count: conflicts
       });
     }
   );
@@ -2687,7 +2777,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       if (args.root && args.path && args.root !== args.path) {
         throw new CodexProError("open_workspace accepts either root or path. If both are provided, they must match.");
       }
-      const workspace = workspaces.openWorkspace(args.root ?? args.path);
+      const workspace = effectiveWorkspaceForServer(server, workspaces.openWorkspace(args.root ?? args.path));
       const globalRules = await readGlobalRulesSnapshot();
       const summary = await workspaceSummary(config, guard, workspace, {
         includeTree: args.include_tree !== false,
@@ -2737,7 +2827,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const summary = await workspaceSummary(config, guard, workspace, {
         includeTree: true,
         maxDepth: limitInt(args.max_depth, 3, 1, 8),
@@ -2790,7 +2880,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       if (args.path) guard.resolve(workspace, args.path);
       const result = await inspectWorkspace(config, guard, workspace);
       const prefix = typeof args.path === "string" && args.path.trim()
@@ -2874,7 +2964,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       if (args.path) guard.resolve(workspace, args.path);
       const result = await inspectWorkspace(config, guard, workspace);
       const prefix = typeof args.path === "string" && args.path.trim()
@@ -2946,7 +3036,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const result = await repoTree(config, guard, workspace, {
         path: args.path ?? ".",
         maxDepth: limitInt(args.max_depth, 4, 1, 12),
@@ -2984,7 +3074,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const result = await searchWorkspace(config, guard, workspace, {
         query: args.query,
         regex: parseBool(args.regex, false),
@@ -3030,7 +3120,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const result = await readTextFile(config, guard, workspace, args.path, {
         startLine: args.start_line,
         endLine: args.end_line,
@@ -3056,7 +3146,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       annotations: READ_ONLY_ANNOTATIONS
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const result = await viewWorkspaceImage(config, guard, workspace, args.path, args.max_bytes);
       const dimensions = result.width && result.height ? `${result.width}x${result.height}` : "unknown";
       return {
@@ -3147,7 +3237,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
       const taskContext = workspaceTaskContextForServer(server, workspace);
@@ -3210,7 +3300,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
       const taskContext = workspaceTaskContextForServer(server, workspace);
@@ -3269,7 +3359,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const patchText = String(args.patch ?? "");
       const codexGraphPaths = patchTouchedPaths(patchText);
       const taskContext = workspaceTaskContextForServer(server, workspace);
@@ -3412,7 +3502,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const result = await runBash(config, guard, workspace, String(args.command ?? ""), {
         repoTask: workspaceTaskContextForServer(server, workspace),
         cwd: args.cwd,
@@ -3607,7 +3697,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const scopedPath = typeof args.path === "string" ? args.path : undefined;
       const status = await gitStatus(config, workspace, guard, scopedPath);
       const statusError = looksLikeGitError(status) ? status : "";
@@ -3645,7 +3735,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const rawDiff = normalizeGitOutput(await gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false)));
       const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
       const stats = diffError ? { additions: 0, deletions: 0, changed: false } : diffStats(rawDiff);
@@ -3702,7 +3792,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const scopedPath = typeof args.path === "string" ? args.path : undefined;
       const staged = parseBool(args.staged, false);
       const normalizedScopedPath = scopedPath?.trim() ? guard.resolve(workspace, scopedPath).relPath : undefined;
@@ -3815,7 +3905,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const context = await readAiBridgeContext(config, guard, workspace);
       return textResult(context.text, {
         workspace_id: workspace.id,
@@ -3853,7 +3943,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const maxWaitSeconds = limitInt(args.max_wait_seconds, 20, 1, 60);
       const pollMs = limitInt(args.poll_ms, 1000, 250, 5000);
       const includeDiff = parseBool(args.include_diff, true);
@@ -4020,7 +4110,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const globalRules = await readGlobalRulesSnapshot();
       const context = await readCodexContext(config, guard, workspace, {
         targetPath: args.target_path,
@@ -4072,7 +4162,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const result = await exportProContext(config, guard, workspace, {
         title: args.title,
         selectedPaths: args.selected_paths,
@@ -4490,7 +4580,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const result = await writeAgentHandoff(config, guard, workspace, {
         agent: args.agent ?? "custom",
         agentName: args.agent_name,
@@ -4554,7 +4644,7 @@ ${result.prompt}
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const result = await writeAgentHandoff(config, guard, workspace, {
         agent: "codex",
         title: cleanOneLine(args.title, "Codex implementation plan"),

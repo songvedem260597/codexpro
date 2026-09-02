@@ -1,6 +1,7 @@
 import React, { useMemo } from "react";
 import "./control-center.css";
 import { WorkerRunningDuration } from "./worker-running-duration.jsx";
+import { WorkspaceCoordinationPanel } from "./workspace-coordination-panel.jsx";
 
 function bytes(value) {
   const size = Math.max(0, Number(value) || 0);
@@ -134,6 +135,7 @@ function TerminalTaskSection({ jobs, profiles, workers, projects, mode = "comple
 }
 
 export function ControlCenter({
+  api = window.codexpro,
   status,
   projects = [],
   performance,
@@ -208,6 +210,11 @@ export function ControlCenter({
   const slowestRequestMs = slowRequests.reduce((max, entry) => Math.max(max, Number(entry?.duration_ms || entry?.details?.duration_ms || 0)), 0);
   const recentTimeline = diagnosticEntries.slice(0, 18);
   const problematicRepos = projects.filter((project) => Number(project.conflicted || 0) > 0 || Number(project.behind || 0) > 0 || Number(project.changes || 0) > 0 || (rootUsage.get(String(project.root || "").toLowerCase()) || 0) > 1).slice(0, 12);
+  const coordinationRoots = useMemo(() => [...new Set([
+    ...tasks.map((task) => String(task.root || "").trim()),
+    ...workerJobs.filter((job) => job?.status === "running").map((job) => String(job.root || "").trim()),
+    ...projects.filter((project) => project?.active || project?.inUse).map((project) => String(project.root || "").trim())
+  ].filter(Boolean))], [tasks, workerJobs, projects]);
 
   return (
     <div className="control-center">
@@ -270,6 +277,8 @@ export function ControlCenter({
           </div>
         )}
       </section>
+
+      <WorkspaceCoordinationPanel api={api} roots={coordinationRoots} projects={projects} onOpenRepo={onOpenRepo} />
 
       <div className="control-two-column control-task-history-grid">
         <TerminalTaskSection jobs={completedTasks} profiles={profiles} workers={workers} projects={projects} />
