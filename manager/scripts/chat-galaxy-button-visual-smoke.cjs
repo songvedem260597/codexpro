@@ -14,7 +14,7 @@ const staticStars = [[18, 28, 2, .78], [34, 72, 3, .88], [68, 24, 2, .7], [82, 6
 
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>
 ${styles}
-html, body { margin: 0; min-height: 100%; background: #0b0f16; color: #e8edf6; }
+html, body { margin: 0; min-height: 100%; overflow: hidden !important; background: #0b0f16; color: #e8edf6; }
 body { min-height: 100vh; display: grid; place-items: center; }
 .fixture { width: 520px; padding: 56px; border: 1px solid #273144; border-radius: 18px; background: #111720; font-family: system-ui, sans-serif; }
 .fixture-title { margin-bottom: 24px; color: #9eabc0; font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
