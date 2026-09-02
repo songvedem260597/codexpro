@@ -374,6 +374,7 @@ assert.match(server, /task_id:[\s\S]*?optional\(\)[\s\S]*?task_title:[\s\S]*?tas
 assert.match(bridge, /browser-profile-tasks\.json/, "profile task titles must survive a runtime restart");
 assert.match(bridge, /function inferProfileTaskConversationId\(profileId: string\)[\s\S]*?codexActivity[\s\S]*?network_stream_in_progress[\s\S]*?startedAt/, "begin_repo_task must bind the AI task to the most relevant working ChatGPT conversation");
 assert.match(bridge, /task_conversation_id: entry\.taskConversationId[\s\S]*?current_task_conversation_id: profileTaskConversationIds\.get\(profile\.id\)/, "task conversation bindings must persist and be exposed to Manager after restart");
+assert.match(bridge, /profileTaskConversationCandidateLog[\s\S]*?task_conversation_binding_source:[\s\S]*?task_conversation_candidates:/, "task registration diagnostics must preserve candidate-tab evidence for wrong-tab investigations");
 assert.match(bridge, /profile-task-events\.jsonl/, "missing task titles must leave persistent profile/session diagnostics");
 assert.match(bridge, /connector_profile_bound:[\s\S]*?connector_update_required:/, "Manager profile summaries must expose connector/profile identity state");
 assert.match(bridge, /loadBrowserProfileTasks\(\)/, "profile task titles must load when the bridge starts");

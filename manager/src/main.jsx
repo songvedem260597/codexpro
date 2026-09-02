@@ -166,31 +166,33 @@ function WorkerIcon({ state, customImages }) {
 function ProfileSummaryIcon({ state, missing }) {
   if (missing) {
     return (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M8 3v5M12 3v5M6 8h8v2a4 4 0 0 1-4 4v3" />
-        <path d="M16 16h6M19 13v6" />
+      <svg className="profile-summary-svg" viewBox="0 0 24 24" aria-hidden="true">
+        <path className="summary-missing-plug" d="M8 3v5M12 3v5M6 8h8v2a4 4 0 0 1-4 4v3" />
+        <path className="summary-missing-plus" d="M16 16h6M19 13v6" />
       </svg>
     );
   }
   if (state === "working") {
     return (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="m13.5 2-8 12h6l-1 8 8-12h-6l1-8Z" />
+      <svg className="profile-summary-svg" viewBox="0 0 24 24" aria-hidden="true">
+        <path className="summary-working-bolt" d="m13.5 2-8 12h6l-1 8 8-12h-6l1-8Z" />
+        <circle className="summary-working-spark" cx="18.4" cy="5.2" r="1.25" />
       </svg>
     );
   }
   if (state === "idle") {
     return (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" />
-        <path d="m8 12 2.6 2.6L16.5 9" />
+      <svg className="profile-summary-svg" viewBox="0 0 24 24" aria-hidden="true">
+        <circle className="summary-idle-ring" cx="12" cy="12" r="9" />
+        <path className="summary-idle-check" d="m8 12 2.6 2.6L16.5 9" />
       </svg>
     );
   }
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 3 2.8 20h18.4L12 3Z" />
-      <path d="M12 9v5M12 17.2v.1" />
+    <svg className="profile-summary-svg" viewBox="0 0 24 24" aria-hidden="true">
+      <path className="summary-hung-triangle" d="M12 3 2.8 20h18.4L12 3Z" />
+      <path className="summary-hung-mark" d="M12 9v5" />
+      <circle className="summary-hung-dot" cx="12" cy="17.25" r=".75" />
     </svg>
   );
 }
@@ -3013,14 +3015,25 @@ function App() {
       requestTargetReasons.current.set(profile.profile_id, selectionReason);
       setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
     }
-    logRendererDiagnostic(api, "info", "chat", `Mở composer ${profile.profile_id} tại ${conversationId}`, {
+    const resolvedTaskTab = (profile.conversation_tabs || []).find((tab) => conversationIdFromTab(tab) === taskConversationId);
+    const taskTabDiffersFromChromeActive = Boolean(taskConversationId && activeConversationId && taskConversationId !== activeConversationId);
+    logRendererDiagnostic(api, taskTabDiffersFromChromeActive ? "warn" : "info", "chat", taskTabDiffersFromChromeActive
+      ? `Task ${profile.current_task_title || profile.current_task_id || profile.profile_id} nằm ở tab khác tab Chrome đang active`
+      : `Mở composer ${profile.profile_id} tại ${conversationId}`, {
       action: "open-chat-target-selection",
       profile_id: profile.profile_id,
+      task_id: String(profile?.current_task_id || ""),
+      task_title: String(profile?.current_task_title || ""),
+      task_bound_conversation_id: String(profile?.current_task_conversation_id || ""),
+      task_resolved_conversation_id: taskConversationId,
+      task_resolved_title: String(resolvedTaskTab?.title || "").slice(0, 160),
+      task_tab_differs_from_chrome_active: taskTabDiffersFromChromeActive,
       from_conversation_id: pinnedConversationId,
       to_conversation_id: conversationId,
       selection_reason: selectionReason,
       active_target_id: String(activeTab?.id || ""),
       active_conversation_id: activeConversationId,
+      active_title: String(activeTab?.title || "").slice(0, 160),
       active_tab_ready: activeTabReady,
       active_tab_busy: Boolean(activeTab?.busy),
       active_tab_settling: Boolean(activeTab?.settling),
@@ -4691,6 +4704,7 @@ function App() {
           {activePage === "control" ? (
             <React.Suspense fallback={<div className="section-note">Đang tải Control Center…</div>}>
               <ControlCenter
+                api={api}
                 status={status}
                 projects={projects}
                 performance={operationsPerformance}

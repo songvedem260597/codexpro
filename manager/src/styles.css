@@ -213,8 +213,31 @@ section { margin-bottom: 38px; }
 .profile-summary-item.is-idle { color: #8ce8af; }
 .profile-summary-item.is-hung { color: #f1939e; }
 .profile-summary-item.is-missing { color: #efb16c; }
-.profile-summary-icon { width: 14px; height: 14px; flex: 0 0 14px; display: grid; place-items: center; color: currentColor; }
-.profile-summary-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.profile-summary-icon { width: 15px; height: 15px; flex: 0 0 15px; display: grid; place-items: center; color: currentColor; }
+.profile-summary-icon svg { width: 15px; height: 15px; overflow: visible; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.profile-summary-svg > * { transform-box: fill-box; transform-origin: center; }
+.profile-summary-item.is-working .summary-working-bolt { animation: profile-summary-working-bolt 1.35s cubic-bezier(.4, 0, .2, 1) infinite; filter: drop-shadow(0 0 1.8px currentColor); }
+.profile-summary-item.is-working .summary-working-spark { fill: currentColor; stroke: none; animation: profile-summary-working-spark 1.35s ease-out infinite; filter: drop-shadow(0 0 2px currentColor); }
+.profile-summary-item.is-idle .summary-idle-ring { animation: profile-summary-idle-ring 2.4s ease-in-out infinite; filter: drop-shadow(0 0 1.4px currentColor); }
+.profile-summary-item.is-idle .summary-idle-check { stroke-dasharray: 14; stroke-dashoffset: 0; animation: profile-summary-idle-check 2.4s ease-in-out infinite; }
+.profile-summary-item.is-hung .summary-hung-triangle { animation: profile-summary-hung-triangle 1.8s ease-in-out infinite; filter: drop-shadow(0 0 1.5px currentColor); }
+.profile-summary-item.is-hung .summary-hung-mark { animation: profile-summary-hung-mark 1.8s ease-in-out infinite; }
+.profile-summary-item.is-hung .summary-hung-dot { fill: currentColor; stroke: none; animation: profile-summary-hung-dot 1.8s ease-in-out infinite; filter: drop-shadow(0 0 2px currentColor); }
+.profile-summary-item.is-missing .summary-missing-plug { animation: profile-summary-missing-plug 2s ease-in-out infinite; }
+.profile-summary-item.is-missing .summary-missing-plus { animation: profile-summary-missing-plus 2s ease-in-out infinite; filter: drop-shadow(0 0 1.4px currentColor); }
+@keyframes profile-summary-working-bolt { 0%, 100% { transform: translateY(0) scale(1); opacity: .86; } 38% { transform: translateY(-.55px) scale(1.08); opacity: 1; } 56% { transform: translateY(.25px) scale(.98); opacity: .9; } }
+@keyframes profile-summary-working-spark { 0%, 28% { transform: translate(-2px, 2px) scale(.35); opacity: 0; } 45% { transform: translate(0, 0) scale(1); opacity: 1; } 72%, 100% { transform: translate(1.8px, -1.8px) scale(.15); opacity: 0; } }
+@keyframes profile-summary-idle-ring { 0%, 100% { transform: scale(.96); opacity: .72; } 50% { transform: scale(1.06); opacity: 1; } }
+@keyframes profile-summary-idle-check { 0%, 18% { stroke-dashoffset: 14; opacity: .35; } 36%, 82% { stroke-dashoffset: 0; opacity: 1; } 100% { stroke-dashoffset: 0; opacity: .72; } }
+@keyframes profile-summary-hung-triangle { 0%, 42%, 100% { transform: translateX(0) rotate(0); } 48% { transform: translateX(-.7px) rotate(-2deg); } 54% { transform: translateX(.7px) rotate(2deg); } 60% { transform: translateX(-.35px) rotate(-1deg); } 66% { transform: translateX(.35px) rotate(1deg); } }
+@keyframes profile-summary-hung-mark { 0%, 38%, 100% { opacity: .62; } 52%, 72% { opacity: 1; } }
+@keyframes profile-summary-hung-dot { 0%, 40%, 100% { transform: scale(.55); opacity: .35; } 56%, 72% { transform: scale(1.4); opacity: 1; } }
+@keyframes profile-summary-missing-plug { 0%, 100% { transform: translateY(.45px); opacity: .74; } 50% { transform: translateY(-.45px); opacity: 1; } }
+@keyframes profile-summary-missing-plus { 0%, 20%, 100% { transform: scale(.78) rotate(0deg); opacity: .48; } 48%, 72% { transform: scale(1.12) rotate(90deg); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .profile-summary-svg * { animation: none !important; transform: none !important; opacity: 1 !important; }
+  .profile-summary-item.is-idle .summary-idle-check { stroke-dashoffset: 0; }
+}
 .profile-summary-update { padding: 4px 7px; color: #ffbc72; white-space: nowrap; }
 @property --profile-border-shine-angle {
   syntax: "<angle>";
