@@ -22,8 +22,7 @@ assert.match(styles, /@media \(max-height: 820px\)[\s\S]*?\.profile-list\.is-car
 assert.match(source, /<ApiWorkerCards[\s\S]*?workers=\{\(status\?\.workers \|\| \[\]\)\.filter[\s\S]*?customImages=\{activeWorkerImages\}/, "saved API workers must render in the connected worker list with the active built-in or custom GIF pack");
 assert.match(source, /function ApiWorkerCards[\s\S]*?<WorkerIcon state=\{workerState\} customImages=\{customImages\}/, "API worker cards must use the animated worker icon");
 assert.match(source, /const apiWorkers = \(status\?\.workers \|\| \[\]\)\.filter[\s\S]*?working:[\s\S]*?apiWorkers\.filter[\s\S]*?idle:[\s\S]*?apiWorkers\.filter/, "overview summary must count connected API workers");
-assert.match(source, /function profileVisibleInWorkerList\(profile\)[\s\S]*?tab_count[\s\S]*?> 0 \|\| Boolean\(profile\?\.connector_installed\)/, "only a zero-tab profile without the CodexPro connector must be hidden from connected workers");
-assert.match(source, /status\?\.browserProfiles \|\| \[\][\s\S]*?\.filter\(profileVisibleInWorkerList\)[\s\S]*?\.map\(\(profile\)/, "the connected worker cards must exclude background profiles with no tabs");
+assert.match(source, /function profileVisibleInWorkerList\(profile\)[\s\S]*?profileConnectionState\(profile\) !== "disconnected"[\s\S]*?tab_count[\s\S]*?> 0 \|\| Boolean\(profile\?\.connector_installed\)/, "disconnected Chrome profiles must hide automatically while an explicitly stopped Mac profile remains visible");
 assert.match(source, /headlessWorker = profile\.headless[\s\S]*?headlessState\?\.workers[\s\S]*?sourceProfileDirectory/, "headless connected worker cards must resolve their clone source from the headless worker registry");
 assert.match(source, /headlessSourceProfile = profile\.headless && profile\.source_profile_id[\s\S]*?headlessSourceLabel[\s\S]*?Clone từ <b>/, "headless connected worker cards must show which Chrome profile they were cloned from");
 assert.match(source, /function chromeProfileIdLabel\(profileId\)[\s\S]*?`Chrome \$\{value\.slice\(0, 8\)\}`/, "Chrome profile ids must be rendered as a stable short label such as Chrome e3b58d66");
@@ -48,8 +47,9 @@ assert.doesNotMatch(source, /connectorAutoMigrationInFlight|connectorAutoMigrati
 assert.match(source, /async function checkProfileConnector\(profile\)[\s\S]*?api\.checkProfile\(profileId\)/, "connector verification must run only from the explicit card action");
 assert.match(source, /connectorActionIsSetup \? setupProfile\(profile\) : checkProfileConnector\(profile\)/, "an unverified profile must check before setup is offered");
 assert.match(source, /connectorDisconnected \? "CHƯA KẾT NỐI CODEXPRO"/, "overview must distinguish disconnected definitions from missing definitions");
-assert.match(source, /async function forgetProfile\(profile\)[\s\S]*?api\.forgetProfile\(profile\.profile_id\)[\s\S]*?browserProfiles:[\s\S]*?\.filter/, "the Manager must remove a forgotten offline profile immediately");
-assert.match(source, /\{hung && \([\s\S]*?forget-profile[\s\S]*?Ẩn khỏi danh sách/, "only a disconnected Chrome profile card must offer the forget action");
+assert.doesNotMatch(source, /Ẩn khỏi danh sách|async function forgetProfile\(profile\)/, "disconnected Chrome profiles should disappear without a manual hide action");
+assert.match(source, /\{profile\.connected && !ready && <span className="update-needed">/, "an offline or disabled profile must not be presented as updateable");
+assert.doesNotMatch(source, /flightRecorderCount|browserIncidentKindLabel|browserIncidentTooltip|Recorder \{/, "flight recorder diagnostics must not clutter worker cards");
 assert.match(preloadSource, /forgetProfile: \(profileId\) => invoke\("codexpro:forget-profile", profileId\)/, "the preload must expose the forget-profile action");
 assert.match(electronSource, /codexpro:forget-profile[\s\S]*?action: "forget_profile"/, "the main process must route profile forgetting through the local MCP runtime");
 

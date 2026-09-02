@@ -569,7 +569,8 @@ function repoTaskEvidenceSummary(proof) {
 }
 
 function profileVisibleInWorkerList(profile) {
-  return Number(profile?.tab_count || 0) > 0 || Boolean(profile?.connector_installed);
+  return profileConnectionState(profile) !== "disconnected"
+    && (Number(profile?.tab_count || 0) > 0 || Boolean(profile?.connector_installed));
 }
 
 function profileSafeForWorkerUpdate(profile) {
@@ -3404,31 +3405,6 @@ function App() {
     }
   }
 
-  async function forgetProfile(profile) {
-    setBusy(`forget-profile:${profile.profile_id}`);
-    setError("");
-    try {
-      await api.forgetProfile(profile.profile_id);
-      emptyBrowserSnapshotSince.current = 0;
-      setStatus((current) => current ? {
-        ...current,
-        browserProfiles: (current.browserProfiles || []).filter((item) => item.profile_id !== profile.profile_id)
-      } : current);
-      setProfileTaskLabels((current) => {
-        if (!Object.prototype.hasOwnProperty.call(current, profile.profile_id)) return current;
-        const next = { ...current };
-        delete next[profile.profile_id];
-        return next;
-      });
-      if (chatProfileId === profile.profile_id) setChatProfileId("");
-      notify("Đã ẩn profile khỏi danh sách · profile sẽ hiện lại khi extension kết nối");
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setBusy("");
-    }
-  }
-
   async function recoveryContinuationSnapshot(profile, conversationId, targetTab) {
     const profileId = String(profile?.profile_id || "");
     const liveResponse = requestResponsesRef.current[profileId] || {};
@@ -4898,10 +4874,6 @@ function App() {
                 headlessSourceDirectory ? `Thư mục: ${headlessSourceDirectory}` : "",
                 profile.source_profile_id ? `Profile ID: ${profile.source_profile_id}` : ""
               ].filter(Boolean).join(" · ");
-              const flightRecorderCount = Math.max(0, Number(profile.flight_recorder_incident_count) || 0);
-              const flightRecorderKind = String(profile.flight_recorder_latest_kind || "").trim();
-              const flightRecorderMessage = String(profile.flight_recorder_latest_message || "").trim();
-              const flightRecorderAt = String(profile.flight_recorder_latest_at || "").trim();
               return (
                 <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`} key={profile.profile_id}>
                   <span className="worker-active-border" aria-hidden="true" />
@@ -4939,7 +4911,6 @@ function App() {
                           {headlessSourceDirectory && headlessSourceDirectory !== headlessSourceLabel && <code>{headlessSourceDirectory}</code>}
                         </span>
                       )}
-                      {flightRecorderCount > 0 && <span className="profile-warning" title={[flightRecorderKind, flightRecorderMessage, flightRecorderAt].filter(Boolean).join(" · ")}>Recorder {flightRecorderCount} sự cố{flightRecorderKind ? ` · ${flightRecorderKind}` : ""}</span>}
                       {connectorMessage && <span className={connectorInstalled ? "ready-text" : "profile-warning"}>{connectorMessage}</span>}
                     </div>
                     {profileTaskLabel && (
@@ -4971,17 +4942,6 @@ function App() {
                         {busy === `recover-profile:${profile.profile_id}` ? "Đang khôi phục…" : busy === `open-profile:${profile.profile_id}` ? "Đang chuyển…" : chromeAction.label}
                       </button>
                     </div>
-                    {hung && (
-                      <button
-                        type="button"
-                        className="button danger-quiet forget-profile"
-                        onClick={() => void forgetProfile(profile)}
-                        disabled={Boolean(busy)}
-                        title="Chỉ ẩn hồ sơ cũ khỏi CodexPro Manager; không xóa Chrome profile."
-                      >
-                        {busy === `forget-profile:${profile.profile_id}` ? "Đang ẩn…" : "Ẩn khỏi danh sách"}
-                      </button>
-                    )}
                     {connectorInstalled ? (
                       <span className={`already-connected ${connectorUpdateRequired ? "is-update-required" : working || settling ? "is-working" : idle ? "is-idle" : "is-default"}`}>✓ Đã thêm CodexPro</span>
                     ) : (
