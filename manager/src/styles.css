@@ -386,6 +386,7 @@ section { margin-bottom: 38px; }
 .profile-action-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; width: 100%; }
 .profile-list.is-card-layout .profile-action-buttons.is-single { grid-template-columns: 1fr; }
 .profile-action-buttons .button { width: 100%; white-space: nowrap; }
+.profile-actions .forget-profile { width: 100%; }
 .profile-chat { padding-left: 12px; padding-right: 12px; }
 .chat-galaxy-button { --chat-galaxy-active: 0; position: relative; isolation: isolate; overflow: hidden; min-height: 40px; color: #101219; border-color: #e9edf4; background: #e9edf4; box-shadow: none; transform: translateZ(0); transition: color .25s ease, border-color .25s ease, background .25s ease, transform .25s ease; }
 .chat-galaxy-button:hover:not(:disabled),

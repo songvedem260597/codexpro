@@ -1110,8 +1110,9 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     if (!incident.task_id) incident.task_id = String(profileTaskIds.get(profile.id) || "").slice(0, 160);
     if (!incident.task_title) incident.task_title = String(profileTaskTitles.get(profile.id) || "").slice(0, 300);
     if (!incident.conversation_id) incident.conversation_id = String(profileTaskConversationIds.get(profile.id) || "").slice(0, 180);
-    profile.flightRecorderIncidents.push(incident);
-    profile.flightRecorderIncidents = profile.flightRecorderIncidents.slice(-MAX_PROFILE_FLIGHT_RECORDER_INCIDENTS);
+    const flightRecorderIncidents = Array.isArray(profile.flightRecorderIncidents) ? profile.flightRecorderIncidents : [];
+    flightRecorderIncidents.push(incident);
+    profile.flightRecorderIncidents = flightRecorderIncidents.slice(-MAX_PROFILE_FLIGHT_RECORDER_INCIDENTS);
     recordBrowserFlightRecorderIncident(incident);
     scheduleProfileNotification(state);
     sendJson(req, res, 200, { ok: true, profile_id: profile.id, incident_id: incident.id });
@@ -1335,7 +1336,8 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       const connectorUpdateRequired = Boolean(!connectorVerificationRequired && profile.connectorVerificationState === 'connected' && expectedFingerprint
         && profile.connectorServerFingerprint !== expectedFingerprint);
       const connectorInstalled = profile.connectorInstalled && connectorProfileBound && !connectorVerificationRequired && profile.connectorVerificationState === 'connected';
-      const latestFlightRecorderIncident = profile.flightRecorderIncidents.at(-1);
+      const flightRecorderIncidents = Array.isArray(profile.flightRecorderIncidents) ? profile.flightRecorderIncidents : [];
+      const latestFlightRecorderIncident = flightRecorderIncidents.at(-1);
       const connectorMessage = connectorVerificationRequired
         ? (profile.connectorVerificationState === 'unknown' && !profile.connectorInstalled && profile.connectorMessage
           ? profile.connectorMessage : "Chưa xác minh lại CodexPro trong ChatGPT.")
@@ -1374,7 +1376,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       current_task_id: profileTaskIds.get(profile.id) || "",
       current_task_title: profileTaskTitles.get(profile.id) || "",
       current_task_conversation_id: profileTaskConversationIds.get(profile.id) || "",
-      flight_recorder_incident_count: profile.flightRecorderIncidents.length,
+      flight_recorder_incident_count: flightRecorderIncidents.length,
       flight_recorder_latest_at: String(latestFlightRecorderIncident?.at || ""),
       flight_recorder_latest_kind: String(latestFlightRecorderIncident?.kind || ""),
       flight_recorder_latest_message: String(latestFlightRecorderIncident?.message || "").slice(0, 500),
@@ -1394,6 +1396,41 @@ export function listDisabledBrowserExtensionProfileIds(): string[] {
     .filter((profile) => !profile.enabled && browserProfileRetentionState(profile, now).visible)
     .map((profile) => profile.id)
     .sort((left, right) => left.localeCompare(right));
+}
+
+export function forgetBrowserExtensionProfile(profileId: string): boolean {
+  const id = String(profileId || "").trim().slice(0, 160);
+  if (!id) return false;
+  const state = ensureBrowserExtensionBridge();
+  const profile = state.profiles.get(id);
+  if (!profile) return false;
+  if (profile.waiter) {
+    profile.waiter.statusCode = 410;
+    profile.waiter.end(JSON.stringify({ error: "Chrome profile was forgotten by CodexPro Manager." }));
+    clearWaiter(profile);
+  }
+  for (const command of profile.queued) {
+    const pending = state.pending.get(command.id);
+    if (!pending) continue;
+    if (pending.timer) clearTimeout(pending.timer);
+    state.pending.delete(command.id);
+    pending.reject(new CodexProError(`Chrome profile ${profile.label || id} was forgotten by CodexPro Manager.`));
+  }
+  state.profiles.delete(id);
+  profileWorkspaceRoots.delete(id);
+  profileWorkspaceBindings.delete(id);
+  profileTaskIds.delete(id);
+  profileTaskTitles.delete(id);
+  profileTaskConversationIds.delete(id);
+  profileTaskUpdatedAt.delete(id);
+  profilePendingTasks.delete(id);
+  profileTaskEventSignatures.delete(id);
+  if (state.activeProfileId === id) state.activeProfileId = undefined;
+  persistBrowserProfileRegistry(state);
+  persistBrowserProfileTasks();
+  scheduleProfileNotification(state);
+  scheduleProfileExpiryNotification(state);
+  return true;
 }
 
 export function subscribeBrowserExtensionProfiles(listener: (profiles: ExtensionProfileSummary[]) => void): () => void {

@@ -3404,6 +3404,31 @@ function App() {
     }
   }
 
+  async function forgetProfile(profile) {
+    setBusy(`forget-profile:${profile.profile_id}`);
+    setError("");
+    try {
+      await api.forgetProfile(profile.profile_id);
+      emptyBrowserSnapshotSince.current = 0;
+      setStatus((current) => current ? {
+        ...current,
+        browserProfiles: (current.browserProfiles || []).filter((item) => item.profile_id !== profile.profile_id)
+      } : current);
+      setProfileTaskLabels((current) => {
+        if (!Object.prototype.hasOwnProperty.call(current, profile.profile_id)) return current;
+        const next = { ...current };
+        delete next[profile.profile_id];
+        return next;
+      });
+      if (chatProfileId === profile.profile_id) setChatProfileId("");
+      notify("Đã ẩn profile khỏi danh sách · profile sẽ hiện lại khi extension kết nối");
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function recoveryContinuationSnapshot(profile, conversationId, targetTab) {
     const profileId = String(profile?.profile_id || "");
     const liveResponse = requestResponsesRef.current[profileId] || {};
@@ -4926,7 +4951,7 @@ function App() {
                     {(working || settling) && <div className="profile-live-activity" role="status" aria-live="polite"><span className="profile-live-activity-text">{liveActivityText || (settling ? "ChatGPT đang hoàn tất tác vụ" : "ChatGPT đang xử lý")}</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></div>}
                   </div>
                   <div className="profile-actions">
-                    {!ready && <span className="update-needed">Có worker {WORKER_EXTENSION_VERSION} mới</span>}
+                    {profile.connected && !ready && <span className="update-needed">Có worker {WORKER_EXTENSION_VERSION} mới</span>}
                     {profileChecking && <span className="checking-profile">Đang kiểm tra ChatGPT…</span>}
                     <div className="profile-action-buttons">
                       <button
@@ -4946,6 +4971,17 @@ function App() {
                         {busy === `recover-profile:${profile.profile_id}` ? "Đang khôi phục…" : busy === `open-profile:${profile.profile_id}` ? "Đang chuyển…" : chromeAction.label}
                       </button>
                     </div>
+                    {hung && (
+                      <button
+                        type="button"
+                        className="button danger-quiet forget-profile"
+                        onClick={() => void forgetProfile(profile)}
+                        disabled={Boolean(busy)}
+                        title="Chỉ ẩn hồ sơ cũ khỏi CodexPro Manager; không xóa Chrome profile."
+                      >
+                        {busy === `forget-profile:${profile.profile_id}` ? "Đang ẩn…" : "Ẩn khỏi danh sách"}
+                      </button>
+                    )}
                     {connectorInstalled ? (
                       <span className={`already-connected ${connectorUpdateRequired ? "is-update-required" : working || settling ? "is-working" : idle ? "is-idle" : "is-default"}`}>✓ Đã thêm CodexPro</span>
                     ) : (

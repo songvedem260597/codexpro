@@ -4,6 +4,7 @@ import fs from "node:fs";
 const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const electronSource = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
+const preloadSource = fs.readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
 assert.match(source, /Hãy kết nối API worker và Chrome profile của bạn/, "connected workers section must use the concise connection guidance");
 assert.match(styles, /\.profile-worker \{[^}]*aspect-ratio:\s*1\s*\/\s*1;/, "worker GIF frames must enforce a square aspect ratio");
 assert.match(styles, /\.profile-worker img \{[^}]*max-width:\s*100%;[^}]*max-height:\s*100%;[^}]*object-fit:\s*contain;/, "worker GIFs must stay contained inside their frame");
@@ -47,5 +48,9 @@ assert.doesNotMatch(source, /connectorAutoMigrationInFlight|connectorAutoMigrati
 assert.match(source, /async function checkProfileConnector\(profile\)[\s\S]*?api\.checkProfile\(profileId\)/, "connector verification must run only from the explicit card action");
 assert.match(source, /connectorActionIsSetup \? setupProfile\(profile\) : checkProfileConnector\(profile\)/, "an unverified profile must check before setup is offered");
 assert.match(source, /connectorDisconnected \? "CHƯA KẾT NỐI CODEXPRO"/, "overview must distinguish disconnected definitions from missing definitions");
+assert.match(source, /async function forgetProfile\(profile\)[\s\S]*?api\.forgetProfile\(profile\.profile_id\)[\s\S]*?browserProfiles:[\s\S]*?\.filter/, "the Manager must remove a forgotten offline profile immediately");
+assert.match(source, /\{hung && \([\s\S]*?forget-profile[\s\S]*?Ẩn khỏi danh sách/, "only a disconnected Chrome profile card must offer the forget action");
+assert.match(preloadSource, /forgetProfile: \(profileId\) => invoke\("codexpro:forget-profile", profileId\)/, "the preload must expose the forget-profile action");
+assert.match(electronSource, /codexpro:forget-profile[\s\S]*?action: "forget_profile"/, "the main process must route profile forgetting through the local MCP runtime");
 
 console.log("✓ Connected worker overview, queued refresh, and manual connector verification smoke test passed");

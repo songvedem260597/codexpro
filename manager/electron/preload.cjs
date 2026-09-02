@@ -45,6 +45,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   rotateLink: () => invoke("codexpro:rotate-link"),
   listProjects: () => invoke("codexpro:projects"),
   checkProfile: (profileId) => invoke("codexpro:check-profile", profileId),
+  forgetProfile: (profileId) => invoke("codexpro:forget-profile", profileId),
   setupProfile: (profileId) => invoke("codexpro:setup-profile", profileId),
   openProfileChat: (payload) => invoke("codexpro:open-profile-chat", payload),
   recoverProfileChat: (payload) => invoke("codexpro:recover-profile-chat", payload),

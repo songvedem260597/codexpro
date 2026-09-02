@@ -3790,6 +3790,18 @@ async function listBrowserProfilesThroughMcp(config, token) {
   return Array.isArray(result.profiles) ? result.profiles : [];
 }
 
+async function forgetChromeProfile(profileId) {
+  const id = String(profileId || "").trim();
+  if (!id || id.length > 160 || !/^[A-Za-z0-9._-]+$/.test(id)) throw new Error("Chrome profile id không hợp lệ.");
+  const status = await readyRuntimeStatus();
+  if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  const token = readToken(status.config.tokenFile);
+  return await localMcpTool(status.config, token, "browser_control", {
+    action: "forget_profile",
+    profile_id: id
+  });
+}
+
 async function setupChatGptProfile(profileId) {
   const id = String(profileId || "").trim();
   if (!id || id.length > 160 || !/^[A-Za-z0-9._-]+$/.test(id)) throw new Error("Chrome profile id không hợp lệ.");
@@ -5019,6 +5031,15 @@ diagnosticIpcHandle("codexpro:check-profile", {
     ? { level: result?.renderer_unresponsive ? "error" : "warn", message: "Kiểm tra profile phát hiện trạng thái bất thường" }
     : null
 }, (_event, profileId) => checkChatGptProfile(profileId));
+diagnosticIpcHandle("codexpro:forget-profile", {
+  category: "profile",
+  action: "forget_profile",
+  logSuccess: true,
+  successMessage: "Đã ẩn Chrome profile khỏi Manager",
+  failureMessage: "Không ẩn được Chrome profile",
+  details: (profileId) => ({ profile_id: String(profileId || "") }),
+  resultDetails: (result) => ({ profile_id: String(result?.profile_id || ""), forgotten: Boolean(result?.forgotten) })
+}, (_event, profileId) => forgetChromeProfile(profileId));
 diagnosticIpcHandle("codexpro:setup-profile", {
   category: "profile",
   action: "setup-profile",
