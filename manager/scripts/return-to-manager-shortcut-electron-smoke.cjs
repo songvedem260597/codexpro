@@ -13,9 +13,11 @@ app.whenReady().then(async () => {
     webPreferences: { sandbox: true }
   });
   try {
+    const testAccelerator = "CommandOrControl+Shift+F11";
     const registration = shortcutModule.registerReturnToManagerShortcut({
       globalShortcut,
-      getWindow: () => win
+      getWindow: () => win,
+      accelerator: testAccelerator
     });
     assert.equal(registration.registered, true, `Could not register ${registration.accelerator}`);
     assert.equal(globalShortcut.isRegistered(registration.accelerator), true);
