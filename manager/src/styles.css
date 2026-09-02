@@ -233,8 +233,8 @@ section { margin-bottom: 38px; }
 .profile-summary-item.is-idle { color: #8ce8af; }
 .profile-summary-item.is-hung { color: #f1939e; }
 .profile-summary-item.is-missing { color: #efb16c; }
-.profile-summary-icon { width: 15px; height: 15px; flex: 0 0 15px; display: grid; place-items: center; color: currentColor; }
-.profile-summary-icon svg { width: 15px; height: 15px; overflow: visible; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.profile-summary-icon { width: 18px; height: 18px; flex: 0 0 18px; display: grid; place-items: center; color: currentColor; }
+.profile-summary-icon svg { width: 18px; height: 18px; overflow: visible; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .profile-summary-svg > * { transform-box: fill-box; transform-origin: center; }
 .profile-summary-item.is-working .summary-working-bolt { animation: profile-summary-working-bolt 1.35s cubic-bezier(.4, 0, .2, 1) infinite; filter: drop-shadow(0 0 1.8px currentColor); }
 .profile-summary-item.is-working .summary-working-spark { fill: currentColor; stroke: none; animation: profile-summary-working-spark 1.35s ease-out infinite; filter: drop-shadow(0 0 2px currentColor); }
