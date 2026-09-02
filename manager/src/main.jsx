@@ -472,7 +472,8 @@ function repoTaskEvidenceSummary(proof) {
 }
 
 function profileVisibleInWorkerList(profile) {
-  return Number(profile?.tab_count || 0) > 0 || Boolean(profile?.connector_installed);
+  return Boolean(profile?.connected)
+    && (Number(profile?.tab_count || 0) > 0 || Boolean(profile?.connector_installed));
 }
 
 function profileSafeForWorkerUpdate(profile) {
@@ -3266,31 +3267,6 @@ function App() {
     }
   }
 
-  async function forgetProfile(profile) {
-    setBusy(`forget-profile:${profile.profile_id}`);
-    setError("");
-    try {
-      await api.forgetProfile(profile.profile_id);
-      emptyBrowserSnapshotSince.current = 0;
-      setStatus((current) => current ? {
-        ...current,
-        browserProfiles: (current.browserProfiles || []).filter((item) => item.profile_id !== profile.profile_id)
-      } : current);
-      setProfileTaskLabels((current) => {
-        if (!Object.prototype.hasOwnProperty.call(current, profile.profile_id)) return current;
-        const next = { ...current };
-        delete next[profile.profile_id];
-        return next;
-      });
-      if (chatProfileId === profile.profile_id) setChatProfileId("");
-      notify("Đã ẩn profile khỏi danh sách · profile sẽ hiện lại khi extension kết nối");
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setBusy("");
-    }
-  }
-
   async function recoveryContinuationSnapshot(profile, conversationId, targetTab) {
     const profileId = String(profile?.profile_id || "");
     const liveResponse = requestResponsesRef.current[profileId] || {};
@@ -4688,10 +4664,6 @@ function App() {
               const profileProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const profileRepoLabel = String(profile.current_workspace_repo || profileProject?.githubRepo || profileProject?.name || "").trim();
               const profileTaskLabel = String(profile.current_task_title || profileTaskLabels[profile.profile_id] || "").trim();
-              const flightRecorderCount = Math.max(0, Number(profile.flight_recorder_incident_count) || 0);
-              const flightRecorderKind = String(profile.flight_recorder_latest_kind || "").trim();
-              const flightRecorderMessage = String(profile.flight_recorder_latest_message || "").trim();
-              const flightRecorderAt = String(profile.flight_recorder_latest_at || "").trim();
               const profileRepository = profileRepoLabel ? {
                 label: profileRepoLabel,
                 title: profileProject?.remoteUrl || workspaceRoot || profileRepoLabel
@@ -4719,7 +4691,6 @@ function App() {
                       <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Mất heartbeat extension"}</span>
                       <span>v{profile.extension_version || "cũ"}</span>
                       <span>{chatGptTabCount} tab</span>
-                      {flightRecorderCount > 0 && <span className="profile-warning" title={[flightRecorderKind, flightRecorderMessage, flightRecorderAt].filter(Boolean).join(" · ")}>Recorder {flightRecorderCount} sự cố{flightRecorderKind ? ` · ${flightRecorderKind}` : ""}</span>}
                       {connectorMessage && <span className={connectorInstalled ? "ready-text" : "profile-warning"}>{connectorMessage}</span>}
                     </div>
                     {profileTaskLabel && (
@@ -4751,17 +4722,6 @@ function App() {
                         {busy === `recover-profile:${profile.profile_id}` ? "Đang khôi phục…" : busy === `open-profile:${profile.profile_id}` ? "Đang chuyển…" : chromeAction.label}
                       </button>
                     </div>
-                    {hung && (
-                      <button
-                        type="button"
-                        className="button danger-quiet forget-profile"
-                        onClick={() => void forgetProfile(profile)}
-                        disabled={Boolean(busy)}
-                        title="Chỉ ẩn hồ sơ cũ khỏi CodexPro Manager; không xóa Chrome profile."
-                      >
-                        {busy === `forget-profile:${profile.profile_id}` ? "Đang ẩn…" : "Ẩn khỏi danh sách"}
-                      </button>
-                    )}
                     {connectorInstalled ? (
                       <span className={`already-connected ${connectorUpdateRequired ? "is-update-required" : working || settling ? "is-working" : idle ? "is-idle" : "is-default"}`}>✓ Đã thêm CodexPro</span>
                     ) : (
