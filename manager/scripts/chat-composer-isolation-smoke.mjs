@@ -3,6 +3,7 @@ import fs from "node:fs";
 
 const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const electronMain = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
 const composerStart = source.indexOf("function ChatRequestComposer(");
 const appStart = source.indexOf("function App()", composerStart);
 assert.ok(composerStart >= 0 && appStart > composerStart, "ChatRequestComposer must stay isolated above App");
@@ -22,7 +23,12 @@ const modalStart = source.indexOf("function renderChatModal()");
 const modalEnd = source.indexOf("const selectedFont =", modalStart);
 const modal = source.slice(modalStart, modalEnd);
 assert.match(modal, /<ChatRequestComposer/, "chat modal must render the isolated composer");
-assert.match(modal, /<ChatDropdown[\s\S]*selectRequestConversation\(profile, id\)/, "chat modal must keep an explicit conversation selector");
+assert.match(modal, /managerSettings\.showChatConversationSelector !== false[\s\S]*?<ChatDropdown[\s\S]*selectRequestConversation\(profile, id\)/, "chat modal conversation selector must be controlled by the Manager setting");
+assert.match(source, /showChatConversationSelector:\s*true/, "conversation selector must remain enabled by default for existing users");
+assert.match(source, /title="Hiện mục Đoạn chat"[\s\S]*saveManagerSetting\(\{ showChatConversationSelector: value \}/, "Settings must expose an explicit conversation-selector toggle");
+assert.match(electronMain, /showChatConversationSelector:\s*true/, "Electron settings must default the selector to visible");
+assert.match(electronMain, /showChatConversationSelector:\s*parsed\?\.showChatConversationSelector !== false/, "Electron settings must persist a saved hidden selector state");
+assert.match(electronMain, /hasOwnProperty\.call\(patch, "showChatConversationSelector"\)[\s\S]*next\.showChatConversationSelector = patch\.showChatConversationSelector !== false/, "Electron settings save path must accept the selector toggle");
 assert.doesNotMatch(modal, /value=\{draft\}/, "chat modal must not own controlled draft input state");
 
 assert.match(source, /requestTargetsRef\.current = \{ \.\.\.requestTargetsRef\.current, \[profileId\]: nextTarget \}/, "conversation selection must synchronously pin the target ref");
