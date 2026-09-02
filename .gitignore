@@ -15,6 +15,7 @@ manager/release/
 manager/release-*/
 release/
 manager/*-smoke.png
+manager/scripts/*-smoke.png
 CODEXPRO_MCP_REPORT.md
 *.local.md
 *.local.json
