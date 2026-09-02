@@ -48,6 +48,14 @@ assert.equal(transientEmpty.preserved, true);
 assert.equal(transientEmpty.emptySinceMs, emptyStartedAt);
 assert.equal(transientEmpty.retryAfterMs, EMPTY_BROWSER_PROFILE_GRACE_MS);
 
+const explicitlyDisabled = stabilizeEmptyBrowserProfileSnapshot(previous, [], {
+  nowMs: emptyStartedAt,
+  removedProfileIds: ["profile-a"]
+});
+assert.deepEqual(explicitlyDisabled.profiles, [], "an explicitly disabled profile must bypass the transient empty grace");
+assert.equal(explicitlyDisabled.preserved, false);
+assert.equal(explicitlyDisabled.emptySinceMs, 0);
+
 const recoveredBeforeGrace = stabilizeEmptyBrowserProfileSnapshot(previous, heartbeatOnly, {
   nowMs: emptyStartedAt + 5_000,
   emptySinceMs: transientEmpty.emptySinceMs

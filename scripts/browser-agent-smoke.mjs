@@ -767,7 +767,7 @@ assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
 assert.match(worker, /if\(domActivity\.busy\)\{[\s\S]*?probeCanonicalActivity\(tab\.id,targetConversationId,true\)[\s\S]*?canonicalCompleted[\s\S]*?send_preflight_canonical/, "send preflight must clear a stale DOM busy guard when canonical proves the previous turn completed");
-assert.equal(manifest.version, "0.5.105");
+assert.equal(manifest.version, "0.5.106");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
@@ -793,7 +793,7 @@ assert.match(popupJs, /button\.hidden=isActive[\s\S]*?activeState\.hidden=!isAct
 assert.match(popupJs, /installButton\.hidden=true/, "the reinstall action must disappear when CodexPro is already ready");
 assert.doesNotMatch(popupHtml + popupJs, /CÀI LẠI \/ KIỂM TRA LẠI/, "the ready popup must not keep a redundant reinstall button");
 assert.match(popupHtml, /id="workerToggle"[\s\S]*?role="switch"/, "the popup must expose an accessible worker connection toggle");
-assert.match(popupJs, /workerEnabled[\s\S]*?BRIDGE}\/register[\s\S]*?enabled:false/, "disabling a worker must immediately publish a hidden profile state to the Bridge");
+assert.match(popupJs, /const acknowledgeWorkerDisable = async \(\) => \{[\s\S]*?registerProfile\(false\)/, "disabling a worker must immediately publish a hidden profile state to the Bridge");
 assert.match(worker, /if\(!profile\.enabled\)[\s\S]*?setTimeout\(resolve,2000\)[\s\S]*?continue/, "a disabled extension must stop polling the Bridge");
 assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && browserProfileRetentionState\(profile, now\)\.visible/, "disabled profiles must be retained internally but excluded from the visible worker list");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");

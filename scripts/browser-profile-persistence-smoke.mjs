@@ -16,12 +16,13 @@ const home = mkdtempSync(path.join(tmpdir(), 'codexpro-profile-persist-'));
 const childPath = path.join(home, 'bridge-child.mjs');
 const bridgeUrl = pathToFileURL(path.resolve('dist/browserExtensionBridge.js')).href;
 writeFileSync(childPath, `
-import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles } from ${JSON.stringify(bridgeUrl)};
+import { ensureBrowserExtensionBridge, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds } from ${JSON.stringify(bridgeUrl)};
 const mode = process.argv[2];
 const port = Number(process.env.CODEXPRO_BROWSER_EXTENSION_BRIDGE_PORT);
 ensureBrowserExtensionBridge();
 await new Promise(resolve => setTimeout(resolve, 80));
-if (mode === 'register') {
+if (mode === 'register' || mode === 'disable') {
+  const enabled = mode === 'register';
   const response = await fetch('http://127.0.0.1:' + port + '/register', {
     method: 'POST',
     headers: {
@@ -35,7 +36,7 @@ if (mode === 'register') {
         email: 'persist@example.test',
         label: 'Persist Smoke',
         version: '0.5.105',
-        enabled: true,
+        enabled,
         worker_enabled_updated_at: Date.now(),
         connector_server_fingerprint: 'fixture-fingerprint'
       },
@@ -47,7 +48,7 @@ if (mode === 'register') {
   await new Promise(resolve => setTimeout(resolve, 500));
   console.log(JSON.stringify(await response.json()));
 } else if (mode === 'list') {
-  console.log(JSON.stringify(listBrowserExtensionProfiles()));
+  console.log(JSON.stringify({ profiles: listBrowserExtensionProfiles(), disabled_profile_ids: listDisabledBrowserExtensionProfileIds() }));
 } else {
   throw new Error('unknown mode');
 }
@@ -79,11 +80,18 @@ try {
   assert.equal(registry.profiles[0].extensionVersion, '0.5.105');
 
   const restored = JSON.parse(run('list', seed + 1));
-  const profile = restored.find(item => item.profile_id === 'persist-smoke-profile');
+  const profile = restored.profiles.find(item => item.profile_id === 'persist-smoke-profile');
   assert.ok(profile, 'persisted browser profile must survive bridge restart');
   assert.equal(profile.connected, false, 'restored profile is visible but disconnected until heartbeat returns');
   assert.equal(profile.active, false);
   assert.equal(profile.extension_version, '0.5.105');
+
+  run('disable', seed + 2);
+  const disabledRegistry = JSON.parse(readFileSync(path.join(home, 'browser-profiles.json'), 'utf8'));
+  assert.equal(disabledRegistry.profiles[0].enabled, false, 'disabled profile metadata must be persisted');
+  const disabledSnapshot = JSON.parse(run('list', seed + 3));
+  assert.deepEqual(disabledSnapshot.profiles, [], 'disabled profiles must stay hidden after bridge restart');
+  assert.deepEqual(disabledSnapshot.disabled_profile_ids, ['persist-smoke-profile'], 'bridge snapshots must identify explicit disabled removals');
   console.log('✓ Browser profile registry survives runtime restart and reconnect state is safe');
 } finally {
   rmSync(home, { recursive: true, force: true });

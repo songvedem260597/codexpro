@@ -33,7 +33,15 @@ export function mergeBrowserProfilePayload(previousProfiles, incomingProfiles) {
 }
 
 export function stabilizeEmptyBrowserProfileSnapshot(previousProfiles, incomingProfiles, options = {}) {
-  const previous = Array.isArray(previousProfiles) ? previousProfiles : [];
+  const removedProfileIds = new Set(
+    (Array.isArray(options.removedProfileIds) ? options.removedProfileIds : [])
+      .map((profileId) => String(profileId || ""))
+      .filter(Boolean)
+  );
+  const previousSource = Array.isArray(previousProfiles) ? previousProfiles : [];
+  const previous = removedProfileIds.size
+    ? previousSource.filter((profile) => !removedProfileIds.has(String(profile?.profile_id || "")))
+    : previousSource;
   const incoming = Array.isArray(incomingProfiles) ? incomingProfiles : [];
   const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
   const graceMs = Number.isFinite(options.graceMs) ? Math.max(0, options.graceMs) : EMPTY_BROWSER_PROFILE_GRACE_MS;
