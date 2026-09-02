@@ -23,8 +23,8 @@ assert.match(responseReader, /text_length:text\.length,links,truncated:/, "the l
 assert.match(markdownRenderer, /safeMarkdownHref[\s\S]*?https\?:\\\/\\\/[\s\S]*?mailto:/, "Manager Markdown rendering must whitelist safe clickable link schemes");
 assert.match(markdownRenderer, /onClick=\{\(event\) => openExternalLink\(event, safeHref\)\}/, "Manager Markdown links must route clicks through the Electron openExternal bridge instead of a denied popup");
 assert.match(markdownRenderer, /globalThis\.window\?\.codexpro\?\.openExternal[\s\S]*?event\.preventDefault\(\)/, "clickable response links must prevent the denied in-app navigation only when the external-link bridge exists");
-assert.equal(manifest.version, "0.5.104", "the macOS single-tab preservation fix must be packaged in a reloadable extension version");
-assert.match(managerMain, /const WORKER_EXTENSION_VERSION = "0\.5\.104";/, "Manager updater must require the worker version containing the macOS single-tab preservation fix");
+assert.equal(manifest.version, "0.5.105", "the macOS chat-read and tab lifecycle fixes must be packaged in a reloadable extension version");
+assert.match(managerMain, /const WORKER_EXTENSION_VERSION = "0\.5\.105";/, "Manager updater must require the worker version containing the macOS chat-read and tab lifecycle fixes");
 assert.match(managerMain, /\["http:", "https:", "mailto:"\][\s\S]*?shell\.openExternal/, "Manager external-link IPC must allow the same safe schemes rendered by response Markdown");
 
 console.log("✓ Chat response link extraction/render smoke test passed");

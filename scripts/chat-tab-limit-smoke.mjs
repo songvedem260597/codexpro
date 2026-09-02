@@ -11,7 +11,7 @@ assert.match(worker, /chrome\.tabs\.onCreated[\s\S]*?enforceSingleChatTabSoon/, 
 assert.match(worker, /chrome\.tabs\.onUpdated[\s\S]*?enforceSingleChatTabSoon/, "navigating a tab to ChatGPT must trigger macOS single-tab enforcement");
 assert.match(worker, /function chatNavigationSupersedesNetworkState[\s\S]*?trackedConversationId!==conversationIdFromUrl\(nextUrl\)/, "navigation to another conversation or the ChatGPT root must supersede stale network state");
 assert.match(worker, /async function resetSupersededChatActivity[\s\S]*?chatNetworkStateByTab\.delete\(tabId\)[\s\S]*?persistChatNetworkState/, "superseded network state must be cleared and persisted");
-assert.match(worker, /codexpro_unreachable[\s\S]*?healthReplacement[\s\S]*?chrome\.tabs\.create/, "a dead sole macOS ChatGPT tab must be replaced after it is closed");
+assert.match(worker, /plan\.reasons\[tabId\]==='codexpro_unreachable'[\s\S]*?chrome\.tabs\.create[\s\S]*?removeTabWithReason\(tabId/, "health cleanup must create the last macOS tab's replacement before closing it");
 assert.match(worker, /recover_chat_tab[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\}\)/, "fresh-chat recovery must use the capped tab creator");
 assert.match(worker, /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:false\}\)/, "new chat requests must use the capped tab creator");
 const replacementSource = worker.slice(
