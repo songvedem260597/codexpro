@@ -96,6 +96,10 @@ try {
   assert.equal(snapshot.summary.total_count, 2, "a later hang of the same task must increment the hang count");
   assert.equal(snapshot.incidents[0].occurrence, 2);
   assert.equal(fs.existsSync(tracker.storePath), true, "hang history must persist across Manager sessions");
+  const reloadedTracker = createTaskHangTracker({ home: tempHome, now: () => now });
+  const reloadedSnapshot = reloadedTracker.snapshot();
+  assert.equal(reloadedSnapshot.summary.total_count, 2, "a fresh Manager tracker must reload persisted hang history");
+  assert.equal(reloadedSnapshot.incidents[0].occurrence, 2, "persisted occurrence counters must survive Manager restart");
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });
 }
