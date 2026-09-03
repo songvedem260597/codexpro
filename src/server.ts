@@ -25,7 +25,7 @@ import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileTaskBinding, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, rebindBrowserExtensionProfileTaskConversation, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
-import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, workerJobPublicRecord, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
+import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, reportWorkerJobProgress, workerJobPublicRecord, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
 import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
@@ -393,6 +393,7 @@ const REPO_TASK_GATE_EXEMPT_TOOLS = new Set<string>([
   "workspace_coordination_status",
   "worker_job_status",
   "worker_job_history",
+  "report_worker_job_progress",
   "finalize_worker_job"
 ]);
 
@@ -633,6 +634,7 @@ const MINIMAL_TOOL_NAMES = [
   "workspace_coordination_status",
   "worker_job_status",
   "worker_job_history",
+  "report_worker_job_progress",
   "finalize_worker_job",
   "open_current_workspace",
   "open_workspace",
@@ -669,6 +671,7 @@ const FULL_TOOL_NAMES = [
   "workspace_coordination_status",
   "worker_job_status",
   "worker_job_history",
+  "report_worker_job_progress",
   "finalize_worker_job",
   "codexpro_inventory",
   "load_skill",
@@ -702,6 +705,7 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   SUPERTOOL_NAME,
   "codexpro_self_test",
   "prepare_repo_task",
+  "report_worker_job_progress",
   "finalize_worker_job",
   "write",
   "edit",
@@ -2445,6 +2449,57 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         count: jobs.length,
         jobs: jobs.map((record) => workerJobPublicRecord(record))
       });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "report_worker_job_progress",
+    {
+      title: "Report Worker Job Progress",
+      description: "Persist a structured progress checkpoint for a profile-bound worker job so partial completion, verification, blockers, errors, and stalls have explicit investigation evidence.",
+      inputSchema: {
+        task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/),
+        stage: z.enum(["started", "partial", "all_parts_done", "verifying", "blocked", "error", "stalled"]),
+        summary: z.string().min(1).max(2000),
+        reason: z.string().max(2000).optional(),
+        evidence: z.string().max(2000).optional(),
+        completed_parts: z.array(z.string().min(1).max(300)).max(50).optional(),
+        remaining_parts: z.array(z.string().min(1).max(300)).max(50).optional()
+      },
+      annotations: HANDOFF_WRITE_ANNOTATIONS
+    },
+    async (args) => {
+      const gateProfileId = repoTaskGateProfileByServer.get(server as object) || undefined;
+      if (!gateProfileId) {
+        throw new CodexProError("WORKER_JOB_PROFILE_REQUIRED: report_worker_job_progress requires a profile-bound Browser or API worker MCP session.", {
+          code: "WORKER_JOB_PROFILE_REQUIRED",
+          details: { task_id: args.task_id }
+        });
+      }
+      try {
+        const record = await reportWorkerJobProgress({
+          jobId: args.task_id,
+          workerId: gateProfileId,
+          stage: args.stage,
+          summary: args.summary,
+          reason: args.reason,
+          evidence: args.evidence,
+          completedParts: args.completed_parts,
+          remainingParts: args.remaining_parts
+        });
+        return textResult(`# Worker Job Progress\n\n${record.jobId}: ${record.lastProgressStage || "running"} · checkpoint ${record.progressSequence}`, {
+          reported: true,
+          policy_version: record.policyVersion,
+          job: workerJobPublicRecord(record)
+        });
+      } catch (error) {
+        throw new CodexProError(`WORKER_JOB_PROGRESS_REJECTED: ${error instanceof Error ? error.message : String(error)}`, {
+          code: "WORKER_JOB_PROGRESS_REJECTED",
+          details: { task_id: args.task_id, profile_id: gateProfileId }
+        });
+      }
     }
   );
 

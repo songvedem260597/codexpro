@@ -41,9 +41,29 @@ const orphaned = taskUnfinalizedIncident(job, {
 assert.equal(orphaned?.category, "task-unfinalized");
 assert.equal(orphaned?.details?.classification, "task_unfinalized");
 assert.equal(orphaned?.details?.suspected_cause, "browser_task_pointer_missing_without_finalize");
+assert.equal(orphaned?.details?.progress_gap_classification, "model_never_reported_progress");
+assert.equal(orphaned?.details?.progress_sequence, 0);
 assert.equal(orphaned?.details?.incident_fingerprint, `task-unfinalized:${job.job_id}`);
 assert.equal(orphaned?.details?.last_event?.type, "bootstrapped");
 assert.ok(orphaned?.details?.stale_ms > 0);
+
+const checkpointOrphaned = taskUnfinalizedIncident({
+  ...job,
+  progress_sequence: 3,
+  last_progress_stage: "verifying",
+  last_progress_at: "2026-09-01T07:00:30.000Z",
+  last_progress_summary: "Code xong, đang chạy smoke test.",
+  last_progress_reason: "Smoke test cuối chưa trả kết quả."
+}, {
+  now,
+  profiles: [{ profile_id: "chrome-one", connected: true, activity: "idle", current_task_id: "", current_task_title: "", conversation_tabs: [] }]
+});
+assert.equal(checkpointOrphaned?.details?.progress_gap_classification, "model_progress_stopped_before_finalize");
+assert.equal(checkpointOrphaned?.details?.progress_sequence, 3);
+assert.equal(checkpointOrphaned?.details?.last_progress_stage, "verifying");
+assert.equal(checkpointOrphaned?.details?.last_progress_at, "2026-09-01T07:00:30.000Z");
+assert.equal(checkpointOrphaned?.details?.last_progress_summary, "Code xong, đang chạy smoke test.");
+assert.equal(checkpointOrphaned?.details?.last_progress_reason, "Smoke test cuối chưa trả kết quả.");
 
 assert.equal(taskUnfinalizedIncident(job, {
   now,

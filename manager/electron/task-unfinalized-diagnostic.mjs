@@ -37,6 +37,14 @@ export function taskUnfinalizedIncident(job, { profiles = [], workers = [], now 
   }
 
   const events = Array.isArray(job?.events) ? job.events : [];
+  const progressSequence = Math.max(0, Number(job?.progress_sequence ?? job?.progressSequence ?? 0) || 0);
+  const lastProgressStage = clean(job?.last_progress_stage ?? job?.lastProgressStage, 80);
+  const lastProgressAt = clean(job?.last_progress_at ?? job?.lastProgressAt, 80);
+  const lastProgressSummary = clean(job?.last_progress_summary ?? job?.lastProgressSummary, 2000);
+  const lastProgressReason = clean(job?.last_progress_reason ?? job?.lastProgressReason, 2000);
+  const progressGapClassification = progressSequence > 0
+    ? "model_progress_stopped_before_finalize"
+    : "model_never_reported_progress";
   return {
     level: "error",
     source: "manager",
@@ -48,6 +56,12 @@ export function taskUnfinalizedIncident(job, { profiles = [], workers = [], now 
       classification: "task_unfinalized",
       incident_fingerprint: `task-unfinalized:${jobId}`,
       suspected_cause: suspectedCause,
+      progress_gap_classification: progressGapClassification,
+      progress_sequence: progressSequence,
+      last_progress_stage: lastProgressStage,
+      last_progress_at: lastProgressAt,
+      last_progress_summary: lastProgressSummary,
+      last_progress_reason: lastProgressReason,
       job_id: jobId,
       task_id: jobId,
       task_title: clean(job?.title, 120),

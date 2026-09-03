@@ -87,5 +87,10 @@ assert.match(
   /Task hoàn tất[\s\S]{0,400}silent:\s*true[\s\S]{0,200}playTaskCompletionSound\(\)/,
   "only the existing task-complete transition should show a silent Windows notification and play the soft click"
 );
+assert.match(
+  main,
+  /previousJobStatus\s*===\s*["']completed["'][\s\S]{0,400}Task hoàn tất/,
+  "an idle browser transition must not announce completion until the worker job is explicitly finalized as completed"
+);
 
 console.log("✓ Gentle task-completion sound smoke test passed");

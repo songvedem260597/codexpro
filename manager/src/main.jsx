@@ -1407,6 +1407,7 @@ function App() {
 
   useEffect(() => {
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
     for (const profile of profiles) {
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
       const tab = tabs.find((item) => item.busy || item.settling || String(item?.network_state || "") === "generating") || tabs.find((item) => item.active) || tabs[0];
@@ -1416,7 +1417,9 @@ function App() {
       const failed = Boolean(tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error);
       const previous = operationsNotificationState.current.get(profile.profile_id);
       if (managerSettings.taskNotifications !== false && previous) {
-        if (previous.working && !working && previous.taskId) {
+        const previousJob = previous.taskId ? jobs.find((job) => String(job?.job_id || job?.jobId || "") === previous.taskId) : null;
+        const previousJobStatus = String(previousJob?.status || "").toLowerCase();
+        if (previous.working && !working && previous.taskId && previousJobStatus === "completed") {
           void api.showNotification?.({ title: "CodexPro · Task hoàn tất", body: `${previous.title} · ${profile.label || profile.profile_id.slice(0, 8)}`, silent: true });
           playTaskCompletionSound();
         } else if (!previous.failed && failed) {
@@ -1425,7 +1428,7 @@ function App() {
       }
       operationsNotificationState.current.set(profile.profile_id, { working, failed, taskId, title });
     }
-  }, [managerSettings.taskNotifications, status?.browserProfiles]);
+  }, [managerSettings.taskNotifications, status?.browserProfiles, status?.workerJobs]);
 
   useEffect(() => {
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];

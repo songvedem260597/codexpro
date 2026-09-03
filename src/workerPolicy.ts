@@ -9,6 +9,18 @@ export const WORKER_POLICY_VERSION = "worker-policy-v1";
 export type WorkerJobKind = "general" | "code";
 export type WorkerJobScope = "workspace" | "all_allowed";
 export type WorkerJobStatus = "prepared" | "running" | "completed" | "failed" | "cancelled" | "blocked";
+export type WorkerJobProgressStage = "started" | "partial" | "all_parts_done" | "verifying" | "blocked" | "error" | "stalled";
+
+export type WorkerJobProgressReport = {
+  at: string;
+  sequence: number;
+  stage: WorkerJobProgressStage;
+  summary: string;
+  reason?: string;
+  evidence?: string;
+  completedParts: string[];
+  remainingParts: string[];
+};
 
 export type WorkerJobRecord = {
   version: 1;
@@ -34,6 +46,12 @@ export type WorkerJobRecord = {
   codexGraphRelationshipCount?: number;
   requiredObligations: string[];
   completedObligations: string[];
+  progressSequence: number;
+  progressReports: WorkerJobProgressReport[];
+  lastProgressStage?: WorkerJobProgressStage;
+  lastProgressAt?: string;
+  lastProgressSummary?: string;
+  lastProgressReason?: string;
   summary?: string;
   error?: string;
   events: Array<{ at: string; type: string; details?: Record<string, unknown> }>;
@@ -42,6 +60,7 @@ export type WorkerJobRecord = {
 const writeTails = new Map<string, Promise<void>>();
 const workerBootstrapTails = new Map<string, Promise<void>>();
 const MAX_EVENTS = 100;
+const MAX_PROGRESS_REPORTS = 24;
 
 function workerJobsDir(): string {
   return path.join(codexProHome(), "worker-jobs");
@@ -65,6 +84,32 @@ function uniqueStrings(values: unknown, maxItems = 100): string[] {
 function workerOwnerKey(value: unknown): string {
   const workerId = clean(value, 160);
   return workerId.startsWith("browser:") ? workerId.slice("browser:".length) : workerId;
+}
+
+function normalizeProgressStage(value: unknown): WorkerJobProgressStage | undefined {
+  const stage = clean(value, 40);
+  return ["started", "partial", "all_parts_done", "verifying", "blocked", "error", "stalled"].includes(stage)
+    ? stage as WorkerJobProgressStage
+    : undefined;
+}
+
+function normalizeProgressReport(value: unknown): WorkerJobProgressReport | undefined {
+  const source = value && typeof value === "object" ? value as Partial<WorkerJobProgressReport> : {};
+  const stage = normalizeProgressStage(source.stage);
+  const sequence = Math.max(1, Math.floor(Number(source.sequence) || 0));
+  const at = clean(source.at, 80);
+  const summary = clean(source.summary, 2000);
+  if (!stage || !sequence || !at || !summary) return undefined;
+  return {
+    at,
+    sequence,
+    stage,
+    summary,
+    reason: clean(source.reason, 2000) || undefined,
+    evidence: clean(source.evidence, 2000) || undefined,
+    completedParts: uniqueStrings(source.completedParts, 50),
+    remainingParts: uniqueStrings(source.remainingParts, 50)
+  };
 }
 
 function normalizeRecord(value: unknown): WorkerJobRecord | undefined {
@@ -100,6 +145,15 @@ function normalizeRecord(value: unknown): WorkerJobRecord | undefined {
     codexGraphRelationshipCount: Number.isFinite(source.codexGraphRelationshipCount) ? Number(source.codexGraphRelationshipCount) : undefined,
     requiredObligations: uniqueStrings(source.requiredObligations),
     completedObligations: uniqueStrings(source.completedObligations),
+    progressSequence: Math.max(0, Math.floor(Number(source.progressSequence) || 0)),
+    progressReports: (Array.isArray(source.progressReports) ? source.progressReports : [])
+      .map((report) => normalizeProgressReport(report))
+      .filter((report): report is WorkerJobProgressReport => Boolean(report))
+      .slice(-MAX_PROGRESS_REPORTS),
+    lastProgressStage: normalizeProgressStage(source.lastProgressStage),
+    lastProgressAt: clean(source.lastProgressAt, 80) || undefined,
+    lastProgressSummary: clean(source.lastProgressSummary, 2000) || undefined,
+    lastProgressReason: clean(source.lastProgressReason, 2000) || undefined,
     summary: clean(source.summary, 4000) || undefined,
     error: clean(source.error, 4000) || undefined,
     events: (Array.isArray(source.events) ? source.events : []).slice(-MAX_EVENTS).map((event) => ({
@@ -197,6 +251,12 @@ export async function prepareWorkerJob(input: {
     codexGraphActive: current?.codexGraphActive || false,
     requiredObligations: current?.requiredObligations || [],
     completedObligations: current?.completedObligations || [],
+    progressSequence: current?.progressSequence || 0,
+    progressReports: current?.progressReports || [],
+    lastProgressStage: current?.lastProgressStage,
+    lastProgressAt: current?.lastProgressAt,
+    lastProgressSummary: current?.lastProgressSummary,
+    lastProgressReason: current?.lastProgressReason,
     events: [...(current?.events || []), event("prepared", { worker_id: input.workerId, scope: input.scope, root: input.root })]
   }));
 }
@@ -238,6 +298,8 @@ async function bootstrapWorkerJobRecord(input: {
         codexGraphActive: false,
         requiredObligations: [],
         completedObligations: [],
+        progressSequence: 0,
+        progressReports: [],
         events: []
       }),
       workerId: input.workerId,
@@ -297,6 +359,56 @@ export async function bootstrapWorkerJob(input: Parameters<typeof bootstrapWorke
   } finally {
     if (workerBootstrapTails.get(ownerKey) === next) workerBootstrapTails.delete(ownerKey);
   }
+}
+
+export async function reportWorkerJobProgress(input: {
+  jobId: string;
+  workerId?: string;
+  stage: WorkerJobProgressStage;
+  summary: string;
+  reason?: string;
+  evidence?: string;
+  completedParts?: string[];
+  remainingParts?: string[];
+}): Promise<WorkerJobRecord> {
+  return await updateWorkerJob(input.jobId, (current) => {
+    if (!current) throw new Error("Worker job was not prepared.");
+    if (input.workerId && workerOwnerKey(current.workerId) !== workerOwnerKey(input.workerId)) throw new Error("Worker job owner mismatch.");
+    if (current.status !== "running") throw new Error(`Worker job is not running; current status is ${current.status}.`);
+    const stage = normalizeProgressStage(input.stage);
+    const summary = clean(input.summary, 2000);
+    if (!stage) throw new Error("Worker job progress stage is invalid.");
+    if (!summary) throw new Error("Worker job progress summary is required.");
+    const at = new Date().toISOString();
+    const sequence = Math.max(0, current.progressSequence || 0) + 1;
+    const report: WorkerJobProgressReport = {
+      at,
+      sequence,
+      stage,
+      summary,
+      reason: clean(input.reason, 2000) || undefined,
+      evidence: clean(input.evidence, 2000) || undefined,
+      completedParts: uniqueStrings(input.completedParts, 50),
+      remainingParts: uniqueStrings(input.remainingParts, 50)
+    };
+    return {
+      ...current,
+      progressSequence: sequence,
+      progressReports: [...current.progressReports, report].slice(-MAX_PROGRESS_REPORTS),
+      lastProgressStage: stage,
+      lastProgressAt: at,
+      lastProgressSummary: summary,
+      lastProgressReason: report.reason,
+      events: [...current.events, event("progress_reported", {
+        sequence,
+        stage,
+        summary: summary.slice(0, 500),
+        reason: report.reason?.slice(0, 500),
+        completed_parts: report.completedParts,
+        remaining_parts: report.remainingParts
+      })]
+    };
+  });
 }
 
 export async function finalizeWorkerJob(input: {
@@ -384,6 +496,21 @@ export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Reco
     required_obligations: record.requiredObligations,
     completed_obligations: record.completedObligations,
     missing_obligations: missingObligations,
+    progress_sequence: record.progressSequence,
+    progress_reports: record.progressReports.map((report) => ({
+      at: report.at,
+      sequence: report.sequence,
+      stage: report.stage,
+      summary: report.summary,
+      reason: report.reason,
+      evidence: report.evidence,
+      completed_parts: report.completedParts,
+      remaining_parts: report.remainingParts
+    })),
+    last_progress_stage: record.lastProgressStage,
+    last_progress_at: record.lastProgressAt,
+    last_progress_summary: record.lastProgressSummary,
+    last_progress_reason: record.lastProgressReason,
     summary: record.summary,
     error: record.error,
     events: record.events.slice(-20)
