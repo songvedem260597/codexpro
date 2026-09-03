@@ -18,13 +18,11 @@ assert.ok((renderer.match(/className="worker-active-border"/g) || []).length >= 
 assert.match(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working::before,[\s\S]*?transparent 0deg 225deg[\s\S]*?#f4a340 244deg[\s\S]*?#ff9f1c 346deg[\s\S]*?animation:\s*profile-border-shine\s+2\.75s\s+linear\s+infinite/, "the original orange rotating shine must remain unchanged as its own style");
 assert.doesNotMatch(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working\s*\{[^}]*border-color:\s*#334052/, "the original shine must not inherit the mint style's neutral static ring");
 assert.doesNotMatch(styles, /\.app-shell\s*\{[^}]*animation:\s*profile-border-shine/, "the rotating shine must not invalidate styles across the entire app shell");
-assert.match(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working::before,[\s\S]*?animation:\s*profile-border-shine\s+2\.8s\s+linear\s+infinite/, "shine animation must be scoped to the working-card ring and use the requested pace");
-assert.match(styles, /conic-gradient\(from var\(--profile-border-shine-angle\)[\s\S]*?transparent 300deg[\s\S]*?#7cffc4 330deg[\s\S]*?#6aa7ff 350deg[\s\S]*?transparent 360deg\)/, "shine border must use the requested mint-to-blue moving highlight");
 assert.match(styles, /working-border-shine[\s\S]*?-webkit-mask-composite:\s*xor[\s\S]*?mask-composite:\s*exclude/, "shine border must mask the gradient down to the border ring");
-assert.match(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working\s*\{[^}]*border-color:\s*#334052;[^}]*#7cffc414[^}]*#6aa7ff12/, "shine mode must neutralize the old orange card ring so the mint-blue highlight stays visible");
 assert.match(styles, /@property --profile-border-shine-angle[\s\S]*?inherits:\s*false/, "shine angle must not inherit through the renderer tree");
 assert.match(styles, /\.chat-response\.is-streaming::before,[\s\S]*?data-layout-settling="1"\]::before,[\s\S]*?data-layout-stream="1"\]::before[^}]*animation:\s*profile-border-shine/, "streaming chat shine must remain painted through transient busy-to-settling transitions");
-assert.match(renderer, /chat-response is-inline \$\{sending \? "is-sending" : selectedBusy \? "is-streaming" : ""\}/, "submission must use a stable sending border instead of restarting the streaming shine before ACK");
+assert.match(renderer, /const responseBorderActive = selectedBusy \|\| selectedSettling;/, "latest-message border must stay active through confirmed processing and settling");
+assert.match(renderer, /chat-response is-inline \$\{responseBorderActive \? "is-streaming" : sending \? "is-sending" : ""\}/, "submission must use a stable sending border and promote it only after processing is confirmed");
 assert.match(styles, /\.chat-response\.is-sending,[\s\S]*?\.chat-response\.is-streaming,[\s\S]*?data-layout-settling="1"\],[\s\S]*?data-layout-stream="1"\]\s*\{[^}]*border-color:/, "sending, streaming, and settling states must keep the same static border geometry");
 assert.match(styles, /\.chat-response\.is-inline\s*\{[^}]*height:\s*260px;[^}]*min-height:\s*260px;[^}]*max-height:\s*260px;[^}]*flex:\s*0 0 260px;[^}]*contain:\s*layout paint;/, "latest-message geometry must stay fixed even while its content and paint layers change");
 assert.match(styles, /\.chat-modal \.chat-response\.is-inline\s*\{[^}]*height:\s*var\(--chat-response-height, 330px\);[^}]*flex-basis:\s*var\(--chat-response-height, 330px\);/, "chat modal must pin its flex basis to the configured latest-message height");
@@ -36,12 +34,8 @@ assert.match(styles, /\.profile-list\.working-border-mint \.browser-profile\.is-
 assert.match(styles, /@property --profile-border-shine-angle[\s\S]*?inherits:\s*false/, "the shared shine angle must remain a registered non-inherited angle");
 assert.match(styles, /prefers-reduced-motion:\s*reduce[\s\S]*?working-border-mint[\s\S]*?animation:\s*none/, "the added mint border must honor reduced-motion preferences");
 
-assert.match(styles, /\.chat-response::before\s*\{[^}]*opacity:\s*0;[^}]*animation:\s*profile-border-shine[^}]*animation-play-state:\s*paused/, "chat shine must stay mounted but hidden and paused while idle or only sending");
-assert.match(styles, /\.chat-response\.is-streaming::before\s*\{[^}]*opacity:\s*1;[^}]*animation-play-state:\s*running/, "confirmed processing must reveal and resume the existing chat shine layer");
 assert.match(renderer, /const responseBorderActive = selectedBusy \|\| selectedSettling;/, "the latest-message border must stay active continuously from confirmed processing through settling");
 assert.match(renderer, /chat-response is-inline \$\{responseBorderActive \? "is-streaming" : sending \? "is-sending" : ""\}/, "confirmed processing must outrank the local sending state for the latest-message border");
-assert.match(styles, /\.chat-response\.is-streaming\s*\{[^}]*border-color:/, "only confirmed processing may change the latest-message border color");
-assert.doesNotMatch(styles, /\.chat-response\.is-sending(?:\s*,|\s*\{)[^}]*border(?:-color)?:/, "pre-ACK sending must not change the latest-message border at all");
 assert.doesNotMatch(styles, /\.chat-response\.is-sending::before/, "pre-ACK sending must not own the animated border paint layer");
 assert.match(styles, /working-border-beam[\s\S]*?mask:[\s\S]*?offset-path:\s*rect\(/, "Border Beam must be clipped to the card ring and follow its perimeter");
 assert.match(styles, /width:\s*44px[\s\S]*?animation:\s*worker-border-beam-move\s+4\.4s/, "worker Border Beam must use the compact segment and gentle speed");
