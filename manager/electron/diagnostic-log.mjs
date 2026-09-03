@@ -183,7 +183,7 @@ async function readRuntimeLifecycleRecords(home) {
   return records.filter((record) => Date.parse(record.timestamp || "") >= cutoff);
 }
 
-function trimToByteLimit(records) {
+export function trimToByteLimit(records) {
   let bytes = 0;
   const kept = [];
   for (let index = records.length - 1; index >= 0; index -= 1) {
@@ -191,9 +191,9 @@ function trimToByteLimit(records) {
     const lineBytes = Buffer.byteLength(line, "utf8");
     if (kept.length && bytes + lineBytes > MAX_LOG_BYTES) break;
     bytes += lineBytes;
-    kept.unshift(records[index]);
+    kept.push(records[index]);
   }
-  return kept;
+  return kept.reverse();
 }
 
 function annotateIncidentOccurrences(records) {

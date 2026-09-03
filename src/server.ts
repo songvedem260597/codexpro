@@ -1587,6 +1587,30 @@ function rememberRepoTaskProof(proof: RepoTaskProof): void {
   for (const taskId of [...repoTaskProofs.keys()].slice(0, repoTaskProofs.size - 400)) repoTaskProofs.delete(taskId);
 }
 
+function repoTaskProofFromWorkerJob(workerJob: ReturnType<typeof readWorkerJob>): RepoTaskProof | undefined {
+  if (!workerJob?.title || !workerJob.kind) return undefined;
+  return {
+    taskId: workerJob.jobId,
+    taskTitle: workerJob.title,
+    taskKind: workerJob.kind,
+    taskSource: "manager",
+    root: workerJob.root,
+    workspaceId: workerJob.workspaceId || "",
+    startedAt: workerJob.startedAt || workerJob.preparedAt,
+    scope: workerJob.scope,
+    globalRulesPath: workerJob.rulesPath,
+    globalRulesSha256: workerJob.rulesHash,
+    agentsFiles: workerJob.agentsFiles,
+    agentsSha256: workerJob.agentsHash
+  };
+}
+
+function workerJobBelongsToProfile(workerJob: ReturnType<typeof readWorkerJob>, profileId: string): boolean {
+  const workerId = String(workerJob?.workerId || "");
+  const normalizedProfileId = String(profileId || "");
+  return Boolean(normalizedProfileId && (workerId === normalizedProfileId || workerId === `browser:${normalizedProfileId}`));
+}
+
 export interface CodexProServerContext {
   workerId?: string | null;
   browserProfileId?: string;
@@ -2566,9 +2590,24 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       annotations: READ_ONLY_ANNOTATIONS
     },
     async (args) => {
-      const proof = repoTaskProofs.get(args.task_id);
+      const workerJob = readWorkerJob(args.task_id);
+      const proof = repoTaskProofs.get(args.task_id) || repoTaskProofFromWorkerJob(workerJob);
       const gateProfileId = repoTaskGateProfileByServer.get(server as object) || "";
-      const expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
+      let expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
+      if (!expected && requireRepoTask && gateProfileId && proof && workerJobBelongsToProfile(workerJob, gateProfileId)) {
+        expected = rememberExpectedRepoTask(gateProfileId, {
+          taskId: proof.taskId,
+          root: proof.scope === "workspace" ? proof.root : undefined,
+          scope: proof.scope
+        });
+        recordBrowserProfileTaskEvent("repo_task_proof_rehydrated", {
+          profile_id: gateProfileId,
+          task_id: proof.taskId,
+          root: expected.root,
+          scope: expected.scope,
+          reason: "runtime_restart"
+        });
+      }
       const active = gateProfileId ? activeRepoTaskByProfile.get(gateProfileId) : activeRepoTaskByServer.get(server as object);
       const rulesMatch = Boolean(active && readGlobalRulesSnapshotSync().sha256 === active.globalRulesSha256);
       let coordinationTask;
@@ -2583,7 +2622,6 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         ? Boolean(proof && expected && expected.taskId === args.task_id && expected.scope === proof.scope && repoTaskRootMatches(proof.root, expected))
         : Boolean(proof);
       const gateActive = Boolean(taskVerified && proof?.taskKind === "code" && sameRepoTask(active, expected) && rulesMatch);
-      const workerJob = readWorkerJob(args.task_id);
       if (taskVerified && gateProfileId && proof?.taskTitle) {
         setBrowserExtensionProfileTask(gateProfileId, proof.taskId, proof.taskTitle);
       }

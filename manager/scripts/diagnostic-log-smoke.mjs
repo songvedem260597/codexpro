@@ -7,8 +7,15 @@ import {
   clearDiagnosticLogs,
   flushDiagnosticLogs,
   pruneDiagnosticLogs,
-  readDiagnosticLogs
+  readDiagnosticLogs,
+  trimToByteLimit
 } from "../electron/diagnostic-log.mjs";
+
+const trimFixture = Array.from({ length: 12 }, (_, index) => ({ id: index, payload: "x" }));
+assert.deepEqual(trimToByteLimit(trimFixture).map((entry) => entry.id), trimFixture.map((entry) => entry.id), "byte trimming must preserve chronological order");
+const trimStartedAt = Date.now();
+trimToByteLimit(Array.from({ length: 30_000 }, (_, index) => ({ id: index, payload: "diagnostic" })));
+assert.ok(Date.now() - trimStartedAt < 2_500, "byte trimming must remain linear for large diagnostic logs");
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "codexpro-diagnostic-"));
 

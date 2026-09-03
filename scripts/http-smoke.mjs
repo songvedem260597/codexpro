@@ -556,6 +556,21 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     await client.close();
     client = undefined;
 
+    child.kill('SIGTERM');
+    await waitForExit(child);
+    child = startServer();
+    await waitForListening(child);
+    client = await createClient('proof-restart-status', profileId);
+    const recoveredStatus = await callTool(client, 'repo_task_status', { task_id: taskId });
+    if (!recoveredStatus.structuredContent.verified || recoveredStatus.structuredContent.task_title !== 'Resume prepared worker task') {
+      throw new Error(`repo_task_status did not recover durable task proof after runtime restart: ${JSON.stringify(recoveredStatus.structuredContent)}`);
+    }
+    if (recoveredStatus.structuredContent.gate_active !== false) {
+      throw new Error(`runtime restart must not claim the coding gate is still active: ${JSON.stringify(recoveredStatus.structuredContent)}`);
+    }
+    await client.close();
+    client = undefined;
+
     const persistedAfterBegin = JSON.parse(await fs.readFile(path.join(codexProHome, 'browser-profile-tasks.json'), 'utf8'));
     const taskAfterBegin = persistedAfterBegin?.profiles?.[profileId];
     if (taskAfterBegin?.pending_task_id) throw new Error(`pending task gate was not cleared after begin_repo_task: ${JSON.stringify(taskAfterBegin)}`);
@@ -565,6 +580,9 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     const taskEvents = (await fs.readFile(path.join(codexProHome, 'profile-task-events.jsonl'), 'utf8')).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
     if (!taskEvents.some((event) => event.event === 'repo_task_prepared_rehydrated' && event.profile_id === profileId && event.task_id === taskId)) {
       throw new Error(`runtime restart recovery was not logged: ${JSON.stringify(taskEvents)}`);
+    }
+    if (!taskEvents.some((event) => event.event === 'repo_task_proof_rehydrated' && event.profile_id === profileId && event.task_id === taskId && event.reason === 'runtime_restart')) {
+      throw new Error(`durable repo task proof recovery was not logged: ${JSON.stringify(taskEvents)}`);
     }
   } finally {
     if (client) await client.close().catch(() => {});
