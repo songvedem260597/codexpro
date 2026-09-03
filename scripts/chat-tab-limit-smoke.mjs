@@ -38,6 +38,67 @@ assert.ok(debuggerGuardSource, "tab cleanup must distinguish the persistent flig
   assert.equal(debuggerSessionBlocksChatTabCleanup(4), false, "a tab with no debugger session must remain eligible for cleanup");
 }
 
+const pendingGuardSource = worker.match(/function pendingConversationBlocksChatTabCleanup\(tabId\) \{[\s\S]*?\n\}/)?.[0];
+assert.ok(pendingGuardSource, "tab cleanup must expire stale pending-conversation guards");
+{
+  const now = Date.now();
+  const pendingConversationByTab = new Map([
+    [21, { at: now }],
+    [22, { at: now - 60_001 }]
+  ]);
+  const pendingConversationBlocksChatTabCleanup = Function(
+    "pendingConversationByTab",
+    "PENDING_CONVERSATION_TTL_MS",
+    `${pendingGuardSource}; return pendingConversationBlocksChatTabCleanup;`
+  )(pendingConversationByTab, 60_000);
+  assert.equal(pendingConversationBlocksChatTabCleanup(21), true, "a fresh pending submission must still protect its tab");
+  assert.equal(pendingConversationBlocksChatTabCleanup(22), false, "a stale pending submission must stop pinning an otherwise idle tab");
+  assert.equal(pendingConversationByTab.has(22), false, "stale pending state must be cleared when cleanup evaluates the tab");
+}
+
+const recorderStartSource = worker.slice(
+  worker.indexOf("async function ensureFlightRecorderForTab"),
+  worker.indexOf("async function ensureFlightRecordersForTabs")
+);
+assert.ok(recorderStartSource.includes("flightRecorderStartPromisesByTab"), "flight recorder startup must serialize concurrent starts per tab");
+{
+  const flightRecorderTrackersByTab = new Map();
+  const flightRecorderStartPromisesByTab = new Map();
+  let acquireCount = 0;
+  const acquireDebuggerTab = async (tabId) => {
+    acquireCount += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return { tabId };
+  };
+  const chrome = { debugger: { async sendCommand() {} } };
+  const ensureFlightRecorderForTab = Function(
+    "flightRecorderTrackersByTab",
+    "flightRecorderStartPromisesByTab",
+    "isChatGptTabUrl",
+    "stopFlightRecorderForTab",
+    "acquireDebuggerTab",
+    "subscribeDebuggerEvents",
+    "noteFlightRecorderEvent",
+    "chrome",
+    "releaseDebuggerTab",
+    `${recorderStartSource}; return ensureFlightRecorderForTab;`
+  )(
+    flightRecorderTrackersByTab,
+    flightRecorderStartPromisesByTab,
+    () => true,
+    async () => false,
+    acquireDebuggerTab,
+    () => () => {},
+    () => {},
+    chrome,
+    () => {}
+  );
+  const results = await Promise.all([1, 2, 3].map(() => ensureFlightRecorderForTab(11, "https://chatgpt.com/c/test1234")));
+  assert.equal(acquireCount, 1, "concurrent flight-recorder startup must acquire exactly one debugger ref for a tab");
+  assert.ok(results.every((result) => result === results[0]), "concurrent recorder callers must share one tracker instance");
+  assert.equal(flightRecorderStartPromisesByTab.size, 0, "flight recorder startup serialization must release its start promise after initialization");
+}
+
 const helperSource = worker.slice(
   worker.indexOf("async function serializeChatGptTabCreation"),
   worker.indexOf("function isChatGenerationRequest")
