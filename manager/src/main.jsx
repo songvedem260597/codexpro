@@ -31,7 +31,7 @@ import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./ch
 import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shouldRolloverConversation } from "./conversation-message-limit.js";
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { confirmChatResponseFinality, hasStrongerNetworkStreamEvidence } from "./chat-response-finality.js";
-import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
+import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileConnectionState, profileTabFailureState } from "./profile-card-state.js";
 import { mergeRuntimeStatus, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "./ui-performance.js";
 import { createApiWorkerDraft, normalizeApiWorkerModels, switchApiWorkerProvider, validateApiWorkerDraft } from "./api-worker-form.js";
 import { AppDropdown } from "./app-dropdown.jsx";
@@ -170,11 +170,13 @@ const DEFAULT_MANAGER_SETTINGS = {
 };
 
 function WorkerIcon({ state, customImages }) {
-  const worker = workerIcons[state] || workerIcons.hung;
-  const customSrc = customImages?.[state] || "";
+  const visualState = state === "stopped" ? "idle" : state;
+  const worker = workerIcons[visualState] || workerIcons.hung;
+  const customSrc = customImages?.[visualState] || "";
+  const label = state === "stopped" ? "Profile Chrome đã tắt" : worker.label;
   return (
-    <div className={`profile-worker is-${state}`} title={worker.label}>
-      <img src={customSrc || worker.src} alt={worker.label} />
+    <div className={`profile-worker is-${state}`} title={label}>
+      <img src={customSrc || worker.src} alt={label} />
       <span className="profile-worker-dot" aria-hidden="true" />
     </div>
   );
@@ -194,6 +196,14 @@ function ProfileSummaryIcon({ state, missing }) {
       <svg className="profile-summary-svg" viewBox="0 0 24 24" aria-hidden="true">
         <path className="summary-working-bolt" d="m13.5 2-8 12h6l-1 8 8-12h-6l1-8Z" />
         <circle className="summary-working-spark" cx="18.4" cy="5.2" r="1.25" />
+      </svg>
+    );
+  }
+  if (state === "stopped") {
+    return (
+      <svg className="profile-summary-svg" viewBox="0 0 24 24" aria-hidden="true">
+        <circle className="summary-stopped-ring" cx="12" cy="12" r="8.5" />
+        <path className="summary-stopped-line" d="M12 3.5v7" />
       </svg>
     );
   }
@@ -2852,8 +2862,9 @@ function App() {
     const outdated = connectedProfiles.filter((profile) => !extensionReady(profile.extension_version));
     return {
       working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length + apiWorkers.filter((worker) => worker.connected && worker.activity === "working").length,
-      hung: visibleProfiles.filter((profile) => !profile.connected).length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
       idle: profiles.filter((profile) => profile.activity === "idle").length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
+      stopped: visibleProfiles.filter((profile) => profileConnectionState(profile) === "stopped").length,
+      hung: visibleProfiles.filter((profile) => profileConnectionState(profile) === "disconnected").length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
       missing: profiles.filter((profile) => confirmedMissingProfiles.includes(profile.profile_id)
         && profile.connector_verification_state === "missing").length,
       reload: outdated.filter(profileSafeForWorkerUpdate).length,
@@ -4475,7 +4486,8 @@ function App() {
     const selectedResponseClearsProfileBusy = Boolean(responseVerifiedComplete && !selectedBusy && !selectedSettling && !otherBusyTab);
     const canSendBase = !busy && profile.connected && Boolean(selectedProjectRoot) && (isNewChat || turnReady) && !rolloverCreating && (isNewChat || conversations.length > 0);
     const working = profile.connected && ((profile.activity === "working" && !selectedResponseClearsProfileBusy) || selectedBusy || selectedSettling || rolloverCreating);
-    const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
+    const profileConnection = profileConnectionState(profile);
+    const workerState = profileConnection === "stopped" ? "stopped" : !profile.connected ? "hung" : working ? "working" : "idle";
     const showRolloverNotice = Boolean(responseCurrent && !responseCleared && response?.rolloverNotice);
     const showRepoTaskNotice = Boolean(responseCurrent && !responseCleared && response?.repoTaskId && (response.repoTaskStatus === "verified" || response.repoTaskStatus === "failed"));
     const showNetworkNotice = Boolean(responseCurrent && !responseCleared && !isNewChat && !responseVerifiedComplete && (selectedNetworkFailed || selectedRecoveringNetworkAbort));
@@ -4512,7 +4524,7 @@ function App() {
               <WorkerIcon state={workerState} customImages={activeWorkerImages} />
               <div>
                 <p className="eyebrow">CHATGPT · {profile.label}</p>
-                <div className="profile-title"><strong>{profile.email || profile.label}</strong>{selectedSettling ? <span className="badge profile-settling">ĐANG HOÀN TẤT</span> : working ? <WorkingBadge /> : profile.connected ? <span className="badge connected">ĐANG RẢNH</span> : <span className="badge profile-hung">MẤT KẾT NỐI</span>}</div>
+                <div className="profile-title"><strong>{profile.email || profile.label}</strong>{selectedSettling ? <span className="badge profile-settling">ĐANG HOÀN TẤT</span> : working ? <WorkingBadge /> : profile.connected ? <span className="badge connected">ĐANG RẢNH</span> : profileConnection === "stopped" ? <span className="badge profile-stopped">ĐÃ TẮT</span> : <span className="badge profile-hung">MẤT KẾT NỐI</span>}</div>
                 <code>{profile.profile_id}</code>
               </div>
             </div>
@@ -4720,9 +4732,10 @@ function App() {
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
-              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} rảnh, ${profileSummary.hung} mất kết nối, ${profileSummary.missing} chưa cài`}>
+              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} rảnh, ${profileSummary.stopped} đã tắt, ${profileSummary.hung} mất kết nối, ${profileSummary.missing} chưa cài`}>
                 <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
                 <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
+                <ProfileSummaryItem state="stopped" count={profileSummary.stopped} label="đã tắt" />
                 <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
                 <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
                 {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
@@ -4793,7 +4806,9 @@ function App() {
               const ready = extensionReady(profile.extension_version);
               const profileBusy = busy === `profile:${profile.profile_id}`;
               const profileChecking = checkingProfiles.includes(profile.profile_id);
-              const hung = !profile.connected;
+              const connectionState = profileConnectionState(profile);
+              const stopped = connectionState === "stopped";
+              const hung = connectionState === "disconnected";
               const settling = profile.connected && profile.activity === "settling";
               const working = profile.connected && profile.activity === "working";
               const profileTabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
@@ -4812,9 +4827,10 @@ function App() {
               const noChatGpt = profile.connected && profile.activity === "no_chatgpt";
               const noBrowserTabs = noChatGpt && Number(profile.tab_count || 0) === 0;
               const chatGptTabCount = Math.max(0, Number(profile.chatgpt_tab_count) || 0);
-              const workerState = hung ? "hung" : working || settling ? "working" : "idle";
+              const workerState = stopped ? "stopped" : hung ? "hung" : working || settling ? "working" : "idle";
               const profileBorderState = profileCardBorderState({
                 connected: profile.connected,
+                stopped,
                 working,
                 settling,
                 rendererUnresponsive,
@@ -4860,6 +4876,7 @@ function App() {
                       <strong>{profile.email || profile.label}</strong>
                       {profile.headless && <span className="badge profile-headless">HEADLESS</span>}
                       {profile.active && <span className="badge">ACTIVE</span>}
+                      {stopped && <span className="badge profile-stopped">ĐÃ TẮT</span>}
                       {hung && <span className="badge profile-hung">MẤT KẾT NỐI</span>}
                       {settling && <span className="badge profile-settling">ĐANG HOÀN TẤT</span>}
                       {working && <WorkingBadge />}
@@ -4877,7 +4894,7 @@ function App() {
                     </div>
                     {(working || settling) && <WorkerRunningDuration startedAt={profile.busy_since || liveTab?.network_last_started_at} />}
                     <div className="profile-meta">
-                      <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Mất heartbeat extension"}</span>
+                      <span><span className={`dot ${profile.connected ? "ok" : stopped ? "stopped" : "bad"}`} aria-hidden="true" />{profile.connected ? "Extension online" : stopped ? "Profile Chrome đã tắt" : "Mất heartbeat extension"}</span>
                       <span>v{profile.extension_version || "cũ"}</span>
                       <span>{chatGptTabCount} tab</span>
                       {profile.headless && (headlessSourceLabel || headlessSourceDirectory) && (

@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "../manager/src/profile-card-state.js";
+import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileConnectionState, profileTabFailureState } from "../manager/src/profile-card-state.js";
 
 const managerSource = fs.readFileSync(new URL("../manager/src/main.jsx", import.meta.url), "utf8");
 assert.match(managerSource, /profileTabFailureState\(\{ connected: profile\.connected, working, settling, tab: liveTab \}\)/, "profile cards must centralize renderer/transport failure classification");
 assert.match(managerSource, /profileChromeActionState\(\{ profile, busy, rendererUnresponsive: tabFailureState\.recoveryRequired \}\)/, "transport recovery may be offered without painting the profile as renderer-hung");
+
+const stoppedAt = "2026-09-03T01:00:00.000Z";
+assert.equal(profileConnectionState({ connected: false, last_seen: stoppedAt, lifecycle_event: { type: "window_removed", reason: "external_or_chrome", at: stoppedAt } }), "stopped", "a disconnected profile whose final lifecycle event closes Chrome must be shown as stopped");
+assert.equal(profileConnectionState({ connected: false, last_seen: "2026-09-03T01:05:00.000Z", lifecycle_event: { type: "window_removed", reason: "external_or_chrome", at: stoppedAt } }), "disconnected", "an old Chrome-close event must not hide a later heartbeat failure");
+assert.equal(profileConnectionState({ connected: false, last_seen: stoppedAt, lifecycle_event: { type: "tab_removed", reason: "external_or_chrome", is_window_closing: true, at: stoppedAt } }), "stopped", "a last-window tab removal is valid stopped evidence");
+assert.equal(profileConnectionState({ connected: false, last_seen: stoppedAt }), "disconnected", "heartbeat loss without close evidence must remain disconnected");
+assert.equal(profileCardBorderState({ connected: false, stopped: true }), "stopped", "stopped profiles must use a neutral card state instead of an error state");
+assert.match(managerSource, /profile-stopped[\s\S]*?ĐÃ TẮT/, "profile UI must render a dedicated stopped badge");
+assert.match(managerSource, /Profile Chrome đã tắt[\s\S]*?Mất heartbeat extension/, "profile metadata must distinguish stopped Chrome from heartbeat loss");
+assert.match(managerSource, /ProfileSummaryItem state="stopped"[\s\S]*?label="đã tắt"/, "overview summary must count stopped profiles separately");
 
 assert.equal(profileCardBorderState({ connected: true, working: true, settling: false, rendererUnresponsive: false, networkState: "failed", rendererError: "", connectionInterrupted: false }), "working", "live tool activity must override a stale failed network generation");
 assert.equal(profileCardBorderState({ connected: true, working: false, settling: false, rendererUnresponsive: false, networkState: "failed", rendererError: "", connectionInterrupted: false }), "idle", "a connected idle profile must not stay red because of an old failed request");
