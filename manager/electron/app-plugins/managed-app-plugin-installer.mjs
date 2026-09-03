@@ -46,6 +46,15 @@ export const DEFAULT_APP_PLUGIN_CATALOG = Object.freeze([{
   branch: "main",
   adapter: "skill-library",
   license: "MIT"
+}, {
+  id: "gitdiagram",
+  name: "GitDiagram",
+  description: "Rút repo local thành sơ đồ kiến trúc tổng quát, dễ đọc, dựa trên CodexGraph và ý tưởng architecture-first của GitDiagram.",
+  repository: "https://github.com/ahmedkhaleel2004/gitdiagram.git",
+  homepage: "https://github.com/ahmedkhaleel2004/gitdiagram",
+  branch: "main",
+  adapter: "gitdiagram-local",
+  license: "MIT"
 }]);
 
 function isPathInside(parent, candidate) {
@@ -85,17 +94,18 @@ function readGeneratedManifest(root) {
   }
 }
 
-export function createManagedAppPluginInstaller({ home, registry, templateRoot, catalog = DEFAULT_APP_PLUGIN_CATALOG }) {
+export function createManagedAppPluginInstaller({ home, registry, templateRoot, gitDiagramTemplateRoot, catalog = DEFAULT_APP_PLUGIN_CATALOG }) {
   if (!registry || typeof registry.install !== "function") throw new Error("Managed plugin installer cần app plugin registry.");
   const resolvedHome = path.resolve(String(home || ""));
   const managedRoot = path.join(resolvedHome, "app-plugin-repos");
   const resolvedTemplateRoot = path.resolve(String(templateRoot || ""));
+  const resolvedGitDiagramTemplateRoot = path.resolve(String(gitDiagramTemplateRoot || templateRoot || ""));
   const catalogById = new Map(catalog.map((item) => [String(item.id), { ...item }]));
 
   function definition(id) {
     const item = catalogById.get(String(id || ""));
     if (!item) throw new Error(`Plugin catalog ${id || "này"} không tồn tại.`);
-    if (item.adapter !== "skill-library") throw new Error(`Adapter ${item.adapter || "unknown"} chưa được hỗ trợ.`);
+    if (!["skill-library", "gitdiagram-local"].includes(item.adapter)) throw new Error(`Adapter ${item.adapter || "unknown"} chưa được hỗ trợ.`);
     return item;
   }
 
@@ -160,11 +170,51 @@ export function createManagedAppPluginInstaller({ home, registry, templateRoot, 
     return skills;
   }
 
+  function generateGitDiagramAdapter(item, root, commit) {
+    if (!fs.statSync(resolvedGitDiagramTemplateRoot, { throwIfNoEntry: false })?.isDirectory()) {
+      throw new Error(`Không tìm thấy template GitDiagram: ${resolvedGitDiagramTemplateRoot}`);
+    }
+    const manifestRoot = path.join(root, ".codexpro-plugin");
+    const uiRoot = path.join(manifestRoot, "ui");
+    fs.mkdirSync(uiRoot, { recursive: true });
+    for (const fileName of ["index.html", "app.js", "styles.css"]) {
+      fs.copyFileSync(path.join(resolvedGitDiagramTemplateRoot, fileName), path.join(uiRoot, fileName));
+    }
+    fs.writeFileSync(path.join(uiRoot, "meta.json"), `${JSON.stringify({
+      schema_version: 1,
+      id: item.id,
+      name: item.name,
+      description: item.description,
+      repository: item.homepage || item.repository,
+      source_commit: commit,
+      license: item.license || "",
+      adapter: item.adapter,
+      generated_at: new Date().toISOString()
+    }, null, 2)}\n`, "utf8");
+    fs.writeFileSync(path.join(manifestRoot, "plugin.json"), `${JSON.stringify({
+      schema_version: 1,
+      id: item.id,
+      name: item.name,
+      version: `1.0.0+${commit.slice(0, 12)}`,
+      description: item.description,
+      homepage: item.homepage || item.repository,
+      source_repository: item.repository,
+      source_commit: commit,
+      license: item.license || "",
+      adapter: item.adapter,
+      ui_url: `codexpro-plugin://${item.id}/`,
+      ui: { entry: ".codexpro-plugin/ui/index.html" }
+    }, null, 2)}\n`, "utf8");
+    return [];
+  }
+
   async function generateAndRegister(item, root) {
     const { stdout } = await git(["rev-parse", "HEAD"], root);
     const commit = String(stdout || "").trim();
     if (!/^[a-f0-9]{40}$/i.test(commit)) throw new Error("Không xác định được commit của plugin.");
-    const skills = generateTasteSkillAdapter(item, root, commit);
+    const skills = item.adapter === "skill-library"
+      ? generateTasteSkillAdapter(item, root, commit)
+      : generateGitDiagramAdapter(item, root, commit);
     const plugin = registry.install(root);
     return { plugin, skill_count: skills.length, source_commit: commit };
   }
@@ -183,10 +233,10 @@ export function createManagedAppPluginInstaller({ home, registry, templateRoot, 
           status: installed?.status || "available",
           installed_version: installed?.version || "",
           source_commit: String(manifest?.source_commit || ""),
-          skill_count: (() => {
+          skill_count: item.adapter === "skill-library" ? (() => {
             try { return JSON.parse(fs.readFileSync(path.join(root, "dist", "catalog.json"), "utf8")).skills?.length || 0; }
             catch { return 0; }
-          })()
+          })() : 0
         };
       });
     },

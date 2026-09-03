@@ -13,7 +13,8 @@ const registry = createAppPluginRegistry({ home });
 const installer = createManagedAppPluginInstaller({
   home,
   registry,
-  templateRoot: path.join(scriptRoot, "..", "electron", "app-plugins", "templates", "taste-skill")
+  templateRoot: path.join(scriptRoot, "..", "electron", "app-plugins", "templates", "taste-skill"),
+  gitDiagramTemplateRoot: path.join(scriptRoot, "..", "electron", "app-plugins", "templates", "gitdiagram")
 });
 const catalogItem = installer.listCatalog().find((item) => item.id === id);
 if (!catalogItem) throw new Error(`Không tìm thấy plugin ${id} trong catalog.`);

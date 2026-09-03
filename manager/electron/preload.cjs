@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   getWorkspaceCoordination: (root) => invoke("codexpro:get-workspace-coordination", root),
   listAppPlugins: () => invoke("codexpro:list-app-plugins"),
   listAppPluginCatalog: () => invoke("codexpro:list-app-plugin-catalog"),
+  analyzeAppPluginRepo: (payload) => invoke("codexpro:analyze-app-plugin-repo", payload),
   prepareAppPluginTask: (payload) => invoke("codexpro:prepare-app-plugin-task", payload),
   installCatalogAppPlugin: (id) => invoke("codexpro:install-catalog-app-plugin", id),
   updateCatalogAppPlugin: (id) => invoke("codexpro:update-catalog-app-plugin", id),
