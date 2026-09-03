@@ -420,6 +420,15 @@ const runtimeTraceWorkspaceByServer = new WeakMap<object, () => Workspace | unde
 const runtimeWorkerIdByServer = new WeakMap<object, string>();
 const repoTaskGateRequiredByServer = new WeakMap<object, boolean>();
 const repoTaskGateProfileByServer = new WeakMap<object, string>();
+
+function resolveWorkerJobProfileIdForServer(server: object, taskId: string): string {
+  const durableWorkerId = String(readWorkerJob(taskId)?.workerId || "").trim();
+  if (durableWorkerId) {
+    repoTaskGateProfileByServer.set(server, durableWorkerId);
+    return durableWorkerId;
+  }
+  return repoTaskGateProfileByServer.get(server) || "";
+}
 type ActiveRepoTask = {
   taskId: string;
   taskTitle: string;
@@ -2790,7 +2799,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       annotations: HANDOFF_WRITE_ANNOTATIONS
     },
     async (args) => {
-      const gateProfileId = repoTaskGateProfileByServer.get(server as object) || undefined;
+      const gateProfileId = resolveWorkerJobProfileIdForServer(server as object, args.task_id) || undefined;
       if (!gateProfileId) {
         throw new CodexProError("WORKER_JOB_PROFILE_REQUIRED: report_worker_job_progress requires a profile-bound Browser or API worker MCP session.", {
           code: "WORKER_JOB_PROFILE_REQUIRED",
@@ -2841,7 +2850,7 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
       annotations: HANDOFF_WRITE_ANNOTATIONS
     },
     async (args) => {
-      const gateProfileId = repoTaskGateProfileByServer.get(server as object) || undefined;
+      const gateProfileId = resolveWorkerJobProfileIdForServer(server as object, args.task_id) || undefined;
       if (!gateProfileId) {
         throw new CodexProError("WORKER_JOB_PROFILE_REQUIRED: finalize_worker_job requires a profile-bound Browser or API worker MCP session.", {
           code: "WORKER_JOB_PROFILE_REQUIRED",
@@ -4676,19 +4685,23 @@ export function createCodexProServer(config: CodexProConfig, context: CodexProSe
         const conversationOwnsTask = Boolean(taskBinding
           && taskBinding.taskId === args.task_id
           && (!taskBinding.conversationId || taskBinding.conversationId === requestedConversationId));
+        const responseFinished = args.action === "get_chat_response"
+          && result.response_ready === true
+          && result.busy !== true
+          && result.network_stream_in_progress !== true
+          && !responseHasStrongerNetworkStreamEvidence(result);
         const terminalOutcome = args.action === "stop_chat_generation"
           ? "cancelled"
           : String(result.network_state || "").toLowerCase() === "failed" || result.network_error
             ? "failed"
-            : result.response_ready === true && result.busy !== true && result.network_stream_in_progress !== true && !responseHasStrongerNetworkStreamEvidence(result)
-              ? "completed"
-              : null;
+            : null;
+        if (workerJob?.status === "running" && responseFinished && conversationOwnsTask) result.worker_job_completion_pending_finalize = true;
         if (workerJob?.status === "running" && workerJob.workerId === selectedProfile && terminalOutcome && conversationOwnsTask) {
           const finalized = await finalizeWorkerJob({
             jobId: args.task_id,
             workerId: selectedProfile,
             outcome: terminalOutcome,
-            summary: terminalOutcome === "completed" ? "ChatGPT response finalized." : undefined,
+            summary: undefined,
             error: terminalOutcome === "failed" ? String(result.network_error || result.error || "ChatGPT generation failed.") : undefined
           });
           if (finalized.root) {
