@@ -98,14 +98,14 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
   ];
   const sourceFilterOptions = sourceOptions.map((item) => ({
     value: item,
-    label: item === "all" ? "Tất cả nguồn" : (SOURCE_LABELS[item] || item),
+    label: item === "all" ? "Mọi nguồn" : (SOURCE_LABELS[item] || item),
     hint: item === "all" ? "Người dùng, Manager, giao diện và MCP" : `Chỉ log từ ${SOURCE_LABELS[item] || item}`,
     tone: item === "user" ? "error" : item === "mcp" ? "mcp" : item === "renderer" ? "renderer" : "neutral",
     count: item === "all" ? availableTotal : available.sources?.[item]
   }));
   const categoryFilterOptions = categoryOptions.map((item) => ({
     value: item,
-    label: item === "all" ? "Tất cả nhóm" : (CATEGORY_LABELS[item] || item),
+    label: item === "all" ? "Mọi nhóm" : (CATEGORY_LABELS[item] || item),
     hint: item === "all" ? "Mọi khu vực chức năng" : `Chỉ nhóm ${CATEGORY_LABELS[item] || item}`,
     tone: ["network", "transport"].includes(item) ? "warn" : item === "chat" ? "chat" : "neutral",
     count: item === "all" ? availableTotal : available.categories?.[item]
