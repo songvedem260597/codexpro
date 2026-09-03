@@ -22,7 +22,7 @@ import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges }
 import { projectCompactGraph } from "./analysis/projection.js";
 import { createRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import { runBrowserControl } from "./browserOps.js";
-import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileTaskBinding, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, rebindBrowserExtensionProfileTaskConversation, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, workerJobPublicRecord, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
@@ -3765,7 +3765,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       description:
         "Fast browser-agent control for the Chrome profile explicitly marked ACTIVE, with dedicated port-9223 Chrome as fallback. Supports persistent CDP/debugger sessions, trusted input, batch actions, wait_for, inspect_element, evaluate, hover/scroll, screenshots, and existing ChatGPT-specific actions.",
       inputSchema: {
-        action: z.enum(["status", "list_profiles", "forget_profile", "select_workspace", "check_chatgpt", "setup_chatgpt", "reload_extension", "stop_chat_generation", "audit_long_running_chat", "recover_chat_tab", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch", "screenshot"]),
+        action: z.enum(["status", "list_profiles", "forget_profile", "select_workspace", "rebind_profile_task", "check_chatgpt", "setup_chatgpt", "reload_extension", "stop_chat_generation", "audit_long_running_chat", "recover_chat_tab", "send_chat_request", "rename_chat", "hide_chat", "get_chat_response", "list_tabs", "open_tab", "activate_tab", "close_tab", "snapshot", "navigate", "click", "trusted_click", "type", "press", "hover", "scroll", "wait_for", "inspect_element", "evaluate", "batch", "screenshot"]),
         profile_id: z.string().optional().describe("Optional extension profile id. Omit to use the profile marked ACTIVE. Ignored for the dedicated fallback browser."),
         root: z.string().optional().describe("Workspace root for select_workspace. The selected profile is locked to this root until changed by CodexPro Manager."),
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
@@ -3872,7 +3872,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
       let result: Record<string, any>;
       const selectedProfile = args.profile_id || profiles.find((profile) => profile.active && profile.connected)?.profile_id;
-      if ((args.action === "select_workspace" || args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "stop_chat_generation" || args.action === "audit_long_running_chat" || args.action === "send_chat_request" || args.action === "rename_chat" || args.action === "hide_chat" || args.action === "get_chat_response") && !selectedProfile) {
+      if ((args.action === "select_workspace" || args.action === "rebind_profile_task" || args.action === "check_chatgpt" || args.action === "setup_chatgpt" || args.action === "stop_chat_generation" || args.action === "audit_long_running_chat" || args.action === "send_chat_request" || args.action === "rename_chat" || args.action === "hide_chat" || args.action === "get_chat_response") && !selectedProfile) {
         throw new CodexProError("Choose an online Chrome extension profile before setting up CodexPro in ChatGPT.");
       }
       if (args.action === "select_workspace") {
@@ -3885,6 +3885,22 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           workspace_id: workspace.id,
           root: workspace.root,
           locked: true
+        });
+      }
+      if (args.action === "rebind_profile_task") {
+        if (!selectedProfile || !args.task_id || !args.conversation_id) throw new CodexProError("Profile, task id, and conversation id are required for recovery rebinding.");
+        const workerJob = readWorkerJob(args.task_id);
+        if (!workerJob || workerJob.workerId !== selectedProfile || !["prepared", "running"].includes(workerJob.status)) {
+          throw new CodexProError("RECOVERY_TASK_NOT_ACTIVE: Refusing to move a completed or foreign task to another conversation.");
+        }
+        const rebound = rebindBrowserExtensionProfileTaskConversation(selectedProfile, args.task_id, args.conversation_id);
+        if (!rebound) throw new CodexProError("RECOVERY_TASK_REBIND_FAILED: The profile task binding changed before recovery completed.");
+        return textResult(`# Profile Task Rebound\n\nTask: ${args.task_id}\nConversation: ${args.conversation_id}`, {
+          action: args.action,
+          profile_id: selectedProfile,
+          task_id: args.task_id,
+          conversation_id: args.conversation_id,
+          rebound: true
         });
       }
       const useExtension = args.browser !== "dedicated" && Boolean(selectedProfile);
@@ -3979,6 +3995,11 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
       if (selectedProfile && args.task_id && (args.action === "get_chat_response" || args.action === "stop_chat_generation")) {
         const workerJob = readWorkerJob(args.task_id);
+        const taskBinding = getBrowserExtensionProfileTaskBinding(selectedProfile);
+        const requestedConversationId = String(args.conversation_id || "").trim();
+        const conversationOwnsTask = Boolean(taskBinding
+          && taskBinding.taskId === args.task_id
+          && (!taskBinding.conversationId || taskBinding.conversationId === requestedConversationId));
         const terminalOutcome = args.action === "stop_chat_generation"
           ? "cancelled"
           : String(result.network_state || "").toLowerCase() === "failed" || result.network_error
@@ -3986,7 +4007,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             : result.response_ready === true && result.busy !== true && result.network_stream_in_progress !== true
               ? "completed"
               : null;
-        if (workerJob?.status === "running" && workerJob.workerId === selectedProfile && terminalOutcome) {
+        if (workerJob?.status === "running" && workerJob.workerId === selectedProfile && terminalOutcome && conversationOwnsTask) {
           const finalized = await finalizeWorkerJob({
             jobId: args.task_id,
             workerId: selectedProfile,
@@ -4003,6 +4024,9 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             }, terminalOutcome);
           }
           result.worker_job_finalized = true;
+        }
+        if (terminalOutcome && !conversationOwnsTask) {
+          result.worker_job_finalization_skipped = "conversation_rebound";
         }
         const currentWorkerJob = readWorkerJob(args.task_id);
         if (currentWorkerJob && currentWorkerJob.workerId === selectedProfile) {

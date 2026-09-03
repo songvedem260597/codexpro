@@ -14,7 +14,7 @@ const between = (source, start, end) => {
   return source.slice(from, to);
 };
 
-const autoRecovery = between(managerUi, "useEffect(() => {\n    if (!managerSettings.autoRecovery)", "}, [managerSettings.autoRecovery, status?.browserProfiles]);");
+const autoRecovery = between(managerUi, "useEffect(() => {\n    if (!managerSettings.autoRecovery)", "}, [managerSettings.autoRecovery, status?.browserProfiles, status?.workerJobs]);");
 assert.match(autoRecovery, /recoverProfileTab\(profile, \{ targetTab, silent: true, automatic: true, hardFailure \}\)/, "auto recovery must use the same guarded continuation pipeline as manual recovery");
 
 const recovery = between(managerUi, "async function recoveryContinuationSnapshot", "async function stopControlTask");
@@ -32,6 +32,7 @@ assert.match(rolloverPrompt, /recovery_reason/, "handoff prompt must include why
 const rollover = between(managerUi, "async function rolloverFullConversation", "async function verifyRepoTaskUse");
 assert.match(rollover, /rolloverReason: continuationReason/, "continuation state must retain the rollover reason");
 assert.match(rollover, /requestTargetsRef\.current = \{ \.\.\.requestTargetsRef\.current, \[profileId\]: newConversationId \}/, "continuation must atomically select the new conversation");
+assert.match(rollover, /previousTaskId: recoveryTaskId[\s\S]*?taskMode: recoveryTaskId \? "recovery" : "new"/, "recovery continuation must preserve the running Task ID instead of enqueuing a new task");
 
 const openProfile = between(managerMain, "async function openProfileChat", "async function recoverProfileChatTab");
 assert.match(openProfile, /action: "activate_tab"[\s\S]*?conversation_id: conversationId \|\| targetConversationId \|\| undefined/, "open Chrome must pass the expected conversation id to the worker for verification");

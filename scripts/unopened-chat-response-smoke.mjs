@@ -16,10 +16,11 @@ let canonical = { ok: true, text: 'Hoàn tất', messages: [{ role: 'user', text
 const context = {
   CANONICAL_READ_TIMEOUT_MS: 15000,
   isChatGptTabUrl: url => String(url).startsWith('https://chatgpt.com/'),
-  readCanonicalConversationPage: () => {},
+  readCanonicalConversationForTab: async (tabId, conversationId, budget) => {
+    calls.push({ target: { tabId }, args: [conversationId], budget });
+    return canonical;
+  },
   withResponseAudit: (result, evidence) => ({ ...result, evidence }),
-  promiseWithTimeout: async (promise, ms) => { calls.push({ budget: ms }); return await promise; },
-  chrome: { scripting: { async executeScript(args) { calls.push(args); return [{ result: canonical }]; } } }
 };
 const { readUnopenedChatResponse } = vm.runInNewContext(`${helper}; ({readUnopenedChatResponse});`, context);
 const conversation = { id: 'recent-conversation-1234', title: 'Requested history' };
@@ -40,13 +41,17 @@ for (const args of [{ read_dom: true }, { read_dom: false, canonical_only: true 
   assert.equal(completedResponseNeedsDomFallback(result), false);
 }
 assert.equal(tabs[0].url, 'https://chatgpt.com/');
-assert.ok(calls.filter(call => call.args).every(call => call.args[0] === conversation.id && call.target.tabId === 1));
+assert.ok(calls.every(call => call.args[0] === conversation.id && call.target.tabId === 1));
 await assert.rejects(readUnopenedChatResponse([], conversation), /CHAT_TAB_MISSING/);
 const before = calls.length;
 await assert.rejects(readUnopenedChatResponse(tabs, conversation, {}, Date.now() - 1), /COMMAND_EXPIRED/);
 assert.equal(calls.length, before, 'expired command must not inject another read');
 canonical = { ok: false, error: 'session expired' };
 await assert.rejects(readUnopenedChatResponse(tabs, conversation), /CHAT_HISTORY_UNAVAILABLE.*session expired/);
+canonical = { ok: false, error: 'ChatGPT HTTP 429', status: 429, rate_limited: true, canonical_rate_limit_count: 3, retry_at: new Date(Date.now() + 30000).toISOString(), retry_after_ms: 30000 };
+const throttled = await readUnopenedChatResponse(tabs, conversation);
+assert.equal(throttled.canonical_rate_limited, true, 'HTTP 429 must be returned as transient state instead of blanking the Manager UI');
+assert.equal(throttled.canonical_rate_limit_count, 3);
 canonical = { ok: true, messages: [], busy: true, response_ready: false };
 assert.equal((await readUnopenedChatResponse(tabs, conversation)).busy, true, 'canonical generation state is preserved');
 console.log('✓ Recent unopened chat reads without navigation or cross-conversation state passed');

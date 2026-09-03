@@ -1,11 +1,11 @@
 import { app, BrowserWindow, clipboard, ClipboardItem, dialog, globalShortcut, ipcMain, nativeImage, Notification, protocol, safeStorage, shell } from "electron";
-import { execFile } from "node:child_process";
+import { runGitProcess, runPowerShellProcess } from "./process-runner.mjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
+
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
 import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
@@ -40,7 +40,7 @@ protocol.registerSchemesAsPrivileged([{
   }
 }]);
 
-const execFileAsync = promisify(execFile);
+
 const workerPluginRegistry = new WorkerPluginRegistry();
 const pendingWorkerUpdates = new Map();
 let workerUpdateFlushTimer = null;
@@ -277,13 +277,16 @@ workerPluginRegistry.register(createApiWorkerPlugin({
   listConfigurations: () => apiWorkerStore.list(),
   onUpdate: queueWorkerUpdate,
   createProvider: async ({ config }) => createProviderForApiWorker(config),
-  createMcpClients: async ({ workerId }) => {
+  createMcpClients: async ({ workerId, signal }) => {
+    signal?.throwIfAborted?.();
     const base = await readyRuntimeBaseStatus();
+    signal?.throwIfAborted?.();
     if (!base.local?.ok) throw new Error("Local CodexPro MCP is offline; API worker cannot start.");
     return await createWorkerMcpClients({
       url: `http://127.0.0.1:${base.config.port}/mcp`,
       token: base.token,
-      workerId
+      workerId,
+      signal
     });
   }
 }));
@@ -345,6 +348,7 @@ const REPO_SCAN_MAX_DEPTH = 12;
 const REPO_SCAN_TIMEOUT_MS = 12000;
 let runtimeBaseCache = null;
 let runtimeBasePromise = null;
+let runtimeStatusPromise = null;
 let runtimeFreshnessPromise = null;
 let runtimeFreshnessRetryTimer = null;
 let scheduledTaskCache = null;
@@ -2366,12 +2370,8 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
   }
 }
 
-async function runPowerShell(script) {
-  const { stdout } = await execFileAsync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-    { windowsHide: true, maxBuffer: 2 * 1024 * 1024 }
-  );
+async function runPowerShell(script, options = {}) {
+  const { stdout } = await runPowerShellProcess(script, options);
   return stdout.trim();
 }
 
@@ -2412,7 +2412,7 @@ async function scheduledTask(options = {}) {
   ].join("; ");
   scheduledTaskPromise = (async () => {
     try {
-      return JSON.parse(await runPowerShell(script));
+      return JSON.parse(await runPowerShell(script, { timeoutMs: 5_000 }));
     } catch (error) {
       return { state: "NotFound", error: error instanceof Error ? error.message : String(error), arguments: "" };
     }
@@ -2497,7 +2497,7 @@ async function runtimeBaseStatus(options = {}) {
     const [local, tunnel, processText] = await Promise.all([
       health(localBase, token),
       publicBase ? health(publicBase, token) : Promise.resolve({ ok: false, status: 0, latency: 0, error: "Không dùng public tunnel" }),
-      runPowerShell("@((Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('node.exe','cloudflared.exe') -and $_.CommandLine -match 'codexpro\\.mjs.*start|dist\\\\http\\.js|cloudflared.*codexpro' } | Select-Object ProcessId,Name,CommandLine)) | ConvertTo-Json -Depth 3 -Compress").catch(() => "[]")
+      runPowerShell("@((Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('node.exe','cloudflared.exe') -and $_.CommandLine -match 'codexpro\\.mjs.*start|dist\\\\http\\.js|cloudflared.*codexpro' } | Select-Object ProcessId,Name,CommandLine)) | ConvertTo-Json -Depth 3 -Compress", { timeoutMs: 3_000 }).catch(() => "[]")
     ]);
     let processes = [];
     try {
@@ -2570,7 +2570,7 @@ async function runtimeBaseStatus(options = {}) {
   }
 }
 
-async function runtimeStatus(options = {}) {
+async function collectRuntimeStatus(options = {}) {
   const base = await runtimeBaseStatus(options);
   const [browserProfileSnapshot, workerJobSnapshot] = base.local.ok
     ? await Promise.all([
@@ -2627,6 +2627,18 @@ async function runtimeStatus(options = {}) {
     tokenConfigured: base.tokenConfigured,
     autoStart: base.autoStart
   };
+}
+
+async function runtimeStatus(options = {}) {
+  const forceRefresh = options?.forceRefresh === true;
+  if (!forceRefresh && runtimeStatusPromise) return runtimeStatusPromise;
+  const promise = collectRuntimeStatus(options);
+  if (!forceRefresh) runtimeStatusPromise = promise;
+  try {
+    return await promise;
+  } finally {
+    if (!forceRefresh && runtimeStatusPromise === promise) runtimeStatusPromise = null;
+  }
 }
 
 async function readyRuntimeBaseStatus() {
@@ -2710,7 +2722,7 @@ async function githubRepoForRoot(root) {
   if (cached && Date.now() - cached.at < 15_000) return cached.value;
   let value = "";
   try {
-    const remote = await execFileAsync("git.exe", ["-C", normalizedRoot, "remote", "get-url", "origin"], { windowsHide: true });
+    const remote = await runGitProcess(["-C", normalizedRoot, "remote", "get-url", "origin"], { timeoutMs: 4_000 });
     value = githubRepoFromRemote(remote.stdout.trim());
   } catch {}
   githubRepoCache.set(normalizedRoot.toLowerCase(), { at: Date.now(), value });
@@ -2720,9 +2732,9 @@ async function githubRepoForRoot(root) {
 async function readGitSummary(root) {
   try {
     const [statusResult, commitResult, remoteResult] = await Promise.allSettled([
-      execFileAsync("git.exe", ["-C", root, "status", "--porcelain=v2", "--branch"], { windowsHide: true, maxBuffer: 2 * 1024 * 1024 }),
-      execFileAsync("git.exe", ["-C", root, "log", "-1", "--pretty=format:%h%x09%s%x09%cI"], { windowsHide: true }),
-      execFileAsync("git.exe", ["-C", root, "remote", "get-url", "origin"], { windowsHide: true })
+      runGitProcess(["-C", root, "status", "--porcelain=v2", "--branch"], { timeoutMs: 4_000, maxBuffer: 2 * 1024 * 1024 }),
+      runGitProcess(["-C", root, "log", "-1", "--pretty=format:%h%x09%s%x09%cI"], { timeoutMs: 4_000 }),
+      runGitProcess(["-C", root, "remote", "get-url", "origin"], { timeoutMs: 4_000 })
     ]);
     if (statusResult.status !== "fulfilled") throw statusResult.reason;
     if (commitResult.status !== "fulfilled") throw commitResult.reason;
@@ -2745,8 +2757,8 @@ async function readGitSummary(root) {
     let remoteCommitAt = "";
     if (upstream) {
       const [remoteCommit, pushReflog] = await Promise.allSettled([
-        execFileAsync("git.exe", ["-C", root, "log", "-1", "--pretty=format:%cI", upstream], { windowsHide: true }),
-        execFileAsync("git.exe", ["-C", root, "reflog", "show", "-1", "--format=%gI", upstream], { windowsHide: true })
+        runGitProcess(["-C", root, "log", "-1", "--pretty=format:%cI", upstream], { timeoutMs: 4_000 }),
+        runGitProcess(["-C", root, "reflog", "show", "-1", "--format=%gI", upstream], { timeoutMs: 4_000 })
       ]);
       if (remoteCommit.status === "fulfilled") remoteCommitAt = remoteCommit.value.stdout.trim();
       if (pushReflog.status === "fulfilled") pushedAt = pushReflog.value.stdout.trim();
@@ -3725,9 +3737,10 @@ async function sendProfileRequestUnlocked(payload) {
   const newChat = Boolean(payload?.newChat);
   const allowBusyFollowup = Boolean(!newChat && payload?.allowBusyFollowup === true);
   const adjustmentRequested = payload?.taskMode === "adjustment";
+  const recoveryRequested = payload?.taskMode === "recovery";
   const text = String(payload?.text || "").trim();
   const requestedWorkflow = String(payload?.workflow || "").trim();
-  const taskWorkflow = adjustmentRequested ? null : resolveTaskWorkflow(requestedWorkflow, text);
+  const taskWorkflow = adjustmentRequested || recoveryRequested ? null : resolveTaskWorkflow(requestedWorkflow, text);
   const requestedScope = payload?.scope === "all_allowed" ? "all_allowed" : "workspace";
   const requestedProjectRoot = String(payload?.projectRoot || "").trim();
   const requestedWorkspaceCandidates = Array.isArray(payload?.workspaceCandidates) ? payload.workspaceCandidates.slice(0, 80) : [];
@@ -3735,9 +3748,11 @@ async function sendProfileRequestUnlocked(payload) {
   const previousTaskId = String(payload?.previousTaskId || "").trim();
   if (previousTaskId && !/^cpt_[a-f0-9]{24}$/.test(previousTaskId)) throw new Error("CodexPro task id trước đó không hợp lệ.");
   if (adjustmentRequested && (newChat || !previousTaskId)) throw new Error("Lệnh điều chỉnh phải trỏ tới task đang chạy trong đoạn chat hiện tại.");
+  if (recoveryRequested && (!newChat || !previousTaskId)) throw new Error("Chat phục hồi phải mở conversation mới nhưng giữ nguyên Task ID đang chạy.");
   let taskId = previousTaskId || `cpt_${randomBytes(12).toString("hex")}`;
   let taskIdReused = Boolean(previousTaskId);
   let adjustmentAccepted = false;
+  let recoveryAccepted = false;
   let existingWorkerJobStatus = "";
   const toolRetry = Boolean(payload?.toolRetry);
   const toolRolloverCount = Math.max(0, Math.min(1, Number(payload?.toolRolloverCount) || 0));
@@ -3869,24 +3884,33 @@ async function sendProfileRequestUnlocked(payload) {
     ]);
     if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
   }
-  if (adjustmentRequested) {
+  if (adjustmentRequested || recoveryRequested) {
     const workerJobResult = await localMcpToolInSession(session, "worker_job_status", { task_id: previousTaskId }, 15000);
     const workerJob = workerJobResult?.job;
     existingWorkerJobStatus = String(workerJob?.status || "").trim().toLowerCase();
-    adjustmentAccepted = acceptsLogicalTaskAdjustment({
-      profileId,
-      conversationId,
-      workerJob,
-      profile,
-      tab: selectedConversationTab
-    });
-    if (adjustmentAccepted) {
+    if (recoveryRequested) {
+      recoveryAccepted = Boolean(
+        String(workerJob?.job_id || workerJob?.jobId || "") === previousTaskId
+        && String(workerJob?.worker_id || workerJob?.workerId || "") === profileId
+        && ["prepared", "running"].includes(existingWorkerJobStatus)
+      );
+      if (!recoveryAccepted) throw new Error("RECOVERY_TASK_NOT_ACTIVE: Task cũ đã kết thúc hoặc không còn thuộc profile này; không tạo chat phục hồi để tránh chạy trùng.");
+    } else {
+      adjustmentAccepted = acceptsLogicalTaskAdjustment({
+        profileId,
+        conversationId,
+        workerJob,
+        profile,
+        tab: selectedConversationTab
+      });
+    }
+    if (adjustmentAccepted || recoveryAccepted) {
       requestScope = workerJob.scope === "all_allowed" ? "all_allowed" : "workspace";
       if (requestScope === "workspace" && workerJob.root) {
         initialWorkspaceRoot = path.resolve(String(workerJob.root));
         selectedProject = { root: initialWorkspaceRoot };
       }
-    } else {
+    } else if (adjustmentRequested) {
       taskId = `cpt_${randomBytes(12).toString("hex")}`;
       taskIdReused = false;
       existingWorkerJobStatus = "";
@@ -3894,7 +3918,7 @@ async function sendProfileRequestUnlocked(payload) {
   }
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
   const currentWorkspaceRoot = String(profile.current_workspace_root || "").trim();
-  const workspaceSelectSkipped = adjustmentAccepted || (!codexProWorkspaceExpanded && requestScope === "all_allowed") || Boolean(currentWorkspaceRoot && initialWorkspaceRoot && path.resolve(currentWorkspaceRoot).toLowerCase() === path.resolve(initialWorkspaceRoot).toLowerCase());
+  const workspaceSelectSkipped = adjustmentAccepted || recoveryAccepted || (!codexProWorkspaceExpanded && requestScope === "all_allowed") || Boolean(currentWorkspaceRoot && initialWorkspaceRoot && path.resolve(currentWorkspaceRoot).toLowerCase() === path.resolve(initialWorkspaceRoot).toLowerCase());
   if (!workspaceSelectSkipped) {
     await localMcpToolInSession(session, "browser_control", {
       action: "select_workspace",
@@ -3902,7 +3926,7 @@ async function sendProfileRequestUnlocked(payload) {
       root: initialWorkspaceRoot
     }, 75000);
   }
-  if (!adjustmentAccepted) {
+  if (!adjustmentAccepted && !recoveryAccepted) {
     const preparedTask = await localMcpToolInSession(session, "prepare_repo_task", {
       profile_id: profileId,
       task_id: taskId,
@@ -3948,7 +3972,17 @@ async function sendProfileRequestUnlocked(payload) {
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
         "Sau khi begin_repo_task với task_kind=code thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác."
       ];
-  const taskText = adjustmentAccepted
+  const taskText = recoveryAccepted
+    ? [
+        "@CodexPro",
+        `Đây là chat phục hồi cho task CodexPro đang chạy, Task ID: ${taskId}.`,
+        "Giữ nguyên task hiện tại, task title, task kind, workspace và Task ID; đây không phải task FIFO mới.",
+        "Không gọi begin_repo_task lần nữa. Hãy kiểm tra trạng thái workspace/repo hiện tại, không lặp lại thao tác đã hoàn thành, rồi tiếp tục từ checkpoint gần nhất trong nội dung dưới đây.",
+        "Chỉ coi task hoàn tất khi phần việc còn lại đã trả phản hồi cuối.",
+        "",
+        text
+      ].join("\n")
+    : adjustmentAccepted
     ? [
         `Đây là lệnh điều chỉnh cho task CodexPro đang chạy, Task ID: ${taskId}.`,
         "Giữ nguyên task hiện tại, task title, task kind, workspace và Task ID; không tạo task mới.",
@@ -3981,6 +4015,17 @@ async function sendProfileRequestUnlocked(payload) {
     one_shot_recovery: payload?.oneShotRecovery === true
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
+  if (recoveryAccepted) {
+    const recoveryConversationId = String(result?.conversation_id || "").trim();
+    if (!/^[A-Za-z0-9-]{8,160}$/.test(recoveryConversationId)) throw new Error("RECOVERY_CONVERSATION_MISSING: Chat mới chưa trả conversation id; task cũ chưa được chuyển quyền sở hữu.");
+    const rebound = await localMcpToolInSession(session, "browser_control", {
+      action: "rebind_profile_task",
+      profile_id: profileId,
+      task_id: taskId,
+      conversation_id: recoveryConversationId
+    }, 15000);
+    if (rebound?.rebound !== true) throw new Error("RECOVERY_TASK_REBIND_FAILED: CodexPro chưa xác nhận conversation mới sở hữu task hiện tại.");
+  }
   if (taskWorkflow && !adjustmentAccepted) {
     diagnostic("info", "worker", "task-workflow", `Đã giao checklist ${taskWorkflow.label} cho Chrome worker`, {
       action: "task-workflow-started",
@@ -3992,7 +4037,7 @@ async function sendProfileRequestUnlocked(payload) {
       request_scope: requestScope
     });
   }
-  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_mode: adjustmentAccepted ? "adjustment" : "new", repo_task_adjustment: adjustmentAccepted, worker_job_status: adjustmentAccepted ? existingWorkerJobStatus : "prepared", repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, codexpro_workspace_expanded_scope: codexProWorkspaceExpanded, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id), workflow_id: taskWorkflow?.id, workflow_version: taskWorkflow?.version };
+  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_mode: recoveryAccepted ? "recovery" : adjustmentAccepted ? "adjustment" : "new", repo_task_adjustment: adjustmentAccepted, repo_task_recovery: recoveryAccepted, worker_job_status: adjustmentAccepted || recoveryAccepted ? existingWorkerJobStatus : "prepared", repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, codexpro_workspace_expanded_scope: codexProWorkspaceExpanded, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id), workflow_id: taskWorkflow?.id, workflow_version: taskWorkflow?.version };
   } finally {
     await closeLocalMcpSession(session);
   }

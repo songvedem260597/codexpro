@@ -1,9 +1,6 @@
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { runGitProcess } from "../process-runner.mjs";
 
 const TASTE_SKILL_GROUPS = Object.freeze({
   "design-taste-frontend": { id: "design-foundation", label: "Nền thiết kế", order: 10, exclusive: true },
@@ -117,7 +114,8 @@ export function createManagedAppPluginInstaller({ home, registry, templateRoot, 
 
   async function git(args, cwd) {
     try {
-      return await execFileAsync("git", args, { cwd, windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+      const timeoutMs = ["clone", "pull", "fetch"].includes(String(args?.[0] || "")) ? 60_000 : 10_000;
+      return await runGitProcess(args, { cwd, timeoutMs, maxBuffer: 8 * 1024 * 1024 });
     } catch (error) {
       const detail = String(error?.stderr || error?.stdout || error?.message || error).trim();
       throw new Error(`Git plugin thất bại: ${detail}`);

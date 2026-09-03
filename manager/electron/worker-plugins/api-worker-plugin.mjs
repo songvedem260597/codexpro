@@ -160,12 +160,12 @@ export function createApiWorkerPlugin(options = {}) {
       let clients;
       let provider;
       try {
-        clients = await options.createMcpClients({ workerId, config, payload });
+        clients = await options.createMcpClients({ workerId, config, payload, signal: controller.signal });
         provider = await options.createProvider({ config, payload });
       } catch (error) {
         state.error = clean(error?.message || error, 1000);
-        state.activity = "failed";
-        state.streamPhase = "error";
+        state.activity = controller.signal.aborted ? "idle" : "failed";
+        state.streamPhase = controller.signal.aborted ? "cancelled" : "error";
         state.streamRevision += 1;
         state.streamUpdatedAt = new Date().toISOString();
         state.finishedAt = new Date().toISOString();

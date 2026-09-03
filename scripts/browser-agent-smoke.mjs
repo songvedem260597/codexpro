@@ -466,6 +466,9 @@ assert.match(bridge, /function inferProfileTaskConversationId\(profileId: string
 assert.match(bridge, /task_conversation_id: entry\.taskConversationId[\s\S]*?current_task_conversation_id: profileTaskConversationIds\.get\(profile\.id\)/, "task conversation bindings must persist and be exposed to Manager after restart");
 assert.match(bridge, /profileTaskConversationCandidateLog[\s\S]*?task_conversation_binding_source:[\s\S]*?task_conversation_candidates:/, "task registration diagnostics must preserve candidate-tab evidence for wrong-tab investigations");
 assert.match(bridge, /profile-task-events\.jsonl/, "missing task titles must leave persistent profile/session diagnostics");
+assert.match(bridge, /const PROFILE_RETENTION_MS = 24 \* 60 \* 60_000/, "browser diagnostic retention window must remain 24 hours");
+assert.match(bridge, /function rotateDiagnosticLogIfNeeded[\s\S]*?const cutoff = Date\.now\(\) - PROFILE_RETENTION_MS[\s\S]*?mtimeMs < cutoff/, "browser diagnostic logs must prune files older than the shared retention window");
+assert.equal((bridge.match(/rotateDiagnosticLogIfNeeded\(logPath,/g) || []).length, 3, "profile, flight-recorder, and rate-limit logs must share retention-aware rotation");
 assert.match(bridge, /connector_profile_bound:[\s\S]*?connector_update_required:/, "Manager profile summaries must expose connector/profile identity state");
 assert.match(bridge, /loadBrowserProfileTasks\(\)/, "profile task titles must load when the bridge starts");
 assert.match(bridge, /persistBrowserProfileTasks\(\)/, "AI task titles must persist after begin_repo_task");
@@ -510,6 +513,14 @@ for (const action of ["trusted_click", "hover", "scroll", "wait_for", "inspect_e
 }
 
 assert.match(browserOps, /const CDP_SESSION_IDLE_MS = 30_000/);
+assert.match(browserOps, /const CDP_CONNECT_TIMEOUT_MS = 2_500/);
+assert.match(browserOps, /const CDP_CONNECT_ATTEMPTS = 3/);
+assert.match(browserOps, /const CDP_CONNECT_BACKOFF_MS = 120/);
+assert.match(browserOps, /const persistentClientPromises = new Map/);
+assert.match(browserOps, /persistentClientPromises\.get\(webSocketUrl\)/, "concurrent CDP attaches for one target must share a single in-flight connection");
+assert.match(browserOps, /for \(let attempt = 0; attempt < CDP_CONNECT_ATTEMPTS; attempt \+= 1\)/, "CDP attach must use bounded retry rather than an unbounded loop");
+assert.match(browserOps, /CDP_CONNECT_BACKOFF_MS \* \(2 \*\* attempt\)/, "CDP retry must back off between attempts");
+assert.match(browserOps, /BROWSER_CDP_ATTACH_FAILED/);
 assert.match(browserOps, /const persistentClients = new Map/);
 assert.match(browserOps, /existing\?\.client\.isOpen\(\)/);
 assert.match(browserOps, /action === "batch"/);
@@ -627,7 +638,7 @@ assert.match(managerMain, /async function recoverProfileChatTab[\s\S]*?action: "
 assert.match(managerMain, /async function auditLongRunningProfileChat[\s\S]*?action: "audit_long_running_chat"[\s\S]*?attempt_key:[\s\S]*?135000/, "Manager must route one-shot 30-minute audits through a timeout that covers one reload, one replacement, and both bounded probes");
 assert.match(managerMain, /codexpro:audit-long-running-profile-chat[\s\S]*?auditLongRunningProfileChat\(payload\)/, "Manager IPC must expose long-task audits to the renderer");
 assert.match(managerPreload, /auditLongRunningProfileChat: \(payload\) => invoke\("codexpro:audit-long-running-profile-chat", payload\)/, "preload must expose auditLongRunningProfileChat");
-assert.match(managerUi, /longRunningChatWatchdogCandidate[\s\S]*?api\.auditLongRunningProfileChat[\s\S]*?long-task-watchdog-hung[\s\S]*?NEW_CHAT_TARGET/, "a hung long-running task must be warned once and force the next task onto a fresh conversation");
+assert.match(managerUi, /longRunningChatWatchdogCandidate[\s\S]*?api\.auditLongRunningProfileChat[\s\S]*?long-task-watchdog-hung[\s\S]*?forceContinuation: true/, "a hung long-running task must move to a continuation chat after the bounded reload attempt");
 assert.match(managerMain, /async function stopProfileTask[\s\S]*?action: "stop_chat_generation"[\s\S]*?15000/, "Manager must route task stop through the bounded MCP command");
 assert.match(managerMain, /codexpro:stop-profile-task[\s\S]*?stopProfileTask\(payload\)/, "Manager IPC must expose task stop to the renderer");
 assert.match(managerPreload, /stopProfileTask: \(payload\) => invoke\("codexpro:stop-profile-task", payload\)/, "preload must expose stopProfileTask");
@@ -688,7 +699,7 @@ assert.doesNotMatch(sendProfileRequestSource, /const base = await readyRuntimeBa
 assert.match(sendProfileRequestSource, /workspaceSelectSkipped[\s\S]*?if \(!workspaceSelectSkipped\)/, "Manager must skip redundant workspace selection when the profile is already scoped correctly");
 assert.match(sendProfileRequestSource, /action: "select_workspace"[\s\S]*?}, 75000\)/, "workspace selection must allow the bounded reconnect window");
 assert.match(sendProfileRequestSource, /isCodexProWorkspaceRequest[\s\S]*?config\?\.root[\s\S]*?codexProWorkspaceExpanded = isCodexProWorkspaceRequest\(base\.config\)[\s\S]*?requestScope = codexProWorkspaceExpanded \? "all_allowed" : requestedScope/, "selecting the active CodexPro workspace must automatically expand the task to all configured allowed roots");
-assert.match(sendProfileRequestSource, /workspaceSelectSkipped = adjustmentAccepted \|\| \(!codexProWorkspaceExpanded && requestScope === "all_allowed"\)/, "adjustments must retain their existing workspace while generic all_allowed requests stay unbound and CodexPro-expanded requests keep the main workspace");
+assert.match(sendProfileRequestSource, /workspaceSelectSkipped = adjustmentAccepted \|\| recoveryAccepted \|\| \(!codexProWorkspaceExpanded && requestScope === "all_allowed"\)/, "adjustments and recovery continuations must retain their existing workspace while generic all_allowed requests stay unbound and CodexPro-expanded requests keep the main workspace");
 assert.match(sendProfileRequestSource, /Workspace chính đã được CodexPro Manager chọn[\s\S]*?TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN[\s\S]*?all_allowed[\s\S]*?DeepSeek Harness/, "CodexPro workspace requests must carry all allowed regions so the agent can inspect external reference source such as DeepSeek Harness");
 assert.match(sendProfileRequestSource, /codexpro_workspace_expanded_scope: codexProWorkspaceExpanded/, "send diagnostics must expose when the CodexPro workspace was expanded to all allowed roots");
 assert.match(sendProfileRequestSource, /localMcpToolInSession\(session, "prepare_repo_task", \{[\s\S]*?profile_id: profileId[\s\S]*?task_id: taskId[\s\S]*?requestScope === "workspace" \? \{ root: initialWorkspaceRoot \} : \{\}[\s\S]*?scope: requestScope[\s\S]*?preparedTask\?\.prepared !== true[\s\S]*?action: "send_chat_request"/, "Manager must prepare workspace tasks with an exact root while leaving all_allowed task roots unbound");
@@ -775,7 +786,7 @@ assert.match(managerUi, /text: "tiếp tục"[\s\S]*?oneShotRecovery: true/, "th
 assert.match(managerMain, /action: "send_chat_request"[\s\S]*?one_shot_recovery: payload\?\.oneShotRecovery === true/, "Manager must forward the one-shot recovery boundary to browser_control");
 assert.match(server, /one_shot_recovery: z\.boolean\(\)\.optional\(\)[\s\S]*?one_shot_recovery: args\.one_shot_recovery/, "browser_control must preserve the one-shot recovery flag through its schema and extension bridge");
 assert.match(worker, /const oneShotRecovery=Boolean\(args\.one_shot_recovery\)[\s\S]*?for\(let prepareAttempt=0;prepareAttempt<\(oneShotRecovery\?1:2\);prepareAttempt\+=1\)/, "one-shot continuation must stop after the first renderer preparation failure");
-assert.match(managerUi, /long-task-watchdog-hung[\s\S]*?long_task_watchdog_hung: true[\s\S]*?Watchdog đã dừng, không retry thêm/, "a renderer that stays hung after reload must stop and warn instead of retrying or opening a tab");
+assert.match(managerUi, /long-task-watchdog-hung[\s\S]*?forceContinuation: true[\s\S]*?Đã chuyển tab task/, "a renderer that stays hung after reload must move the same logical task to one continuation tab");
 assert.match(managerUi, /if \(!managerSettings\.autoRecovery\) return;[\s\S]*?longRunningChatWatchdogCandidate\(profile, jobs\)[\s\S]*?continue;/, "generic auto-recovery must not race the one-shot watchdog for tasks running over 30 minutes");
 assert.match(managerMain, /ChatGPT báo Connection interrupted[\s\S]*?incident_fingerprint: `chat-connection-interrupted:/, "Connection interrupted transitions must be persisted with a repeat-count fingerprint");
 assert.match(worker, /dom_reload_deferred=true/, "unsafe reload attempts must keep the checkpoint and wait for a later poll");
@@ -804,7 +815,7 @@ assert.match(managerMain, /manager-chat-cache\.json[\s\S]*?MAX_CHAT_CACHE_ENTRIE
 assert.match(managerUi, /currentResponse\?\.repoTaskId && canVerifyRepoTaskUse\(/, "CodexPro verification must wait for a canonical-ready settled response");
 assert.match(managerMain, /const previousTaskId = String\(payload\?\.previousTaskId[\s\S]*?let taskId = previousTaskId \|\| `cpt_/, "task-title retry, chat rollover, and active-task adjustments must preserve the original prepared task id");
 assert.match(managerMain, /repo_task_id_reused: taskIdReused[\s\S]*?repo_task_dispatched_at: taskDispatchedAt/, "Manager send results must expose task-id reuse and the attempt dispatch boundary");
-assert.match(sendProfileRequestSource, /adjustmentRequested[\s\S]*?worker_job_status[\s\S]*?acceptsLogicalTaskAdjustment\([\s\S]*?if \(!adjustmentAccepted\) \{[\s\S]*?prepare_repo_task/, "Manager backend must reuse a task only while its durable job is active and must prepare a new task after a terminal state");
+assert.match(sendProfileRequestSource, /adjustmentRequested[\s\S]*?worker_job_status[\s\S]*?acceptsLogicalTaskAdjustment\([\s\S]*?if \(!adjustmentAccepted && !recoveryAccepted\) \{[\s\S]*?prepare_repo_task/, "Manager backend must reuse a task only while its durable job is active and must prepare a new task after a terminal state");
 assert.match(sendProfileRequestSource, /Đây là lệnh điều chỉnh cho task CodexPro đang chạy[\s\S]*?không tạo task mới[\s\S]*?repo_task_adjustment: adjustmentAccepted/, "accepted follow-ups must be explicitly framed and reported as adjustments to the same logical task");
 assert.match(managerUi, /repoTaskDispatchedAt: currentResponse\.repoTaskDispatchedAt/, "renderer task verification must compare network completion with the active send-attempt boundary");
 assert.match(managerUi, /repoTaskDispatchedAt: String\(result\?\.repo_task_dispatched_at[\s\S]*?repoTaskDispatchedAt: String\(created\?\.repo_task_dispatched_at[\s\S]*?repoTaskDispatchedAt: String\(retried\?\.repo_task_dispatched_at/, "initial sends, retries, and chat rollovers must all retain their dispatch boundary");

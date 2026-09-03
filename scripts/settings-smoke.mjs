@@ -244,6 +244,9 @@ raise SystemExit(proc.returncode or 0)
   return true;
 }
 
+const trace = (label) => { if (process.env.CODEXPRO_SETTINGS_SMOKE_TRACE === '1') console.error(`[settings-smoke] ${label}`); };
+trace('begin');
+
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-root-'));
 const realRoot = await fs.realpath(root);
 const reuseRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-reuse-'));
@@ -498,6 +501,7 @@ runFail([
   'abc'
 ], env, /Invalid port: abc/i);
 
+trace('runtime-none');
 const runtimePort = await getFreePort();
 const runtimePath = await runtimeStatusPath(runtimeRoot, home);
 run([
@@ -540,6 +544,7 @@ try {
   if (error?.code !== 'ENOENT') throw error;
 }
 
+trace('headless');
 const headlessRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-headless-'));
 const headlessPort = await getFreePort();
 const headlessRuntimePath = await runtimeStatusPath(headlessRoot, home);
@@ -596,6 +601,7 @@ if (runInteractiveQuit([
   }
 }
 
+trace('quick-tunnel');
 const cloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-'));
 const cloudflarePort = await getFreePort();
 const cloudflarePath = await runtimeStatusPath(cloudflareRoot, home);
@@ -622,7 +628,11 @@ await withStartedCodexPro([
   '--token',
   'codexpro-cloudflare-token',
   '--no-copy-url'
-], withoutProxyEnv({ ...env, CODEXPRO_FAKE_CLOUDFLARED_PID: fakeCloudflaredPidPath }), async (child) => {
+], withoutProxyEnv({
+  ...env,
+  CODEXPRO_FAKE_CLOUDFLARED_PID: fakeCloudflaredPidPath,
+  CODEXPRO_QUICK_TUNNEL_HEALTH_BASE: `http://127.0.0.1:${cloudflarePort}`
+}), async (child) => {
   const runtime = await waitForJson(cloudflarePath, (data) => data.endpoint?.includes('trycloudflare.com'), 'cloudflare runtime status');
   if (runtime.endpoint.includes('api.trycloudflare.com') || !runtime.endpoint.startsWith('https://real-codexpro.trycloudflare.com/mcp')) {
     throw new Error(`quick tunnel saved the wrong endpoint: ${JSON.stringify(runtime)}`);
@@ -630,18 +640,25 @@ await withStartedCodexPro([
   if (!Number.isInteger(runtime.tunnelPid) || runtime.tunnelPid === child.pid) {
     throw new Error(`quick tunnel runtime did not publish its supervised child pid: ${JSON.stringify(runtime)}`);
   }
-  const tunnelProcessPid = process.platform === 'win32'
+  const firstTunnelPid = runtime.tunnelPid;
+  const firstShimPid = process.platform === 'win32'
     ? Number(await fs.readFile(fakeCloudflaredPidPath, 'utf8'))
-    : runtime.tunnelPid;
-  process.kill(tunnelProcessPid, 'SIGTERM');
-  const closed = await Promise.race([
-    new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal }))),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('launcher did not exit after tunnel child stopped')), 10_000))
-  ]);
-  if (closed.code === 0) {
-    throw new Error(`launcher exited successfully after unexpected tunnel loss: ${JSON.stringify(closed)}`);
+    : firstTunnelPid;
+  if (process.platform === 'win32') {
+    const killed = spawnSync('taskkill.exe', ['/pid', String(firstTunnelPid), '/t', '/f'], { stdio: 'ignore' });
+    if (killed.status !== 0) throw new Error(`failed to terminate supervised quick tunnel tree pid=${firstTunnelPid}`);
+  } else {
+    process.kill(firstTunnelPid, 'SIGTERM');
   }
-}, { forceKill: true });
+  const restartedRuntime = await waitForJson(
+    cloudflarePath,
+    (data) => data.endpoint?.startsWith('https://real-codexpro.trycloudflare.com/mcp') && Number.isInteger(data.tunnelPid) && data.tunnelPid !== firstTunnelPid,
+    'cloudflare quick tunnel restart status'
+  );
+  if (restartedRuntime.pid !== child.pid) {
+    throw new Error(`quick tunnel restart unexpectedly replaced the launcher: ${JSON.stringify(restartedRuntime)}`);
+  }
+});
 try {
   await fs.access(cloudflarePath);
   throw new Error('runtime status was not cleared after supervised tunnel exit');
@@ -658,6 +675,7 @@ if (process.platform === 'win32') {
   }
 }
 
+trace('quick-tunnel-proxy');
 const proxyCloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-proxy-'));
 const proxyCloudflarePort = await getFreePort();
 const proxyCloudflarePath = await runtimeStatusPath(proxyCloudflareRoot, home);
@@ -701,7 +719,8 @@ await withStartedCodexPro([
   PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ''}`,
   HTTPS_PROXY: 'http://proxy.example.test:8080',
   CODEXPRO_FAKE_CURL_ARGS: curlArgsPath,
-  CODEXPRO_FAKE_CLOUDFLARED_ARGS: cloudflaredArgsPath
+  CODEXPRO_FAKE_CLOUDFLARED_ARGS: cloudflaredArgsPath,
+  CODEXPRO_QUICK_TUNNEL_HEALTH_BASE: `http://127.0.0.1:${proxyCloudflarePort}`
 }, async () => {
   const runtime = await waitForJson(proxyCloudflarePath, (data) => data.endpoint?.includes('proxy-codexpro.trycloudflare.com'), 'proxy cloudflare runtime status');
   if (!runtime.endpoint.startsWith('https://proxy-codexpro.trycloudflare.com/mcp')) {

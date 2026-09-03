@@ -82,6 +82,8 @@ try {
 
   await pruneDiagnosticLogs(root);
   const all = await readDiagnosticLogs(root, { hours: 24, limit: 20 });
+  assert.equal(all.scan.tail_bounded, true, "recent unfiltered diagnostics should use bounded tail reads");
+  assert.equal(all.scan.max_bytes_per_file, 2 * 1024 * 1024);
   assert.equal(all.summary.total, 6);
   assert.equal(all.summary.error, 2);
   assert.equal(all.summary.warn, 2);
@@ -108,6 +110,7 @@ try {
   assert.ok(serialized.includes("[REDACTED]"));
 
   const errors = await readDiagnosticLogs(root, { hours: 24, level: "error" });
+  assert.equal(errors.scan.tail_bounded, false, "filtered diagnostics must retain full-scan semantics");
   assert.equal(errors.entries.length, 2);
   assert.ok(errors.entries.some((entry) => entry.action === "send-request"));
   assert.ok(errors.entries.some((entry) => entry.action === "child-exit"));
@@ -115,6 +118,7 @@ try {
   assert.equal(errors.available.levels.info, 2, "filter facets must retain all available levels");
 
   const searched = await readDiagnosticLogs(root, { hours: 24, query: "list_profiles" });
+  assert.equal(searched.scan.tail_bounded, false, "diagnostic search must scan the full retention window");
   assert.equal(searched.entries.length, 1);
   assert.equal(searched.entries[0].source, "mcp");
 
