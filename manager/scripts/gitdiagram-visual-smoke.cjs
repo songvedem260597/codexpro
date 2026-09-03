@@ -99,6 +99,7 @@ app.whenReady().then(async () => {
         modules: document.querySelector("#modules")?.textContent?.trim() || "",
         connections: document.querySelector("#connections")?.textContent?.trim() || "",
         copyDisabled: document.querySelector("#copy")?.disabled,
+        clickableCount: document.querySelectorAll(".flow-node.is-clickable").length,
         nodeCount: document.querySelectorAll(".flow-node").length,
         edgeCount: document.querySelectorAll("#diagram svg path[marker-end]").length,
         labelCount: document.querySelectorAll(".edge-label").length,
@@ -112,6 +113,7 @@ app.whenReady().then(async () => {
 
     if (rendered.summaryHidden || rendered.components !== "5" || rendered.modules !== "2" || rendered.connections !== "4") throw new Error(`Summary did not render: ${JSON.stringify(rendered)}`);
     if (rendered.copyDisabled) throw new Error("Copy Mermaid must be enabled after a successful analysis.");
+    if (rendered.clickableCount < 1) throw new Error(`Overview must expose drill-down affordances: ${JSON.stringify(rendered)}`);
     if (rendered.nodeCount !== fixture.nodes.length || rendered.edgeCount !== fixture.edges.length || rendered.labelCount !== fixture.edges.length) {
       throw new Error(`Diagram geometry is incomplete: ${JSON.stringify(rendered)}`);
     }
