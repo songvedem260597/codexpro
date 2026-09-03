@@ -1921,11 +1921,33 @@ async function focusChatComposerForSubmitPage(attemptId='',expectedText='') {
   return {ok:true,focused:document.activeElement===composer,selection_inside:Boolean(getSelection()?.anchorNode&&composer.contains(getSelection().anchorNode)),focus_wait_ms:750,composer_recovered_after_react:recovered};
 }
 
+function dismissKnownBlockingChatModalPage(attemptId='',expectedText='') {
+  const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
+  const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
+  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+  const composerText=composer?.isContentEditable?String(composer.innerText||composer.textContent||''):String(composer?.value||'');
+  const draftOwned=Boolean(composer&&(composer.dataset.codexproDraftAttempt===attemptId||expectedText&&normalized(composerText)===normalized(expectedText)));
+  if(!draftOwned)return {ok:true,dismissed:false,reason:'draft-not-owned'};
+  const dialogs=[document.querySelector('#modal-subscription-failure'),...document.querySelectorAll('[role="dialog"]')].filter((element,index,array)=>element&&array.indexOf(element)===index&&visible(element));
+  const modal=dialogs.find(element=>{
+    if(element.id==='modal-subscription-failure')return true;
+    const text=normalized(element.innerText||element.textContent||'');
+    return /review payment method|plus plan failed to renew|payment method.*pay now|xem lai phuong thuc thanh toan|gia han.*plus.*that bai/i.test(text);
+  });
+  if(!modal)return {ok:true,dismissed:false,blocking_modal_present:false};
+  const close=['button[data-testid="close-button"]','button[aria-label="Close"]','button[aria-label="Đóng"]','button[aria-label="Dong"]'].map(selector=>modal.querySelector(selector)).find(element=>visible(element)&&!element.disabled&&element.getAttribute?.('aria-disabled')!=='true');
+  if(!close)return {ok:false,dismissed:false,error:'Modal thanh toán đang chặn composer nhưng không tìm thấy nút đóng an toàn.'};
+  close.click();
+  return {ok:true,dismissed:true,modal:'subscription-payment'};
+}
+
 function prepareTrustedClickFallbackPage(attemptId='',expectedText='') {
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
   const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
   const composerText=composer?.isContentEditable?String(composer.innerText||composer.textContent||''):String(composer?.value||'');
+  const blockingModal=document.querySelector('#modal-subscription-failure');
+  if(visible(blockingModal))return {ok:false,error:'Modal thanh toán đang chặn nút Send; không click fallback.'};
   const recovered=Boolean(composer&&composer.dataset.codexproDraftAttempt!==attemptId&&expectedText&&normalized(composerText)===normalized(expectedText));
   if(!composer||composer.dataset.codexproDraftAttempt!==attemptId&&!recovered)return {ok:false,error:'Composer không còn giữ đúng draft của attempt này.'};
   composer.dataset.codexproDraftAttempt=attemptId;
@@ -4250,9 +4272,10 @@ async function trustedActivateChatSendButtonTab(tabId,attemptId) {
   if(!attemptId)throw new Error('Trusted send attempt không hợp lệ.');
   await withDebuggerTab(tabId,async target=>{
     const safeAttempt=String(attemptId).replace(/[\\"\r\n]/g,'');
-    const expression=`(()=>{const el=document.querySelector('[data-codexpro-send-attempt="${safeAttempt}"]')||document.querySelector('#composer-submit-button,button[data-testid="send-button"]');if(!el||el.disabled||el.getAttribute('aria-disabled')==='true')return null;el.scrollIntoView({block:'center',inline:'center'});const rect=el.getBoundingClientRect();return rect.width&&rect.height?{x:rect.left+rect.width/2,y:rect.top+rect.height/2}:null;})()`;
+    const expression=`(()=>{const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};if(visible(document.querySelector('#modal-subscription-failure')))return {blocked:true};const el=document.querySelector('[data-codexpro-send-attempt="${safeAttempt}"]')||document.querySelector('#composer-submit-button,button[data-testid="send-button"]');if(!el||el.disabled||el.getAttribute('aria-disabled')==='true')return null;el.scrollIntoView({block:'center',inline:'center'});const rect=el.getBoundingClientRect();return rect.width&&rect.height?{x:rect.left+rect.width/2,y:rect.top+rect.height/2}:null;})()`;
     const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression,returnByValue:true});
     const point=evaluated?.result?.value;
+    if(point?.blocked)throw new Error('Modal thanh toán xuất hiện lại ngay trước trusted click; chưa dispatch.');
     if(!Number.isFinite(point?.x)||!Number.isFinite(point?.y))throw new Error('Không tìm được tọa độ nút gửi ChatGPT.');
     await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mouseMoved',x:point.x,y:point.y,button:'none'});
     await chrome.debugger.sendCommand(target,'Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',buttons:1,clickCount:1});
@@ -4286,6 +4309,21 @@ async function submitChatAttachmentButtonTab(tabId,attemptId,expectedText='') {
 
 async function trustedSubmitChatComposerTab(tabId,attemptId,expectedText='') {
   if(!attemptId)throw new Error('Trusted composer attempt không hợp lệ.');
+  let blockingModalDismissed=false;
+  const settleBlockingModal=async()=>{
+    let quietChecks=0;
+    for(let guardAttempt=0;guardAttempt<6;guardAttempt+=1){
+      const [result]=await chrome.scripting.executeScript({target:{tabId},func:dismissKnownBlockingChatModalPage,args:[attemptId,expectedText]});
+      if(result?.result?.ok!==true)throw new Error(result?.result?.error||'Không xử lý được modal đang chặn composer ChatGPT.');
+      if(result?.result?.dismissed){blockingModalDismissed=true;quietChecks=0;await new Promise(resolve=>setTimeout(resolve,250));continue;}
+      quietChecks+=1;
+      if(quietChecks>=3)return;
+      await new Promise(resolve=>setTimeout(resolve,200));
+    }
+    throw new Error('Modal thanh toán liên tục xuất hiện lại; dừng trước khi phát Enter để tránh trạng thái gửi không chắc chắn.');
+  };
+  try{await settleBlockingModal();}
+  catch(error){throw new Error('TRUSTED_ENTER_PRE_DISPATCH: '+String(error?.message||error));}
   const [focused]=await chrome.scripting.executeScript({target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
   if(focused?.result?.ok!==true)throw new Error('TRUSTED_ENTER_PRE_DISPATCH: '+(focused?.result?.error||'Không xác minh được composer ChatGPT trước khi gửi bằng Enter.'));
   let tracker;
@@ -4299,17 +4337,21 @@ async function trustedSubmitChatComposerTab(tabId,attemptId,expectedText='') {
     await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:true});
     focusEmulationEnabled=true;
     await new Promise(resolve=>setTimeout(resolve,250));
+    await settleBlockingModal();
     const [refocused]=await chrome.scripting.executeScript({target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
     refocusedResult=refocused?.result||null;
     if(refocused?.result?.ok!==true||refocused?.result?.focused!==true&&refocused?.result?.selection_inside!==true)throw new Error(refocused?.result?.error||'Composer mất focus trong background focus emulation lifecycle.');
     await new Promise(resolve=>setTimeout(resolve,250));
+    await settleBlockingModal();
+    const [finalFocus]=await chrome.scripting.executeScript({target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
+    if(finalFocus?.result?.ok!==true||finalFocus?.result?.focused!==true&&finalFocus?.result?.selection_inside!==true)throw new Error(finalFocus?.result?.error||'Composer mất focus ngay trước trusted Enter dispatch.');
     keyDispatchStarted=true;
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'char',key:'Enter',code:'Enter',text:'\r',unmodifiedText:'\r',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
   }catch(error){if(focusEmulationEnabled)await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});await tracker.cleanup();throw new Error((keyDispatchStarted?'TRUSTED_ENTER_DISPATCH_UNCERTAIN: ':'TRUSTED_ENTER_PRE_DISPATCH: ')+String(error?.message||error));}
   if(focusEmulationEnabled)await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});
-  return {dispatched:true,page_brought_to_front:false,background_submit:true,focus_emulation_used:true,composer_recovered_after_react:Boolean(focused?.result?.composer_recovered_after_react),composer_refocused_after_react:Boolean(refocusedResult?.composer_recovered_after_react),cdp_tracker_armed:true,cdp_network_acknowledged:false,cdp_generation_endpoint:'',cdp_request_id:'',cdp_tracker_timeout:false};
+  return {dispatched:true,page_brought_to_front:false,background_submit:true,focus_emulation_used:true,blocking_modal_dismissed:blockingModalDismissed,composer_recovered_after_react:Boolean(focused?.result?.composer_recovered_after_react),composer_refocused_after_react:Boolean(refocusedResult?.composer_recovered_after_react),cdp_tracker_armed:true,cdp_network_acknowledged:false,cdp_generation_endpoint:'',cdp_request_id:'',cdp_tracker_timeout:false};
 }
 
 async function trustedKeyTab(tabId,key) {
