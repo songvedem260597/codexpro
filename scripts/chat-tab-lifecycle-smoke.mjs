@@ -41,6 +41,7 @@ for (const mode of ['race', 'complete', 'missing', 'timeout', 'removed']) {
   assert.equal(harness.removedListeners.size, 0, `${mode}: close listener must be removed`);
 }
 
+const cleanupGuardSource = worker.slice(worker.indexOf('function debuggerSessionBlocksChatTabCleanup('), worker.indexOf('function planChatTabCleanup('));
 const policySource = worker.slice(worker.indexOf('function planChatTabCleanup('), worker.indexOf('async function probeChatGptTabHealth('));
 const cleanupSource = worker.slice(worker.indexOf('async function cleanupChatGptTabs('), worker.indexOf('function enforceSingleChatTabSoon('));
 function cleanupHarness({ createFails = false, busy = false, pinned = false, limit = 1 } = {}) {
@@ -63,7 +64,8 @@ function cleanupHarness({ createFails = false, busy = false, pinned = false, lim
     CHAT_TAB_HEALTH_FAILURES_TO_CLOSE: 2, CHAT_TAB_CLEANUP_INTERVAL_MS: 30000,
     lastChatTabCleanupAt: 0, recentConversationCache: {},
     chatTabHealthByTab: new Map([[1, { failures: 1 }]]),
-    debuggerSessionsByTab: new Map(), pendingConversationByTab: new Map(),
+    debuggerSessionsByTab: new Map(), flightRecorderTrackersByTab: new Map(), pendingConversationByTab: new Map(),
+    PENDING_CONVERSATION_TTL_MS: 60000,
     chatAttachmentOwnershipByTab: new Map(), browserMutationTailsByTab: new Map(), chatDomActivityByTab: new Map(),
     chatGptTabLimit: async () => limit, ensureChatAttachmentOwnershipLoaded: async () => {},
     probeChatGptTabHealth: async () => false, chatRequestState: async () => ({ busy }),
@@ -77,7 +79,7 @@ function cleanupHarness({ createFails = false, busy = false, pinned = false, lim
       minimumTabCount = Math.min(minimumTabCount, tabs.length);
     }
   };
-  const { cleanupChatGptTabs } = vm.runInNewContext(`${policySource}\n${cleanupSource}; ({cleanupChatGptTabs});`, context);
+  const { cleanupChatGptTabs } = vm.runInNewContext(`${cleanupGuardSource}\n${policySource}\n${cleanupSource}; ({cleanupChatGptTabs});`, context);
   return { cleanupChatGptTabs, tabs, events, minimum: () => minimumTabCount };
 }
 
