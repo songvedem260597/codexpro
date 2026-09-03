@@ -462,6 +462,38 @@ assert.match(sendBlock, /attachmentSubmit\?submitChatAttachmentButtonTab\(tab\.i
 assert.match(worker, /async function submitChatAttachmentButtonTab\(tabId,attemptId,expectedText=''/, "attachment submit must install the network tracker before invoking the scoped page click");
 assert.match(worker, /func:clickPreparedChatSendButtonPage,args:\[attemptId\]/, "attachment submit must click only the Send button marked for the exact attempt");
 assert.match(sendBlock, /ATTACHMENT_UPLOAD_FAILED:/, "a failed upload must stop before submit and clean only the owned draft");
+const recoverableAttachmentAbortSource = extractFunction("isRecoverableAttachmentUploadAbort");
+const isRecoverableAttachmentUploadAbort = Function(`${recoverableAttachmentAbortSource}; return isRecoverableAttachmentUploadAbort;`)();
+assert.equal(isRecoverableAttachmentUploadAbort({ endpoint: "/backend-api/files/library/reuse", phase: "failed", status_code: 0, error: "net::ERR_ABORTED" }), true, "ChatGPT cancelling its library reuse optimization must not fail an otherwise recoverable attachment upload");
+assert.equal(isRecoverableAttachmentUploadAbort({ endpoint: "/backend-api/files", phase: "failed", status_code: 0, error: "net::ERR_ABORTED" }), false, "an aborted primary file upload must remain fatal");
+assert.equal(isRecoverableAttachmentUploadAbort({ endpoint: "/backend-api/files/library/reuse", phase: "failed", status_code: 429, error: "net::ERR_ABORTED" }), false, "an HTTP failure on library reuse must remain fatal even if Chrome also reports ERR_ABORTED");
+const completedAttachmentUploadSource = extractFunction("isCompletedAttachmentUpload");
+const isCompletedAttachmentUpload = Function(`${completedAttachmentUploadSource}; return isCompletedAttachmentUpload;`)();
+assert.equal(isCompletedAttachmentUpload({ endpoint: "/backend-api/files/library/reuse", phase: "completed", status_code: 200 }, "/backend-api/files/library/reuse"), true, "a successful library reuse response is definitive attachment upload evidence");
+const attachmentUploadWaitSource = extractFunction("waitForAttachmentUploadNetwork");
+assert.match(attachmentUploadWaitSource, /isCompletedAttachmentUpload\(item,'\/backend-api\/files\/process_upload_stream'\)[\s\S]*?isCompletedAttachmentUpload\(item,'\/backend-api\/files\/library\/reuse'\)[\s\S]*?isRecoverableAttachmentUploadAbort/, "attachment upload wait must accept definitive success before rejecting failures and must exclude the recoverable reuse abort");
+const attachmentWaitLog = new Map();
+const attachmentWaiters = new Map();
+const waitForAttachmentUploadNetwork = Function(
+  "chatNetworkPostLogByTab",
+  "chatNetworkPostWaitersByTab",
+  "ATTACHMENT_UPLOAD_TIMEOUT_MS",
+  "ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS",
+  `${extractFunction("isAttachmentUploadEndpoint")};${recoverableAttachmentAbortSource};${completedAttachmentUploadSource};async ${attachmentUploadWaitSource}; return waitForAttachmentUploadNetwork;`
+)(attachmentWaitLog, attachmentWaiters, 30000, 2500);
+const uploadNow = Date.now();
+attachmentWaitLog.set(91, [
+  { endpoint: "/backend-api/files/library/reuse", phase: "failed", status_code: 0, error: "net::ERR_ABORTED", observed_at_ms: uploadNow - 1200 },
+  { endpoint: "/backend-api/files", phase: "completed", status_code: 200, error: "", observed_at_ms: uploadNow - 3000 }
+]);
+const recoveredUpload = await waitForAttachmentUploadNetwork(91, uploadNow - 5000, 100);
+assert.equal(recoveredUpload.acknowledged, true, "an aborted reuse branch followed by a completed base upload must still acknowledge the attachment");
+assert.equal(recoveredUpload.reuse_abort_recovered, true, "attachment diagnostics must record that the library reuse abort was recovered");
+attachmentWaitLog.set(92, [
+  { endpoint: "/backend-api/files/library/reuse", phase: "completed", status_code: 200, error: "", observed_at_ms: uploadNow }
+]);
+const reusedUpload = await waitForAttachmentUploadNetwork(92, uploadNow - 1000, 100);
+assert.equal(reusedUpload.endpoint, "/backend-api/files/library/reuse", "a successful library reuse response must acknowledge without waiting for a redundant fresh upload");
 assert.match(worker, /const tracker=cdpNetworkTrackersByTab\.get\(tabId\);if\(tracker\)void tracker\.cleanup\(\)/, "closing a tab must detach its CDP tracker");
 assert.match(worker, /chrome\.tabs\.onUpdated\.addListener\(\(tabId,changeInfo(?:,tab)?\)=>\{[\s\S]*?if\(typeof changeInfo\?\.url==='string'\)void reconcileChatTabNavigation\(tabId,changeInfo\.url\);/, "navigating the same tab away from its conversation must immediately reconcile conversation-scoped state");
 assert.match(worker, /conversationScopedStateMismatch\(current\.conversation_id,conversationId\)\)\{chatNetworkStateByTab\.delete\(tabId\)/, "network state from the previous conversation must be removed even when the active URL has no conversation id");

@@ -464,6 +464,20 @@ function isAttachmentUploadEndpoint(endpoint) {
   return Boolean(attachmentUploadStage(endpoint));
 }
 
+function isRecoverableAttachmentUploadAbort(item) {
+  return String(item?.endpoint||'')==='/backend-api/files/library/reuse'
+    && Number(item?.status_code||0)===0
+    && /failed$/i.test(String(item?.phase||''))
+    && /(?:net::)?ERR_ABORTED/i.test(String(item?.error||''));
+}
+
+function isCompletedAttachmentUpload(item,endpoint) {
+  return String(item?.endpoint||'')===endpoint
+    && /completed$/i.test(String(item?.phase||''))
+    && Number(item?.status_code)>0
+    && Number(item?.status_code)<400;
+}
+
 async function waitForChatSubmitLifecycle(tabId,startedAfterMs,timeoutMs=1800) {
   const deadline=Date.now()+Math.max(100,Number(timeoutMs)||1800);
   const readEvidence=()=>recentChatPostEvidence(tabId,startedAfterMs).filter(isChatSubmissionAckEvidence);
@@ -496,15 +510,18 @@ async function waitForAttachmentUploadNetwork(tabId,startedAfterMs,timeoutMs=ATT
   });
   while(Date.now()<deadline){
     const uploads=(chatNetworkPostLogByTab.get(tabId)||[]).filter(item=>Number(item.observed_at_ms||0)>=Number(startedAfterMs||0)&&isAttachmentUploadEndpoint(item.endpoint));
-    const failed=uploads.find(item=>item.phase==='failed'||Number(item.status_code)>=400);
-    if(failed)throw new Error(`ChatGPT upload file thất bại tại ${failed.endpoint}: ${failed.error||`HTTP ${failed.status_code}`}`);
+    const recoverableReuseAbort=uploads.find(isRecoverableAttachmentUploadAbort);
     const processingSeen=uploads.some(item=>attachmentUploadStage(item.endpoint)==='processing');
-    const processingComplete=[...uploads].reverse().find(item=>attachmentUploadStage(item.endpoint)==='processing'&&item.phase==='completed'&&Number(item.status_code)>0&&Number(item.status_code)<400);
-    if(processingComplete)return {acknowledged:true,endpoint:processingComplete.endpoint,fallback:false};
-    const baseCompleted=[...uploads].reverse().find(item=>attachmentUploadStage(item.endpoint)==='base'&&item.phase==='completed'&&Number(item.status_code)>0&&Number(item.status_code)<400);
+    const processingComplete=[...uploads].reverse().find(item=>attachmentUploadStage(item.endpoint)==='processing'&&/completed$/i.test(String(item.phase||''))&&Number(item.status_code)>0&&Number(item.status_code)<400);
+    if(processingComplete)return {acknowledged:true,endpoint:processingComplete.endpoint,fallback:false,reuse_abort_recovered:Boolean(recoverableReuseAbort)};
+    const reuseComplete=[...uploads].reverse().find(item=>isCompletedAttachmentUpload(item,'/backend-api/files/library/reuse'));
+    if(reuseComplete)return {acknowledged:true,endpoint:reuseComplete.endpoint,fallback:false,reused:true};
+    const failed=uploads.find(item=>(/failed$/i.test(String(item.phase||''))||Number(item.status_code)>=400)&&!isRecoverableAttachmentUploadAbort(item));
+    if(failed)throw new Error(`ChatGPT upload file thất bại tại ${failed.endpoint}: ${failed.error||`HTTP ${failed.status_code}`}`);
+    const baseCompleted=[...uploads].reverse().find(item=>attachmentUploadStage(item.endpoint)==='base'&&/completed$/i.test(String(item.phase||''))&&Number(item.status_code)>0&&Number(item.status_code)<400);
     const quietRemaining=baseCompleted&&!processingSeen?Math.max(0,ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS-(Date.now()-Number(baseCompleted.observed_at_ms||0))):null;
     if(quietRemaining===0){
-      return {acknowledged:true,endpoint:baseCompleted.endpoint,fallback:true};
+      return {acknowledged:true,endpoint:baseCompleted.endpoint,fallback:true,reuse_abort_recovered:Boolean(recoverableReuseAbort)};
     }
     await waitForChange(Math.min(deadline-Date.now(),quietRemaining===null?deadline-Date.now():quietRemaining));
   }
