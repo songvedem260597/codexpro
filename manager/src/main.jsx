@@ -25,7 +25,7 @@ import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discard
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 import { conversationCompletedTaskCount, conversationMessageLimit, conversationTotalMessageCount, logicalTaskTracking, recordCompletedLogicalTask, shouldQualifyFastMessageLimit, shouldRolloverConversation } from "./conversation-message-limit.js";
-import { activeLogicalTaskAdjustment } from "./logical-chat-task.js";
+import { activeLogicalTaskAdjustment } from "../electron/logical-chat-task.mjs";
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";

@@ -27,7 +27,7 @@ import { createAppPluginRegistry } from "./app-plugins/app-plugin-registry.mjs";
 import { createManagedAppPluginInstaller } from "./app-plugins/managed-app-plugin-installer.mjs";
 import { createPluginSkillBundle } from "./app-plugins/plugin-skill-bundle.mjs";
 import { registerReturnToManagerShortcut, RETURN_TO_MANAGER_ACCELERATOR } from "./return-to-manager-shortcut.mjs";
-import { acceptsLogicalTaskAdjustment } from "../src/logical-chat-task.js";
+import { acceptsLogicalTaskAdjustment } from "./logical-chat-task.mjs";
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "codexpro-plugin",
