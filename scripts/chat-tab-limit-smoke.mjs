@@ -3,7 +3,7 @@ import fs from "node:fs";
 
 const worker = fs.readFileSync(new URL("../chrome-extension/service-worker.js", import.meta.url), "utf8");
 
-assert.match(worker, /const MAX_CHATGPT_TABS = 3;/, "Windows/non-mac worker cap must remain three tabs");
+assert.match(worker, /const MAX_CHATGPT_TABS = 2;/, "Windows/non-mac worker cap must be two tabs");
 assert.match(worker, /const MAC_MAX_CHATGPT_TABS = 1;/, "macOS worker must cap ChatGPT to one tab per Chrome profile");
 assert.match(worker, /chrome\.runtime\.getPlatformInfo\(\)/, "tab cap must be selected from the real Chrome platform");
 assert.match(worker, /CHAT_TAB_LIMIT_REACHED/, "worker must fail closed when the existing tab is protected");
@@ -38,12 +38,12 @@ function makeLimitHarness(os) {
     "MAC_MAX_CHATGPT_TABS",
     `let chatTabLimitCache = null; ${limitSource}; return { chatGptTabLimit };`
   );
-  return factory(chrome, 3, 1).chatGptTabLimit;
+  return factory(chrome, 2, 1).chatGptTabLimit;
 }
 
 assert.equal(await makeLimitHarness("mac")(), 1, "macOS must resolve to exactly one ChatGPT tab");
-assert.equal(await makeLimitHarness("win")(), 3, "Windows must retain the three-tab cap");
-assert.equal(await makeLimitHarness("linux")(), 3, "non-mac platforms must retain the normal cap");
+assert.equal(await makeLimitHarness("win")(), 2, "Windows must resolve to the two-tab cap");
+assert.equal(await makeLimitHarness("linux")(), 2, "non-mac platforms must resolve to the two-tab cap");
 
 const debuggerGuardSource = worker.match(/function debuggerSessionBlocksChatTabCleanup\(tabId\) \{[\s\S]*?\n\}/)?.[0];
 assert.ok(debuggerGuardSource, "tab cleanup must distinguish the persistent flight-recorder debugger ref from transient debugger work");
@@ -133,7 +133,7 @@ const helperSource = worker.slice(
 );
 assert.ok(helperSource.includes("async function createChatGptTab"), "capped tab creator source must be present");
 
-function makeHarness(initialTabs, { limit = 3 } = {}) {
+function makeHarness(initialTabs, { limit = 2 } = {}) {
   let tabs = initialTabs.map(tab => ({ ...tab }));
   const debuggerSessionsByTab = new Map(initialTabs.filter(tab => Number(tab.debuggerRefs) > 0).map(tab => [tab.id, { refs: Number(tab.debuggerRefs) }]));
   const flightRecorderTrackersByTab = new Map(initialTabs.filter(tab => tab.flightRecorder).map(tab => [tab.id, {}]));
@@ -214,7 +214,7 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
   );
   const { createChatGptTab } = factory(
     chrome,
-    3,
+    2,
     1,
     isChatGptTabUrl,
     tabList,
@@ -238,12 +238,11 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
 
 {
   const harness = makeHarness([
-    { id: 1, url: "https://chatgpt.com/c/a1111111" },
-    { id: 2, url: "https://chatgpt.com/c/b2222222" }
-  ], { limit: 3 });
+    { id: 1, url: "https://chatgpt.com/c/a1111111" }
+  ], { limit: 2 });
   await harness.createChatGptTab({ url: "https://chatgpt.com/", active: false });
-  assert.equal(harness.state().count, 3);
-  assert.equal(harness.state().maxObserved, 3, "Windows opening the third tab must not exceed its cap");
+  assert.equal(harness.state().count, 2);
+  assert.equal(harness.state().maxObserved, 2, "non-mac opening the second tab must not exceed its cap");
 }
 
 {
@@ -320,4 +319,4 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
   assert.equal(harness.state().maxObserved, 1, "concurrent macOS requests must be serialized and never reach two ChatGPT tabs");
 }
 
-console.log("✓ macOS one-tab / Windows three-tab ChatGPT cap smoke test passed");
+console.log("✓ macOS one-tab / non-mac two-tab ChatGPT cap smoke test passed");
