@@ -6,8 +6,8 @@ const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "u
 
 assert.match(renderer, /function ChatGalaxyButtonContent\(\)[\s\S]*?chat-galaxy-spark[\s\S]*?chat-galaxy-static[\s\S]*?chat-galaxy-orbit[\s\S]*?chat-galaxy-label/, "Chat button must render the galaxy layers and readable label");
 assert.equal((renderer.match(/<ChatGalaxyButtonContent \/>/g) || []).length, 2, "browser and API worker Chat buttons must share the same galaxy effect");
-assert.match(renderer, /className="button primary profile-chat chat-galaxy-button"[\s\S]*?onClick=\{\(\) => openChat\(profile\)\}/, "browser worker Chat button must use the galaxy effect");
-assert.match(renderer, /className="button primary profile-chat chat-galaxy-button"[^>]*onClick=\{\(\) => onRun\(worker\)\}/, "API worker Chat button must use the galaxy effect");
+assert.match(renderer, /className="button primary profile-chat chat-galaxy-button"[\s\S]*?onClick=\{\(event\) => \{ openChat\(profile\); if \(event\.detail > 0\) event\.currentTarget\.blur\(\); \}\}/, "browser worker Chat button must open the popup and release pointer focus");
+assert.match(renderer, /className="button primary profile-chat chat-galaxy-button"[^>]*onClick=\{\(event\) => \{ onRun\(worker\); if \(event\.detail > 0\) event\.currentTarget\.blur\(\); \}\}/, "API worker Chat button must open the popup and release pointer focus");
 assert.match(renderer, /function TitleGalaxyAccent\(\)[\s\S]*?title-galaxy-accent">Multi<\/span>/, "Multi title accent must render the galaxy treatment directly on the text glyphs");
 assert.match(renderer, /<>CodexPro <TitleGalaxyAccent \/> Agent<\/>/, "overview title must render the galaxy treatment only on Multi");
 

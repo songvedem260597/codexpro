@@ -991,7 +991,7 @@ function ApiWorkerCards({ workers, customImages, onRun, onStop }) {
         </div>
         <div className="profile-actions">
           <div className={`profile-action-buttons ${worker.activity === "working" ? "" : "is-single"}`}>
-            <button className="button primary profile-chat chat-galaxy-button" type="button" disabled={!worker.connected} onClick={() => onRun(worker)}><ChatGalaxyButtonContent /></button>
+            <button className="button primary profile-chat chat-galaxy-button" type="button" disabled={!worker.connected} onClick={(event) => { onRun(worker); if (event.detail > 0) event.currentTarget.blur(); }}><ChatGalaxyButtonContent /></button>
             {worker.activity === "working" && <button className="button profile-stop-button" type="button" onClick={() => onStop(worker.worker_id)}>Dừng</button>}
           </div>
           {worker.connected
@@ -5049,7 +5049,7 @@ function App() {
                     <div className="profile-action-buttons">
                       <button
                         className="button primary profile-chat chat-galaxy-button"
-                        onClick={() => openChat(profile)}
+                        onClick={(event) => { openChat(profile); if (event.detail > 0) event.currentTarget.blur(); }}
                         disabled={!profile.connected || !connectorInstalled}
                         title={profileRequestChats(profile).length ? "Mở khung chat của profile" : "Nhập task; CodexPro sẽ tự mở tab ChatGPT khi gửi"}
                       >

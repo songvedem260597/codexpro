@@ -25,9 +25,9 @@ assert.match(modal, /request-files[\s\S]*?request-file-image[\s\S]*?attach-butto
 assert.match(modal, /AI tự đặt title 4–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP/, "API job composer must explain the AI-owned MCP title bootstrap");
 
 assert.match(source, /<span className="already-connected">✓ Đã kết nối CodexPro<\/span>/, "connected API cards must show the CodexPro connection strip below Run job");
-assert.match(source, /onClick=\{\(\) => onRun\(worker\)\}><ChatGalaxyButtonContent \/><\/button>/, "API worker cards must use the shared Chat galaxy action content as Chrome profiles");
+assert.match(source, /onClick=\{\(event\) => \{ onRun\(worker\); if \(event\.detail > 0\) event\.currentTarget\.blur\(\); \}\}><ChatGalaxyButtonContent \/><\/button>/, "API worker cards must use the shared Chat galaxy action content and release pointer focus");
 assert.match(source, /<Dot ok=\{worker\.connected\} \/>\{worker\.model\}/, "API worker model metadata must show its online status dot");
-assert.match(source, /<div className=\{`profile-action-buttons \$\{worker\.activity === "working" \? "" : "is-single"\}`\}>[\s\S]*?onClick=\{\(\) => onRun\(worker\)\}><ChatGalaxyButtonContent \/><\/button>[\s\S]*?worker\.activity === "working"[\s\S]*?onClick=\{\(\) => onStop\(worker\.worker_id\)\}>Dừng<\/button>/, "working API cards must keep the shared Chat action available next to Stop");
+assert.match(source, /<div className=\{`profile-action-buttons \$\{worker\.activity === "working" \? "" : "is-single"\}`\}>[\s\S]*?onClick=\{\(event\) => \{ onRun\(worker\); if \(event\.detail > 0\) event\.currentTarget\.blur\(\); \}\}><ChatGalaxyButtonContent \/><\/button>[\s\S]*?worker\.activity === "working"[\s\S]*?onClick=\{\(\) => onStop\(worker\.worker_id\)\}>Dừng<\/button>/, "working API cards must keep the shared Chat action available next to Stop");
 assert.match(styles, /\.profile-list\.is-card-layout \.profile-action-buttons\.is-single \{ grid-template-columns: 1fr; \}/, "idle API cards must outrank the card-layout grid and keep Chat full width");
 assert.match(source, /profile-task-summary[\s\S]*?Task gần nhất/, "completed API cards must show the latest task title");
 assert.doesNotMatch(source, /Kết quả job gần nhất/, "API cards must keep the latest response inside Chat instead of expanding it on the overview");
