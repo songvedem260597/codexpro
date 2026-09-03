@@ -136,6 +136,8 @@ try {
   assert.equal(publicError.execution_state, "error");
   assert.equal(publicError.blocked_part, "tests", "error progress must retain the exact failed part for Control Center");
   assert.equal(publicError.blocked_reason, "Build command exited unexpectedly.");
+  assert.equal(publicError.progress_percent, 40, "error progress must preserve the last reported percentage while blocked");
+  assert.deepEqual(publicError.remaining_parts, ["tests", "commit", "push"], "error progress must preserve unfinished delivery steps");
   const partsDoneProgress = await reportWorkerJobProgress({
     jobId: codeId,
     workerId: "api.custom",
