@@ -89,22 +89,24 @@ assert.equal(shouldCheckProfileConnector(fresh, { now, lastCheck: now - 1000 }),
 assert.equal(shouldCheckProfileConnector(fresh, { now, lastCheck: now - 120000 }), false, 'fresh session verification needs no repeat');
 assert.equal(shouldCheckProfileConnector({ ...fresh, connector_checked_at: '2026-09-03T01:00:00Z' }, { now, lastCheck: now - 120000 }), true, 'do not trust a cached success for 24 hours');
 
-const summarize = Function('profile', 'expectedFingerprint', 'CONNECTOR_VERIFICATION_TTL_MS', `
+const summarize = Function('profile', 'expectedFingerprint', `
   const observedCodexProToolActivity = false;
   ${section(bridge, '      const connectorProfileBound = expectedFingerprint', '      return {\n      profile_id:')}
   return { connectorInstalled, connectorVerificationRequired, connectorUpdateRequired, connectorMessage };
 `);
 const currentProfile = { connectorInstalled: true, connectorVerificationState: 'connected', connectorServerFingerprint: 'bound', connectorCheckedAt: new Date().toISOString(), connectorMessage: 'CodexPro READY' };
-assert.equal(summarize(currentProfile, 'bound', 900000).connectorInstalled, true);
-const disconnectedSummary = summarize({ ...currentProfile, connectorInstalled: false, connectorVerificationState: 'disconnected', connectorMessage: 'Chưa kết nối' }, 'bound', 900000);
+assert.equal(summarize(currentProfile, 'bound').connectorInstalled, true);
+const disconnectedSummary = summarize({ ...currentProfile, connectorInstalled: false, connectorVerificationState: 'disconnected', connectorMessage: 'Chưa kết nối' }, 'bound');
 assert.equal(disconnectedSummary.connectorVerificationRequired, false, 'fresh disconnected evidence must survive the public profile summary');
 assert.equal(disconnectedSummary.connectorInstalled, false);
 assert.equal(disconnectedSummary.connectorMessage, 'Chưa kết nối');
-assert.equal(summarize({ ...currentProfile, connectorVerificationState: undefined }, 'bound', 900000).connectorInstalled, false, 'legacy list-only READY must be reverified even if its timestamp is recent');
-assert.equal(summarize({ ...currentProfile, connectorVerificationState: 'missing' }, 'bound', 900000).connectorInstalled, false, 'contradictory missing/ok payload must fail closed');
-assert.equal(summarize({ ...currentProfile, connectorCheckedAt: '2020-01-01T00:00:00Z' }, 'bound', 900000).connectorInstalled, false, 'expired success must not be displayed as READY');
-assert.equal(summarize({ ...currentProfile, connectorInstalled: false }, 'bound', 900000).connectorUpdateRequired, false, 'missing/disconnected is not a URL migration and must not trigger automatic reinstallation');
-assert.equal(summarize({ ...currentProfile, connectorVerificationState: 'unknown' }, 'old', 900000).connectorUpdateRequired, false, 'unknown status must not automatically delete/recreate a connector');
+assert.equal(summarize({ ...currentProfile, connectorVerificationState: undefined }, 'bound').connectorInstalled, false, 'legacy list-only READY must be reverified even if its timestamp is recent');
+assert.equal(summarize({ ...currentProfile, connectorVerificationState: 'missing' }, 'bound').connectorInstalled, false, 'contradictory missing/ok payload must fail closed');
+const staleSuccess = summarize({ ...currentProfile, connectorCheckedAt: '2020-01-01T00:00:00Z' }, 'bound');
+assert.equal(staleSuccess.connectorInstalled, true, 'a previously verified connector must remain READY after 15 minutes until a new negative observation');
+assert.equal(staleSuccess.connectorVerificationRequired, false, 'verification age alone must not downgrade a verified connector');
+assert.equal(summarize({ ...currentProfile, connectorInstalled: false }, 'bound').connectorUpdateRequired, false, 'missing/disconnected is not a URL migration and must not trigger automatic reinstallation');
+assert.equal(summarize({ ...currentProfile, connectorVerificationState: 'unknown' }, 'old').connectorUpdateRequired, false, 'unknown status must not automatically delete/recreate a connector');
 assert.equal(shouldCheckProfileConnector({ ...fresh, connector_verification_required: true }, { now, lastCheck: now - 61000 }), true, 'retry an inconclusive check after one minute instead of treating it as verified absence');
 assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'unknown' }), 'check');
 assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'missing' }), 'setup', 'a confirmed missing profile must expose the explicit setup button');

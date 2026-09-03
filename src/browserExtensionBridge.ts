@@ -10,7 +10,6 @@ const BRIDGE_HOST = "127.0.0.1";
 const CODEXPRO_EXTENSION_ORIGIN = "chrome-extension://gndipignbnipohooclcbhjliikamjlpl";
 export const BROWSER_EXTENSION_BRIDGE_PORT = 9224;
 const PROFILE_TTL_MS = 3 * 60_000;
-const CONNECTOR_VERIFICATION_TTL_MS = 15 * 60_000;
 const PROFILE_RETENTION_MS = 24 * 60 * 60_000;
 const PROFILE_RECONNECT_WAIT_MS = 45_000;
 const COMMAND_TIMEOUT_MS = 25_000;
@@ -1229,8 +1228,8 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
         : profile.connectorInstalled;
       const checkedAtMs = Date.parse(profile.connectorCheckedAt);
       const connectorVerificationRequired = !['connected', 'disconnected', 'missing'].includes(profile.connectorVerificationState || '')
-        || !Number.isFinite(checkedAtMs) || checkedAtMs > Date.now()
-        || Date.now() - checkedAtMs >= CONNECTOR_VERIFICATION_TTL_MS;
+        || !Number.isFinite(checkedAtMs)
+        || checkedAtMs > Date.now();
       const connectorUpdateRequired = Boolean(!connectorVerificationRequired && profile.connectorVerificationState === 'connected' && expectedFingerprint
         && profile.connectorServerFingerprint !== expectedFingerprint);
       const connectorInstalled = profile.connectorInstalled && connectorProfileBound && !connectorVerificationRequired && profile.connectorVerificationState === 'connected';
