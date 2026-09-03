@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import "./control-center.css";
 import { WorkerRunningDuration } from "./worker-running-duration.jsx";
 import { WorkspaceCoordinationPanel } from "./workspace-coordination-panel.jsx";
@@ -35,6 +35,20 @@ function durationText(value) {
   if (minutes < 60) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+function normalizeTaskName(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("vi-VN")
+    .replace(/đ/g, "d")
+    .trim();
+}
+
+function taskMatchesName(task, normalizedQuery) {
+  if (!normalizedQuery) return true;
+  return normalizeTaskName(task?.title || task?.task_title || "").includes(normalizedQuery);
 }
 
 function activeProfileTab(profile) {
@@ -213,6 +227,8 @@ export function ControlCenter({
   onUpdateWorkers,
   onRestartServer
 }) {
+  const [taskSearch, setTaskSearch] = useState("");
+  const normalizedTaskSearch = useMemo(() => normalizeTaskName(taskSearch), [taskSearch]);
   const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
   const workers = Array.isArray(status?.workers) ? status.workers : [];
   const workerJobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
@@ -220,8 +236,8 @@ export function ControlCenter({
   const taskHangIncidents = Array.isArray(status?.taskHangIncidents) ? status.taskHangIncidents : [];
   const taskHangSummary = status?.taskHangSummary && typeof status.taskHangSummary === "object" ? status.taskHangSummary : {};
   const recentTaskHangIncidents = taskHangIncidents.slice(0, 24);
-  const completedTasks = taskWorkerJobs.filter((job) => job?.status === "completed");
-  const failedTasks = taskWorkerJobs.filter((job) => ["failed", "cancelled", "blocked"].includes(String(job?.status)));
+  const completedTasks = taskWorkerJobs.filter((job) => job?.status === "completed" && taskMatchesName(job, normalizedTaskSearch));
+  const failedTasks = taskWorkerJobs.filter((job) => ["failed", "cancelled", "blocked"].includes(String(job?.status)) && taskMatchesName(job, normalizedTaskSearch));
   const tasks = useMemo(() => profiles
     .filter((profile) => {
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
@@ -248,7 +264,8 @@ export function ControlCenter({
     ...tasks.map((task) => task.taskId),
     ...workers.filter((worker) => worker?.activity === "working").map((worker) => String(worker.current_task_id || ""))
   ].filter(Boolean));
-  const unfinishedTasks = taskWorkerJobs.filter((job) => job?.status === "running" && !liveTaskIds.has(String(job?.job_id || "")));
+  const unfinishedTasks = taskWorkerJobs.filter((job) => job?.status === "running" && !liveTaskIds.has(String(job?.job_id || "")) && taskMatchesName(job, normalizedTaskSearch));
+  const visibleTasks = useMemo(() => tasks.filter((task) => taskMatchesName(task, normalizedTaskSearch)), [tasks, normalizedTaskSearch]);
 
   const taskProjects = useMemo(() => new Map(tasks.map((task) => [task.profile.profile_id, projectForTask(task, projects)])), [tasks, projects]);
   const rootUsage = useMemo(() => {
@@ -300,10 +317,24 @@ export function ControlCenter({
       </section>
 
       <section className="control-section control-task-section">
-        <div className="control-section-head"><div><p className="eyebrow">TASK CENTER</p><h2>Task đang chạy</h2></div><span className="control-section-count">{tasks.length} task</span></div>
-        {!tasks.length ? <Empty>Không có task nào đang chạy.</Empty> : (
+        <div className="control-section-head control-task-head">
+          <div><p className="eyebrow">TASK CENTER</p><h2>Task đang chạy</h2></div>
+          <div className="control-task-search-tools">
+            <input
+              className="control-task-search"
+              type="search"
+              autoComplete="off"
+              value={taskSearch}
+              onChange={(event) => setTaskSearch(event.target.value)}
+              placeholder="Tìm task theo tên…"
+              aria-label="Tìm task theo tên"
+            />
+            <span className="control-section-count">{normalizedTaskSearch ? `${visibleTasks.length}/${tasks.length} task` : `${tasks.length} task`}</span>
+          </div>
+        </div>
+        {!visibleTasks.length ? <Empty>{normalizedTaskSearch ? `Không tìm thấy task đang chạy có tên “${taskSearch.trim()}”.` : "Không có task nào đang chạy."}</Empty> : (
           <div className="control-task-list">
-            {tasks.map((task) => {
+            {visibleTasks.map((task) => {
               const project = taskProjects.get(task.profile.profile_id);
               const mappingMissing = !task.taskId || !task.root || !task.profile.profile_id || !String(project?.repoFullName || project?.name || "");
               return (

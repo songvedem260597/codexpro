@@ -6,6 +6,11 @@
 .control-section-head .eyebrow { margin-bottom: 5px; }
 .control-section-head h2 { margin-bottom: 0; }
 .control-section-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.control-task-search-tools { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.control-task-search { width: min(320px, 34vw); min-width: 190px; height: 34px; padding: 0 11px; color: #dfe5ee; border: 1px solid #303948; border-radius: 7px; outline: none; background: #0d1219; font: inherit; font-size: var(--font-description); transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease; }
+.control-task-search::placeholder { color: #69778b; }
+.control-task-search:hover { border-color: #3a4658; background: #101720; }
+.control-task-search:focus { border-color: #4f6f93; box-shadow: 0 0 0 2px #4f6f9328; background: #111923; }
 .control-section-count { flex: 0 0 auto; padding: 5px 9px; color: #a8b2c4; border: 1px solid #303948; border-radius: 999px; background: #10151d; font-size: var(--font-micro); font-weight: var(--weight-semibold); }
 .control-two-column { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .control-task-list { display: grid; gap: 9px; }
@@ -174,6 +179,9 @@
   .control-hang-actions { grid-column: 1 / -1; }
 }
 @media (max-width: 680px) {
+  .control-task-head { align-items: stretch; flex-direction: column; }
+  .control-task-search-tools { justify-content: stretch; }
+  .control-task-search { width: 100%; min-width: 0; }
   .performance-grid { grid-template-columns: 1fr; }
   .control-task-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .control-hang-summary { grid-template-columns: 1fr; }
