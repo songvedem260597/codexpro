@@ -14,7 +14,9 @@ function run(args) {
   return spawnSync(process.execPath, [cli, ...args], {
     cwd: projectRoot,
     encoding: 'utf8',
-    timeout: 5000,
+    // The full macOS smoke suite can leave filesystem/indexing work in flight;
+    // keep this bounded while allowing the CLI cold start to finish under load.
+    timeout: 15_000,
     env: { ...process.env, NO_COLOR: '1', CI: '1', CODEXPRO_HOME: home }
   });
 }
