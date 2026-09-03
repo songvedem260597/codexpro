@@ -60,6 +60,10 @@
 .app-plugin-task-summary > button { grid-column: 2; grid-row: 1 / span 2; padding: 7px 10px; color: #aeb9c9; border: 1px solid #394352; border-radius: var(--radius-control); background: #151b24; }
 .app-plugin-task-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .app-plugin-task-fields label { min-width: 0; display: grid; gap: 6px; }
+.app-plugin-task-fields label > .project-dropdown,
+.app-plugin-task-fields label > .app-dropdown { width: 100%; min-width: 0; }
+.app-plugin-task-fields .project-dropdown-trigger,
+.app-plugin-task-fields .app-dropdown-trigger { min-width: 0; max-width: 100%; }
 .app-plugin-task-fields label > span { color: #9aa7b8; font-size: var(--font-micro); font-weight: var(--weight-semibold); }
 .app-plugin-task-fields label.is-wide { grid-column: 1 / -1; }
 .app-plugin-task-fields textarea { min-height: 84px; resize: vertical; padding: 10px 12px; color: #edf1f6; border: 1px solid #354052; border-radius: var(--radius-control); outline: 0; background: #0d1117; font: inherit; line-height: 1.5; }
