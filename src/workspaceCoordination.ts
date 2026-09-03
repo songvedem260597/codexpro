@@ -3,7 +3,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { runGitProcess } from "./processOps.js";
 import { CodexProError } from "./guard.js";
 import { codexProHome } from "./profileStore.js";
 
@@ -123,9 +123,9 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function gitText(root: string, args: string[]): string {
-  const executable = process.platform === "win32" ? "git.exe" : "git";
-  const result = spawnSync(executable, args, {
+async function gitText(root: string, args: string[]): Promise<string> {
+
+  const result = await runGitProcess(root, args, {
     cwd: root,
     encoding: "utf8",
     windowsHide: true,
@@ -135,9 +135,9 @@ function gitText(root: string, args: string[]): string {
   return result.status === 0 ? String(result.stdout ?? "").trim() : "";
 }
 
-function gitStatus(root: string, args: string[]): number {
-  const executable = process.platform === "win32" ? "git.exe" : "git";
-  const result = spawnSync(executable, args, {
+async function gitStatus(root: string, args: string[]): Promise<number> {
+
+  const result = await runGitProcess(root, args, {
     cwd: root,
     encoding: "utf8",
     windowsHide: true,
@@ -147,9 +147,9 @@ function gitStatus(root: string, args: string[]): number {
   return Number(result.status ?? 1);
 }
 
-function gitRun(root: string, args: string[], timeout = 30_000): { status: number; stdout: string; stderr: string } {
-  const executable = process.platform === "win32" ? "git.exe" : "git";
-  const result = spawnSync(executable, args, {
+async function gitRun(root: string, args: string[], timeout = 30_000): Promise<{ status: number; stdout: string; stderr: string }> {
+
+  const result = await runGitProcess(root, args, {
     cwd: root,
     encoding: "utf8",
     windowsHide: true,
@@ -167,8 +167,8 @@ function nulPaths(text: string): string[] {
   return text.split("\0").map((value) => value.trim()).filter(Boolean).map((value) => value.replace(/\\/g, "/"));
 }
 
-function gitPaths(root: string, args: string[]): string[] {
-  return nulPaths(gitText(root, args));
+async function gitPaths(root: string, args: string[]): Promise<string[]> {
+  return nulPaths(await gitText(root, args));
 }
 
 function uniquePaths(values: string[]): string[] {
@@ -182,24 +182,24 @@ function uniquePaths(values: string[]): string[] {
   return [...seen.values()].sort((left, right) => left.localeCompare(right));
 }
 
-function currentDirtyPaths(root: string): string[] {
+async function currentDirtyPaths(root: string): Promise<string[]> {
   return uniquePaths([
-    ...gitPaths(root, ["diff", "--name-only", "-z", "--"]),
-    ...gitPaths(root, ["diff", "--cached", "--name-only", "-z", "--"]),
-    ...gitPaths(root, ["ls-files", "--others", "--exclude-standard", "-z", "--"])
+    ...await gitPaths(root, ["diff", "--name-only", "-z", "--"]),
+    ...await gitPaths(root, ["diff", "--cached", "--name-only", "-z", "--"]),
+    ...await gitPaths(root, ["ls-files", "--others", "--exclude-standard", "-z", "--"])
   ]);
 }
 
-function currentHead(root: string): string {
+function currentHead(root: string): Promise<string> {
   return gitText(root, ["rev-parse", "HEAD"]);
 }
 
-function currentBranch(root: string): string {
-  const branch = gitText(root, ["branch", "--show-current"]);
-  return branch || gitText(root, ["rev-parse", "--abbrev-ref", "HEAD"]);
+async function currentBranch(root: string): Promise<string> {
+  const branch = await gitText(root, ["branch", "--show-current"]);
+  return branch || await gitText(root, ["rev-parse", "--abbrev-ref", "HEAD"]);
 }
 
-function currentRemoteHead(root: string): string {
+function currentRemoteHead(root: string): Promise<string> {
   return gitText(root, ["rev-parse", "@{upstream}"]);
 }
 
@@ -383,34 +383,34 @@ function requireTask(state: WorkspaceCoordinationState, taskId: string): Workspa
   return task;
 }
 
-function changedPathsBetween(root: string, baseHead: string, head: string, paths?: string[]): string[] {
+async function changedPathsBetween(root: string, baseHead: string, head: string, paths?: string[]): Promise<string[]> {
   if (!baseHead || !head || baseHead === head) return [];
   const args = ["diff", "--name-only", "-z", `${baseHead}..${head}`];
   if (paths?.length) args.push("--", ...paths);
-  return uniquePaths(gitPaths(root, args));
+  return uniquePaths(await gitPaths(root, args));
 }
 
 function claimOwner(state: WorkspaceCoordinationState, relPath: string): string | undefined {
   return state.claims[canonicalPathKey(relPath)]?.taskId;
 }
 
-function ensureTaskWorktree(root: string, taskId: string, baseHead: string): { root: string; branch: string } | undefined {
+async function ensureTaskWorktree(root: string, taskId: string, baseHead: string): Promise<{ root: string; branch: string } | undefined> {
   if (!baseHead) return undefined;
   const target = worktreeDir(root, taskId);
   const branch = worktreeBranch(taskId);
   if (fs.existsSync(target)) {
-    const top = gitText(target, ["rev-parse", "--show-toplevel"]);
-    if (top && sameFsPath(top, target)) return { root: canonicalRoot(target), branch: currentBranch(target) || branch };
+    const top = await gitText(target, ["rev-parse", "--show-toplevel"]);
+    if (top && sameFsPath(top, target)) return { root: canonicalRoot(target), branch: (await currentBranch(target)) || branch };
     throw new CodexProError(`WORKSPACE_WORKTREE_PATH_BUSY: task worktree path already exists but is not a valid Git worktree: ${target}.`, {
       code: "WORKSPACE_WORKTREE_PATH_BUSY",
       details: { task_id: taskId, worktree_root: target }
     });
   }
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  const branchExists = gitStatus(root, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]) === 0;
+  const branchExists = (await gitStatus(root, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])) === 0;
   const result = branchExists
-    ? gitRun(root, ["worktree", "add", target, branch], 60_000)
-    : gitRun(root, ["worktree", "add", "-b", branch, target, baseHead], 60_000);
+    ? await gitRun(root, ["worktree", "add", target, branch], 60_000)
+    : await gitRun(root, ["worktree", "add", "-b", branch, target, baseHead], 60_000);
   if (result.status !== 0) {
     throw new CodexProError(`WORKSPACE_WORKTREE_CREATE_FAILED: ${result.stderr || result.stdout || "git worktree add failed"}`, {
       code: "WORKSPACE_WORKTREE_CREATE_FAILED",
@@ -433,7 +433,7 @@ function taskGitRoot(context: WorkspaceTaskContext, task?: WorkspaceTaskRecord):
 
 export async function registerWorkspaceTask(context: WorkspaceTaskContext): Promise<WorkspaceTaskRecord> {
   const root = canonicalRoot(context.root);
-  return await withState(root, (state) => {
+  return await withState(root, async (state) => {
     const existing = state.tasks[context.taskId];
     const now = nowIso();
     if (existing?.status === "running") {
@@ -441,7 +441,7 @@ export async function registerWorkspaceTask(context: WorkspaceTaskContext): Prom
       if (context.workerId) existing.workerId = String(context.workerId).slice(0, 160);
       if (context.title) existing.title = String(context.title).slice(0, 120);
       if (!existing.worktreeRoot) {
-        const worktree = ensureTaskWorktree(root, existing.taskId, existing.baseHead);
+        const worktree = await ensureTaskWorktree(root, existing.taskId, existing.baseHead);
         if (worktree) {
           existing.worktreeRoot = worktree.root;
           existing.worktreeBranch = worktree.branch;
@@ -465,17 +465,17 @@ export async function registerWorkspaceTask(context: WorkspaceTaskContext): Prom
       }
     }
 
-    const baseHead = currentHead(root);
-    const worktree = ensureTaskWorktree(root, context.taskId, baseHead);
+    const baseHead = await currentHead(root);
+    const worktree = await ensureTaskWorktree(root, context.taskId, baseHead);
     const task: WorkspaceTaskRecord = {
       taskId: context.taskId,
       workerId,
       title: String(context.title || "").trim().slice(0, 120),
       status: "running",
       baseHead,
-      baseBranch: currentBranch(root),
-      baseRemoteHead: currentRemoteHead(root),
-      initialDirtyPaths: currentDirtyPaths(root),
+      baseBranch: await currentBranch(root),
+      baseRemoteHead: await currentRemoteHead(root),
+      initialDirtyPaths: await currentDirtyPaths(root),
       touchedPaths: [],
       claimedPaths: [],
       commitShas: [],
@@ -493,11 +493,11 @@ export async function claimWorkspacePaths(context: WorkspaceTaskContext, paths: 
   const root = canonicalRoot(context.root);
   const normalizedPaths = uniquePaths(paths.map((value) => workspaceRelativePath(root, root, value)));
   if (!normalizedPaths.length) throw new CodexProError("WORKSPACE_PATH_REQUIRED: at least one path must be claimed.", { code: "WORKSPACE_PATH_REQUIRED" });
-  return await withState(root, (state) => {
+  return await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     const gitRoot = taskGitRoot(context, task);
-    const head = currentHead(gitRoot);
-    const committedConflicts = task.worktreeRoot ? [] : changedPathsBetween(gitRoot, task.baseHead, head, normalizedPaths);
+    const head = await currentHead(gitRoot);
+    const committedConflicts = task.worktreeRoot ? [] : await changedPathsBetween(gitRoot, task.baseHead, head, normalizedPaths);
     if (committedConflicts.length) {
       throw new CodexProError(`WORKSPACE_STALE_BASE_CONFLICT: committed changes landed after ${task.taskId} began: ${committedConflicts.join(", ")}.`, {
         code: "WORKSPACE_STALE_BASE_CONFLICT",
@@ -531,7 +531,7 @@ export async function recordWorkspacePathsTouched(context: WorkspaceTaskContext,
   const root = canonicalRoot(context.root);
   const normalizedPaths = uniquePaths(paths.map((value) => workspaceRelativePath(root, root, value)));
   if (!normalizedPaths.length) throw new CodexProError("WORKSPACE_PATH_REQUIRED: at least one path must be recorded.", { code: "WORKSPACE_PATH_REQUIRED" });
-  return await withState(root, (state) => {
+  return await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     const now = nowIso();
     for (const relPath of normalizedPaths) {
@@ -555,7 +555,7 @@ export async function releaseWorkspacePaths(context: WorkspaceTaskContext, paths
   const root = canonicalRoot(context.root);
   const normalizedPaths = uniquePaths(paths.map((value) => workspaceRelativePath(root, root, value)));
   if (!normalizedPaths.length) return;
-  await withState(root, (state) => {
+  await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     const touchedKeys = new Set(task.touchedPaths.map(canonicalPathKey));
     const releasedKeys = new Set<string>();
@@ -583,12 +583,12 @@ function workspaceRelativePath(root: string, cwd: string, value: string): string
 
 export async function preflightWorkspaceGitAdd(context: WorkspaceTaskContext, cwd: string, args: string[]): Promise<void> {
   const root = canonicalRoot(context.root);
-  await withState(root, (state) => {
+  await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     const gitRoot = taskGitRoot(context, task);
     const paths = uniquePaths(args.map((value) => workspaceRelativePath(gitRoot, cwd, value)));
     const ownedKeys = new Set(task.touchedPaths.map(canonicalPathKey));
-    const stagedPaths = uniquePaths(gitPaths(gitRoot, ["diff", "--cached", "--name-only", "-z", "--"]));
+    const stagedPaths = uniquePaths(await gitPaths(gitRoot, ["diff", "--cached", "--name-only", "-z", "--"]));
     if (!task.worktreeRoot) {
       const foreignStaged = stagedPaths.filter((relPath) => !ownedKeys.has(canonicalPathKey(relPath)));
       if (foreignStaged.length) {
@@ -618,10 +618,10 @@ export async function preflightWorkspaceGitAdd(context: WorkspaceTaskContext, cw
 
 export async function preflightWorkspaceCommit(context: WorkspaceTaskContext): Promise<{ stagedPaths: string[] }> {
   const root = canonicalRoot(context.root);
-  return await withState(root, (state) => {
+  return await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     const gitRoot = taskGitRoot(context, task);
-    const stagedPaths = uniquePaths(gitPaths(gitRoot, ["diff", "--cached", "--name-only", "-z", "--"]));
+    const stagedPaths = uniquePaths(await gitPaths(gitRoot, ["diff", "--cached", "--name-only", "-z", "--"]));
     if (!stagedPaths.length) return { stagedPaths };
 
     const ownedKeys = new Set(task.touchedPaths.map(canonicalPathKey));
@@ -653,8 +653,8 @@ export async function preflightWorkspaceCommit(context: WorkspaceTaskContext): P
     }
 
     if (!task.worktreeRoot) {
-      const head = currentHead(gitRoot);
-      const conflicts = changedPathsBetween(gitRoot, task.baseHead, head, stagedPaths);
+      const head = await currentHead(gitRoot);
+      const conflicts = await changedPathsBetween(gitRoot, task.baseHead, head, stagedPaths);
       if (conflicts.length) {
         throw new CodexProError(`WORKSPACE_COMMIT_STALE_BASE: HEAD changed on paths staged by ${task.taskId}: ${conflicts.join(", ")}.`, {
           code: "WORKSPACE_COMMIT_STALE_BASE",
@@ -669,12 +669,12 @@ export async function preflightWorkspaceCommit(context: WorkspaceTaskContext): P
 
 export async function recordWorkspaceCommit(context: WorkspaceTaskContext): Promise<string> {
   const root = canonicalRoot(context.root);
-  return await withState(root, (state) => {
+  return await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     const gitRoot = taskGitRoot(context, task);
-    const head = currentHead(gitRoot);
+    const head = await currentHead(gitRoot);
     if (!head) return "";
-    const message = gitText(gitRoot, ["show", "-s", "--format=%B", head]);
+    const message = await gitText(gitRoot, ["show", "-s", "--format=%B", head]);
     const provenance = `CodexPro-Task: ${context.taskId}`;
     if (!message.split(/\r?\n/).some((line) => line.trim() === provenance)) {
       throw new CodexProError(`WORKSPACE_COMMIT_PROVENANCE_MISSING: HEAD is not tagged for task ${context.taskId}.`, {
@@ -685,8 +685,8 @@ export async function recordWorkspaceCommit(context: WorkspaceTaskContext): Prom
     task.commitShas = [...new Set([...task.commitShas, head])].slice(-200);
     if (!task.worktreeRoot) {
       task.baseHead = head;
-      task.baseBranch = currentBranch(gitRoot);
-      task.baseRemoteHead = currentRemoteHead(gitRoot);
+      task.baseBranch = await currentBranch(gitRoot);
+      task.baseRemoteHead = await currentRemoteHead(gitRoot);
     }
     task.updatedAt = nowIso();
     return head;
@@ -697,7 +697,7 @@ export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskCon
   const root = canonicalRoot(context.root);
   const startedAt = Date.now();
   const enqueuedAt = nowIso();
-  await withState(root, (state) => {
+  await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     if (state.integrationLease?.taskId === context.taskId) return;
     if (!state.integrationQueue.some((entry) => entry.taskId === context.taskId)) {
@@ -712,7 +712,7 @@ export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskCon
   });
 
   while (true) {
-    const acquired = await withState(root, (state) => {
+    const acquired = await withState(root, async (state) => {
       const task = requireTask(state, context.taskId);
       if (state.integrationLease?.taskId === context.taskId) return true;
       const first = state.integrationQueue[0];
@@ -728,7 +728,7 @@ export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskCon
     });
     if (acquired) break;
     if (Date.now() - startedAt >= INTEGRATION_QUEUE_WAIT_MS) {
-      await withState(root, (state) => {
+      await withState(root, async (state) => {
         state.integrationQueue = state.integrationQueue.filter((entry) => entry.taskId !== context.taskId);
         const task = state.tasks[context.taskId];
         if (task?.status === "running" && branch) {
@@ -749,7 +749,7 @@ export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskCon
   return async () => {
     if (released) return;
     released = true;
-    await withState(root, (state) => {
+    await withState(root, async (state) => {
       if (state.integrationLease?.taskId === context.taskId) delete state.integrationLease;
       const task = state.tasks[context.taskId];
       if (task?.status === "running" && branch && task.integrationStatus === "integrating") {
@@ -763,12 +763,12 @@ export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskCon
 
 export async function preflightWorkspacePush(context: WorkspaceTaskContext, branch: string): Promise<void> {
   const root = canonicalRoot(context.root);
-  const task = await withState(root, (state) => {
+  const task = await withState(root, async (state) => {
     const currentTask = requireTask(state, context.taskId);
     return { ...currentTask, commitShas: [...currentTask.commitShas], touchedPaths: [...currentTask.touchedPaths] };
   });
   const gitRoot = taskGitRoot(context, task);
-  const current = currentBranch(gitRoot);
+  const current = await currentBranch(gitRoot);
   const expectedCurrent = task.worktreeRoot ? task.worktreeBranch : branch;
   if (!current || (expectedCurrent && current !== expectedCurrent) || (task.worktreeRoot && task.baseBranch && branch !== task.baseBranch)) {
     throw new CodexProError(`WORKSPACE_PUSH_BRANCH_MISMATCH: active task branch is ${current || "detached"}, integration target is ${branch}.`, {
@@ -776,14 +776,14 @@ export async function preflightWorkspacePush(context: WorkspaceTaskContext, bran
       details: { task_id: task.taskId, current_branch: current, task_branch: task.worktreeBranch || null, base_branch: task.baseBranch || null, requested_branch: branch }
     });
   }
-  const dirty = currentDirtyPaths(gitRoot);
+  const dirty = await currentDirtyPaths(gitRoot);
   if (dirty.length) {
     throw new CodexProError(`WORKSPACE_PUSH_DIRTY_WORKTREE: commit or revert task changes before integrating: ${dirty.join(", ")}.`, {
       code: "WORKSPACE_PUSH_DIRTY_WORKTREE",
       details: { task_id: task.taskId, paths: dirty }
     });
   }
-  let head = currentHead(gitRoot);
+  let head = await currentHead(gitRoot);
   if (head && !task.commitShas.includes(head)) {
     throw new CodexProError(`WORKSPACE_PUSH_HEAD_NOT_OWNED: local HEAD was not committed by task ${task.taskId}.`, {
       code: "WORKSPACE_PUSH_HEAD_NOT_OWNED",
@@ -791,23 +791,23 @@ export async function preflightWorkspacePush(context: WorkspaceTaskContext, bran
     });
   }
 
-  const remoteLine = gitText(gitRoot, ["ls-remote", "origin", `refs/heads/${branch}`]);
+  const remoteLine = await gitText(gitRoot, ["ls-remote", "origin", `refs/heads/${branch}`]);
   let remoteHead = remoteLine.split(/\s+/)[0] || "";
-  if (remoteHead && head && gitStatus(gitRoot, ["merge-base", "--is-ancestor", remoteHead, head]) !== 0) {
-    const fetched = gitRun(gitRoot, ["fetch", "--quiet", "origin", branch], 60_000);
+  if (remoteHead && head && await gitStatus(gitRoot, ["merge-base", "--is-ancestor", remoteHead, head]) !== 0) {
+    const fetched = await gitRun(gitRoot, ["fetch", "--quiet", "origin", branch], 60_000);
     if (fetched.status !== 0) {
       throw new CodexProError(`WORKSPACE_INTEGRATION_FETCH_FAILED: ${fetched.stderr || fetched.stdout || `could not fetch origin/${branch}`}.`, {
         code: "WORKSPACE_INTEGRATION_FETCH_FAILED",
         details: { task_id: task.taskId, branch }
       });
     }
-    remoteHead = gitText(gitRoot, ["rev-parse", `refs/remotes/origin/${branch}`]) || remoteHead;
-    const localChanged = changedPathsBetween(gitRoot, task.baseHead, head);
-    const remoteChanged = changedPathsBetween(gitRoot, task.baseHead, remoteHead);
+    remoteHead = await gitText(gitRoot, ["rev-parse", `refs/remotes/origin/${branch}`]) || remoteHead;
+    const localChanged = await changedPathsBetween(gitRoot, task.baseHead, head);
+    const remoteChanged = await changedPathsBetween(gitRoot, task.baseHead, remoteHead);
     const remoteKeys = new Set(remoteChanged.map(canonicalPathKey));
     const overlap = localChanged.filter((relPath) => remoteKeys.has(canonicalPathKey(relPath)));
     if (overlap.length) {
-      await withState(root, (state) => {
+      await withState(root, async (state) => {
         const live = requireTask(state, context.taskId);
         live.integrationStatus = "conflict";
         live.integrationFinishedAt = nowIso();
@@ -822,10 +822,10 @@ export async function preflightWorkspacePush(context: WorkspaceTaskContext, bran
 
     const hooksDir = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-empty-git-hooks-"));
     try {
-      const rebased = gitRun(gitRoot, ["-c", `core.hooksPath=${hooksDir}`, "rebase", remoteHead], 120_000);
+      const rebased = await gitRun(gitRoot, ["-c", `core.hooksPath=${hooksDir}`, "rebase", remoteHead], 120_000);
       if (rebased.status !== 0) {
-        gitRun(gitRoot, ["-c", `core.hooksPath=${hooksDir}`, "rebase", "--abort"], 30_000);
-        await withState(root, (state) => {
+        await gitRun(gitRoot, ["-c", `core.hooksPath=${hooksDir}`, "rebase", "--abort"], 30_000);
+        await withState(root, async (state) => {
           const live = requireTask(state, context.taskId);
           live.integrationStatus = "conflict";
           live.integrationFinishedAt = nowIso();
@@ -840,11 +840,11 @@ export async function preflightWorkspacePush(context: WorkspaceTaskContext, bran
     } finally {
       fs.rmSync(hooksDir, { recursive: true, force: true });
     }
-    head = currentHead(gitRoot);
-    const rebasedCommits = gitText(gitRoot, ["rev-list", "--reverse", `${remoteHead}..${head}`]).split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+    head = await currentHead(gitRoot);
+    const rebasedCommits = (await gitText(gitRoot, ["rev-list", "--reverse", `${remoteHead}..${head}`])).split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
     const provenance = `CodexPro-Task: ${task.taskId}`;
     for (const commit of rebasedCommits) {
-      const message = gitText(gitRoot, ["show", "-s", "--format=%B", commit]);
+      const message = await gitText(gitRoot, ["show", "-s", "--format=%B", commit]);
       if (!message.split(/\r?\n/).some((line) => line.trim() === provenance)) {
         throw new CodexProError(`WORKSPACE_COMMIT_PROVENANCE_MISSING: rebased commit ${commit} is not tagged for task ${task.taskId}.`, {
           code: "WORKSPACE_COMMIT_PROVENANCE_MISSING",
@@ -852,7 +852,7 @@ export async function preflightWorkspacePush(context: WorkspaceTaskContext, bran
         });
       }
     }
-    await withState(root, (state) => {
+    await withState(root, async (state) => {
       const live = requireTask(state, context.taskId);
       live.baseHead = remoteHead;
       live.baseRemoteHead = remoteHead;
@@ -861,7 +861,7 @@ export async function preflightWorkspacePush(context: WorkspaceTaskContext, bran
       live.updatedAt = nowIso();
     });
   } else {
-    await withState(root, (state) => {
+    await withState(root, async (state) => {
       const live = requireTask(state, context.taskId);
       live.remoteHeadBeforeIntegration = remoteHead;
       live.updatedAt = nowIso();
@@ -871,10 +871,10 @@ export async function preflightWorkspacePush(context: WorkspaceTaskContext, bran
 
 export async function recordWorkspacePush(context: WorkspaceTaskContext, branch: string): Promise<string> {
   const root = canonicalRoot(context.root);
-  return await withState(root, (state) => {
+  return await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     const gitRoot = taskGitRoot(context, task);
-    const head = currentHead(gitRoot);
+    const head = await currentHead(gitRoot);
     task.integrationStatus = "integrated";
     task.integrationBranch = branch;
     task.integrationFinishedAt = nowIso();
@@ -888,7 +888,7 @@ export async function recordWorkspacePush(context: WorkspaceTaskContext, branch:
 
 export async function finalizeWorkspaceTask(context: WorkspaceTaskContext, status: WorkspaceTaskStatus): Promise<void> {
   const root = canonicalRoot(context.root);
-  const cleanup = await withState(root, (state) => {
+  const cleanup = await withState(root, async (state) => {
     const task = state.tasks[context.taskId];
     if (!task) return undefined;
     const now = nowIso();
@@ -906,10 +906,10 @@ export async function finalizeWorkspaceTask(context: WorkspaceTaskContext, statu
       removeWorktree: status === "completed" && task.integrationStatus === "integrated"
     };
   });
-  if (cleanup?.removeWorktree && cleanup.worktreeRoot && fs.existsSync(cleanup.worktreeRoot) && currentDirtyPaths(cleanup.worktreeRoot).length === 0) {
-    const removed = gitRun(root, ["worktree", "remove", cleanup.worktreeRoot], 60_000);
+  if (cleanup?.removeWorktree && cleanup.worktreeRoot && fs.existsSync(cleanup.worktreeRoot) && (await currentDirtyPaths(cleanup.worktreeRoot)).length === 0) {
+    const removed = await gitRun(root, ["worktree", "remove", cleanup.worktreeRoot], 60_000);
     if (removed.status === 0 && cleanup.worktreeBranch) {
-      gitRun(root, ["branch", "-D", cleanup.worktreeBranch], 30_000);
+      await gitRun(root, ["branch", "-D", cleanup.worktreeBranch], 30_000);
     }
   }
 }
@@ -920,12 +920,12 @@ export function readWorkspaceCoordination(root: string): WorkspaceCoordinationSt
   return state;
 }
 
-export function readWorkspaceCoordinationStatus(root: string) {
+export async function readWorkspaceCoordinationStatus(root: string) {
   const canonical = canonicalRoot(root);
   const state = readState(canonical);
   cleanupStaleState(state);
-  const head = currentHead(canonical);
-  const branch = currentBranch(canonical);
+  const head = await currentHead(canonical);
+  const branch = await currentBranch(canonical);
   const queuePosition = new Map(state.integrationQueue.map((entry, index) => [entry.taskId, index + 1]));
   const claims = Object.entries(state.claims)
     .map(([claimPath, claim]) => {
@@ -940,11 +940,11 @@ export function readWorkspaceCoordinationStatus(root: string) {
       };
     })
     .sort((left, right) => left.path.localeCompare(right.path));
-  const tasks = Object.values(state.tasks)
-    .map((task) => {
+  const tasks = (await Promise.all(Object.values(state.tasks)
+    .map(async (task) => {
       const watchedPaths = uniquePaths([...task.claimedPaths, ...task.touchedPaths]);
       const stalePaths = task.status === "running" && task.baseHead && head && task.baseHead !== head && watchedPaths.length
-        ? changedPathsBetween(canonical, task.baseHead, head, watchedPaths)
+        ? await changedPathsBetween(canonical, task.baseHead, head, watchedPaths)
         : [];
       return {
         task_id: task.taskId,
@@ -977,7 +977,7 @@ export function readWorkspaceCoordinationStatus(root: string) {
         updated_at: task.updatedAt,
         finished_at: task.finishedAt || ""
       };
-    })
+    })))
     .sort((left, right) => {
       if (left.status === "running" && right.status !== "running") return -1;
       if (left.status !== "running" && right.status === "running") return 1;

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { runGitProcess } from "./processOps.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CodexProConfig } from "./config.js";
@@ -1051,32 +1051,32 @@ async function applyWorkspacePatch(
     assertWriteToolAllowed(config, touchedPath);
   }
 
-  return withFileWriteLocks(absPaths, () => {
+  return withFileWriteLocks(absPaths, async () => {
     for (const touchedPath of paths) {
       guard.resolve(workspace, touchedPath, { forWrite: true });
       assertWriteToolAllowed(config, touchedPath);
     }
 
-    const check = spawnSync("git", ["apply", "--check", "--whitespace=nowarn"], {
+    const check = await runGitProcess(workspace.root, ["apply", "--check", "--whitespace=nowarn"], {
       cwd: workspace.root,
       input: patch,
       encoding: "utf8",
       maxBuffer: config.maxOutputBytes,
       env: { ...process.env, NO_COLOR: "1" }
     });
-    if (check.error || check.status !== 0) {
-      throw new CodexProError(redactSensitiveText(check.stderr?.trim() || check.stdout?.trim() || check.error?.message || "git apply --check failed"));
+    if (check.status !== 0) {
+      throw new CodexProError(redactSensitiveText(check.stderr.trim() || check.stdout.trim() || "git apply --check failed"));
     }
 
-    const applied = spawnSync("git", ["apply", "--whitespace=nowarn"], {
+    const applied = await runGitProcess(workspace.root, ["apply", "--whitespace=nowarn"], {
       cwd: workspace.root,
       input: patch,
       encoding: "utf8",
       maxBuffer: config.maxOutputBytes,
       env: { ...process.env, NO_COLOR: "1" }
     });
-    if (applied.error || applied.status !== 0) {
-      throw new CodexProError(redactSensitiveText(applied.stderr?.trim() || applied.stdout?.trim() || applied.error?.message || "git apply failed"));
+    if (applied.status !== 0) {
+      throw new CodexProError(redactSensitiveText(applied.stderr.trim() || applied.stdout.trim() || "git apply failed"));
     }
 
     const diff = redactSensitiveText(patch.trimEnd());
@@ -2395,7 +2395,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     },
     async (args) => {
       const workspace = workspaces.openWorkspace(args.root, { select: false });
-      const snapshot = readWorkspaceCoordinationStatus(workspace.root);
+      const snapshot = await readWorkspaceCoordinationStatus(workspace.root);
       const activeTasks = snapshot.tasks.filter((task) => task.status === "running").length;
       const conflicts = snapshot.tasks.filter((task) => task.integration_status === "conflict" || task.stale_base).length;
       return textResult(`# Workspace Coordination\n\n${activeTasks} active task(s), ${snapshot.claims.length} claimed path(s), ${snapshot.integration_queue.length} queued integration(s).`, {
