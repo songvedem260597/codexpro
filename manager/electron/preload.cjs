@@ -66,6 +66,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   getRequestFilePreview: (filePath) => invoke("codexpro:get-request-file-preview", filePath),
   captureClipboardImage: () => invoke("codexpro:capture-clipboard-image"),
   sendProfileRequest: (payload) => invokeResult("codexpro:send-profile-request", payload),
+  resumeProfileTask: (payload) => invokeResult("codexpro:resume-profile-task", payload),
   renameProfileChat: (payload) => invoke("codexpro:rename-profile-chat", payload),
   getProfileResponse: (payload) => invoke("codexpro:get-profile-response", payload),
   getChatResponseCache: (payload) => invoke("codexpro:get-chat-response-cache", payload),
