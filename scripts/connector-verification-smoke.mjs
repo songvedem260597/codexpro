@@ -107,8 +107,7 @@ assert.equal(summarize({ ...currentProfile, connectorInstalled: false }, 'bound'
 assert.equal(summarize({ ...currentProfile, connectorVerificationState: 'unknown' }, 'old', 900000).connectorUpdateRequired, false, 'unknown status must not automatically delete/recreate a connector');
 assert.equal(shouldCheckProfileConnector({ ...fresh, connector_verification_required: true }, { now, lastCheck: now - 61000 }), true, 'retry an inconclusive check after one minute instead of treating it as verified absence');
 assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'unknown' }), 'check');
-assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'missing' }), 'check', 'persisted missing evidence must not expose setup before a manual recheck');
-assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'missing' }, { confirmedMissing: true }), 'setup');
+assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'missing' }), 'setup', 'a confirmed missing profile must expose the explicit setup button');
 assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'disconnected' }), 'connect', 'a listed definition must offer Connect rather than Add');
 assert.equal(profileConnectorCardAction({ connector_installed: true, connector_profile_bound: true }), 'ready');
 
