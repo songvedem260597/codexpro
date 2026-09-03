@@ -160,6 +160,44 @@ try {
   assert.ok(repeatedIncident.every((entry) => entry.details?.occurrence_count === 2), "every repeated incident row must expose the total occurrence count in the selected window");
   assert.ok(repeatedIncident.every((entry) => entry.details?.first_seen_at && entry.details?.last_seen_at), "repeated incidents must expose their investigation window");
 
+  const compactionRoot = path.join(root, "compaction");
+  await fs.mkdir(compactionRoot, { recursive: true });
+  const compactionRecords = [];
+  const compactionBaseTime = Date.now() - 60_000;
+  for (let index = 0; index < 16_000; index += 1) {
+    compactionRecords.push(JSON.stringify({
+      schema_version: 1,
+      record_id: `compaction-${index}`,
+      timestamp: new Date(compactionBaseTime + index).toISOString(),
+      level: "info",
+      source: "compaction",
+      category: "retention",
+      action: "seed",
+      message: `${index}:${"x".repeat(600)}`
+    }));
+  }
+  await fs.writeFile(path.join(compactionRoot, "manager-diagnostic.jsonl"), `${compactionRecords.join("\n")}\n`, "utf8");
+  const seededStat = await fs.stat(path.join(compactionRoot, "manager-diagnostic.jsonl"));
+  assert.ok(seededStat.size > 8 * 1024 * 1024, "compaction fixture must exceed the diagnostic cap");
+  await pruneDiagnosticLogs(compactionRoot);
+  const compactedStat = await fs.stat(path.join(compactionRoot, "manager-diagnostic.jsonl"));
+  assert.ok(compactedStat.size <= 6 * 1024 * 1024, "compaction must leave enough headroom to avoid pruning after every append");
+  const compactedLatest = await readDiagnosticLogs(compactionRoot, { hours: 24, source: "compaction", limit: 2 });
+  assert.equal(compactedLatest.entries[0]?.record_id, "compaction-15999", "compaction must retain the newest record");
+  assert.equal(compactedLatest.entries[1]?.record_id, "compaction-15998", "compaction must preserve record order");
+  for (let index = 0; index < 100; index += 1) {
+    await appendDiagnosticLog(compactionRoot, {
+      level: "info",
+      source: "compaction",
+      category: "retention",
+      action: "post-compaction",
+      message: `post-compaction-${index}`
+    });
+  }
+  await flushDiagnosticLogs(compactionRoot);
+  const appendedStat = await fs.stat(path.join(compactionRoot, "manager-diagnostic.jsonl"));
+  assert.ok(appendedStat.size < 8 * 1024 * 1024, "normal appends after compaction must remain below the prune trigger");
+
   const burstRoot = path.join(root, "burst");
   const burstWrites = [];
   for (let index = 0; index < 22_500; index += 1) {

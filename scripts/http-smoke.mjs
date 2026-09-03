@@ -539,6 +539,10 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     await waitForListening(child);
 
     client = await createClient('prepared-task-worker', profileId);
+    const preparedOnlyStatus = await callTool(client, 'repo_task_status', { task_id: taskId });
+    if (preparedOnlyStatus.structuredContent.verified !== false) {
+      throw new Error(`prepared-only worker job was accepted as begin_repo_task proof: ${JSON.stringify(preparedOnlyStatus.structuredContent)}`);
+    }
     const began = await callTool(client, 'begin_repo_task', {
       task_id: taskId,
       task_title: 'Resume prepared worker task',
@@ -553,20 +557,13 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     if (!String(read.structuredContent.text || '').includes('restart gate survived')) {
       throw new Error('rehydrated prepared task did not unlock the prepared workspace');
     }
-    await client.close();
-    client = undefined;
-
-    child.kill('SIGTERM');
-    await waitForExit(child);
-    child = startServer();
-    await waitForListening(child);
-    client = await createClient('proof-restart-status', profileId);
-    const recoveredStatus = await callTool(client, 'repo_task_status', { task_id: taskId });
-    if (!recoveredStatus.structuredContent.verified || recoveredStatus.structuredContent.task_title !== 'Resume prepared worker task') {
-      throw new Error(`repo_task_status did not recover durable task proof after runtime restart: ${JSON.stringify(recoveredStatus.structuredContent)}`);
-    }
-    if (recoveredStatus.structuredContent.gate_active !== false) {
-      throw new Error(`runtime restart must not claim the coding gate is still active: ${JSON.stringify(recoveredStatus.structuredContent)}`);
+    const finalized = await callTool(client, 'finalize_worker_job', {
+      task_id: taskId,
+      outcome: 'completed',
+      summary: 'restart persistence fixture complete'
+    });
+    if (finalized.structuredContent.job?.status !== 'completed') {
+      throw new Error(`restart-survival task did not finalize: ${JSON.stringify(finalized.structuredContent)}`);
     }
     await client.close();
     client = undefined;
@@ -581,9 +578,20 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     if (!taskEvents.some((event) => event.event === 'repo_task_prepared_rehydrated' && event.profile_id === profileId && event.task_id === taskId)) {
       throw new Error(`runtime restart recovery was not logged: ${JSON.stringify(taskEvents)}`);
     }
-    if (!taskEvents.some((event) => event.event === 'repo_task_proof_rehydrated' && event.profile_id === profileId && event.task_id === taskId && event.reason === 'runtime_restart')) {
-      throw new Error(`durable repo task proof recovery was not logged: ${JSON.stringify(taskEvents)}`);
+    child.kill('SIGTERM');
+    await waitForExit(child);
+    child = startServer();
+    await waitForListening(child);
+
+    client = await createClient('completed-task-worker', profileId);
+    const recovered = await callTool(client, 'repo_task_status', { task_id: taskId });
+    if (!recovered.structuredContent.verified
+      || recovered.structuredContent.verification_source !== 'worker_job'
+      || recovered.structuredContent.task_title !== 'Resume prepared worker task'
+      || recovered.structuredContent.gate_active !== false) {
+      throw new Error(`completed task proof did not survive runtime restart safely: ${JSON.stringify(recovered.structuredContent)}`);
     }
+    await expectToolErrorCode(client, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
   } finally {
     if (client) await client.close().catch(() => {});
     if (child && child.exitCode == null && child.signalCode == null) child.kill('SIGTERM');
