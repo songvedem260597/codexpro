@@ -72,6 +72,8 @@ try {
   assert.equal(refreshedStyles, fs.readFileSync(path.join(bundledUiRoot, "styles.css"), "utf8"));
   assert.match(refreshedIndex, /project-dropdown-trigger/);
   assert.doesNotMatch(refreshedIndex, /<select\b/i);
+  assert.match(refreshedStyles, /\.action\.primary/);
+  assert.doesNotMatch(refreshedStyles, /button#analyze/);
 
   const architecture = buildGitDiagramArchitecture({
     root: "C:\\repo",
