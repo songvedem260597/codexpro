@@ -498,6 +498,7 @@ assert.match(trustedClickSource, /modal-subscription-failure/, "trusted click mu
 assert.match(trustedClickSource, /point\?\.blocked/, "trusted click must stop before mouse dispatch when the modal reappears");
 
 const enterSource = extractFunction("trustedSubmitChatComposerTab");
+assert.ok(enterSource.indexOf("settleBlockingModal") < enterSource.indexOf("focusChatComposerForSubmitPage"), "blocking modal stability must be checked before the first composer focus attempt");
 assert.match(enterSource, /focusChatComposerForSubmitPage/, "trusted Enter must focus the prepared composer without locating Send");
 assert.match(enterSource, /Input\.dispatchKeyEvent/, "trusted Enter must use CDP keyboard input");
 assert.doesNotMatch(enterSource, /Page\.bringToFront/, "trusted Enter must not bring the Chrome profile to the foreground");
