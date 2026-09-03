@@ -131,6 +131,32 @@ try {
   assert.equal(routedTask.entries[0].action, "repo_task_profile_rerouted");
   assert.equal(routedTask.entries[0].details.task_owner_profile_id, "profile-owner");
 
+  for (const [action, message] of [
+    ["provider-fetch", "HTTP 429 rate limit request 10001"],
+    ["provider-fetch", "HTTP 429 rate limit request 10002"]
+  ]) {
+    await appendDiagnosticLog(root, { level: "error", source: "manager", category: "network", action, message });
+  }
+  await appendDiagnosticLog(root, { level: "error", source: "renderer", category: "layout", action: "render-panel", message: "CSS layout overflow in task panel" });
+  await appendDiagnosticLog(root, { level: "error", source: "manager", category: "provider", action: "openai-response", message: "OpenAI Responses API request failed" });
+  await appendDiagnosticLog(root, { level: "error", source: "manager", category: "task", action: "state-transition", message: "Task invariant mismatch during routing transition" });
+  await appendDiagnosticLog(root, { level: "error", source: "manager", category: "repo", action: "git-push", message: "git push failed because of branch conflict" });
+  await appendDiagnosticLog(root, { level: "error", source: "worker", category: "compile", action: "parse", message: "SyntaxError unexpected token in worker script" });
+
+  const networkErrors = await readDiagnosticLogs(root, { hours: 24, errorType: "network_api" });
+  const repeatedNetwork = networkErrors.entries.filter((entry) => entry.action === "provider-fetch");
+  assert.equal(repeatedNetwork.length, 2, "network/API taxonomy must support direct filtering");
+  assert.ok(repeatedNetwork.every((entry) => entry.details?.error_type === "network_api"));
+  assert.ok(repeatedNetwork.every((entry) => entry.details?.occurrence_count === 2), "same normalized automatic error must expose repeat count");
+  assert.equal(new Set(repeatedNetwork.map((entry) => entry.details?.error_fingerprint)).size, 1, "dynamic numeric ids must not split the same incident fingerprint");
+  assert.ok(networkErrors.summary.repeated_error_incidents >= 1, "summary must expose repeated automatic incidents");
+  assert.equal((await readDiagnosticLogs(root, { hours: 24, errorType: "ui_ux", query: "render-panel" })).entries[0]?.details?.error_type, "ui_ux");
+  assert.equal((await readDiagnosticLogs(root, { hours: 24, errorType: "openai", query: "openai-response" })).entries[0]?.details?.error_type, "openai");
+  assert.equal((await readDiagnosticLogs(root, { hours: 24, errorType: "logic", query: "state-transition" })).entries[0]?.details?.error_type, "logic");
+  assert.equal((await readDiagnosticLogs(root, { hours: 24, errorType: "git", query: "git-push" })).entries[0]?.details?.error_type, "git");
+  assert.equal((await readDiagnosticLogs(root, { hours: 24, errorType: "syntax", query: "unexpected token" })).entries[0]?.details?.error_type, "syntax");
+  assert.ok((await readDiagnosticLogs(root, { hours: 24 })).available.error_types.network_api >= 2, "error taxonomy must be exposed as filter facets");
+
   for (const [incidentFingerprint, message] of [
     ["same-user-incident", "Người dùng báo lỗi lần đầu"],
     ["same-user-incident", "Người dùng báo lỗi lặp lại"],
@@ -152,6 +178,7 @@ try {
   const userReported = await readDiagnosticLogs(root, { hours: 24, source: "user", category: "user-reported-error" });
   assert.equal(userReported.entries.length, 3);
   assert.equal(userReported.summary.user_reported_error, 3, "summary must separate user-discovered errors from automatic system errors");
+  assert.ok(userReported.entries.every((entry) => entry.details?.error_type === "user"), "user-reported incidents must retain the user error taxonomy");
   const repeatedIncident = userReported.entries.filter((entry) => entry.details?.incident_fingerprint === "same-user-incident");
   assert.equal(repeatedIncident.length, 2);
   assert.ok(repeatedIncident.every((entry) => entry.details?.occurrence_count === 2), "every repeated incident row must expose the total occurrence count in the selected window");

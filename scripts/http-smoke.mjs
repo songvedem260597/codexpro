@@ -208,11 +208,12 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const generalProgress = await callTool(general, 'report_worker_job_progress', {
       task_id: generalBegan.structuredContent.task_id,
       stage: 'verifying',
-      summary: 'General fixture implementation is complete; final verification remains.',
-      completed_parts: ['implementation'],
-      remaining_parts: ['verification']
+      summary: 'General fixture implementation and final verification are complete.',
+      progress_percent: 99,
+      completed_parts: ['implementation', 'verification'],
+      remaining_parts: []
     });
-    if (!generalProgress.structuredContent.reported || generalProgress.structuredContent.job?.last_progress_stage !== 'verifying' || generalProgress.structuredContent.job?.progress_sequence !== 1) {
+    if (!generalProgress.structuredContent.reported || generalProgress.structuredContent.job?.last_progress_stage !== 'verifying' || generalProgress.structuredContent.job?.progress_sequence !== 1 || generalProgress.structuredContent.job?.progress_percent !== 99 || generalProgress.structuredContent.job?.remaining_parts?.length !== 0) {
       throw new Error(`general task did not persist structured progress through MCP: ${JSON.stringify(generalProgress.structuredContent)}`);
     }
     const generalFinalized = await callTool(general, 'finalize_worker_job', { task_id: generalBegan.structuredContent.task_id, outcome: 'completed', summary: 'general fixture complete' });

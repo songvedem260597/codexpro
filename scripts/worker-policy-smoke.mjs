@@ -87,6 +87,7 @@ try {
     summary: "Implementation complete; tests remain.",
     reason: "Waiting for verification before finalizing.",
     evidence: "src/workerPolicy.ts updated",
+    progressPercent: 40,
     completedParts: ["implementation"],
     remainingParts: ["tests", "commit", "push"]
   });
@@ -95,9 +96,64 @@ try {
   assert.equal(publicProgress.last_progress_stage, "partial");
   assert.equal(publicProgress.last_progress_summary, "Implementation complete; tests remain.");
   assert.equal(publicProgress.last_progress_reason, "Waiting for verification before finalizing.");
+  assert.equal(publicProgress.progress_percent, 40);
+  assert.deepEqual(publicProgress.completed_parts, ["implementation"]);
+  assert.deepEqual(publicProgress.remaining_parts, ["tests", "commit", "push"]);
   assert.deepEqual(publicProgress.progress_reports[0].completed_parts, ["implementation"]);
   assert.deepEqual(publicProgress.progress_reports[0].remaining_parts, ["tests", "commit", "push"]);
-  assert.equal((await finalizeWorkerJob({ jobId: codeId, workerId: "api.custom", outcome: "completed" })).status, "completed");
+  await assert.rejects(
+    () => finalizeWorkerJob({ jobId: codeId, workerId: "api.custom", outcome: "completed" }),
+    /unfinished parts remain: tests, commit, push/
+  );
+  const blockedProgress = await reportWorkerJobProgress({
+    jobId: codeId,
+    workerId: "api.custom",
+    stage: "blocked",
+    summary: "Verification cannot continue.",
+    reason: "Test environment is unavailable.",
+    blockedPart: "tests",
+    progressPercent: 40,
+    completedParts: ["implementation"],
+    remainingParts: ["tests", "commit", "push"]
+  });
+  const publicBlocked = workerJobPublicRecord(blockedProgress);
+  assert.equal(publicBlocked.execution_state, "blocked");
+  assert.equal(publicBlocked.blocked_part, "tests");
+  assert.equal(publicBlocked.blocked_reason, "Test environment is unavailable.");
+  assert.deepEqual(publicBlocked.remaining_parts, ["tests", "commit", "push"]);
+  const partsDoneProgress = await reportWorkerJobProgress({
+    jobId: codeId,
+    workerId: "api.custom",
+    stage: "all_parts_done",
+    summary: "Implementation work is done; verification and delivery remain.",
+    progressPercent: 90,
+    completedParts: ["implementation"],
+    remainingParts: ["tests", "commit", "push"]
+  });
+  assert.deepEqual(workerJobPublicRecord(partsDoneProgress).remaining_parts, ["tests", "commit", "push"], "all_parts_done must not erase unfinished verification/delivery steps");
+  await assert.rejects(
+    () => finalizeWorkerJob({ jobId: codeId, workerId: "api.custom", outcome: "completed" }),
+    /unfinished parts remain: tests, commit, push/
+  );
+  const verifyingProgress = await reportWorkerJobProgress({
+    jobId: codeId,
+    workerId: "api.custom",
+    stage: "verifying",
+    summary: "Tests, commit, and push are complete.",
+    evidence: "verification passed",
+    progressPercent: 99,
+    completedParts: ["implementation", "tests", "commit", "push"],
+    remainingParts: []
+  });
+  assert.equal(workerJobPublicRecord(verifyingProgress).progress_percent, 99);
+  assert.deepEqual(workerJobPublicRecord(verifyingProgress).remaining_parts, []);
+  const completedCode = await finalizeWorkerJob({ jobId: codeId, workerId: "api.custom", outcome: "completed", summary: "Implementation, verification, commit, and push completed." });
+  const publicCompleted = workerJobPublicRecord(completedCode);
+  assert.equal(publicCompleted.status, "completed");
+  assert.equal(publicCompleted.progress_percent, 100);
+  assert.equal(publicCompleted.completion_confirmed, true);
+  assert.ok(publicCompleted.completion_confirmed_at);
+  assert.match(String(publicCompleted.completion_evidence || ""), /Implementation, verification, commit, and push completed/);
   await assert.rejects(
     () => reportWorkerJobProgress({ jobId: codeId, workerId: "api.custom", stage: "verifying", summary: "late update" }),
     /not running/

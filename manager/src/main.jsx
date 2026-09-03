@@ -1022,7 +1022,7 @@ function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChoo
 function App() {
   const [activePage, setActivePage] = useState("overview");
   const [diagnosticLogs, setDiagnosticLogs] = useState({ summary: { total: 0, info: 0, warn: 0, error: 0 }, entries: [], sources: [], categories: [], queried_hours: 24, checked_at: "" });
-  const [diagnosticFilters, setDiagnosticFilters] = useState({ level: "all", source: "all", category: "all", hours: 24, query: "" });
+  const [diagnosticFilters, setDiagnosticFilters] = useState({ level: "all", source: "all", category: "all", errorType: "all", hours: 24, query: "" });
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [selectedDiagnostic, setSelectedDiagnostic] = useState(null);
   const [operationsPerformance, setOperationsPerformance] = useState(null);

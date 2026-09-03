@@ -1792,7 +1792,7 @@ function createWindow() {
           if (!logPageClicked) throw new Error("Smoke không tìm thấy màn Nhật ký.");
           await new Promise((resolve) => setTimeout(resolve, 500));
           const dropdownOpened = await win.webContents.executeJavaScript(`(() => {
-            const trigger = document.querySelector('.diagnostic-filter-trigger');
+            const trigger = document.querySelector('.diagnostic-filter-row .app-dropdown-trigger');
             trigger?.click();
             return Boolean(trigger);
           })()`, true);
@@ -1801,8 +1801,8 @@ function createWindow() {
           diagnosticProbe = await win.webContents.executeJavaScript(`(() => {
             const panel = document.querySelector('.diagnostic-panel');
             const toolbar = document.querySelector('.diagnostic-toolbar');
-            const filters = [...document.querySelectorAll('.diagnostic-filter-trigger')];
-            const menu = document.querySelector('.diagnostic-filter-menu');
+            const filters = [...document.querySelectorAll('.diagnostic-filter-row .app-dropdown-trigger')];
+            const menu = document.querySelector('.diagnostic-filter-row .app-dropdown-menu');
             const rect = (node) => node ? { left: Math.round(node.getBoundingClientRect().left), right: Math.round(node.getBoundingClientRect().right), top: Math.round(node.getBoundingClientRect().top), bottom: Math.round(node.getBoundingClientRect().bottom), width: Math.round(node.getBoundingClientRect().width), height: Math.round(node.getBoundingClientRect().height) } : null;
             const panelRect = rect(panel);
             const toolbarRect = rect(toolbar);
@@ -1820,7 +1820,7 @@ function createWindow() {
               noHorizontalOverflow: Boolean(panelRect && toolbarRect && toolbarRect.right <= panelRect.right + 1 && toolbarRect.left >= panelRect.left - 1 && filterRects.every((item) => item && item.right <= panelRect.right + 1))
             };
           })()`, true);
-          if (!diagnosticProbe.visible || diagnosticProbe.customDropdownCount !== 4 || diagnosticProbe.nativeSelectCount !== 0 || !diagnosticProbe.menuOpen || diagnosticProbe.menuOptionCount < 4 || !diagnosticProbe.noHorizontalOverflow) {
+          if (!diagnosticProbe.visible || diagnosticProbe.customDropdownCount !== 5 || diagnosticProbe.nativeSelectCount !== 0 || !diagnosticProbe.menuOpen || diagnosticProbe.menuOptionCount < 4 || !diagnosticProbe.noHorizontalOverflow) {
             throw new Error(`Diagnostic dropdown smoke không đạt: ${JSON.stringify(diagnosticProbe)}`);
           }
         }
@@ -3981,9 +3981,9 @@ async function sendProfileRequestUnlocked(payload) {
       ];
   const taskStatusProtocolLines = [
     "BẮT BUỘC báo tiến độ task qua MCP CodexPro bằng trạng thái có cấu trúc, không chỉ mô tả bằng câu trả lời văn bản.",
-    `Sau mỗi phần việc có ý nghĩa đã xong, gọi tool MCP CodexPro "codexpro" với action="report_worker_job_progress" và args có "task_id":"${taskId}", "stage":"partial", "summary":"<đã xong gì>", "completed_parts":[...], "remaining_parts":[...].`,
-    `Khi đã xong toàn bộ phần triển khai nhưng còn build/test/verify/commit/push, báo stage="all_parts_done" hoặc stage="verifying" cho Task ID ${taskId}; không được gọi completed sớm.`,
-    "Nếu bị chặn, gặp lỗi, hoặc nghi task đang treo nhưng model vẫn còn phản hồi được, BẮT BUỘC báo stage=\"blocked\", \"error\" hoặc \"stalled\" kèm reason rõ ràng và evidence nếu có để Manager điều tra.",
+    `Sau mỗi phần việc có ý nghĩa đã xong, gọi tool MCP CodexPro "codexpro" với action="report_worker_job_progress" và args có "task_id":"${taskId}", "stage":"partial", "progress_percent":<0-100>, "summary":"<đã xong gì>", "completed_parts":[...], "remaining_parts":[...]. completed_parts/remaining_parts phải phản ánh toàn bộ snapshot hiện tại, không chỉ phần vừa thay đổi.`,
+    `Khi đã xong toàn bộ phần triển khai nhưng còn build/test/verify/commit/push, báo stage="all_parts_done" hoặc stage="verifying" cho Task ID ${taskId}, remaining_parts phải liệt kê chính xác bước còn lại; chỉ để remaining_parts=[] sau khi thực sự không còn phần việc nào chưa xong. Không được gọi completed sớm.`,
+    "Nếu bị chặn, gặp lỗi, hoặc nghi task đang treo nhưng model vẫn còn phản hồi được, BẮT BUỘC báo stage=\"blocked\", \"error\" hoặc \"stalled\" kèm blocked_part=\"<đang kẹt ở phần nào>\", reason rõ ràng, progress_percent, completed_parts, remaining_parts và evidence nếu có để Manager điều tra.",
     `TRƯỚC mọi câu trả lời cuối cho người dùng, BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="finalize_worker_job" cho Task ID ${taskId}. Chỉ dùng outcome="completed" khi toàn bộ yêu cầu đã xong và mọi bước verify bắt buộc đã đạt; nếu không phải dùng outcome="failed" hoặc "cancelled" với summary/error rõ ràng.`,
     "Nếu chưa finalize_worker_job thành công thì task chưa được coi là hoàn tất dù ChatGPT đã ngừng streaming hoặc profile chuyển sang rảnh."
   ];

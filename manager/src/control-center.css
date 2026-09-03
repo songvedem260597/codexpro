@@ -13,12 +13,16 @@
 .control-task.is-working { border-color: #725125; box-shadow: inset 3px 0 0 #f4a340; }
 .control-task.is-settling { border-color: #665227; box-shadow: inset 3px 0 0 #d9b35d; }
 .control-task.is-hung { border-color: #713941; box-shadow: inset 3px 0 0 #e35d6a; }
+.control-task.is-blocked, .control-task.is-stalled, .control-task.is-error { border-color: #713941; box-shadow: inset 3px 0 0 #e35d6a; }
+.control-task.is-verifying { border-color: #315d6f; box-shadow: inset 3px 0 0 #5fc5eb; }
 .control-task-state { display: inline-flex; align-items: center; gap: 7px; color: #aeb9ca; font-size: var(--font-description); }
 .control-task-state strong { font-size: inherit; font-weight: var(--weight-semibold); }
 .control-pulse { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; background: #798497; }
 .control-task.is-working .control-pulse { background: #f4a340; box-shadow: 0 0 8px #f4a3408a; animation: control-pulse 1.8s ease-in-out infinite; }
 .control-task.is-settling .control-pulse { background: #d9b35d; }
 .control-task.is-hung .control-pulse { background: #e35d6a; box-shadow: 0 0 8px #e35d6a80; }
+.control-task.is-blocked .control-pulse, .control-task.is-stalled .control-pulse, .control-task.is-error .control-pulse { background: #e35d6a; box-shadow: 0 0 8px #e35d6a80; }
+.control-task.is-verifying .control-pulse { background: #5fc5eb; box-shadow: 0 0 8px #5fc5eb70; }
 @keyframes control-pulse { 50% { opacity: .35; transform: scale(.75); } }
 .control-task-main { min-width: 0; }
 .control-task-main > strong { display: block; overflow: hidden; color: #e9edf4; font-size: var(--font-title); font-weight: var(--weight-title); text-overflow: ellipsis; white-space: nowrap; }
@@ -26,6 +30,19 @@
 .control-task-progress { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 7px; }
 .control-task-progress small { min-width: 0; overflow: hidden; color: #8390a3; font-size: var(--font-description); text-overflow: ellipsis; white-space: nowrap; }
 .control-task-progress .profile-run-duration { flex: 0 0 auto; color: #f2bd70; font-variant-numeric: tabular-nums; }
+.control-task-snapshot { display: grid; gap: 6px; margin-top: 9px; padding: 9px 10px; border: 1px solid #283443; border-radius: 7px; background: #0b1016; }
+.control-task-snapshot-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #8896a9; font-size: var(--font-micro); }
+.control-task-snapshot-head strong { color: #dce5f1; font-size: var(--font-description); font-variant-numeric: tabular-nums; }
+.control-task-progress-track { height: 6px; overflow: hidden; border-radius: 999px; background: #202a36; }
+.control-task-progress-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4ca9d8, #63d49c); }
+.control-task-parts { display: grid; gap: 4px; }
+.control-task-parts span { overflow: hidden; font-size: var(--font-micro); text-overflow: ellipsis; white-space: nowrap; }
+.control-task-parts .is-done, .control-task-parts .is-clear { color: #83d8a7; }
+.control-task-parts .is-remaining { color: #e7bc72; }
+.control-task-blocker { display: grid; gap: 2px; padding: 7px 8px; color: #ffabb5; border: 1px solid #65343c; border-radius: 5px; background: #281217; }
+.control-task-blocker strong { font-size: var(--font-description); }
+.control-task-blocker small { color: #c98891; font-size: var(--font-micro); line-height: 1.35; }
+.control-task-confirmed { color: #8ee1b0; font-size: var(--font-micro); font-weight: var(--weight-semibold); }
 .control-task-git { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; color: #9aa8bc; font-size: var(--font-micro); }
 .control-task-git span, .control-task-git b { padding: 3px 6px; border: 1px solid #2f3948; border-radius: 5px; background: #0c1118; font-weight: var(--weight-semibold); white-space: nowrap; }
 .control-task-git b { color: #ff9da8; border-color: #70343f; background: #281217; }
@@ -41,9 +58,11 @@
 .control-terminal-task.is-completed { border-color: #28553c; box-shadow: inset 3px 0 0 #53d889; }
 .control-terminal-task.is-running { border-color: #6c5825; box-shadow: inset 3px 0 0 #e7b94c; }
 .control-terminal-section.is-unfinished .control-terminal-state { color: #ffd77c; border-color: #6c5825; background: #2b230f; }
-.control-terminal-task.is-failed, .control-terminal-task.is-blocked, .control-terminal-task.is-cancelled { border-color: #65343c; box-shadow: inset 3px 0 0 #e35d6a; }
+.control-terminal-task.is-failed, .control-terminal-task.is-blocked, .control-terminal-task.is-cancelled, .control-terminal-task.is-error, .control-terminal-task.is-stalled { border-color: #65343c; box-shadow: inset 3px 0 0 #e35d6a; }
+.control-terminal-task.is-verifying { border-color: #315d6f; box-shadow: inset 3px 0 0 #5fc5eb; }
 .control-terminal-state { padding: 4px 7px; color: #9ee3b9; border: 1px solid #28553c; border-radius: 999px; background: #102319; font-size: var(--font-micro); font-weight: var(--weight-semibold); white-space: nowrap; }
 .control-terminal-task:not(.is-completed) .control-terminal-state { color: #ffabb5; border-color: #65343c; background: #281217; }
+.control-terminal-task.is-verifying .control-terminal-state { color: #9eddf4; border-color: #315d6f; background: #10242d; }
 .control-terminal-main { min-width: 0; }
 .control-terminal-main strong, .control-terminal-main small, .control-terminal-main p { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .control-terminal-main strong { color: #e4e9f1; font-size: var(--font-body); }

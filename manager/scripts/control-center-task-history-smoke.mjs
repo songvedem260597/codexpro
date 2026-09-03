@@ -10,6 +10,10 @@ assert.match(source, /"Task chưa hoàn thành"/, "control center must list inte
 assert.match(source, /"Task thất bại"/, "control center must label failed tasks");
 assert.match(source, /\["failed", "cancelled", "blocked"\]/, "failed task history must include blocked and cancelled outcomes");
 assert.match(source, /WorkerRunningDuration startedAt=\{task\.startedAt\}/, "running tasks must show a live duration clock");
+assert.match(source, /function TaskProgressSnapshot[\s\S]*?progress_percent[\s\S]*?completed_parts[\s\S]*?remaining_parts/, "task cards must render the persisted progress snapshot");
+assert.match(source, /blocked_part[\s\S]*?blocked_reason/, "task cards must expose exactly where a task is blocked or stalled");
+assert.match(source, /completion_confirmed[\s\S]*?Đã xác nhận hoàn tất/, "completed tasks must render an explicit completion confirmation");
+assert.match(source, /\["blocked", "stalled", "error", "verifying"\]\.includes\(executionState\)/, "live task state must use structured worker execution state instead of flattening everything to running");
 assert.match(source, /prefix=\{job\.status === "completed" \? "Hoàn thành trong" : "Hoạt động trong"\}/, "completed tasks alone must label their frozen duration as completion time");
 assert.match(source, /const unfinishedTasks = workerJobs\.filter[\s\S]*?job\?\.status === "running"[\s\S]*?!liveTaskIds\.has/, "only non-live running jobs must appear as unfinished coordination tasks");
 assert.ok(source.indexOf("UPDATE CENTER") < source.indexOf("TASK CENTER"), "Update Center must be the first coordination section before Task Center");

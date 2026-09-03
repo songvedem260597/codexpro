@@ -4,6 +4,26 @@ import { AppDropdown } from "./app-dropdown.jsx";
 const LEVEL_LABELS = { info: "INFO", warn: "CẢNH BÁO", error: "LỖI" };
 const SOURCE_LABELS = { user: "Người dùng", manager: "Manager", renderer: "Giao diện", mcp: "MCP", worker: "Worker", electron: "Electron" };
 const DIAGNOSTIC_RENDER_BATCH = 180;
+const ERROR_TYPE_LABELS = {
+  user: "Người dùng",
+  network_api: "Mạng / API",
+  ui_ux: "UI / UX",
+  openai: "OpenAI",
+  logic: "Logic",
+  git: "Git",
+  runtime: "Runtime",
+  syntax: "Syntax"
+};
+const ERROR_TYPE_HINTS = {
+  user: "Lỗi được người dùng báo hoặc phát hiện",
+  network_api: "HTTP, API, timeout, DNS, socket, rate limit",
+  ui_ux: "Renderer, CSS, layout, DOM, hiển thị",
+  openai: "OpenAI, ChatGPT, model hoặc Responses API",
+  logic: "State, invariant, routing hoặc xử lý nghiệp vụ",
+  git: "Commit, push, branch, merge, rebase hoặc conflict",
+  runtime: "Process, lifecycle và lỗi thực thi khác",
+  syntax: "Parser, syntax error hoặc TypeScript syntax"
+};
 
 const CATEGORY_LABELS = {
   "user-reported-error": "Lỗi người dùng phát hiện",
@@ -30,7 +50,7 @@ function DiagnosticDropdown({ value, options, onChange, ariaLabel }) {
       onChange={onChange}
       ariaLabel={ariaLabel}
       searchPlaceholder={`Tìm ${ariaLabel.toLocaleLowerCase("vi-VN")}…`}
-      renderValue={(selected) => <><span className={`app-dropdown-dot is-${selected?.tone || "neutral"}`} aria-hidden="true" /><strong>{selected?.label || "Chọn bộ lọc"}</strong>{Number.isFinite(Number(selected?.count)) && <span className="app-dropdown-count">{Number(selected.count)}</span>}</>}
+      renderValue={(selected) => <><span className={`app-dropdown-dot is-${selected?.tone || "neutral"}`} aria-hidden="true" /><strong>{selected?.label || "Chọn bộ lọc"}</strong></>}
       renderOption={(option) => <><span className={`app-dropdown-dot is-${option.tone || "neutral"}`} aria-hidden="true" /><span className="app-dropdown-option-copy"><strong>{option.label}</strong>{option.hint && <small>{option.hint}</small>}</span>{Number.isFinite(Number(option.count)) && <span className="app-dropdown-count">{Number(option.count)}</span>}</>}
     />
   );
@@ -61,17 +81,17 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
   const entries = Array.isArray(data?.entries) ? data.entries : [];
   const [visibleCount, setVisibleCount] = useState(DIAGNOSTIC_RENDER_BATCH);
   const visibleEntries = entries.slice(0, visibleCount);
-  const summary = data?.summary || { total: 0, info: 0, warn: 0, error: 0, user_reported_error: 0, user_reported_incidents: 0 };
+  const summary = data?.summary || { total: 0, info: 0, warn: 0, error: 0, user_reported_error: 0, user_reported_incidents: 0, unique_error_incidents: 0, repeated_error_incidents: 0 };
 
   useEffect(() => {
     setVisibleCount(DIAGNOSTIC_RENDER_BATCH);
-  }, [data?.checked_at, filters.level, filters.source, filters.category, filters.hours, filters.query]);
-  const available = data?.available || { levels: summary, sources: {}, categories: {} };
+  }, [data?.checked_at, filters.level, filters.source, filters.category, filters.errorType, filters.hours, filters.query]);
+  const available = data?.available || { levels: summary, sources: {}, categories: {}, error_types: {} };
   const availableTotal = Object.values(available.levels || {}).reduce((total, count) => total + (Number(count) || 0), 0);
   const sourceOptions = ["all", ...new Set(["user", "renderer", "mcp", ...(data?.sources || [])])];
   const categoryOptions = ["all", ...new Set(["user-reported-error", "task-unfinalized", "runtime", "status", "projects", "profile", "chat", "network", "tool", "transport", ...(data?.categories || [])])];
   const levelOptions = [
-    { value: "all", label: "Tất cả mức", hint: "Hiển thị toàn bộ mức độ", tone: "neutral", count: availableTotal },
+    { value: "all", label: "Mọi mức", hint: "Hiển thị toàn bộ mức độ", tone: "neutral", count: availableTotal },
     { value: "error", label: "Lỗi", hint: "Cần điều tra ngay", tone: "error", count: available.levels?.error || 0 },
     { value: "warn", label: "Cảnh báo", hint: "Có thể tự phục hồi", tone: "warn", count: available.levels?.warn || 0 },
     { value: "info", label: "Thông tin", hint: "Hoạt động bình thường", tone: "info", count: available.levels?.info || 0 }
@@ -90,6 +110,16 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
     tone: ["network", "transport"].includes(item) ? "warn" : item === "chat" ? "chat" : "neutral",
     count: item === "all" ? availableTotal : available.categories?.[item]
   }));
+  const errorTypeOptions = [
+    { value: "all", label: "Tất cả loại lỗi", hint: "Người dùng, API, UI/UX, OpenAI, logic, Git, runtime, syntax", tone: "neutral", count: Object.values(available.error_types || {}).reduce((total, count) => total + (Number(count) || 0), 0) },
+    ...Object.entries(ERROR_TYPE_LABELS).map(([value, label]) => ({
+      value,
+      label,
+      hint: ERROR_TYPE_HINTS[value],
+      tone: value === "user" || value === "syntax" ? "error" : value === "network_api" || value === "git" ? "warn" : value === "ui_ux" ? "renderer" : value === "openai" ? "mcp" : "neutral",
+      count: available.error_types?.[value] || 0
+    }))
+  ];
   const hourOptions = [
     { value: 1, label: "1 giờ gần nhất", hint: "Điều tra lỗi vừa xảy ra", tone: "time" },
     { value: 6, label: "6 giờ gần nhất", hint: "Theo dõi trong một phiên", tone: "time" },
@@ -103,8 +133,9 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
         <article><span>Tổng log</span><strong>{summary.total || 0}</strong><small>trong {data?.queried_hours || filters.hours} giờ</small></article>
         <article className="is-error"><span>Lỗi</span><strong>{summary.error || 0}</strong><small>cần ưu tiên điều tra</small></article>
         <article className="is-user-error"><span>Lỗi người dùng phát hiện</span><strong>{summary.user_reported_error || 0}</strong><small>{summary.user_reported_incidents || 0} lỗi riêng biệt</small></article>
+        <article className="is-incident"><span>Sự cố riêng biệt</span><strong>{summary.unique_error_incidents || 0}</strong><small>theo fingerprint lỗi</small></article>
+        <article className="is-repeat"><span>Sự cố bị lặp</span><strong>{summary.repeated_error_incidents || 0}</strong><small>xuất hiện từ 2 lần</small></article>
         <article className="is-warn"><span>Cảnh báo</span><strong>{summary.warn || 0}</strong><small>có thể tự phục hồi</small></article>
-        <article className="is-info"><span>Thông tin</span><strong>{summary.info || 0}</strong><small>MCP / runtime bình thường</small></article>
       </section>
 
       <section className="diagnostic-panel">
@@ -133,6 +164,7 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
             <DiagnosticDropdown value={filters.level} options={levelOptions} onChange={(level) => onFilters({ level })} ariaLabel="Lọc mức log" />
             <DiagnosticDropdown value={filters.source} options={sourceFilterOptions} onChange={(source) => onFilters({ source })} ariaLabel="Lọc nguồn log" />
             <DiagnosticDropdown value={filters.category} options={categoryFilterOptions} onChange={(category) => onFilters({ category })} ariaLabel="Lọc nhóm log" />
+            <DiagnosticDropdown value={filters.errorType || "all"} options={errorTypeOptions} onChange={(errorType) => onFilters({ errorType })} ariaLabel="Lọc loại lỗi" />
             <DiagnosticDropdown value={filters.hours} options={hourOptions} onChange={(hours) => onFilters({ hours: Number(hours) })} ariaLabel="Khoảng thời gian log" />
           </div>
         </div>
@@ -144,7 +176,7 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
 
         <div className="diagnostic-table" role="table" aria-label="Nhật ký chẩn đoán CodexPro">
           <div className="diagnostic-row diagnostic-head" role="row">
-            <span>Thời gian</span><span>Mức</span><span>Nguồn / nhóm</span><span>Action</span><span>Nội dung</span><span>Lặp lại</span><span>Thời lượng</span>
+            <span>Thời gian</span><span>Mức</span><span>Nguồn / nhóm</span><span>Loại lỗi</span><span>Action</span><span>Nội dung</span><span>Lặp lại</span><span>Thời lượng</span>
           </div>
           {!entries.length && <div className="diagnostic-empty">Không có log phù hợp trong khoảng thời gian đã chọn.</div>}
           {visibleEntries.map((entry, index) => {
@@ -155,9 +187,10 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
                 <span className="diagnostic-time">{diagnosticTime(entry.timestamp)}</span>
                 <span><b className={`diagnostic-level is-${entry.level || "info"}`}>{LEVEL_LABELS[entry.level] || "INFO"}</b></span>
                 <span className="diagnostic-source"><strong>{SOURCE_LABELS[entry.source] || entry.source || "Manager"}</strong><small>{CATEGORY_LABELS[entry.category] || entry.category || "Runtime"}</small></span>
+                <span className="diagnostic-error-type">{entry.details?.error_type ? <b className={`is-${entry.details.error_type}`}>{ERROR_TYPE_LABELS[entry.details.error_type] || entry.details.error_type}</b> : "—"}</span>
                 <span className="diagnostic-action">{entry.action || "—"}</span>
                 <span className="diagnostic-message">{entry.message || "—"}</span>
-                <span className="diagnostic-occurrence">{entry.details?.incident_fingerprint ? `${Number(entry.details?.occurrence_count) || 1} lần` : "—"}</span>
+                <span className="diagnostic-occurrence">{entry.details?.error_fingerprint || entry.details?.incident_fingerprint ? `${Number(entry.details?.occurrence_count) || 1} lần` : "—"}</span>
                 <span className="diagnostic-duration">{Number.isFinite(Number(entry.duration_ms)) ? `${Number(entry.duration_ms)} ms` : "—"}</span>
               </button>
             );
@@ -166,7 +199,7 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
         {selected && (
           <div className="diagnostic-detail">
             <div className="diagnostic-detail-head">
-              <div><b>{LEVEL_LABELS[selected.level] || "INFO"} · {SOURCE_LABELS[selected.source] || selected.source || "Manager"}</b><span>{diagnosticTime(selected.timestamp)} · {CATEGORY_LABELS[selected.category] || selected.category || "Runtime"}</span></div>
+              <div><b>{LEVEL_LABELS[selected.level] || "INFO"} · {SOURCE_LABELS[selected.source] || selected.source || "Manager"}</b><span>{diagnosticTime(selected.timestamp)} · {CATEGORY_LABELS[selected.category] || selected.category || "Runtime"}{selected.details?.error_type ? ` · ${ERROR_TYPE_LABELS[selected.details.error_type] || selected.details.error_type}` : ""}</span></div>
               <button className="button secondary" type="button" onClick={() => onCopy(selected)}>Copy chi tiết</button>
             </div>
             <strong>{selected.message || "Không có message"}</strong>

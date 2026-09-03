@@ -2458,13 +2458,15 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     "report_worker_job_progress",
     {
       title: "Report Worker Job Progress",
-      description: "Persist a structured progress checkpoint for a profile-bound worker job so partial completion, verification, blockers, errors, and stalls have explicit investigation evidence.",
+      description: "Persist a structured task checkpoint with progress percent, completed/remaining parts, blocker location, verification evidence, and stall/error context. Keep remaining_parts accurate at every stage; it must be empty before successful finalization.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/),
         stage: z.enum(["started", "partial", "all_parts_done", "verifying", "blocked", "error", "stalled"]),
         summary: z.string().min(1).max(2000),
         reason: z.string().max(2000).optional(),
         evidence: z.string().max(2000).optional(),
+        progress_percent: z.number().min(0).max(100).optional(),
+        blocked_part: z.string().min(1).max(300).optional(),
         completed_parts: z.array(z.string().min(1).max(300)).max(50).optional(),
         remaining_parts: z.array(z.string().min(1).max(300)).max(50).optional()
       },
@@ -2486,6 +2488,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           summary: args.summary,
           reason: args.reason,
           evidence: args.evidence,
+          progressPercent: args.progress_percent,
+          blockedPart: args.blocked_part,
           completedParts: args.completed_parts,
           remainingParts: args.remaining_parts
         });
