@@ -202,6 +202,9 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
       throw new Error(`general task title proof was not retained: ${JSON.stringify(generalStatus.structuredContent)}`);
     }
     const generalWorkerStatus = await callTool(general, 'worker_job_status', { task_id: generalBegan.structuredContent.task_id });
+    if (generalWorkerStatus.structuredContent.job?.counts_as_task !== false || generalWorkerStatus.structuredContent.job?.source_change_count !== 0) {
+      throw new Error(`general Q&A/research worker was incorrectly classified as a source-changing task: ${JSON.stringify(generalWorkerStatus.structuredContent)}`);
+    }
     if (!generalWorkerStatus.structuredContent.found || generalWorkerStatus.structuredContent.job?.policy_version !== 'worker-policy-v1' || generalWorkerStatus.structuredContent.job?.status !== 'running') {
       throw new Error(`general task did not persist MCP worker policy evidence: ${JSON.stringify(generalWorkerStatus.structuredContent)}`);
     }
@@ -237,6 +240,9 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (!directRead.structuredContent.text.includes('gate initial')) throw new Error('direct profile task remained blocked after begin_repo_task');
     const directWorkerStatus = await callTool(direct, 'worker_job_status', { task_id: directBegan.structuredContent.task_id });
     const directJob = directWorkerStatus.structuredContent.job;
+    if (directJob?.counts_as_task !== false || directJob?.source_change_count !== 0) {
+      throw new Error(`read-only repository inspection was incorrectly classified as a source-changing task: ${JSON.stringify(directWorkerStatus.structuredContent)}`);
+    }
     if (!directJob?.rules_hash || !directJob?.agents_hash || !directJob?.codexgraph_active || directJob?.missing_obligations?.length) {
       throw new Error(`code task did not retain rules/AGENTS/CodexGraph bootstrap evidence: ${JSON.stringify(directWorkerStatus.structuredContent)}`);
     }
@@ -396,7 +402,23 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     }
     const activeRead = await callTool(gated, 'read', { path: 'gate.txt' });
     if (!activeRead.structuredContent.text.includes('gate initial')) throw new Error('read remained blocked after begin_repo_task');
+    const preMutationBash = await callTool(gated, 'bash', { command: 'node -e "console.log(\'read-build-commit-push-only\')"' });
+    if (!String(preMutationBash.structuredContent.stdout || '').includes('read-build-commit-push-only')) throw new Error('bash-only classification fixture did not run');
+    const preMutationStatus = await callTool(gated, 'worker_job_status', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa' });
+    if (preMutationStatus.structuredContent.job?.counts_as_task !== false || preMutationStatus.structuredContent.job?.source_change_count !== 0) {
+      throw new Error(`read/analysis/bash-only work was incorrectly counted as a task before any source edit: ${JSON.stringify(preMutationStatus.structuredContent)}`);
+    }
     await callTool(gated, 'edit', { path: 'gate.txt', old_text: 'gate initial', new_text: 'gate changed' });
+    const postMutationStatus = await callTool(gated, 'worker_job_status', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa' });
+    const postMutationJob = postMutationStatus.structuredContent.job;
+    if (postMutationJob?.counts_as_task !== true || postMutationJob?.source_change_count !== 1 || !postMutationJob?.source_changed_paths?.includes?.('gate.txt')) {
+      throw new Error(`real source edit did not promote the worker job to Task: ${JSON.stringify(postMutationStatus.structuredContent)}`);
+    }
+    const classifiedHistory = await callTool(gated, 'worker_job_history', { statuses: ['running'], limit: 20 });
+    const classifiedHistoryJob = classifiedHistory.structuredContent.jobs?.find?.((job) => job?.job_id === 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa');
+    if (classifiedHistoryJob?.counts_as_task !== true || classifiedHistoryJob?.source_change_count !== 1) {
+      throw new Error(`worker job history did not expose source-change task classification: ${JSON.stringify(classifiedHistory.structuredContent)}`);
+    }
     const activeBash = await callTool(gated, 'bash', { command: 'node -e "console.log(\'active\')"' });
     if (!String(activeBash.structuredContent.stdout || '').includes('active')) throw new Error('bash did not run after begin_repo_task');
 

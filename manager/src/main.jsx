@@ -1412,6 +1412,8 @@ function App() {
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
       const tab = tabs.find((item) => item.busy || item.settling || String(item?.network_state || "") === "generating") || tabs.find((item) => item.active) || tabs[0];
       const taskId = String(profile?.current_task_id || "");
+      const job = jobs.find((item) => String(item?.job_id || item?.jobId || "") === taskId) || null;
+      const countsAsTask = job?.counts_as_task === true;
       const title = String(profile?.current_task_title || tab?.title || profile?.active_chat_title || "Task CodexPro");
       const working = Boolean(tab?.busy || tab?.settling || profile?.activity === "working" || Number(profile?.busy_request_count || 0) > 0);
       const failed = Boolean(tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error);
@@ -1419,14 +1421,15 @@ function App() {
       if (managerSettings.taskNotifications !== false && previous) {
         const previousJob = previous.taskId ? jobs.find((job) => String(job?.job_id || job?.jobId || "") === previous.taskId) : null;
         const previousJobStatus = String(previousJob?.status || "").toLowerCase();
-        if (previous.working && !working && previous.taskId && previousJobStatus === "completed") {
+        const previousCountsAsTask = previous.countsAsTask || previousJob?.counts_as_task === true;
+        if (previousCountsAsTask && previous.working && !working && previous.taskId && previousJobStatus === "completed") {
           void api.showNotification?.({ title: "CodexPro · Task hoàn tất", body: `${previous.title} · ${profile.label || profile.profile_id.slice(0, 8)}`, silent: true });
           playTaskCompletionSound();
-        } else if (!previous.failed && failed) {
+        } else if (countsAsTask && !previous.failed && failed) {
           void api.showNotification?.({ title: "CodexPro · Task bị gián đoạn", body: `“${title}” gặp lỗi hoặc profile bị treo. Code có thể đang sửa dở/chưa commit.` });
         }
       }
-      operationsNotificationState.current.set(profile.profile_id, { working, failed, taskId, title });
+      operationsNotificationState.current.set(profile.profile_id, { working, failed, taskId, title, countsAsTask });
     }
   }, [managerSettings.taskNotifications, status?.browserProfiles, status?.workerJobs]);
 
