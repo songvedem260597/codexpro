@@ -1,4 +1,4 @@
-const state = { projects: [], result: null, requestId: "", meta: null };
+const state = { projects: [], result: null, requestId: "", meta: null, viewKey: "overview" };
 const elements = {
   project: document.querySelector("#project"),
   analyze: document.querySelector("#analyze"),
@@ -6,9 +6,14 @@ const elements = {
   status: document.querySelector("#status"),
   summary: document.querySelector("#summary"),
   components: document.querySelector("#components"),
+  modules: document.querySelector("#modules"),
   connections: document.querySelector("#connections"),
   symbols: document.querySelector("#symbols"),
   relations: document.querySelector("#relations"),
+  viewbar: document.querySelector("#viewbar"),
+  back: document.querySelector("#back"),
+  viewTitle: document.querySelector("#view-title"),
+  viewHint: document.querySelector("#view-hint"),
   diagram: document.querySelector("#diagram"),
   warnings: document.querySelector("#warnings"),
   commit: document.querySelector("#commit")
@@ -51,7 +56,8 @@ function layoutNodes(result) {
   }
   const layers = [...layerMap.entries()].sort((a, b) => a[0] - b[0]);
   const widest = Math.max(1, ...layers.map(([, list]) => list.length));
-  const width = Math.max(760, widest * 240 + 120);
+  const viewportWidth = Math.max(760, elements.diagram?.parentElement?.clientWidth || 0);
+  const width = Math.max(viewportWidth, widest * 240 + 120);
   const layerGap = 126;
   const top = 44;
   const positions = new Map();
@@ -65,7 +71,8 @@ function layoutNodes(result) {
       height: 72
     }));
   }
-  const height = Math.max(560, top + (layers.at(-1)?.[0] || 0) * layerGap + 150);
+  const minHeight = state.viewKey === "overview" ? 560 : 380;
+  const height = Math.max(minHeight, top + (layers.at(-1)?.[0] || 0) * layerGap + 150);
   return { positions, width, height };
 }
 
@@ -131,6 +138,19 @@ function renderDiagram(result) {
     box.style.left = `${position.x}px`;
     box.style.top = `${position.y}px`;
     box.title = node.path || node.key || node.label;
+    const detailView = state.viewKey === "overview" ? state.result?.details?.[node.key] : null;
+    if (detailView?.nodes?.length) {
+      box.classList.add("is-clickable");
+      box.tabIndex = 0;
+      box.setAttribute("role", "button");
+      box.setAttribute("aria-label", `Xem module bên trong ${node.label || node.key}`);
+      box.addEventListener("click", () => openDetail(node.key));
+      box.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        openDetail(node.key);
+      });
+    }
     const label = document.createElement("strong");
     label.textContent = node.label || node.key || node.id;
     const detail = document.createElement("small");
@@ -142,20 +162,49 @@ function renderDiagram(result) {
   elements.diagram.replaceChildren(svg, ...labels, ...nodeElements);
 }
 
+function activeDiagramResult() {
+  if (state.viewKey === "overview") return state.result;
+  return state.result?.details?.[state.viewKey] || state.result;
+}
+
+function showOverview() {
+  if (!state.result) return;
+  state.viewKey = "overview";
+  elements.viewbar.hidden = false;
+  elements.back.hidden = true;
+  elements.viewTitle.textContent = "Tổng quan hệ thống";
+  elements.viewHint.textContent = "Nhấp một component để xem module bên trong.";
+  elements.copy.disabled = !String(state.result?.mermaid || "").trim();
+  renderDiagram(state.result);
+}
+
+function openDetail(componentKey) {
+  const detail = state.result?.details?.[componentKey];
+  if (!detail?.nodes?.length) return;
+  state.viewKey = componentKey;
+  elements.viewbar.hidden = false;
+  elements.back.hidden = false;
+  elements.viewTitle.textContent = detail.component_label || detail.title || componentKey;
+  const stats = detail.stats || {};
+  elements.viewHint.textContent = `${stats.modules || detail.nodes.length} module · ${stats.connections || detail.edges?.length || 0} luồng nội bộ`;
+  elements.copy.disabled = !String(detail.mermaid || "").trim();
+  renderDiagram(detail);
+}
+
 function renderResult(result) {
   state.result = result;
   const stats = result?.stats || {};
   elements.components.textContent = Number(stats.components || 0).toLocaleString("vi-VN");
+  elements.modules.textContent = Number(stats.detail_modules || 0).toLocaleString("vi-VN");
   elements.connections.textContent = Number(stats.connections || 0).toLocaleString("vi-VN");
   elements.symbols.textContent = Number(stats.source_symbols || 0).toLocaleString("vi-VN");
   elements.relations.textContent = Number(stats.source_relationships || 0).toLocaleString("vi-VN");
   elements.summary.hidden = false;
-  elements.copy.disabled = !String(result?.mermaid || "").trim();
   const warnings = Array.isArray(result?.warnings) ? result.warnings.filter(Boolean) : [];
   elements.warnings.hidden = !warnings.length;
   elements.warnings.textContent = warnings.join(" · ");
-  renderDiagram(result);
-  setStatus(`Đã rút ${stats.components || 0} component lớn từ CodexGraph.`, "");
+  showOverview();
+  setStatus(`Đã rút ${stats.components || 0} component lớn và ${stats.detail_modules || 0} module chi tiết từ CodexGraph.`, "");
 }
 
 elements.analyze.addEventListener("click", () => {
@@ -169,10 +218,12 @@ elements.analyze.addEventListener("click", () => {
 });
 
 elements.copy.addEventListener("click", () => {
-  const mermaid = String(state.result?.mermaid || "");
+  const mermaid = String(activeDiagramResult()?.mermaid || "");
   if (!mermaid) return;
   window.parent.postMessage({ type: "codexpro:copy-text", text: mermaid, label: "GitDiagram Mermaid" }, "*");
 });
+
+elements.back.addEventListener("click", showOverview);
 
 window.addEventListener("message", (event) => {
   if (event.source !== window.parent) return;

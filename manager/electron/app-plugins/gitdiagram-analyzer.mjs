@@ -72,6 +72,17 @@ function componentKeyForPath(value = "") {
   return segments[0];
 }
 
+function moduleKeyForPath(value = "", componentKey = "") {
+  const path = normalizedPath(value);
+  if (!path || !componentKey || componentKey === "root") return path;
+  const segments = path.split("/").filter(Boolean);
+  const componentSegments = String(componentKey).split("/").filter(Boolean);
+  if (segments.length <= componentSegments.length) return path;
+  const remainder = segments.slice(componentSegments.length);
+  if (remainder.length <= 1) return path;
+  return [...componentSegments, remainder[0]].join("/");
+}
+
 function titleCaseToken(token) {
   const known = LABEL_WORDS.get(String(token || "").toLowerCase());
   if (known) return known;
@@ -91,6 +102,21 @@ function labelForComponent(key) {
   if (segments.length === 2 && segments[0].toLowerCase() === "manager" && segments[1].toLowerCase() === "src") return "Manager UI";
   if (segments.length === 2 && segments[0].toLowerCase() === "manager" && segments[1].toLowerCase() === "electron") return "Manager Runtime";
   return segments.map(titleCaseToken).join(" · ");
+}
+
+function labelForModule(key, componentKey = "") {
+  const normalized = normalizedPath(key);
+  const segments = normalized.split("/").filter(Boolean);
+  const componentSegments = String(componentKey || "").split("/").filter(Boolean);
+  const leaf = segments.at(-1) || normalized;
+  if (/\.[a-z0-9]+$/i.test(leaf)) {
+    const withoutExtension = leaf.replace(/\.[^.]+$/, "");
+    if (/^(?:index|main|app|server|client|runtime)$/i.test(withoutExtension) && segments.length > componentSegments.length + 1) {
+      return titleCaseToken(segments.at(-2));
+    }
+    return titleCaseToken(withoutExtension);
+  }
+  return titleCaseToken(leaf);
 }
 
 function edgeLabel(kind) {
@@ -163,11 +189,15 @@ function compileMermaid(nodes, edges) {
 export function buildGitDiagramArchitecture(inspection, options = {}) {
   const maxComponents = Math.max(4, Math.min(14, Number(options.maxComponents) || 10));
   const maxEdges = Math.max(4, Math.min(28, Number(options.maxEdges) || 18));
+  const maxModules = Math.max(4, Math.min(18, Number(options.maxModules) || 12));
+  const maxModuleEdges = Math.max(4, Math.min(32, Number(options.maxModuleEdges) || 22));
   const graph = inspection?.codexgraph || inspection || {};
   const rawNodes = Array.isArray(graph.nodes) ? graph.nodes : [];
   const rawEdges = Array.isArray(graph.edges) ? graph.edges : [];
   const componentByNode = new Map();
+  const moduleByNode = new Map();
   const stats = new Map();
+  const moduleStatsByComponent = new Map();
 
   for (const node of rawNodes) {
     const key = componentKeyForPath(node?.path);
@@ -175,20 +205,62 @@ export function buildGitDiagramArchitecture(inspection, options = {}) {
     const nodeId = String(node?.key ?? node?.id ?? "");
     if (!nodeId) continue;
     componentByNode.set(nodeId, key);
+    const path = normalizedPath(node?.path);
+    const moduleKey = moduleKeyForPath(path, key);
+    if (moduleKey) moduleByNode.set(nodeId, moduleKey);
     const current = stats.get(key) || { key, symbolCount: 0, crossDegree: 0, paths: new Map(), edgeKinds: new Map() };
     current.symbolCount += 1;
-    const path = normalizedPath(node?.path);
     if (path) current.paths.set(path, (current.paths.get(path) || 0) + 1);
     stats.set(key, current);
+
+    if (moduleKey) {
+      const perComponent = moduleStatsByComponent.get(key) || new Map();
+      const moduleCurrent = perComponent.get(moduleKey) || {
+        key: moduleKey,
+        symbolCount: 0,
+        crossDegree: 0,
+        paths: new Map(),
+        edgeKinds: new Map()
+      };
+      moduleCurrent.symbolCount += 1;
+      if (path) moduleCurrent.paths.set(path, (moduleCurrent.paths.get(path) || 0) + 1);
+      perComponent.set(moduleKey, moduleCurrent);
+      moduleStatsByComponent.set(key, perComponent);
+    }
   }
 
   const crossEdges = [];
+  const moduleEdgesByComponent = new Map();
   for (const edge of rawEdges) {
-    const from = componentByNode.get(String(edge?.source ?? edge?.fromSymbolId ?? ""));
-    const to = componentByNode.get(String(edge?.target ?? edge?.toSymbolId ?? ""));
-    if (!from || !to || from === to) continue;
+    const sourceId = String(edge?.source ?? edge?.fromSymbolId ?? "");
+    const targetId = String(edge?.target ?? edge?.toSymbolId ?? "");
+    const from = componentByNode.get(sourceId);
+    const to = componentByNode.get(targetId);
+    if (!from || !to) continue;
     const kind = String(edge?.kind || "references");
     const priority = FLOW_PRIORITY.get(kind) ?? 50;
+    const fromModule = moduleByNode.get(sourceId);
+    const toModule = moduleByNode.get(targetId);
+
+    if (from === to) {
+      if (!fromModule || !toModule || fromModule === toModule) continue;
+      const moduleEdges = moduleEdgesByComponent.get(from) || [];
+      moduleEdges.push({ from: fromModule, to: toModule, kind, priority });
+      moduleEdgesByComponent.set(from, moduleEdges);
+      const perComponent = moduleStatsByComponent.get(from);
+      const leftModule = perComponent?.get(fromModule);
+      const rightModule = perComponent?.get(toModule);
+      if (leftModule) {
+        leftModule.crossDegree += priority <= 11 ? 2 : 1;
+        leftModule.edgeKinds.set(kind, (leftModule.edgeKinds.get(kind) || 0) + 1);
+      }
+      if (rightModule) {
+        rightModule.crossDegree += priority <= 11 ? 2 : 1;
+        rightModule.edgeKinds.set(kind, (rightModule.edgeKinds.get(kind) || 0) + 1);
+      }
+      continue;
+    }
+
     crossEdges.push({ from, to, kind, priority });
     const left = stats.get(from);
     const right = stats.get(to);
@@ -200,6 +272,10 @@ export function buildGitDiagramArchitecture(inspection, options = {}) {
       right.crossDegree += priority <= 11 ? 2 : 1;
       right.edgeKinds.set(kind, (right.edgeKinds.get(kind) || 0) + 1);
     }
+    const leftModule = moduleStatsByComponent.get(from)?.get(fromModule);
+    const rightModule = moduleStatsByComponent.get(to)?.get(toModule);
+    if (leftModule) leftModule.crossDegree += priority <= 11 ? 2 : 1;
+    if (rightModule) rightModule.crossDegree += priority <= 11 ? 2 : 1;
   }
 
   const ranked = [...stats.values()]
@@ -258,6 +334,83 @@ export function buildGitDiagramArchitecture(inspection, options = {}) {
   const layers = computeLayers(nodes, edges);
   nodes = nodes.map((node) => ({ ...node, layer: layers.get(node.id) || 0 }));
   const mermaid = compileMermaid(nodes, edges);
+  const details = {};
+  let detailModuleCount = 0;
+
+  for (const component of ranked) {
+    const componentId = idByKey.get(component.key);
+    const perComponent = moduleStatsByComponent.get(component.key) || new Map();
+    const rankedModules = [...perComponent.values()]
+      .map((item) => ({ ...item, score: item.symbolCount + item.crossDegree * 3 }))
+      .sort((a, b) => b.score - a.score || b.symbolCount - a.symbolCount || a.key.localeCompare(b.key))
+      .slice(0, maxModules);
+    if (!rankedModules.length) continue;
+
+    const selectedModuleKeys = new Set(rankedModules.map((item) => item.key));
+    const moduleIdByKey = new Map(rankedModules.map((item, index) => [item.key, `${componentId}m${index + 1}`]));
+    const aggregatedModules = new Map();
+    for (const edge of moduleEdgesByComponent.get(component.key) || []) {
+      if (!selectedModuleKeys.has(edge.from) || !selectedModuleKeys.has(edge.to)) continue;
+      const pair = `${edge.from}\u0000${edge.to}`;
+      const current = aggregatedModules.get(pair) || { from: edge.from, to: edge.to, total: 0, kinds: new Map(), bestPriority: 999 };
+      current.total += 1;
+      current.kinds.set(edge.kind, (current.kinds.get(edge.kind) || 0) + 1);
+      current.bestPriority = Math.min(current.bestPriority, edge.priority);
+      aggregatedModules.set(pair, current);
+    }
+
+    let moduleEdges = [...aggregatedModules.values()].map((item) => {
+      const [kind, kindCount] = [...item.kinds.entries()].sort((a, b) => {
+        const priority = (FLOW_PRIORITY.get(a[0]) ?? 50) - (FLOW_PRIORITY.get(b[0]) ?? 50);
+        return priority || b[1] - a[1] || a[0].localeCompare(b[0]);
+      })[0] || ["references", 0];
+      return {
+        from: moduleIdByKey.get(item.from),
+        to: moduleIdByKey.get(item.to),
+        kind,
+        label: edgeLabel(kind),
+        weight: item.total,
+        kind_weight: kindCount,
+        priority: item.bestPriority
+      };
+    }).filter((edge) => edge.from && edge.to);
+    const moduleFlowEdges = moduleEdges.filter((edge) => edge.priority <= 11);
+    if (moduleFlowEdges.length >= Math.min(3, rankedModules.length - 1)) moduleEdges = moduleFlowEdges;
+    moduleEdges = moduleEdges
+      .sort((a, b) => a.priority - b.priority || b.weight - a.weight || a.from.localeCompare(b.from) || a.to.localeCompare(b.to))
+      .slice(0, maxModuleEdges);
+
+    let moduleNodes = rankedModules.map((item) => {
+      const representative = [...item.paths.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] || item.key;
+      return {
+        id: moduleIdByKey.get(item.key),
+        key: item.key,
+        label: labelForModule(item.key, component.key),
+        description: `${item.symbolCount.toLocaleString("en-US")} symbols · ${item.crossDegree.toLocaleString("en-US")} links`,
+        path: representative,
+        symbol_count: item.symbolCount,
+        score: item.score
+      };
+    });
+    const moduleLayers = computeLayers(moduleNodes, moduleEdges);
+    moduleNodes = moduleNodes.map((node) => ({ ...node, layer: moduleLayers.get(node.id) || 0 }));
+    detailModuleCount += moduleNodes.length;
+    details[component.key] = {
+      schema_version: 1,
+      source: "CodexGraph module projection",
+      title: `${labelForComponent(component.key)} · module flow`,
+      component_key: component.key,
+      component_label: labelForComponent(component.key),
+      nodes: moduleNodes,
+      edges: moduleEdges,
+      mermaid: compileMermaid(moduleNodes, moduleEdges),
+      stats: {
+        modules: moduleNodes.length,
+        connections: moduleEdges.length,
+        source_symbols: component.symbolCount
+      }
+    };
+  }
   const coverage = graph.coverage || {};
   return {
     schema_version: 1,
@@ -266,12 +419,14 @@ export function buildGitDiagramArchitecture(inspection, options = {}) {
     root: String(inspection?.root || inspection?.workspace_root || ""),
     nodes,
     edges,
+    details,
     mermaid,
     stats: {
       source_symbols: Number(coverage.symbolCount || rawNodes.length) || rawNodes.length,
       source_relationships: Number(coverage.relationshipCount || rawEdges.length) || rawEdges.length,
       components: nodes.length,
-      connections: edges.length
+      connections: edges.length,
+      detail_modules: detailModuleCount
     },
     warnings: [
       ...(Array.isArray(graph.warnings) ? graph.warnings.slice(0, 2) : []),

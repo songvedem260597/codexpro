@@ -5422,7 +5422,7 @@ diagnosticIpcHandle("codexpro:analyze-app-plugin-repo", {
   successMessage: "GitDiagram đã rút kiến trúc repo",
   failureMessage: "GitDiagram không phân tích được repo",
   details: (payload) => ({ plugin_id: String(payload?.pluginId || ""), root: String(payload?.root || "") }),
-  resultDetails: (result) => ({ components: Number(result?.stats?.components) || 0, connections: Number(result?.stats?.connections) || 0 })
+  resultDetails: (result) => ({ components: Number(result?.stats?.components) || 0, modules: Number(result?.stats?.detail_modules) || 0, connections: Number(result?.stats?.connections) || 0 })
 }, async (_event, payload) => {
   const pluginId = String(payload?.pluginId || "").trim();
   if (pluginId !== "gitdiagram") throw new Error("Repo analyzer này chỉ dành cho plugin GitDiagram.");

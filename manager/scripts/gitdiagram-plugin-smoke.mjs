@@ -93,6 +93,14 @@ try {
   assert.ok(labels.includes("Analysis Engine"), `missing Analysis Engine in ${labels.join(", ")}`);
   assert.ok(architecture.nodes.length <= 10);
   assert.ok(architecture.edges.length >= 3);
+  assert.ok(architecture.stats.detail_modules >= architecture.nodes.length, "selected components should retain a module-level drill-down");
+  const runtimeDetail = architecture.details?.["manager/electron"];
+  assert.ok(runtimeDetail, "Manager Runtime must expose a module-level detail projection");
+  assert.deepEqual(runtimeDetail.nodes.map((node) => node.label).sort(), ["Main", "Worker Core"]);
+  assert.equal(runtimeDetail.edges.length, 1);
+  assert.equal(runtimeDetail.edges[0].kind, "calls");
+  assert.match(runtimeDetail.mermaid, /Main/);
+  assert.match(runtimeDetail.mermaid, /Worker Core/);
   assert.match(architecture.mermaid, /^flowchart TD/m);
   assert.doesNotMatch(architecture.mermaid, /main\.jsx|service-worker\.js|projection\.ts/, "overview Mermaid must use component labels, not file/function-level labels");
 
