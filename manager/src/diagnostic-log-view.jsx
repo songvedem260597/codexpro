@@ -111,7 +111,7 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
     count: item === "all" ? availableTotal : available.categories?.[item]
   }));
   const errorTypeOptions = [
-    { value: "all", label: "Tất cả loại lỗi", hint: "Người dùng, API, UI/UX, OpenAI, logic, Git, runtime, syntax", tone: "neutral", count: Object.values(available.error_types || {}).reduce((total, count) => total + (Number(count) || 0), 0) },
+    { value: "all", label: "Mọi loại lỗi", hint: "Người dùng, API, UI/UX, OpenAI, logic, Git, runtime, syntax", tone: "neutral", count: Object.values(available.error_types || {}).reduce((total, count) => total + (Number(count) || 0), 0) },
     ...Object.entries(ERROR_TYPE_LABELS).map(([value, label]) => ({
       value,
       label,
@@ -124,7 +124,7 @@ export function DiagnosticLogView({ data, filters, busy, selected, onFilters, on
     { value: 1, label: "1 giờ gần nhất", hint: "Điều tra lỗi vừa xảy ra", tone: "time" },
     { value: 6, label: "6 giờ gần nhất", hint: "Theo dõi trong một phiên", tone: "time" },
     { value: 12, label: "12 giờ gần nhất", hint: "Nửa ngày gần nhất", tone: "time" },
-    { value: 24, label: "24 giờ gần nhất", hint: "Toàn bộ thời gian lưu", tone: "time" }
+    { value: 24, label: "24 giờ", hint: "Toàn bộ thời gian lưu", tone: "time" }
   ];
 
   return (
