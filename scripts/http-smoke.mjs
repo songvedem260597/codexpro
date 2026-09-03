@@ -246,6 +246,9 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (!generalFinalized.structuredContent.finalized || generalFinalized.structuredContent.job?.status !== 'completed') {
       throw new Error(`general task did not finalize through MCP policy: ${JSON.stringify(generalFinalized.structuredContent)}`);
     }
+    if (generalFinalized.structuredContent.job?.counts_as_task !== false || generalFinalized.structuredContent.job?.source_change_count !== 0) {
+      throw new Error(`finalization incorrectly promoted a Q&A/research worker into a Task without a source change: ${JSON.stringify(generalFinalized.structuredContent)}`);
+    }
     await general.close();
     clients.splice(clients.indexOf(general), 1);
     const statelessTaskId = 'cpt_121212121212121212121212';
