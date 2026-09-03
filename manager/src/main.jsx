@@ -4934,8 +4934,11 @@ function App() {
                     {formatRepoActivity(project) && <span className="recent-activity">{formatRepoActivity(project)}</span>}
                     <span>{project.source}</span>
                     <span>{project.isGit ? `nhánh ${project.branch}` : "không phải Git repo"}</span>
-                    <span className={project.changes ? "changed" : "clean"}>{project.changes ? `${project.changes} thay đổi` : "sạch"}</span>
-                    {project.commit?.hash && <span>{project.commit.hash} · {project.commit.subject}</span>}
+                    {project.isGit && (
+                      <span className={project.changes || project.behind || project.ahead ? "changed" : "clean"} title={project.commit?.subject || ""}>
+                        Local: {project.commit?.hash || "—"} · Remote: {project.remoteCommitHash || "—"} · {project.behind ? `Máy đang chậm ${project.behind} commit` : project.ahead ? `Máy đang trước ${project.ahead} commit` : "Máy đã đồng bộ"} · {project.changes ? `${project.changes} file chưa commit` : "Không có file chưa commit"}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="project-actions">
