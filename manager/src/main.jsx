@@ -4879,7 +4879,7 @@ function App() {
                         : `${profileSummary.outdated} worker cần cập nhật`}
                     >
                       <strong>{profileSummary.outdated}</strong>
-                      <span>{profileSummary.reload > 0 ? "cần cập nhật" : "chờ cập nhật"}</span>
+                      <span>cập nhật</span>
                     </span>
                   </div>
                 )}

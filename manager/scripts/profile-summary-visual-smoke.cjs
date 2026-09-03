@@ -27,7 +27,7 @@ const cards = `
           <span class="profile-summary-item is-hung"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-hung-triangle" d="M12 3 2.8 20h18.4L12 3Z"></path><path class="summary-hung-mark" d="M12 9v5"></path><circle class="summary-hung-dot" cx="12" cy="17.25" r=".75"></circle></svg></span><strong>0</strong><span>mất kết nối</span></span>
           <span class="profile-summary-item is-missing"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-missing-plug" d="M8 3v5M12 3v5M6 8h8v2a4 4 0 0 1-4 4v3"></path><path class="summary-missing-plus" d="M16 16h6M19 13v6"></path></svg></span><strong>0</strong><span>chưa cài</span></span>
         </div>
-        <div class="profile-summary-updates"><span class="profile-summary-update is-deferred"><strong>1</strong><span>chờ cập nhật</span></span></div>
+        <div class="profile-summary-updates"><span class="profile-summary-update is-deferred"><strong>1</strong><span>cập nhật</span></span></div>
       </div>
     </div>
   </div></div>`
@@ -76,8 +76,8 @@ app.whenReady().then(async () => {
     }
     const statesCenter = (normal.summary.statesTop + normal.summary.statesBottom) / 2;
     const updateCenter = (normal.summary.updateTop + normal.summary.updateBottom) / 2;
-    if (normal.summary.scrollWidth > normal.summary.clientWidth + 2 || normal.summary.statesScrollWidth > normal.summary.statesClientWidth + 2 || normal.summary.height > 70 || Math.abs(statesCenter - updateCenter) > 2) {
-      throw new Error(`Overview update status must stay centered in its side column without worker-state overflow: ${JSON.stringify(normal.summary)}`);
+    if (normal.summary.scrollWidth > normal.summary.clientWidth + 2 || normal.summary.statesScrollWidth > normal.summary.statesClientWidth + 2 || normal.summary.height > 48 || normal.summary.statesBottom - normal.summary.statesTop > 22 || Math.abs(statesCenter - updateCenter) > 5) {
+      throw new Error(`Overview worker states and update indicator must stay on one row without overflow: ${JSON.stringify(normal.summary)}`);
     }
     if (normal.shell.scrollWidth > normal.shell.clientWidth + 2 || normal.shell.left < -2 || normal.shell.right > normal.viewportWidth + 2) {
       throw new Error(`Profile summary fixture overflowed: ${JSON.stringify(normal.shell)}`);
