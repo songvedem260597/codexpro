@@ -2944,8 +2944,17 @@ function App() {
       setConfirmedMissingProfiles((current) => state === "missing"
         ? [...new Set([...current, profileId])]
         : current.filter((id) => id !== profileId));
-      notify(result?.message || (result?.installed ? "CodexPro READY" : "Đã kiểm tra CodexPro"));
-      await refresh(false);
+      if (state === "missing") {
+        notify("Chưa cài CodexPro · đang tự cài cho profile này…");
+        // A missing definition is an explicit, user-triggered setup path. Keep
+        // the background heartbeat read-only so it can never navigate/reload
+        // ChatGPT repeatedly, while a confirmed missing profile is repaired
+        // immediately and only once.
+        await setupProfile(profile);
+      } else {
+        notify(result?.message || (result?.installed ? "CodexPro READY" : "Đã kiểm tra CodexPro"));
+        await refresh(false);
+      }
     } catch (err) {
       const message = err?.message || String(err);
       logRendererDiagnostic(api, "warn", "profile", `Kiểm tra profile ${profileId} lỗi: ${message}`, {

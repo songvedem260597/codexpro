@@ -10,6 +10,8 @@ assert.match(source, /connectorActionIsSetup \? setupProfile\(profile\) : checkP
 assert.match(source, /connectorMissingConfirmed[\s\S]*?confirmedMissingProfiles\.includes/, "setup is exposed only after a manual missing result in the current Manager session");
 assert.match(source, /connectorDisconnected \? "CHƯA KẾT NỐI CODEXPRO"/, "a listed but disconnected definition must not be labelled as missing");
 assert.match(source, /connectorDisconnected[\s\S]*?"Kết nối CodexPro"/, "a disconnected definition must offer Connect rather than Add");
+assert.match(source, /if \(state === "missing"\)[\s\S]*?await setupProfile\(profile\)/, "a user-confirmed missing profile must be installed immediately");
+assert.match(source, /background heartbeat read-only/, "automatic status polling must remain read-only while missing setup is explicit");
 assert.match(bridge, /connectorInstalled = profile\.connectorInstalled && connectorProfileBound && !connectorVerificationRequired/, "only current connected evidence may produce READY after a manual migration");
 
 console.log("✓ Connector manual-migration safety smoke test passed");
