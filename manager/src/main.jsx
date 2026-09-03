@@ -5215,9 +5215,12 @@ function App() {
                     <span>{project.source}</span>
                     {project.active && <span>{project.sessionCount} phiên MCP</span>}
                     <span>{project.isGit ? `nhánh ${project.branch}` : "thư mục dự án"}</span>
-                    <span className={project.changes ? "changed" : "clean"}>{project.changes ? `${project.changes} thay đổi` : "sạch"}</span>
+                    {project.isGit && (
+                      <span className={project.changes || project.behind || project.ahead ? "changed" : "clean"} title={project.commit?.subject || ""}>
+                        Local: {project.commit?.hash || "—"} · Remote: {project.remoteCommitHash || "—"} · {project.behind ? `Máy đang chậm ${project.behind} commit` : project.ahead ? `Máy đang trước ${project.ahead} commit` : "Máy đã đồng bộ"} · {project.changes ? `${project.changes} file chưa commit` : "Không có file chưa commit"}
+                      </span>
+                    )}
                     {project.lastSeenAt && <span>Hoạt động {new Date(project.lastSeenAt).toLocaleTimeString("vi-VN")}</span>}
-                    {project.commit?.hash && <span>{project.commit.hash} · {project.commit.subject}</span>}
                   </div>
                 </div>
                 <div className="project-actions">

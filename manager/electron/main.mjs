@@ -3361,12 +3361,17 @@ async function readGitSummary(root) {
     const remoteUrl = remoteResult.status === "fulfilled" ? remoteResult.value.stdout.trim() : "";
     let pushedAt = "";
     let remoteCommitAt = "";
+    let remoteCommitHash = "";
     if (upstream) {
       const [remoteCommit, pushReflog] = await Promise.allSettled([
-        runGitProcess(["-C", root, "log", "-1", "--pretty=format:%cI", upstream], { timeoutMs: 4_000 }),
+        runGitProcess(["-C", root, "log", "-1", "--pretty=format:%h%x09%cI", upstream], { timeoutMs: 4_000 }),
         runGitProcess(["-C", root, "reflog", "show", "-1", "--format=%gI", upstream], { timeoutMs: 4_000 })
       ]);
-      if (remoteCommit.status === "fulfilled") remoteCommitAt = remoteCommit.value.stdout.trim();
+      if (remoteCommit.status === "fulfilled") {
+        const [remoteHash = "", remoteDate = ""] = remoteCommit.value.stdout.trim().split("\t");
+        remoteCommitHash = remoteHash;
+        remoteCommitAt = remoteDate;
+      }
       if (pushReflog.status === "fulfilled") pushedAt = pushReflog.value.stdout.trim();
     }
     const [hash = "", subject = "", date = ""] = commitText.trim().split("\t");
@@ -3391,6 +3396,7 @@ async function readGitSummary(root) {
       upstream,
       pushedAt,
       remoteCommitAt,
+      remoteCommitHash,
       activityAt: latestActivity?.value || date,
       activityTimestamp: latestActivity?.timestamp || 0,
       activityKind: latestActivity?.kind || "commit",
@@ -3398,7 +3404,7 @@ async function readGitSummary(root) {
       ...identity
     };
   } catch {
-    return { isGit: false, branch: "", changes: 0, modified: 0, untracked: 0, conflicted: 0, ahead: 0, behind: 0, commit: null, remoteUrl: "", upstream: "", pushedAt: "", remoteCommitAt: "", activityAt: "", activityTimestamp: 0, activityKind: "", githubRepo: "", githubUrl: "", officialName: "", repoFullName: "" };
+    return { isGit: false, branch: "", changes: 0, modified: 0, untracked: 0, conflicted: 0, ahead: 0, behind: 0, commit: null, remoteUrl: "", upstream: "", pushedAt: "", remoteCommitAt: "", remoteCommitHash: "", activityAt: "", activityTimestamp: 0, activityKind: "", githubRepo: "", githubUrl: "", officialName: "", repoFullName: "" };
   }
 }
 
