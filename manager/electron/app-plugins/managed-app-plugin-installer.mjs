@@ -91,6 +91,14 @@ function readGeneratedManifest(root) {
   }
 }
 
+function filesMatch(left, right) {
+  try {
+    return fs.readFileSync(left).equals(fs.readFileSync(right));
+  } catch {
+    return false;
+  }
+}
+
 export function createManagedAppPluginInstaller({ home, registry, templateRoot, gitDiagramTemplateRoot, catalog = DEFAULT_APP_PLUGIN_CATALOG }) {
   if (!registry || typeof registry.install !== "function") throw new Error("Managed plugin installer cần app plugin registry.");
   const resolvedHome = path.resolve(String(home || ""));
@@ -206,6 +214,34 @@ export function createManagedAppPluginInstaller({ home, registry, templateRoot, 
     return [];
   }
 
+  function gitDiagramTemplateIsCurrent(root) {
+    const uiRoot = path.join(root, ".codexpro-plugin", "ui");
+    return ["index.html", "app.js", "styles.css"].every((fileName) => (
+      filesMatch(path.join(resolvedGitDiagramTemplateRoot, fileName), path.join(uiRoot, fileName))
+    ));
+  }
+
+  function syncInstalledLocalAdapters() {
+    const installedById = new Map(registry.list().map((plugin) => [plugin.id, plugin]));
+    const refreshed = [];
+    for (const item of catalogById.values()) {
+      if (item.adapter !== "gitdiagram-local") continue;
+      const installed = installedById.get(item.id);
+      if (!installed) continue;
+      const root = pluginRoot(item.id);
+      if (path.resolve(String(installed.repo_root || "")) !== root) continue;
+      if (!fs.statSync(path.join(root, ".git"), { throwIfNoEntry: false })?.isDirectory()) continue;
+      if (gitDiagramTemplateIsCurrent(root)) continue;
+      const manifest = readGeneratedManifest(root);
+      const commit = String(manifest?.source_commit || "").trim();
+      if (!/^[a-f0-9]{40}$/i.test(commit)) continue;
+      generateGitDiagramAdapter(item, root, commit);
+      registry.install(root);
+      refreshed.push(item.id);
+    }
+    return refreshed;
+  }
+
   async function generateAndRegister(item, root) {
     const { stdout } = await git(["rev-parse", "HEAD"], root);
     const commit = String(stdout || "").trim();
@@ -219,6 +255,7 @@ export function createManagedAppPluginInstaller({ home, registry, templateRoot, 
 
   return {
     listCatalog() {
+      syncInstalledLocalAdapters();
       const installedById = new Map(registry.list().map((plugin) => [plugin.id, plugin]));
       return [...catalogById.values()].map((item) => {
         const root = pluginRoot(item.id);
