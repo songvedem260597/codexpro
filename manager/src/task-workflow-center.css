@@ -3,7 +3,7 @@
 .task-workflow-launcher-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
 .task-workflow-field { display: grid; gap: 7px; min-width: 0; }
 .task-workflow-field > span { color: var(--muted, #93a0b5); font-size: var(--font-description, 13px); }
-.task-workflow-field .app-dropdown { width: 100%; min-width: 0; }
+.task-workflow-field .app-dropdown, .task-workflow-field .project-dropdown { width: 100%; min-width: 0; }
 .task-workflow-field textarea { width: 100%; border: 1px solid var(--border, #2b374d); border-radius: 10px; background: var(--input, #0c111a); color: inherit; padding: 10px 12px; font: inherit; min-height: 92px; resize: vertical; }
 .task-workflow-field.is-wide { grid-column: 1 / -1; }
 .task-workflow-launch-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }

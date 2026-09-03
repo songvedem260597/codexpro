@@ -41,6 +41,7 @@ assert.equal(progress.issues, 1);
 const app = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const center = fs.readFileSync(new URL("../src/task-workflow-center.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/task-workflow-center.css", import.meta.url), "utf8");
+const globalStyles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const managerMain = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
 const agentLoop = fs.readFileSync(new URL("../electron/worker-core/mcp-agent-loop.mjs", import.meta.url), "utf8");
 const apiPlugin = fs.readFileSync(new URL("../electron/worker-plugins/api-worker-plugin.mjs", import.meta.url), "utf8");
@@ -58,6 +59,8 @@ assert.match(center, /getRepoTaskStatus/, "Chrome checklist completion must requ
 assert.match(center, /deriveTaskWorkflowProgress/, "rendered checkboxes must be derived from worker evidence");
 assert.match(styles, /\.task-workflow-checklist-step\.is-completed/, "completed checklist steps need a distinct visual state");
 assert.match(styles, /\.task-workflow-checklist-step \.task-workflow-check \{[^}]*display: grid;[^}]*place-items: center;[^}]*align-self: center;/, "checklist number/icon badges must be vertically centered without changing their horizontal layout");
+assert.match(styles, /\.task-workflow-field \.app-dropdown, \.task-workflow-field \.project-dropdown \{ width: 100%; min-width: 0; \}/, "workflow workspace dropdown must be allowed to shrink inside its grid column");
+assert.match(globalStyles, /\.project-dropdown-menu \{[^}]*width: 100%;[^}]*min-width: 0;[^}]*max-width: 100%;[^}]*box-sizing: border-box;[^}]*grid-template-columns: minmax\(0, 1fr\);[^}]*overflow-x: hidden;/, "project dropdown menu must stay clipped to the trigger width instead of expanding past the card");
 assert.match(managerMain, /resolveTaskWorkflow/, "Chrome dispatch must use the generic workflow registry");
 assert.match(agentLoop, /resolveTaskWorkflow/, "API dispatch must use the generic workflow registry");
 assert.match(agentLoop, /workflow_progress/, "API workers must publish structured progress evidence between checklist steps");
