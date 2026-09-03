@@ -68,11 +68,34 @@ app.whenReady().then(async () => {
     await wait(120);
 
     const initial = await win.webContents.executeJavaScript(`(() => ({
-      options: document.querySelectorAll("#project option").length,
+      options: document.querySelectorAll(".project-dropdown-option").length,
+      triggerDisabled: document.querySelector("#project-trigger")?.disabled,
       analyzeDisabled: document.querySelector("#analyze")?.disabled,
-      status: document.querySelector("#status")?.textContent?.trim() || ""
+      projectName: document.querySelector("#project-name")?.textContent?.trim() || "",
+      status: document.querySelector("#status")?.textContent?.trim() || "",
+      nativeSelectCount: document.querySelectorAll("select").length,
+      primaryBackground: getComputedStyle(document.querySelector("#analyze")).backgroundColor,
+      primaryRadius: getComputedStyle(document.querySelector("#analyze")).borderRadius
     }))()`);
-    if (initial.options !== 1 || initial.analyzeDisabled) throw new Error(`Plugin context did not initialize: ${JSON.stringify(initial)}`);
+    if (initial.options !== 1 || initial.triggerDisabled || initial.analyzeDisabled || initial.projectName !== "CodexPro" || initial.nativeSelectCount !== 0 || !initial.status.includes("Chọn repo")) {
+      throw new Error(`Plugin context did not initialize custom project picker: ${JSON.stringify(initial)}`);
+    }
+    if (initial.primaryBackground !== "rgb(233, 237, 244)" || initial.primaryRadius !== "5px") {
+      throw new Error(`GitDiagram primary action does not match Manager controls: ${JSON.stringify(initial)}`);
+    }
+
+    await win.webContents.executeJavaScript(`document.querySelector("#project-trigger").click()`);
+    await wait(80);
+    const dropdown = await win.webContents.executeJavaScript(`(() => ({
+      expanded: document.querySelector("#project-trigger")?.getAttribute("aria-expanded"),
+      menuHidden: document.querySelector("#project-menu")?.hidden,
+      selected: document.querySelector(".project-dropdown-option.is-selected")?.textContent?.trim() || "",
+      triggerHeight: Math.round(document.querySelector("#project-trigger")?.getBoundingClientRect().height || 0)
+    }))()`);
+    if (dropdown.expanded !== "true" || dropdown.menuHidden || !dropdown.selected.includes("CodexPro") || dropdown.triggerHeight < 56) {
+      throw new Error(`Custom project dropdown interaction failed: ${JSON.stringify(dropdown)}`);
+    }
+    await win.webContents.executeJavaScript(`document.querySelector("#project-trigger").click()`);
 
     await win.webContents.executeJavaScript(`document.querySelector("#analyze").click()`);
     let requestId = "";

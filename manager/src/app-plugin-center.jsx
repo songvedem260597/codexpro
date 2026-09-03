@@ -79,6 +79,18 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
   const gitDiagram = useMemo(() => catalog.find((plugin) => plugin.id === "gitdiagram") || null, [catalog]);
   const workers = useMemo(() => pluginWorkerOptions(status), [status]);
   const selectedWorker = useMemo(() => workers.find((worker) => worker.key === workerKey) || null, [workerKey, workers]);
+  const pluginProjects = useMemo(() => projects.map((project) => ({
+    root: project.root,
+    name: project.name,
+    repoFullName: project.repoFullName,
+    branch: project.branch,
+    isGit: Boolean(project.isGit)
+  })), [projects]);
+
+  const postPluginContext = useCallback((target = pluginFrameRef.current?.contentWindow) => {
+    if (!target) return;
+    target.postMessage({ type: "codexpro:plugin-context", projects: pluginProjects }, "*");
+  }, [pluginProjects]);
 
   useEffect(() => {
     if (workers.some((worker) => worker.key === workerKey && worker.ready)) return;
@@ -91,17 +103,10 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
   }, [projects, workspaceRoot]);
 
   useEffect(() => {
-    const pluginProjects = projects.map((project) => ({
-      root: project.root,
-      name: project.name,
-      repoFullName: project.repoFullName,
-      branch: project.branch,
-      isGit: Boolean(project.isGit)
-    }));
     const receivePluginMessage = (event) => {
       if (!pluginFrameRef.current || event.source !== pluginFrameRef.current.contentWindow) return;
       if (event.data?.type === "codexpro:plugin-ready") {
-        event.source.postMessage({ type: "codexpro:plugin-context", projects: pluginProjects }, "*");
+        postPluginContext(event.source);
         return;
       }
       if (event.data?.type === "codexpro:gitdiagram-analyze") {
@@ -142,8 +147,11 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
       }
     };
     window.addEventListener("message", receivePluginMessage);
+    // The iframe can announce readiness before Manager finishes loading saved projects.
+    // Push the latest context on every project change so the plugin cannot get stuck empty.
+    postPluginContext();
     return () => window.removeEventListener("message", receivePluginMessage);
-  }, [api, notify, projects, reportError, selected?.id, selected?.name]);
+  }, [api, notify, postPluginContext, projects, reportError, selected?.id, selected?.name]);
 
   async function install() {
     setBusy("install");
