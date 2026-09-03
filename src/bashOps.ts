@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +7,7 @@ import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { redactSensitiveText } from "./redact.js";
+import { runGitProcess } from "./processOps.js";
 import { acquireWorkspaceIntegrationLease, preflightWorkspaceCommit, preflightWorkspaceGitAdd, preflightWorkspacePush, recordWorkspaceCommit, recordWorkspacePush, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 export interface BashResult {
@@ -325,25 +326,25 @@ function safeLocalRemoteUrl(remoteUrl: string, workspaceRoot: string): boolean {
   }
 }
 
-function assertSafePushTarget(executable: string, branch: string, cwd: string, workspaceRoot: string): void {
-  const branchCheck = spawnSync(executable, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd, windowsHide: true });
+async function assertSafePushTarget(branch: string, cwd: string, workspaceRoot: string): Promise<void> {
+  const branchCheck = await runGitProcess(cwd, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { timeoutMs: 10_000 });
   if (branchCheck.status !== 0) throw new CodexProError(`Safe git push requires an existing local branch: ${branch}`);
 
-  const remoteCheck = spawnSync(executable, ["remote", "get-url", "--all", "--push", "origin"], { cwd, encoding: "utf8", windowsHide: true });
+  const remoteCheck = await runGitProcess(cwd, ["remote", "get-url", "--all", "--push", "origin"], { timeoutMs: 10_000 });
   const remoteUrls = String(remoteCheck.stdout ?? "").split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
   if (remoteCheck.status !== 0 || !remoteUrls.length || remoteUrls.some((remoteUrl) => !/^https:\/\//i.test(remoteUrl) && !safeLocalRemoteUrl(remoteUrl, workspaceRoot))) {
     throw new CodexProError("Safe git push requires origin to use HTTPS or a local remote contained inside the workspace.");
   }
 }
 
-function directGitInvocation(command: SafeGitWrite, cwd: string, workspaceRoot: string, taskId = "", integrationFromHead = false, pushSafetyRoot = workspaceRoot): DirectInvocation {
+async function directGitInvocation(command: SafeGitWrite, cwd: string, workspaceRoot: string, taskId = "", integrationFromHead = false, pushSafetyRoot = workspaceRoot): Promise<DirectInvocation> {
   const executable = process.platform === "win32" ? "git.exe" : "git";
   if (command.kind === "add") {
     assertExplicitGitFiles(command.args, cwd, workspaceRoot);
     return { executable, args: ["add", ...command.args] };
   }
   if (command.kind === "push") {
-    assertSafePushTarget(executable, command.branch, cwd, pushSafetyRoot);
+    await assertSafePushTarget(command.branch, cwd, pushSafetyRoot);
     const hooksDir = emptyGitHooksDir();
     return { executable, args: ["-c", `core.hooksPath=${hooksDir}`, "push", "origin", integrationFromHead ? `HEAD:${command.branch}` : command.branch], cleanupDir: hooksDir };
   }
@@ -564,8 +565,16 @@ function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void
     // Force the full tree while the parent PID still identifies its descendants;
     // otherwise the shell can exit first and orphan an output-heavy grandchild.
     const args = ["/pid", String(child.pid), "/t", "/f"];
-    const result = spawnSync("taskkill", args, { stdio: "ignore", windowsHide: true });
-    if (result.status !== 0) child.kill(signal);
+    const killer = spawn("taskkill", args, { stdio: "ignore", windowsHide: true });
+    killer.once("error", () => {
+      try { child.kill(signal); } catch {}
+    });
+    const fallback = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        try { child.kill(signal); } catch {}
+      }
+    }, 1_000);
+    fallback.unref();
     return;
   }
   try {
@@ -598,13 +607,13 @@ function secretLabels(text: string): string[] {
   return checks.filter(([, pattern]) => pattern.test(text)).map(([label]) => label);
 }
 
-function gitText(args: string[], cwd: string): string {
+async function gitText(args: string[], cwd: string): Promise<string> {
   const executable = process.platform === "win32" ? "git.exe" : "git";
-  const result = spawnSync(executable, args, { cwd, encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+  const result = await runGitProcess(cwd, args, { timeoutMs: 15_000, maxBuffer: 8 * 1024 * 1024 });
   return result.status === 0 || result.status === 1 ? String(result.stdout ?? "") : "";
 }
 
-function assertSensitiveGitProtection(command: string, cwd: string): void {
+async function assertSensitiveGitProtection(command: string, cwd: string): Promise<void> {
   const write = command.match(/git(?:\.exe)?["']?\s+(add|commit|push)\b/i);
   if (!write) return;
   if (/[;&|`\r\n]/.test(command)) {
@@ -617,12 +626,12 @@ function assertSensitiveGitProtection(command: string, cwd: string): void {
     return;
   }
   const names = operation === "commit"
-    ? gitText(["diff", "--cached", "--name-only", "-z"], cwd)
-    : gitText(["ls-tree", "-r", "--name-only", "-z", "HEAD"], cwd);
+    ? await gitText(["diff", "--cached", "--name-only", "-z"], cwd)
+    : await gitText(["ls-tree", "-r", "--name-only", "-z", "HEAD"], cwd);
   const sensitiveNames = names.split("\0").filter(Boolean).filter(sensitiveGitPath);
   const content = operation === "commit"
-    ? gitText(["diff", "--cached", "--no-ext-diff", "--unified=0", "--"], cwd).split(/\r?\n/).filter((line) => line.startsWith("+") && !line.startsWith("+++")).join("\n")
-    : gitText(["grep", "-I", "-n", "-e", "BEGIN", "-e", "AKIA", "-e", "ghp_", "-e", "gho_", "-e", "sk-", "-e", "sk_live_", "-e", "AIza", "HEAD", "--"], cwd);
+    ? (await gitText(["diff", "--cached", "--no-ext-diff", "--unified=0", "--"], cwd)).split(/\r?\n/).filter((line) => line.startsWith("+") && !line.startsWith("+++")).join("\n")
+    : await gitText(["grep", "-I", "-n", "-e", "BEGIN", "-e", "AKIA", "-e", "ghp_", "-e", "gho_", "-e", "sk-", "-e", "sk_live_", "-e", "AIza", "HEAD", "--"], cwd);
   const labels = secretLabels(content);
   if (sensitiveNames.length || labels.length) {
     const details = [...sensitiveNames.slice(0, 10), ...labels].join(", ");
@@ -642,7 +651,7 @@ export async function runBash(
   assertSafeCommand(config, command);
   const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
   const cwd = cwdResolved.absPath;
-  assertSensitiveGitProtection(command, cwd);
+  await assertSensitiveGitProtection(command, cwd);
   const safeGitWrite = parseSafeGitWrite(command);
   let releaseIntegrationLease: (() => Promise<void>) | undefined;
   if (options.repoTask) {
@@ -675,7 +684,7 @@ export async function runBash(
   let directInvocation: DirectInvocation | undefined;
   try {
     directInvocation = safeGitWrite
-      ? directGitInvocation(safeGitWrite, cwd, workspace.root, options.repoTask?.taskId || "", Boolean(options.repoTask?.worktreeRoot), options.repoTask?.root || workspace.root)
+      ? await directGitInvocation(safeGitWrite, cwd, workspace.root, options.repoTask?.taskId || "", Boolean(options.repoTask?.worktreeRoot), options.repoTask?.root || workspace.root)
       : directPackageInvocation(command);
   } catch (error) {
     await releaseIntegrationLease?.();
