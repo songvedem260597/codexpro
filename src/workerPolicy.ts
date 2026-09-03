@@ -15,9 +15,11 @@ export type WorkerJobProgressReport = {
   at: string;
   sequence: number;
   stage: WorkerJobProgressStage;
+  progressPercent: number;
   summary: string;
   reason?: string;
   evidence?: string;
+  blockedPart?: string;
   completedParts: string[];
   remainingParts: string[];
 };
@@ -48,10 +50,19 @@ export type WorkerJobRecord = {
   completedObligations: string[];
   progressSequence: number;
   progressReports: WorkerJobProgressReport[];
+  progressPercent: number;
+  completedParts: string[];
+  remainingParts: string[];
   lastProgressStage?: WorkerJobProgressStage;
   lastProgressAt?: string;
   lastProgressSummary?: string;
   lastProgressReason?: string;
+  blockedAt?: string;
+  blockedPart?: string;
+  blockedReason?: string;
+  completionConfirmed: boolean;
+  completionConfirmedAt?: string;
+  completionEvidence?: string;
   summary?: string;
   error?: string;
   events: Array<{ at: string; type: string; details?: Record<string, unknown> }>;
@@ -93,6 +104,27 @@ function normalizeProgressStage(value: unknown): WorkerJobProgressStage | undefi
     : undefined;
 }
 
+function normalizeProgressPercent(value: unknown, fallback = 0): number {
+  const numeric = Number(value);
+  return Math.max(0, Math.min(100, Math.round(Number.isFinite(numeric) ? numeric : fallback)));
+}
+
+function deriveProgressPercent(input: {
+  stage: WorkerJobProgressStage;
+  explicit?: unknown;
+  completedParts: string[];
+  remainingParts: string[];
+  currentPercent?: number;
+}): number {
+  if (input.explicit != null && Number.isFinite(Number(input.explicit))) return normalizeProgressPercent(input.explicit);
+  if (input.stage === "started") return 0;
+  if (input.stage === "all_parts_done") return 95;
+  if (input.stage === "verifying") return Math.max(95, normalizeProgressPercent(input.currentPercent));
+  const total = input.completedParts.length + input.remainingParts.length;
+  if (total > 0) return Math.min(95, Math.round((input.completedParts.length / total) * 100));
+  return normalizeProgressPercent(input.currentPercent);
+}
+
 function normalizeProgressReport(value: unknown): WorkerJobProgressReport | undefined {
   const source = value && typeof value === "object" ? value as Partial<WorkerJobProgressReport> : {};
   const stage = normalizeProgressStage(source.stage);
@@ -104,9 +136,11 @@ function normalizeProgressReport(value: unknown): WorkerJobProgressReport | unde
     at,
     sequence,
     stage,
+    progressPercent: normalizeProgressPercent(source.progressPercent),
     summary,
     reason: clean(source.reason, 2000) || undefined,
     evidence: clean(source.evidence, 2000) || undefined,
+    blockedPart: clean(source.blockedPart, 300) || undefined,
     completedParts: uniqueStrings(source.completedParts, 50),
     remainingParts: uniqueStrings(source.remainingParts, 50)
   };
@@ -150,10 +184,19 @@ function normalizeRecord(value: unknown): WorkerJobRecord | undefined {
       .map((report) => normalizeProgressReport(report))
       .filter((report): report is WorkerJobProgressReport => Boolean(report))
       .slice(-MAX_PROGRESS_REPORTS),
+    progressPercent: normalizeProgressPercent(source.progressPercent, status === "completed" ? 100 : 0),
+    completedParts: uniqueStrings(source.completedParts, 50),
+    remainingParts: uniqueStrings(source.remainingParts, 50),
     lastProgressStage: normalizeProgressStage(source.lastProgressStage),
     lastProgressAt: clean(source.lastProgressAt, 80) || undefined,
     lastProgressSummary: clean(source.lastProgressSummary, 2000) || undefined,
     lastProgressReason: clean(source.lastProgressReason, 2000) || undefined,
+    blockedAt: clean(source.blockedAt, 80) || undefined,
+    blockedPart: clean(source.blockedPart, 300) || undefined,
+    blockedReason: clean(source.blockedReason, 2000) || undefined,
+    completionConfirmed: source.completionConfirmed === true || status === "completed",
+    completionConfirmedAt: clean(source.completionConfirmedAt, 80) || (status === "completed" ? clean(source.finishedAt, 80) || undefined : undefined),
+    completionEvidence: clean(source.completionEvidence, 2000) || undefined,
     summary: clean(source.summary, 4000) || undefined,
     error: clean(source.error, 4000) || undefined,
     events: (Array.isArray(source.events) ? source.events : []).slice(-MAX_EVENTS).map((event) => ({
@@ -253,10 +296,19 @@ export async function prepareWorkerJob(input: {
     completedObligations: current?.completedObligations || [],
     progressSequence: current?.progressSequence || 0,
     progressReports: current?.progressReports || [],
+    progressPercent: current?.progressPercent || 0,
+    completedParts: current?.completedParts || [],
+    remainingParts: current?.remainingParts || [],
     lastProgressStage: current?.lastProgressStage,
     lastProgressAt: current?.lastProgressAt,
     lastProgressSummary: current?.lastProgressSummary,
     lastProgressReason: current?.lastProgressReason,
+    blockedAt: current?.blockedAt,
+    blockedPart: current?.blockedPart,
+    blockedReason: current?.blockedReason,
+    completionConfirmed: current?.completionConfirmed === true,
+    completionConfirmedAt: current?.completionConfirmedAt,
+    completionEvidence: current?.completionEvidence,
     events: [...(current?.events || []), event("prepared", { worker_id: input.workerId, scope: input.scope, root: input.root })]
   }));
 }
@@ -300,6 +352,10 @@ async function bootstrapWorkerJobRecord(input: {
         completedObligations: [],
         progressSequence: 0,
         progressReports: [],
+        progressPercent: 0,
+        completedParts: [],
+        remainingParts: [],
+        completionConfirmed: false,
         events: []
       }),
       workerId: input.workerId,
@@ -368,6 +424,8 @@ export async function reportWorkerJobProgress(input: {
   summary: string;
   reason?: string;
   evidence?: string;
+  progressPercent?: number;
+  blockedPart?: string;
   completedParts?: string[];
   remainingParts?: string[];
 }): Promise<WorkerJobRecord> {
@@ -381,29 +439,54 @@ export async function reportWorkerJobProgress(input: {
     if (!summary) throw new Error("Worker job progress summary is required.");
     const at = new Date().toISOString();
     const sequence = Math.max(0, current.progressSequence || 0) + 1;
+    const completedParts = Array.isArray(input.completedParts) ? uniqueStrings(input.completedParts, 50) : current.completedParts;
+    const remainingParts = Array.isArray(input.remainingParts) ? uniqueStrings(input.remainingParts, 50) : current.remainingParts;
+
+
+    const progressPercent = deriveProgressPercent({
+      stage,
+      explicit: input.progressPercent,
+      completedParts,
+      remainingParts,
+      currentPercent: current.progressPercent
+    });
+    const blocking = stage === "blocked" || stage === "stalled" || stage === "error";
     const report: WorkerJobProgressReport = {
       at,
       sequence,
       stage,
+      progressPercent,
       summary,
       reason: clean(input.reason, 2000) || undefined,
       evidence: clean(input.evidence, 2000) || undefined,
-      completedParts: uniqueStrings(input.completedParts, 50),
-      remainingParts: uniqueStrings(input.remainingParts, 50)
+      blockedPart: clean(input.blockedPart, 300) || undefined,
+      completedParts,
+      remainingParts
     };
     return {
       ...current,
       progressSequence: sequence,
       progressReports: [...current.progressReports, report].slice(-MAX_PROGRESS_REPORTS),
+      progressPercent,
+      completedParts,
+      remainingParts,
       lastProgressStage: stage,
       lastProgressAt: at,
       lastProgressSummary: summary,
       lastProgressReason: report.reason,
+      blockedAt: blocking ? at : undefined,
+      blockedPart: blocking ? report.blockedPart || remainingParts[0] : undefined,
+      blockedReason: blocking ? report.reason || summary : undefined,
+      completionConfirmed: false,
+      completionConfirmedAt: undefined,
+      completionEvidence: undefined,
       events: [...current.events, event("progress_reported", {
         sequence,
         stage,
+        progress_percent: progressPercent,
         summary: summary.slice(0, 500),
         reason: report.reason?.slice(0, 500),
+        blocked_part: report.blockedPart,
         completed_parts: report.completedParts,
         remaining_parts: report.remainingParts
       })]
@@ -427,12 +510,22 @@ export async function finalizeWorkerJob(input: {
     if (input.outcome === "completed" && missing.length) {
       throw new Error(`Worker job cannot complete; missing obligations: ${missing.join(", ")}.`);
     }
+    if (input.outcome === "completed" && current.remainingParts.length) {
+      throw new Error(`Worker job cannot complete; unfinished parts remain: ${current.remainingParts.join(", ")}. Report all_parts_done/verifying with an empty remaining_parts list first.`);
+    }
+    const finishedAt = new Date().toISOString();
+    const completionConfirmed = input.outcome === "completed";
     return {
       ...current,
       status: input.outcome,
-      finishedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      finishedAt,
+      updatedAt: finishedAt,
       completedObligations: completed,
+      progressPercent: completionConfirmed ? 100 : current.progressPercent,
+      remainingParts: completionConfirmed ? [] : current.remainingParts,
+      completionConfirmed,
+      completionConfirmedAt: completionConfirmed ? finishedAt : undefined,
+      completionEvidence: completionConfirmed ? clean(input.summary, 2000) || current.lastProgressSummary || "finalize_worker_job" : undefined,
       summary: clean(input.summary, 4000) || current.summary,
       error: clean(input.error, 4000) || current.error,
       events: [...current.events, event("finalized", { outcome: input.outcome, missing_obligations: missing })]
@@ -459,6 +552,11 @@ export async function reconcileCompletedWorkerJob(input: {
       ...current,
       status: "completed",
       finishedAt: new Date(finishedAtMs).toISOString(),
+      progressPercent: 100,
+      remainingParts: [],
+      completionConfirmed: true,
+      completionConfirmedAt: new Date(finishedAtMs).toISOString(),
+      completionEvidence: clean(input.evidence, 2000),
       summary: clean(input.summary, 4000) || current.summary,
       events: [...current.events, event("reconciled_completed", {
         evidence: clean(input.evidence, 300),
@@ -472,6 +570,11 @@ export async function reconcileCompletedWorkerJob(input: {
 export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Record<string, unknown> | undefined {
   if (!record) return undefined;
   const missingObligations = record.requiredObligations.filter((obligation) => !record.completedObligations.includes(obligation));
+  const executionState = ["completed", "failed", "cancelled", "blocked"].includes(record.status)
+    ? record.status
+    : ["blocked", "stalled", "error", "verifying"].includes(String(record.lastProgressStage))
+      ? record.lastProgressStage
+      : record.status;
   return {
     policy_version: record.policyVersion,
     job_id: record.jobId,
@@ -496,14 +599,20 @@ export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Reco
     required_obligations: record.requiredObligations,
     completed_obligations: record.completedObligations,
     missing_obligations: missingObligations,
+    execution_state: executionState,
+    progress_percent: record.progressPercent,
+    completed_parts: record.completedParts,
+    remaining_parts: record.remainingParts,
     progress_sequence: record.progressSequence,
     progress_reports: record.progressReports.map((report) => ({
       at: report.at,
       sequence: report.sequence,
       stage: report.stage,
+      progress_percent: report.progressPercent,
       summary: report.summary,
       reason: report.reason,
       evidence: report.evidence,
+      blocked_part: report.blockedPart,
       completed_parts: report.completedParts,
       remaining_parts: report.remainingParts
     })),
@@ -511,6 +620,12 @@ export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Reco
     last_progress_at: record.lastProgressAt,
     last_progress_summary: record.lastProgressSummary,
     last_progress_reason: record.lastProgressReason,
+    blocked_at: record.blockedAt,
+    blocked_part: record.blockedPart,
+    blocked_reason: record.blockedReason,
+    completion_confirmed: record.completionConfirmed,
+    completion_confirmed_at: record.completionConfirmedAt,
+    completion_evidence: record.completionEvidence,
     summary: record.summary,
     error: record.error,
     events: record.events.slice(-20)

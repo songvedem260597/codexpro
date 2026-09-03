@@ -99,12 +99,50 @@ function Empty({ children }) {
   return <div className="control-empty">{children}</div>;
 }
 
-function terminalStateLabel(status) {
+function taskExecutionState(job) {
+  return String(job?.execution_state || job?.status || "running");
+}
+
+function terminalStateLabel(job) {
+  const status = taskExecutionState(job);
   if (status === "completed") return "Hoàn thành";
   if (status === "running") return "Chưa hoàn thành";
+  if (status === "verifying") return "Đang xác minh";
+  if (status === "stalled") return "Đang treo";
+  if (status === "error") return "Đang lỗi";
   if (status === "cancelled") return "Đã dừng";
   if (status === "blocked") return "Bị chặn";
   return "Thất bại";
+}
+
+function liveTaskStateLabel(state) {
+  if (state === "working") return "Đang chạy";
+  if (state === "hung" || state === "stalled") return "Bị treo";
+  if (state === "blocked") return "Bị chặn";
+  if (state === "error") return "Đang lỗi";
+  if (state === "verifying" || state === "settling") return "Đang xác minh";
+  return "Đang chờ";
+}
+
+function TaskProgressSnapshot({ job }) {
+  if (!job) return null;
+  const progress = Math.max(0, Math.min(100, Math.round(Number(job.progress_percent) || 0)));
+  const completed = Array.isArray(job.completed_parts) ? job.completed_parts : [];
+  const remaining = Array.isArray(job.remaining_parts) ? job.remaining_parts : [];
+  const blockedPart = String(job.blocked_part || "").trim();
+  const blockedReason = String(job.blocked_reason || job.last_progress_reason || "").trim();
+  return (
+    <div className="control-task-snapshot">
+      <div className="control-task-snapshot-head"><span>Tiến độ</span><strong>{progress}%</strong></div>
+      <div className="control-task-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={progress}><i style={{ width: `${progress}%` }} /></div>
+      <div className="control-task-parts">
+        <span className="is-done" title={completed.join(" · ")}>{completed.length ? `Đã xong ${completed.length}: ${completed.slice(0, 2).join(" · ")}` : "Chưa ghi nhận phần đã xong"}</span>
+        <span className={remaining.length ? "is-remaining" : "is-clear"} title={remaining.join(" · ")}>{remaining.length ? `Chưa xong ${remaining.length}: ${remaining.slice(0, 2).join(" · ")}` : "Không còn phần chưa xong"}</span>
+      </div>
+      {(blockedPart || blockedReason) && <div className="control-task-blocker"><strong>{blockedPart ? `Treo/chặn tại: ${blockedPart}` : "Task đang bị chặn"}</strong>{blockedReason && <small>{blockedReason}</small>}</div>}
+      {job.completion_confirmed === true && <div className="control-task-confirmed">✓ Đã xác nhận hoàn tất{job.completion_confirmed_at ? ` · ${relativeTime(job.completion_confirmed_at)}` : ""}</div>}
+    </div>
+  );
 }
 
 function terminalWorkerLabel(job, profiles, workers) {
@@ -126,12 +164,14 @@ function TerminalTaskSection({ jobs, profiles, workers, projects, mode = "comple
       {!jobs.length ? <Empty>Chưa có {title.toLocaleLowerCase("vi-VN")}.</Empty> : <div className="control-terminal-list">
         {jobs.map((job) => {
           const project = projects.find((item) => String(item.root || "").toLowerCase() === String(job.root || "").toLowerCase());
-          return <article className={`control-terminal-task is-${job.status}`} key={job.job_id}>
-            <span className="control-terminal-state">{terminalStateLabel(job.status)}</span>
+          const executionState = taskExecutionState(job);
+          return <article className={`control-terminal-task is-${executionState}`} key={job.job_id}>
+            <span className="control-terminal-state">{terminalStateLabel(job)}</span>
             <div className="control-terminal-main">
               <strong>{job.title || "Task CodexPro"}</strong>
               <small>{terminalWorkerLabel(job, profiles, workers)} · {project?.name || project?.localName || (job.root ? String(job.root).split(/[\\/]/).at(-1) : "Tất cả vùng")}</small>
               {job.error && <p>{job.error}</p>}
+              <TaskProgressSnapshot job={job} />
             </div>
             <div className="control-terminal-time">
               <WorkerRunningDuration startedAt={job.started_at || job.prepared_at} finishedAt={job.finished_at || job.updated_at} prefix={job.status === "completed" ? "Hoàn thành trong" : "Hoạt động trong"} />
@@ -182,16 +222,20 @@ export function ControlCenter({
     })
     .map((profile) => {
       const tab = activeProfileTab(profile);
+      const taskId = String(profile.current_task_id || "");
+      const job = workerJobs.find((item) => String(item?.job_id || "") === taskId) || null;
+      const executionState = taskExecutionState(job);
       return {
         profile,
         tab,
-        taskId: String(profile.current_task_id || ""),
+        job,
+        taskId,
         title: String(profile.current_task_title || "").trim() || String(tab?.title || profile.active_chat_title || "Task chưa có title"),
         root: String(profile.current_workspace_root || ""),
-        state: tab?.renderer_unresponsive ? "hung" : (tab?.busy || profile.activity === "working") ? "working" : tab?.settling ? "settling" : "idle",
+        state: tab?.renderer_unresponsive ? "hung" : ["blocked", "stalled", "error", "verifying"].includes(executionState) ? executionState : (tab?.busy || profile.activity === "working") ? "working" : tab?.settling ? "settling" : "idle",
         startedAt: String(profile.busy_since || tab?.network_last_started_at || "")
       };
-    }), [profiles]);
+    }), [profiles, workerJobs]);
   const liveTaskIds = new Set([
     ...tasks.map((task) => task.taskId),
     ...workers.filter((worker) => worker?.activity === "working").map((worker) => String(worker.current_task_id || ""))
@@ -256,7 +300,7 @@ export function ControlCenter({
               const mappingMissing = !task.taskId || !task.root || !task.profile.profile_id || !String(project?.repoFullName || project?.name || "");
               return (
                 <article className={`control-task is-${task.state}`} key={`${task.profile.profile_id}:${task.taskId || task.title}`}>
-                  <div className="control-task-state"><span className="control-pulse" /><strong>{task.state === "working" ? "Đang chạy" : task.state === "hung" ? "Bị treo" : task.state === "settling" ? "Đang hoàn tất" : "Đang chờ"}</strong></div>
+                  <div className="control-task-state"><span className="control-pulse" /><strong>{liveTaskStateLabel(task.state)}</strong></div>
                   <div className="control-task-main">
                     <strong>{task.title}</strong>
                     <div className="control-mapping-row">
@@ -266,6 +310,7 @@ export function ControlCenter({
                       <span className={project?.repoFullName ? "ok" : "missing"}>{project?.repoFullName || task.profile.current_workspace_repo || "Repo ?"}</span>
                     </div>
                     <div className="control-task-progress"><small>{task.tab?.activity_text || "CodexPro đang xử lý"}</small><WorkerRunningDuration startedAt={task.startedAt} /></div>
+                    <TaskProgressSnapshot job={task.job} />
                     {project?.isGit && (
                       <div className="control-task-git" title={project.root || task.root}>
                         <span>{project.branch || "detached"}</span>

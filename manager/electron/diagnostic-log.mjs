@@ -18,6 +18,7 @@ const SENSITIVE_KEY = /(authorization|cookie|password|passwd|secret|token|api[_-
 let writeQueue = Promise.resolve();
 let recordSequence = 0;
 const writeStates = new Map();
+const ERROR_TYPES = ["user", "network_api", "ui_ux", "openai", "logic", "git", "runtime", "syntax"];
 
 function logPath(home) {
   return path.join(home, "manager-diagnostic.jsonl");
@@ -82,6 +83,54 @@ export function sanitizeDiagnosticValue(value, depth = 0) {
     return output;
   }
   return scrubString(value);
+}
+
+function diagnosticSearchText(record = {}) {
+  return `${record.source || ""} ${record.category || ""} ${record.action || ""} ${record.message || ""} ${JSON.stringify(record.details || {})}`.toLowerCase();
+}
+
+function classifyErrorType(record = {}) {
+  const text = diagnosticSearchText(record);
+  if (record.source === "user" || record.category === "user-reported-error") return "user";
+  if (/\b(openai|chatgpt|gpt-[a-z0-9.-]*|responses? api)\b/i.test(text)) return "openai";
+  if (/\b(git|github|gitlab|worktree|commit|push|branch|merge|rebase|cherry-pick|conflict)\b/i.test(text)) return "git";
+  if (/\b(syntax|syntaxerror|parse error|parser|unexpected token|unexpected identifier|ts\d{3,5})\b/i.test(text)) return "syntax";
+  if (/\b(ui|ux|renderer|rendering|css|layout|dom|viewport|window|visual|stylesheet)\b/i.test(text)) return "ui_ux";
+  if (/\b(network|api|http|https|fetch|socket|websocket|tunnel|timeout|timed out|connection|dns|econn|rate limit|429|5\d\d)\b/i.test(text)) return "network_api";
+  if (/\b(logic|invariant|mismatch|dedupe|duplicate|routing|transition|invalid state|state machine|finality)\b/i.test(text)) return "logic";
+  return "runtime";
+}
+
+function normalizeErrorFingerprintText(record = {}) {
+  return `${record.source || ""}|${record.category || ""}|${record.action || ""}|${record.message || ""}`
+    .toLowerCase()
+    .replace(/cpt_[a-f0-9]{24}/g, "cpt_#")
+    .replace(/\b[0-9a-f]{12,}\b/g, "#hex")
+    .replace(/\b\d{4,}\b/g, "#num")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function annotateErrorMetadata(records) {
+  return records.map((record) => {
+    const existingType = String(record?.details?.error_type || "").trim();
+    const shouldClassify = record?.level === "warn" || record?.level === "error" || record?.source === "user";
+    if (!shouldClassify && !existingType) return record;
+    const errorType = ERROR_TYPES.includes(existingType) ? existingType : classifyErrorType(record);
+    const existingFingerprint = String(record?.details?.error_fingerprint || record?.details?.incident_fingerprint || "").trim();
+    const errorFingerprint = existingFingerprint || createHash("sha256")
+      .update(`${errorType}|${normalizeErrorFingerprintText(record)}`, "utf8")
+      .digest("hex")
+      .slice(0, 20);
+    return {
+      ...record,
+      details: {
+        ...(record.details || {}),
+        error_type: errorType,
+        error_fingerprint: errorFingerprint
+      }
+    };
+  });
 }
 
 function normalizeRecord(entry = {}) {
@@ -226,7 +275,7 @@ export function trimToByteLimit(records) {
 function annotateIncidentOccurrences(records) {
   const incidents = new Map();
   for (const record of records) {
-    const fingerprint = String(record?.details?.incident_fingerprint || "").trim();
+    const fingerprint = String(record?.details?.error_fingerprint || record?.details?.incident_fingerprint || "").trim();
     if (!fingerprint) continue;
     const current = incidents.get(fingerprint) || { count: 0, firstSeenAt: record.timestamp, lastSeenAt: record.timestamp };
     current.count += 1;
@@ -235,7 +284,7 @@ function annotateIncidentOccurrences(records) {
     incidents.set(fingerprint, current);
   }
   return records.map((record) => {
-    const fingerprint = String(record?.details?.incident_fingerprint || "").trim();
+    const fingerprint = String(record?.details?.error_fingerprint || record?.details?.incident_fingerprint || "").trim();
     const occurrence = fingerprint ? incidents.get(fingerprint) : null;
     if (!occurrence) return record;
     return {
@@ -409,22 +458,24 @@ export async function readDiagnosticLogs(home, options = {}) {
   const level = String(options.level || "all");
   const source = String(options.source || "all").toLowerCase();
   const category = String(options.category || "all").toLowerCase();
+  const errorType = String(options.errorType || options.error_type || "all").toLowerCase();
   const query = String(options.query || "").trim().toLowerCase().slice(0, 200);
   const limit = Math.max(1, Math.min(MAX_READ_ENTRIES, Number(options.limit) || 1000));
-  const tailBounded = limit <= 1000 && level === "all" && source === "all" && category === "all" && !query;
+  const tailBounded = limit <= 1000 && level === "all" && source === "all" && category === "all" && errorType === "all" && !query;
   const readOptions = tailBounded ? { tailBytes: RECENT_QUERY_TAIL_BYTES } : {};
-  const windowRecords = annotateIncidentOccurrences([
+  const windowRecords = annotateIncidentOccurrences(annotateErrorMetadata([
     ...await readValidRecords(home, readOptions),
     ...await readProfileTaskEventRecords(home, readOptions),
     ...await readRuntimeLifecycleRecords(home, readOptions)
   ].filter((item) => {
     const timestamp = Date.parse(item.timestamp || "");
     return Number.isFinite(timestamp) && timestamp >= cutoff;
-  }).sort((left, right) => Date.parse(left.timestamp || "") - Date.parse(right.timestamp || "")));
+  }).sort((left, right) => Date.parse(left.timestamp || "") - Date.parse(right.timestamp || ""))));
   const records = windowRecords.filter((item) => {
     if (level !== "all" && item.level !== level) return false;
     if (source !== "all" && String(item.source || "").toLowerCase() !== source) return false;
     if (category !== "all" && String(item.category || "").toLowerCase() !== category) return false;
+    if (errorType !== "all" && String(item?.details?.error_type || "").toLowerCase() !== errorType) return false;
     if (query) {
       const haystack = `${item.source || ""} ${item.category || ""} ${item.action || ""} ${item.message || ""} ${JSON.stringify(item.details || {})}`.toLowerCase();
       if (!haystack.includes(query)) return false;
@@ -442,14 +493,24 @@ export async function readDiagnosticLogs(home, options = {}) {
     .filter((item) => item.source === "user" && item.category === "user-reported-error")
     .map((item) => String(item?.details?.incident_fingerprint || item.record_id || ""))
     .filter(Boolean)).size;
+  const errorFingerprints = entries
+    .map((item) => String(item?.details?.error_fingerprint || "").trim())
+    .filter(Boolean);
+  summary.unique_error_incidents = new Set(errorFingerprints).size;
+  summary.repeated_error_incidents = new Set(entries
+    .filter((item) => Number(item?.details?.occurrence_count || 0) > 1)
+    .map((item) => String(item?.details?.error_fingerprint || "").trim())
+    .filter(Boolean)).size;
   const available = windowRecords.reduce((acc, item) => {
     const sourceName = String(item.source || "manager");
     const categoryName = String(item.category || "runtime");
+    const errorTypeName = String(item?.details?.error_type || "");
     acc.levels[item.level] = (acc.levels[item.level] || 0) + 1;
     acc.sources[sourceName] = (acc.sources[sourceName] || 0) + 1;
     acc.categories[categoryName] = (acc.categories[categoryName] || 0) + 1;
+    if (errorTypeName) acc.error_types[errorTypeName] = (acc.error_types[errorTypeName] || 0) + 1;
     return acc;
-  }, { levels: { info: 0, warn: 0, error: 0 }, sources: {}, categories: {} });
+  }, { levels: { info: 0, warn: 0, error: 0 }, sources: {}, categories: {}, error_types: {} });
   return {
     retention_hours: 24,
     queried_hours: hours,
