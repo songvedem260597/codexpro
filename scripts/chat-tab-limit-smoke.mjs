@@ -135,6 +135,9 @@ assert.ok(helperSource.includes("async function createChatGptTab"), "capped tab 
 
 function makeHarness(initialTabs, { limit = 3 } = {}) {
   let tabs = initialTabs.map(tab => ({ ...tab }));
+  const debuggerSessionsByTab = new Map(initialTabs.filter(tab => Number(tab.debuggerRefs) > 0).map(tab => [tab.id, { refs: Number(tab.debuggerRefs) }]));
+  const flightRecorderTrackersByTab = new Map(initialTabs.filter(tab => tab.flightRecorder).map(tab => [tab.id, {}]));
+  const pendingConversationByTab = new Map(initialTabs.filter(tab => Number(tab.pendingAt) > 0).map(tab => [tab.id, { at: Number(tab.pendingAt) }]));
   let nextId = 100;
   let maxObserved = tabs.length;
   let creates = 0;
@@ -175,6 +178,18 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
     try { return new URL(String(value || "")).origin === "https://chatgpt.com"; } catch { return false; }
   };
   const chatGptTabLimit = async () => limit;
+  const debuggerSessionBlocksChatTabCleanup = tabId => {
+    const refs = Math.max(0, Number(debuggerSessionsByTab.get(tabId)?.refs || 0));
+    const recorderRefs = flightRecorderTrackersByTab.has(tabId) ? 1 : 0;
+    return refs > recorderRefs;
+  };
+  const pendingConversationBlocksChatTabCleanup = tabId => {
+    const pending = pendingConversationByTab.get(tabId);
+    if (!pending) return false;
+    if (Date.now() - Number(pending.at || 0) < 60_000) return true;
+    pendingConversationByTab.delete(tabId);
+    return false;
+  };
   const conversationIdFromUrl = value => {
     try { return new URL(String(value || "")).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || ""; } catch { return ""; }
   };
@@ -190,8 +205,8 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
     "conversationIdFromUrl",
     "chatRequestState",
     "chatDomActivityState",
-    "debuggerSessionsByTab",
-    "pendingConversationByTab",
+    "debuggerSessionBlocksChatTabCleanup",
+    "pendingConversationBlocksChatTabCleanup",
     "chatAttachmentOwnershipByTab",
     "browserMutationTailsByTab",
     "recordProfileLifecycleEvent",
@@ -209,8 +224,8 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
     conversationIdFromUrl,
     async () => ({ busy: false }),
     async () => ({ busy: false }),
-    new Map(),
-    new Map(),
+    debuggerSessionBlocksChatTabCleanup,
+    pendingConversationBlocksChatTabCleanup,
     new Map(),
     new Map(),
     () => {}
@@ -240,6 +255,45 @@ function makeHarness(initialTabs, { limit = 3 } = {}) {
   assert.equal(harness.state().maxObserved, 1, "macOS must reuse its sole idle tab without closing the profile window");
   assert.equal(harness.state().creates, 0, "macOS one-tab navigation must not create a replacement tab");
   assert.deepEqual(harness.state().closed, [], "the sole macOS ChatGPT tab must remain open");
+}
+
+
+{
+  const harness = makeHarness([
+    { id: 1, url: "https://chatgpt.com/c/a1111111", active: true, debuggerRefs: 1, flightRecorder: true }
+  ], { limit: 1 });
+  await harness.createChatGptTab({ url: "https://chatgpt.com/", active: true });
+  assert.equal(harness.state().count, 1);
+  assert.equal(harness.state().creates, 0, "flight recorder alone must not block macOS from reusing its sole idle ChatGPT tab for rollover");
+}
+
+{
+  const harness = makeHarness([
+    { id: 1, url: "https://chatgpt.com/c/a1111111", active: true, debuggerRefs: 2, flightRecorder: true }
+  ], { limit: 1 });
+  await assert.rejects(
+    harness.createChatGptTab({ url: "https://chatgpt.com/", active: true }),
+    /CHAT_TAB_LIMIT_REACHED/
+  );
+  assert.equal(harness.state().creates, 0, "a transient debugger operation must still protect the sole macOS ChatGPT tab");
+}
+
+{
+  const harness = makeHarness([
+    { id: 1, url: "https://chatgpt.com/c/a1111111", active: true, pendingAt: Date.now() - 60_001 }
+  ], { limit: 1 });
+  await harness.createChatGptTab({ url: "https://chatgpt.com/", active: true });
+  assert.equal(harness.state().creates, 0, "stale pending state must not block safe macOS rollover reuse");
+}
+
+{
+  const harness = makeHarness([
+    { id: 1, url: "https://chatgpt.com/c/a1111111", active: true, pendingAt: Date.now() }
+  ], { limit: 1 });
+  await assert.rejects(
+    harness.createChatGptTab({ url: "https://chatgpt.com/", active: true }),
+    /CHAT_TAB_LIMIT_REACHED/
+  );
 }
 
 {

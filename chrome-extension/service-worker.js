@@ -318,8 +318,9 @@ async function createChatGptTab(createArgs={}) {
         chatRequestState(reusable.id,conversationId),
         chatDomActivityState(reusable.id,conversationId,{maxAgeMs:750}).catch(()=>({busy:false}))
       ]);
-      const debuggerBusy=Number(debuggerSessionsByTab.get(reusable.id)?.refs||0)>0;
-      const protectedTab=reusable.pinned||reusable.audible||reusable.status==='loading'||pendingConversationByTab.has(reusable.id)||chatAttachmentOwnershipByTab.has(reusable.id)||browserMutationTailsByTab.has(reusable.id)||debuggerBusy||summary.busy||summary.settling||networkState.busy||domActivity?.busy;
+      const debuggerBusy=debuggerSessionBlocksChatTabCleanup(reusable.id);
+      const pendingBusy=pendingConversationBlocksChatTabCleanup(reusable.id);
+      const protectedTab=reusable.pinned||reusable.audible||reusable.status==='loading'||pendingBusy||chatAttachmentOwnershipByTab.has(reusable.id)||browserMutationTailsByTab.has(reusable.id)||debuggerBusy||summary.busy||summary.settling||networkState.busy||domActivity?.busy;
       if(protectedTab)throw new Error('CHAT_TAB_LIMIT_REACHED: Tab ChatGPT duy nhất đang hoạt động hoặc được bảo vệ; chưa điều hướng để tránh cắt task.');
       const previousUrl=String(reusable.url||'');
       const updated=await chrome.tabs.update(reusable.id,{url,active:createArgs.active===true});
