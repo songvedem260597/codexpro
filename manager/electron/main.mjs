@@ -33,6 +33,7 @@ import { buildGitDiagramArchitecture } from "./app-plugins/gitdiagram-analyzer.m
 import { createPluginSkillBundle } from "./app-plugins/plugin-skill-bundle.mjs";
 import { registerReturnToManagerShortcut, RETURN_TO_MANAGER_ACCELERATOR } from "./return-to-manager-shortcut.mjs";
 import { acceptsLogicalTaskAdjustment } from "./logical-chat-task.mjs";
+import { createTaskHangTracker } from "./task-hang-tracker.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -116,6 +117,7 @@ const codexProHome = process.env.CODEXPRO_HOME
   ? path.resolve(process.env.CODEXPRO_HOME)
   : path.join(os.homedir(), ".codexpro");
 const appPluginRegistry = createAppPluginRegistry({ home: codexProHome });
+const taskHangTracker = createTaskHangTracker({ home: codexProHome });
 const managedAppPluginInstaller = createManagedAppPluginInstaller({
   home: codexProHome,
   registry: appPluginRegistry,
@@ -3183,6 +3185,9 @@ async function collectRuntimeStatus(options = {}) {
     return { ...profile, current_workspace_repo: await githubRepoForRoot(workspaceRoot) };
   }));
   const workerStatus = await workerPluginRegistry.list({ browserProfiles });
+  const taskHangTracking = browserProfileSnapshot.available
+    ? taskHangTracker.reconcile(browserProfiles)
+    : taskHangTracker.snapshot();
   for (const incident of taskUnfinalizedIncidents(workerJobs, { profiles: browserProfiles, workers: workerStatus.workers })) {
     if (!diagnosticAllowed(incident.fingerprint, TASK_UNFINALIZED_REPEAT_MS)) continue;
     diagnostic(incident.level, incident.source, incident.category, incident.message, {
@@ -3201,6 +3206,8 @@ async function collectRuntimeStatus(options = {}) {
     workers: workerStatus.workers,
     workerSources: workerStatus.sources,
     workerJobs,
+    taskHangIncidents: taskHangTracking.incidents,
+    taskHangSummary: taskHangTracking.summary,
     workerSnapshotAvailable: browserProfileSnapshot.available,
     workerJobsAvailable: workerJobSnapshot.available,
     mcpLink: base.mcpLink,

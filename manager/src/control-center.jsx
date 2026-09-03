@@ -27,6 +27,16 @@ function relativeTime(value) {
   return `${hours} giờ trước`;
 }
 
+function durationText(value) {
+  const totalSeconds = Math.max(0, Math.round((Number(value) || 0) / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
 function activeProfileTab(profile) {
   const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
   return tabs.find((tab) => tab.busy || tab.settling || String(tab?.network_state || "") === "generating") || tabs.find((tab) => tab.active) || tabs[0] || null;
@@ -150,6 +160,7 @@ export function ControlCenter({
   onOpenChat,
   onOpenChrome,
   onRecover,
+  onContinueAfterHang,
   onStop,
   onOpenRepo,
   onToggleSetting,
@@ -159,6 +170,9 @@ export function ControlCenter({
   const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
   const workers = Array.isArray(status?.workers) ? status.workers : [];
   const workerJobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
+  const taskHangIncidents = Array.isArray(status?.taskHangIncidents) ? status.taskHangIncidents : [];
+  const taskHangSummary = status?.taskHangSummary && typeof status.taskHangSummary === "object" ? status.taskHangSummary : {};
+  const recentTaskHangIncidents = taskHangIncidents.slice(0, 24);
   const completedTasks = workerJobs.filter((job) => job?.status === "completed");
   const failedTasks = workerJobs.filter((job) => ["failed", "cancelled", "blocked"].includes(String(job?.status)));
   const tasks = useMemo(() => profiles
@@ -276,6 +290,48 @@ export function ControlCenter({
             })}
           </div>
         )}
+      </section>
+
+      <section className="control-section control-hang-section">
+        <div className="control-section-head">
+          <div><p className="eyebrow">HANG INCIDENTS</p><h2>Lỗi mạng / OpenAI làm treo task</h2></div>
+          <span className={`control-section-count ${Number(taskHangSummary.active_count || 0) > 0 ? "is-danger" : ""}`}>{taskHangSummary.active_count || 0} đang treo · {taskHangSummary.total_count || 0} lần</span>
+        </div>
+        <div className="control-hang-summary">
+          <div><span>Đang treo</span><strong>{taskHangSummary.active_count || 0}</strong><small>incident cần theo dõi</small></div>
+          <div><span>Tổng số lần treo</span><strong>{taskHangSummary.total_count || 0}</strong><small>lưu xuyên phiên Manager</small></div>
+          <div><span>Do mạng</span><strong>{taskHangSummary.network_count || 0}</strong><small>disconnect · timeout · net::ERR</small></div>
+          <div><span>Do OpenAI</span><strong>{taskHangSummary.openai_count || 0}</strong><small>HTTP 4xx / 5xx · 429</small></div>
+          <div><span>Tổng thời gian treo</span><strong>{durationText(taskHangSummary.total_duration_ms || 0)}</strong><small>lâu nhất {durationText(taskHangSummary.longest_duration_ms || 0)}</small></div>
+        </div>
+        <div className="control-hang-policy">CodexPro chỉ ghi nhận khi task đang chạy và có tín hiệu lỗi thực tế. Tab lỗi <strong>không bị tự đóng</strong>; bạn có thể thử khôi phục tab cũ hoặc chủ động đóng tab lỗi và tiếp tục đúng Task ID hiện tại.</div>
+        {!recentTaskHangIncidents.length ? <Empty>Chưa ghi nhận task nào treo do mạng hoặc lỗi OpenAI.</Empty> : <div className="control-hang-list">
+          {recentTaskHangIncidents.map((incident) => {
+            const profile = profiles.find((item) => String(item?.profile_id || "") === String(incident.profile_id || ""));
+            const targetTab = (profile?.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(incident.tab_id));
+            const sourceLabel = incident.source === "openai" ? "OpenAI" : "Mạng";
+            return <article className={`control-hang-row is-${incident.active ? "active" : "resolved"} is-${incident.source || "network"}`} key={incident.id}>
+              <div className="control-hang-state">
+                <span className={`hang-source is-${incident.source || "network"}`}>{sourceLabel}{Number(incident.status_code || 0) ? ` · ${incident.status_code}` : ""}</span>
+                <small>{incident.active ? "Đang treo" : "Đã hồi phục"}</small>
+              </div>
+              <div className="control-hang-main">
+                <strong>{incident.task_title || "Task CodexPro"}</strong>
+                <div className="control-hang-meta"><span>Lần treo #{incident.occurrence || 1}</span><span>{incident.task_id ? incident.task_id.slice(0, 16) : "Task ?"}</span><span>{incident.tab_title || `Tab ${incident.tab_id || "?"}`}</span></div>
+                <p>{incident.message || incident.network_error || "Không có mô tả lỗi."}</p>
+              </div>
+              <div className="control-hang-time">
+                {incident.active ? <WorkerRunningDuration startedAt={incident.started_at} prefix="Treo" /> : <strong>{durationText(incident.duration_ms || 0)}</strong>}
+                <small>{incident.active ? `từ ${relativeTime(incident.started_at)}` : `kết thúc ${relativeTime(incident.ended_at)}`}</small>
+              </div>
+              <div className="control-hang-actions">
+                <button className="button secondary" type="button" disabled={!profile} onClick={() => profile && onOpenChat(profile.profile_id)}>Chat</button>
+                <button className="button secondary" type="button" disabled={!profile || !incident.active} onClick={() => profile && onRecover(profile, { conversationId: incident.conversation_id, targetTab })}>Khôi phục tab</button>
+                <button className="button danger-quiet" type="button" disabled={!incident.active || !incident.recoverable || !profile} onClick={() => onContinueAfterHang(incident)}>Đóng tab + tiếp tục task</button>
+              </div>
+            </article>;
+          })}
+        </div>}
       </section>
 
       <WorkspaceCoordinationPanel api={api} roots={coordinationRoots} projects={projects} onOpenRepo={onOpenRepo} />
