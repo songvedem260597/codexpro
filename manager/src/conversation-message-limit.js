@@ -31,9 +31,37 @@ export function conversationTotalMessageCount(source) {
 }
 
 export function conversationCompletedTaskCount(source) {
+  if (Object.prototype.hasOwnProperty.call(source || {}, "logicalTaskCount")
+    || Object.prototype.hasOwnProperty.call(source || {}, "logical_task_count")) {
+    return normalizedCount(source?.logicalTaskCount ?? source?.logical_task_count);
+  }
   const assistantCount = normalizedCount(source?.messageCount ?? source?.message_count);
   if (assistantCount > 0) return assistantCount;
   return usableMessages(source).filter((message) => message?.role === "assistant").length;
+}
+
+export function logicalTaskTracking(source) {
+  const reportedIds = source?.completedLogicalTaskIds ?? source?.completed_logical_task_ids;
+  const completedLogicalTaskIds = [...new Set((Array.isArray(reportedIds) ? reportedIds : [])
+    .map((taskId) => String(taskId || "").trim())
+    .filter((taskId) => /^cpt_[a-f0-9]{24}$/.test(taskId)))]
+    .slice(-20);
+  return {
+    logicalTaskCount: conversationCompletedTaskCount(source),
+    completedLogicalTaskIds
+  };
+}
+
+export function recordCompletedLogicalTask(source, taskId, status) {
+  const current = logicalTaskTracking(source);
+  const normalizedTaskId = String(taskId || "").trim();
+  if (String(status || "").trim().toLowerCase() !== "completed"
+    || !/^cpt_[a-f0-9]{24}$/.test(normalizedTaskId)
+    || current.completedLogicalTaskIds.includes(normalizedTaskId)) return current;
+  return {
+    logicalTaskCount: current.logicalTaskCount + 1,
+    completedLogicalTaskIds: [...current.completedLogicalTaskIds, normalizedTaskId].slice(-20)
+  };
 }
 
 export function conversationTaskInProgress(source) {

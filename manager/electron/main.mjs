@@ -30,6 +30,7 @@ import { createAppPluginRegistry } from "./app-plugins/app-plugin-registry.mjs";
 import { createManagedAppPluginInstaller } from "./app-plugins/managed-app-plugin-installer.mjs";
 import { createPluginSkillBundle } from "./app-plugins/plugin-skill-bundle.mjs";
 import { registerReturnToManagerShortcut, RETURN_TO_MANAGER_ACCELERATOR } from "./return-to-manager-shortcut.mjs";
+import { acceptsLogicalTaskAdjustment } from "../src/logical-chat-task.js";
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "codexpro-plugin",
@@ -969,6 +970,13 @@ function normalizeChatCacheEntry(value) {
     .filter(Boolean)
     .slice(-MAX_CHAT_CACHE_MESSAGES);
   const text = String(value?.text || "").trim().slice(0, MAX_CHAT_CACHE_TEXT_CHARS);
+  const hasLogicalTaskCount = Object.prototype.hasOwnProperty.call(value || {}, "logicalTaskCount");
+  const completedLogicalTaskIds = [...new Set((Array.isArray(value?.completedLogicalTaskIds) ? value.completedLogicalTaskIds : [])
+    .map((taskId) => String(taskId || "").trim())
+    .filter((taskId) => /^cpt_[a-f0-9]{24}$/.test(taskId)))]
+    .slice(-20);
+  const repoTaskId = String(value?.repoTaskId || "").trim();
+  const logicalTaskStatus = String(value?.logicalTaskStatus || "").trim().toLowerCase();
   if (!messages.length && !text) return null;
   return {
     profileId,
@@ -982,6 +990,10 @@ function normalizeChatCacheEntry(value) {
     responseSource: String(value?.responseSource || "").slice(0, 80),
     messageCount: Math.max(0, Math.floor(Number(value?.messageCount) || 0)),
     totalMessageCount: Math.max(0, Math.floor(Number(value?.totalMessageCount) || 0)),
+    ...(hasLogicalTaskCount ? { logicalTaskCount: Math.max(0, Math.floor(Number(value?.logicalTaskCount) || 0)) } : {}),
+    completedLogicalTaskIds,
+    repoTaskId: /^cpt_[a-f0-9]{24}$/.test(repoTaskId) ? repoTaskId : "",
+    logicalTaskStatus: ["prepared", "running", "completed", "failed", "cancelled", "blocked"].includes(logicalTaskStatus) ? logicalTaskStatus : "",
     activityStartedAt: String(value?.activityStartedAt || "").slice(0, 80),
     fastMessageLimitQualified: Boolean(value?.fastMessageLimitQualified),
     updatedAt: String(value?.updatedAt || new Date().toISOString()).slice(0, 80)
@@ -4268,17 +4280,21 @@ async function sendProfileRequestUnlocked(payload) {
   const conversationId = String(payload?.conversationId || "").trim();
   const newChat = Boolean(payload?.newChat);
   const allowBusyFollowup = Boolean(!newChat && payload?.allowBusyFollowup === true);
+  const adjustmentRequested = payload?.taskMode === "adjustment";
   const text = String(payload?.text || "").trim();
   const requestedWorkflow = String(payload?.workflow || "").trim();
-  const taskWorkflow = resolveTaskWorkflow(requestedWorkflow, text);
+  const taskWorkflow = adjustmentRequested ? null : resolveTaskWorkflow(requestedWorkflow, text);
   const requestedScope = payload?.scope === "all_allowed" ? "all_allowed" : "workspace";
   const requestedProjectRoot = String(payload?.projectRoot || "").trim();
   const requestedWorkspaceCandidates = Array.isArray(payload?.workspaceCandidates) ? payload.workspaceCandidates.slice(0, 80) : [];
   const requestedFiles = Array.isArray(payload?.attachments) ? payload.attachments.slice(0, MAX_REQUEST_ATTACHMENTS) : [];
   const previousTaskId = String(payload?.previousTaskId || "").trim();
   if (previousTaskId && !/^cpt_[a-f0-9]{24}$/.test(previousTaskId)) throw new Error("CodexPro task id trước đó không hợp lệ.");
-  const taskId = previousTaskId || `cpt_${randomBytes(12).toString("hex")}`;
-  const taskIdReused = Boolean(previousTaskId);
+  if (adjustmentRequested && (newChat || !previousTaskId)) throw new Error("Lệnh điều chỉnh phải trỏ tới task đang chạy trong đoạn chat hiện tại.");
+  let taskId = previousTaskId || `cpt_${randomBytes(12).toString("hex")}`;
+  let taskIdReused = Boolean(previousTaskId);
+  let adjustmentAccepted = false;
+  let existingWorkerJobStatus = "";
   const toolRetry = Boolean(payload?.toolRetry);
   const toolRolloverCount = Math.max(0, Math.min(1, Number(payload?.toolRolloverCount) || 0));
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
@@ -4427,9 +4443,32 @@ async function sendProfileRequestUnlocked(payload) {
     ]);
     if (!allowedConversationIds.has(conversationId)) throw new Error("Đoạn chat không còn thuộc 3 chat gần nhất của profile này.");
   }
+  if (adjustmentRequested) {
+    const workerJobResult = await localMcpToolInSession(session, "worker_job_status", { task_id: previousTaskId }, 15000);
+    const workerJob = workerJobResult?.job;
+    existingWorkerJobStatus = String(workerJob?.status || "").trim().toLowerCase();
+    adjustmentAccepted = acceptsLogicalTaskAdjustment({
+      profileId,
+      conversationId,
+      workerJob,
+      profile,
+      tab: selectedConversationTab
+    });
+    if (adjustmentAccepted) {
+      requestScope = workerJob.scope === "all_allowed" ? "all_allowed" : "workspace";
+      if (requestScope === "workspace" && workerJob.root) {
+        initialWorkspaceRoot = path.resolve(String(workerJob.root));
+        selectedProject = { root: initialWorkspaceRoot };
+      }
+    } else {
+      taskId = `cpt_${randomBytes(12).toString("hex")}`;
+      taskIdReused = false;
+      existingWorkerJobStatus = "";
+    }
+  }
   if (sendDebug) console.error('[manager-send] before send_chat_request tool');
   const currentWorkspaceRoot = String(profile.current_workspace_root || "").trim();
-  const workspaceSelectSkipped = (!codexProWorkspaceExpanded && requestScope === "all_allowed") || Boolean(currentWorkspaceRoot && initialWorkspaceRoot && path.resolve(currentWorkspaceRoot).toLowerCase() === path.resolve(initialWorkspaceRoot).toLowerCase());
+  const workspaceSelectSkipped = adjustmentAccepted || (!codexProWorkspaceExpanded && requestScope === "all_allowed") || Boolean(currentWorkspaceRoot && initialWorkspaceRoot && path.resolve(currentWorkspaceRoot).toLowerCase() === path.resolve(initialWorkspaceRoot).toLowerCase());
   if (!workspaceSelectSkipped) {
     await localMcpToolInSession(session, "browser_control", {
       action: "select_workspace",
@@ -4437,14 +4476,16 @@ async function sendProfileRequestUnlocked(payload) {
       root: initialWorkspaceRoot
     }, 75000);
   }
-  const preparedTask = await localMcpToolInSession(session, "prepare_repo_task", {
-    profile_id: profileId,
-    task_id: taskId,
-    ...(requestScope === "workspace" ? { root: initialWorkspaceRoot } : {}),
-    scope: requestScope
-  }, 15000);
-  if (preparedTask?.prepared !== true || String(preparedTask?.task_id || "") !== taskId) {
-    throw new Error("CodexPro server không xác nhận task gate trước khi gửi request.");
+  if (!adjustmentAccepted) {
+    const preparedTask = await localMcpToolInSession(session, "prepare_repo_task", {
+      profile_id: profileId,
+      task_id: taskId,
+      ...(requestScope === "workspace" ? { root: initialWorkspaceRoot } : {}),
+      scope: requestScope
+    }, 15000);
+    if (preparedTask?.prepared !== true || String(preparedTask?.task_id || "") !== taskId) {
+      throw new Error("CodexPro server không xác nhận task gate trước khi gửi request.");
+    }
   }
   const taskScopeLines = codexProWorkspaceExpanded
     ? [
@@ -4481,14 +4522,25 @@ async function sendProfileRequestUnlocked(payload) {
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
         "Sau khi begin_repo_task với task_kind=code thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác."
       ];
-  const taskText = [
-    ...(newChat ? ["@CodexPro"] : ["Hãy sử dụng MCP CodexPro đã được kích hoạt trong đoạn chat này."]),
-    ...taskScopeLines,
-    ...(toolRetry ? ["Đây là lần gửi lại vì phản hồi trước không trả task title qua CodexPro. Phải gọi codexpro action=begin_repo_task với task_title và task_kind ngay."] : []),
-    ...(taskWorkflow ? ["", buildTaskWorkflowPrompt(taskWorkflow.id)] : []),
-    "",
-    text ? `Yêu cầu của người dùng:\n${text}` : "Yêu cầu của người dùng nằm trong file đính kèm."
-  ].join("\n");
+  const taskText = adjustmentAccepted
+    ? [
+        `Đây là lệnh điều chỉnh cho task CodexPro đang chạy, Task ID: ${taskId}.`,
+        "Giữ nguyên task hiện tại, task title, task kind, workspace và Task ID; không tạo task mới.",
+        existingWorkerJobStatus === "prepared"
+          ? `Task đang ở trạng thái prepared: hãy gọi begin_repo_task đúng Task ID ${taskId} theo yêu cầu ban đầu rồi tiếp tục với điều chỉnh này.`
+          : "Task đã begin_repo_task: không gọi begin_repo_task lần nữa và không thay đổi task gate hiện tại.",
+        "Áp dụng nội dung dưới đây như chỉ dẫn mới nhất cho phần việc đang chạy. Chỉ coi task hoàn tất khi lượt xử lý sau điều chỉnh đã trả phản hồi cuối.",
+        "",
+        text ? `Điều chỉnh của người dùng:\n${text}` : "Điều chỉnh của người dùng nằm trong file đính kèm."
+      ].join("\n")
+    : [
+        ...(newChat ? ["@CodexPro"] : ["Hãy sử dụng MCP CodexPro đã được kích hoạt trong đoạn chat này."]),
+        ...taskScopeLines,
+        ...(toolRetry ? ["Đây là lần gửi lại vì phản hồi trước không trả task title qua CodexPro. Phải gọi codexpro action=begin_repo_task với task_title và task_kind ngay."] : []),
+        ...(taskWorkflow ? ["", buildTaskWorkflowPrompt(taskWorkflow.id)] : []),
+        "",
+        text ? `Yêu cầu của người dùng:\n${text}` : "Yêu cầu của người dùng nằm trong file đính kèm."
+      ].join("\n");
   const dispatchStartedAt = Date.now();
   const taskDispatchedAt = new Date(dispatchStartedAt).toISOString();
   const result = await localMcpToolInSession(session, "browser_control", {
@@ -4503,7 +4555,7 @@ async function sendProfileRequestUnlocked(payload) {
     one_shot_recovery: payload?.oneShotRecovery === true
   }, 235000);
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
-  if (taskWorkflow) {
+  if (taskWorkflow && !adjustmentAccepted) {
     diagnostic("info", "worker", "task-workflow", `Đã giao checklist ${taskWorkflow.label} cho Chrome worker`, {
       action: "task-workflow-started",
       workflow_id: taskWorkflow.id,
@@ -4514,7 +4566,7 @@ async function sendProfileRequestUnlocked(payload) {
       request_scope: requestScope
     });
   }
-  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, codexpro_workspace_expanded_scope: codexProWorkspaceExpanded, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id), workflow_id: taskWorkflow?.id, workflow_version: taskWorkflow?.version };
+  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_mode: adjustmentAccepted ? "adjustment" : "new", repo_task_adjustment: adjustmentAccepted, worker_job_status: adjustmentAccepted ? existingWorkerJobStatus : "prepared", repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, codexpro_workspace_expanded_scope: codexProWorkspaceExpanded, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id), workflow_id: taskWorkflow?.id, workflow_version: taskWorkflow?.version };
   } finally {
     await closeLocalMcpSession(session);
   }
