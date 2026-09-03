@@ -100,7 +100,9 @@ function Empty({ children }) {
 }
 
 function taskExecutionState(job) {
-  return String(job?.execution_state || job?.status || "running");
+  const progressStage = String(job?.last_progress_stage || "");
+  const structuredStage = ["blocked", "stalled", "error", "verifying"].includes(progressStage) ? progressStage : "";
+  return String(job?.execution_state || structuredStage || job?.status || "running");
 }
 
 function terminalStateLabel(job) {
@@ -126,11 +128,15 @@ function liveTaskStateLabel(state) {
 
 function TaskProgressSnapshot({ job }) {
   if (!job) return null;
-  const progress = Math.max(0, Math.min(100, Math.round(Number(job.progress_percent) || 0)));
-  const completed = Array.isArray(job.completed_parts) ? job.completed_parts : [];
-  const remaining = Array.isArray(job.remaining_parts) ? job.remaining_parts : [];
-  const blockedPart = String(job.blocked_part || "").trim();
-  const blockedReason = String(job.blocked_reason || job.last_progress_reason || "").trim();
+  const reports = Array.isArray(job.progress_reports) ? job.progress_reports : [];
+  const latest = reports.length ? reports.at(-1) : null;
+  const completed = Array.isArray(job.completed_parts) && job.completed_parts.length ? job.completed_parts : (Array.isArray(latest?.completed_parts) ? latest.completed_parts : []);
+  const remaining = Array.isArray(job.remaining_parts) && job.remaining_parts.length ? job.remaining_parts : (Array.isArray(latest?.remaining_parts) ? latest.remaining_parts : []);
+  const explicitProgress = Number(job.progress_percent ?? latest?.progress_percent);
+  const derivedProgress = completed.length + remaining.length > 0 ? Math.round((completed.length / (completed.length + remaining.length)) * 100) : (job.status === "completed" ? 100 : 0);
+  const progress = Math.max(0, Math.min(100, Number.isFinite(explicitProgress) ? Math.round(explicitProgress) : derivedProgress));
+  const blockedPart = String(job.blocked_part || latest?.blocked_part || "").trim();
+  const blockedReason = String(job.blocked_reason || job.last_progress_reason || latest?.reason || "").trim();
   return (
     <div className="control-task-snapshot">
       <div className="control-task-snapshot-head"><span>Tiến độ</span><strong>{progress}%</strong></div>
