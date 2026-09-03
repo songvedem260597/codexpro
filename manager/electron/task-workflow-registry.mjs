@@ -1,4 +1,9 @@
 import {
+  APP_HANG_RESILIENCE_WORKFLOW_ID,
+  appHangResilienceWorkflow,
+  detectAppHangResilienceWorkflow
+} from "./app-hang-resilience-workflow.mjs";
+import {
   PROJECT_PERFORMANCE_WORKFLOW_ID,
   detectProjectPerformanceWorkflow,
   projectPerformanceWorkflow
@@ -19,6 +24,11 @@ const WORKFLOW_DEFINITIONS = Object.freeze([
     id: PROJECT_PERFORMANCE_WORKFLOW_ID,
     create: projectPerformanceWorkflow,
     detect: detectProjectPerformanceWorkflow
+  }),
+  Object.freeze({
+    id: APP_HANG_RESILIENCE_WORKFLOW_ID,
+    create: appHangResilienceWorkflow,
+    detect: detectAppHangResilienceWorkflow
   })
 ]);
 

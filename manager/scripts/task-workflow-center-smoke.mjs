@@ -10,15 +10,18 @@ import {
 import { deriveTaskWorkflowProgress } from "../src/task-workflow-progress.js";
 
 const workflows = listTaskWorkflows();
-assert.ok(workflows.length >= 2, "the workflow registry must expose reusable stability and performance checklists");
+assert.ok(workflows.length >= 3, "the workflow registry must expose maintenance, performance, and anti-hang checklists");
 assert.equal(new Set(workflows.map((workflow) => workflow.id)).size, workflows.length, "workflow ids must be unique");
 assert.equal(getTaskWorkflow("system_stability_maintenance")?.label, "Bảo trì ổn định dự án");
 assert.equal(getTaskWorkflow("project_performance_optimization")?.label, "Tối ưu tốc độ và hiệu suất dự án");
+assert.equal(getTaskWorkflow("app_hang_resilience")?.label, "Chống treo và phục hồi ứng dụng");
 assert.equal(resolveTaskWorkflow("system_stability_maintenance", "")?.id, "system_stability_maintenance");
 assert.equal(resolveTaskWorkflow("project_performance_optimization", "")?.id, "project_performance_optimization");
+assert.equal(resolveTaskWorkflow("app_hang_resilience", "")?.id, "app_hang_resilience");
 assert.equal(resolveTaskWorkflow("", "Hãy bảo trì hệ thống")?.id, "system_stability_maintenance");
 assert.equal(resolveTaskWorkflow("", "Bảo trì ổn định dự án này")?.id, "system_stability_maintenance");
 assert.equal(resolveTaskWorkflow("", "Tối ưu tốc độ dự án này")?.id, "project_performance_optimization");
+assert.equal(resolveTaskWorkflow("", "Chống treo cho app này")?.id, "app_hang_resilience");
 assert.equal(resolveTaskWorkflow("unknown", "Hãy bảo trì hệ thống"), null, "unknown explicit workflow ids must fail closed");
 
 const prompt = buildTaskWorkflowPrompt("system_stability_maintenance");
