@@ -25,7 +25,7 @@ import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
-import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, workerJobPublicRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
+import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, workerJobPublicRecord, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
 import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
@@ -1332,6 +1332,18 @@ type RepoTaskProof = {
 
 const repoTaskProofs = new Map<string, RepoTaskProof>();
 
+function durableRepoTaskProof(job: WorkerJobRecord | undefined, taskId: string, profileId: string): WorkerJobRecord | undefined {
+  if (!job || job.jobId !== taskId || job.status === "prepared") return undefined;
+  if (job.kind !== "general" && job.kind !== "code") return undefined;
+  const titleWordCount = job.title.trim().split(/\s+/).filter(Boolean).length;
+  if (titleWordCount < 4 || titleWordCount > 6) return undefined;
+  if (!job.events.some((event) => event.type === "bootstrapped")) return undefined;
+  if (job.requiredObligations.some((obligation) => !job.completedObligations.includes(obligation))) return undefined;
+  const normalizeOwner = (value: string) => value.trim().replace(/^browser:/, "");
+  if (profileId && normalizeOwner(job.workerId) !== normalizeOwner(profileId)) return undefined;
+  return job;
+}
+
 function rememberRepoTaskProof(proof: RepoTaskProof): void {
   repoTaskProofs.set(proof.taskId, proof);
   if (repoTaskProofs.size <= 500) return;
@@ -2278,25 +2290,32 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
       const active = gateProfileId ? activeRepoTaskByProfile.get(gateProfileId) : activeRepoTaskByServer.get(server as object);
       const rulesMatch = Boolean(active && readGlobalRulesSnapshotSync().sha256 === active.globalRulesSha256);
+      const workerJob = readWorkerJob(args.task_id);
+      const durableProof = durableRepoTaskProof(workerJob, args.task_id, gateProfileId);
       let coordinationTask;
-      if (proof?.taskKind === "code" && proof.root) {
+      const statusTaskKind = proof?.taskKind || durableProof?.kind;
+      const statusRoot = proof?.root || durableProof?.root;
+      if (statusTaskKind === "code" && statusRoot) {
         try {
-          coordinationTask = readWorkspaceCoordination(proof.root).tasks[args.task_id];
+          coordinationTask = readWorkspaceCoordination(statusRoot).tasks[args.task_id];
         } catch {
           coordinationTask = undefined;
         }
       }
-      const taskVerified = requireRepoTask
+      const memoryTaskVerified = requireRepoTask
         ? Boolean(proof && expected && expected.taskId === args.task_id && expected.scope === proof.scope && repoTaskRootMatches(proof.root, expected))
         : Boolean(proof);
-      const gateActive = Boolean(taskVerified && proof?.taskKind === "code" && sameRepoTask(active, expected) && rulesMatch);
-      const workerJob = readWorkerJob(args.task_id);
-      if (taskVerified && gateProfileId && proof?.taskTitle) {
+      const taskVerified = memoryTaskVerified || Boolean(durableProof);
+      const gateActive = Boolean(memoryTaskVerified && proof?.taskKind === "code" && sameRepoTask(active, expected) && rulesMatch);
+      if (memoryTaskVerified && gateProfileId && proof?.taskTitle) {
         setBrowserExtensionProfileTask(gateProfileId, proof.taskId, proof.taskTitle);
       }
-      return textResult(taskVerified ? `# Profile Task Verified\n\n${proof!.taskId} registered “${proof!.taskTitle}” as ${proof!.taskKind}.` : `# Profile Task Missing\n\nNo begin_repo_task proof was found for ${args.task_id}.`, {
+      const taskTitle = proof?.taskTitle || durableProof?.title;
+      const taskKind = proof?.taskKind || durableProof?.kind;
+      return textResult(taskVerified ? `# Profile Task Verified\n\n${args.task_id} registered “${taskTitle}” as ${taskKind}.` : `# Profile Task Missing\n\nNo begin_repo_task proof was found for ${args.task_id}.`, {
         task_id: args.task_id,
         verified: taskVerified,
+        verification_source: memoryTaskVerified ? "memory" : durableProof ? "worker_job" : undefined,
         gate_active: gateActive,
         profile_id: gateProfileId || undefined,
         expected_task_id: expected?.taskId,
@@ -2321,6 +2340,34 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           agents_sha256: proof.agentsSha256,
           codexgraph_active: Boolean(proof.codexGraph),
           codexgraph: proof.codexGraph,
+          worktree_root: coordinationTask?.worktreeRoot,
+          worktree_branch: coordinationTask?.worktreeBranch,
+          integration_status: coordinationTask?.integrationStatus,
+          integration_branch: coordinationTask?.integrationBranch,
+          integration_requested_at: coordinationTask?.integrationRequestedAt,
+          integration_started_at: coordinationTask?.integrationStartedAt,
+          integration_finished_at: coordinationTask?.integrationFinishedAt,
+          integrated_head: coordinationTask?.integratedHead
+        } : durableProof ? {
+          task_title: durableProof.title,
+          task_title_source: "ai",
+          task_title_requested_by: "mcp_server",
+          task_title_returned_by: "ai",
+          task_kind: durableProof.kind,
+          task_source: "manager",
+          root: durableProof.root,
+          workspace_id: durableProof.workspaceId,
+          started_at: durableProof.startedAt,
+          scope: durableProof.scope,
+          global_rules_loaded: Boolean(durableProof.rulesHash),
+          global_rules_path: durableProof.rulesPath,
+          global_rules_sha256: durableProof.rulesHash,
+          agents_loaded: Boolean(durableProof.agentsFiles.length),
+          agents_files: durableProof.agentsFiles,
+          agents_sha256: durableProof.agentsHash,
+          codexgraph_active: durableProof.codexGraphActive,
+          codexgraph_symbol_count: durableProof.codexGraphSymbolCount,
+          codexgraph_relationship_count: durableProof.codexGraphRelationshipCount,
           worktree_root: coordinationTask?.worktreeRoot,
           worktree_branch: coordinationTask?.worktreeBranch,
           integration_status: coordinationTask?.integrationStatus,
