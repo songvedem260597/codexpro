@@ -3,7 +3,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-const MCP_REQUEST_TIMEOUT_MS = process.platform === 'win32' ? 60000 : 15000;
+// Windows and macOS both run the full CodexGraph mutation checks in this suite;
+// cold caches and filesystem indexing can legitimately exceed 15 seconds.
+const MCP_REQUEST_TIMEOUT_MS = process.platform === 'linux' ? 15000 : 60000;
 
 function encode(message) {
   return `${JSON.stringify(message)}\n`;
