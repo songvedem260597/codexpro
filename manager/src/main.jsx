@@ -3431,6 +3431,32 @@ function App() {
       if (!silent) setBusy("");
     }
   }
+  async function continueTaskAfterHang(incident) {
+    const profileId = String(incident?.profile_id || "");
+    const taskId = String(incident?.task_id || "");
+    const conversationId = String(incident?.conversation_id || "");
+    const profile = (status?.browserProfiles || []).find((item) => String(item?.profile_id || "") === profileId);
+    if (!profile) {
+      setError("Không còn tìm thấy Chrome profile của task bị treo.");
+      return null;
+    }
+    if (!/^cpt_[a-f0-9]{24}$/.test(taskId) || !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) {
+      setError("Task bị treo chưa có đủ Task ID / conversation để tiếp tục an toàn.");
+      return null;
+    }
+    const targetTab = (profile.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(incident?.tab_id));
+    const sourceLabel = incident?.source === "openai" ? "OpenAI/ChatGPT" : "mạng";
+    const statusLabel = Number(incident?.status_code || 0) ? ` HTTP ${Number(incident.status_code)}` : "";
+    return await recoverProfileTab(profile, {
+      forceContinuation: true,
+      hardFailure: true,
+      taskId,
+      conversationId,
+      targetTab,
+      recoveryReason: `Control Center xác nhận lỗi ${sourceLabel}${statusLabel} làm task treo. Đóng tab lỗi và tiếp tục đúng Task ID hiện tại.`
+    });
+  }
+
   async function stopControlTask(task) {
     const profile = task?.profile;
     const tab = task?.tab;
@@ -4950,7 +4976,8 @@ function App() {
                 busy={busy}
                 onOpenChat={setChatProfileId}
                 onOpenChrome={(profile) => void openProfile(profile, { focusOnly: true })}
-                onRecover={(profile) => void recoverProfileTab(profile)}
+                onRecover={(profile, options) => void recoverProfileTab(profile, options)}
+                onContinueAfterHang={(incident) => void continueTaskAfterHang(incident)}
                 onStop={(task) => void stopControlTask(task)}
                 onOpenRepo={(root) => void api.openFolder(root)}
                 onToggleSetting={(key, value) => void saveManagerSetting({ [key]: value }, value ? "Đã bật tự động hóa" : "Đã tắt tự động hóa")}
