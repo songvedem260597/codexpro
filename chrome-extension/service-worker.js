@@ -2154,6 +2154,17 @@ function networkStreamMatchesCurrentGeneration(networkState,networkStream) {
   return Number.isFinite(streamEvidenceAt)&&streamEvidenceAt>=generationStartedAt-1500;
 }
 
+function networkStreamCompletedForCurrentGeneration(networkState,networkStream) {
+  return Boolean(
+    networkStream?.available&&
+    networkState?.network_state==='completed'&&
+    networkStream.in_progress!==true&&
+    !networkStream.error&&
+    String(networkStream.text||'').trim()&&
+    networkStreamMatchesCurrentGeneration(networkState,networkStream)
+  );
+}
+
 function mergeCompletedNetworkStreamResponse(response,networkStream) {
   const current=response&&typeof response==='object'?response:{};
   const streamText=String(networkStream?.text||'').trim();
@@ -3071,7 +3082,7 @@ if(action==='rename_chat'){
     const networkStreamInProgress=Boolean(networkStream.in_progress);
     const effectiveNetworkBusy=Boolean(networkState.busy||networkStreamInProgress);
     const networkStreamLive=Boolean(effectiveNetworkBusy&&networkStream.available);
-    const networkStreamCompletedCurrent=Boolean(networkState.network_state==='completed'&&networkStream.completed&&!networkStream.error&&networkStreamMatchesCurrentGeneration(networkState,networkStream));
+    const networkStreamCompletedCurrent=networkStreamCompletedForCurrentGeneration(networkState,networkStream);
     const networkStreamUsable=Boolean(networkStream.available&&(networkStreamLive||networkStreamCompletedCurrent));
     const visibleNetworkStreamMessages=networkStreamUsable?networkStreamMessages:[];
     const visibleNetworkStreamText=networkStreamUsable?networkStreamText:'';
