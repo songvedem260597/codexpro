@@ -16,6 +16,8 @@ const CANONICAL_ACTIVITY_PROBE_MS = 5000;
 const CANONICAL_ACTIVITY_STALE_MS = CHAT_REQUEST_STALE_MS;
 const CANONICAL_ACTIVITY_GENERATION_SKEW_MS = 2*1000;
 const CANONICAL_READ_TIMEOUT_MS = 15000;
+const CANONICAL_RATE_LIMIT_BASE_BACKOFF_MS = 5000;
+const CANONICAL_RATE_LIMIT_MAX_BACKOFF_MS = 60000;
 const DOM_ACTION_TIMEOUT_MS = 5000;
 const SCREENSHOT_TIMEOUT_MS = 15000;
 const TRUSTED_INPUT_TIMEOUT_MS = 10000;
@@ -61,6 +63,7 @@ const browserMutationTailsByTab = new Map();
 const canonicalCompletionProbeAtByTab = new Map();
 const chatCanonicalActivityByTab = new Map();
 const chatCanonicalActivityProbesByTab = new Map();
+const canonicalReadStatesByConversation = new Map();
 const pendingConversationByTab = new Map();
 const chatAttachmentOwnershipByTab = new Map();
 const chatDomActivityByTab = new Map();
@@ -937,6 +940,15 @@ chrome.tabs.onRemoved.addListener((tabId,removeInfo)=>{const intent=tabRemovalIn
 chrome.windows.onRemoved.addListener(windowId=>{const intent=windowRemovalIntents.get(windowId);windowRemovalIntents.delete(windowId);recordProfileLifecycleEvent({type:'window_removed',reason:String(intent?.reason||'external_or_chrome'),window_id:windowId,requested_at:intent?.at?new Date(intent.at).toISOString():''});});
 chrome.tabs.onCreated.addListener(tab=>{const recorderUrl=String(tab?.pendingUrl||tab?.url||'');if(isChatGptTabUrl(recorderUrl)){if(Number.isInteger(tab?.id))void ensureFlightRecorderForTab(tab.id,recorderUrl).catch(()=>{});void enforceSingleChatTabSoon().catch(()=>{});}});
 
+function resetChatTabDocumentEpoch(tabId) {
+  realtimeNetworkStreamsByTab.delete(tabId);
+  pendingRealtimeStreamTabs.delete(tabId);
+  chatDomActivityByTab.delete(tabId);
+  chatCanonicalActivityByTab.delete(tabId);
+  chatCanonicalActivityProbesByTab.delete(tabId);
+  canonicalCompletionProbeAtByTab.delete(tabId);
+}
+
 function chatNavigationSupersedesNetworkState(current,nextUrl) {
   const trackedConversationId=String(current?.conversation_id||'');
   if(!trackedConversationId)return false;
@@ -950,10 +962,7 @@ async function resetSupersededChatActivity(tabId,nextUrl) {
   chatNetworkStateByTab.delete(tabId);
   chatNetworkPostLogByTab.delete(tabId);
   chatNetworkPostVersionByTab.delete(tabId);
-  chatDomActivityByTab.delete(tabId);
-  chatCanonicalActivityByTab.delete(tabId);
-  chatCanonicalActivityProbesByTab.delete(tabId);
-  canonicalCompletionProbeAtByTab.delete(tabId);
+  resetChatTabDocumentEpoch(tabId);
   notifyChatNetworkWaiters(tabId);
   await persistChatNetworkState();
   scheduleRealtimeProfilePush(0);
@@ -961,6 +970,7 @@ async function resetSupersededChatActivity(tabId,nextUrl) {
 }
 
 chrome.tabs.onUpdated.addListener((tabId,changeInfo,tab)=>{
+  if(changeInfo?.status==='loading')resetChatTabDocumentEpoch(tabId);
   if(!changeInfo?.url)return;
   void resetSupersededChatActivity(tabId,changeInfo.url).catch(()=>{});
   if(isChatGptTabUrl(changeInfo.url||tab?.url))void enforceSingleChatTabSoon().catch(()=>{});
@@ -1255,6 +1265,9 @@ async function tabList() {
       connection_interrupted:Boolean(domActivity.connection_interrupted),
       message_delivery_timed_out:Boolean(domActivity.message_delivery_timed_out),
       dom_probe_available:domActivity.available,
+      canonical_rate_limited:Boolean(canonicalActivity.canonical_rate_limited),
+      canonical_rate_limit_count:Number(canonicalActivity.canonical_rate_limit_count)||0,
+      canonical_retry_at:String(canonicalActivity.canonical_retry_at||''),
       network_state:networkState.network_state,
       network_source:networkState.network_source,
       network_generation_endpoint:networkState.network_generation_endpoint,
@@ -2034,8 +2047,16 @@ async function readCanonicalConversationPage(conversationId) {
       return text?{id:String(message.id||node.id||`${role}-${index}`),role,text:text.slice(0,40000),truncated:text.length>40000,content_type:contentType,status:String(message?.status||''),end_turn:message?.end_turn===true,create_time:Number(message?.create_time)||0,order:index}:null;
     }).filter(Boolean));
   };
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),12000);
   try{
-    const sessionResponse=await fetch('/api/auth/session',{credentials:'include',cache:'no-store'});
+    const sessionResponse=await fetch('/api/auth/session',{credentials:'include',cache:'no-store',signal:controller.signal});
+    if(sessionResponse.status===429){
+      const retryAfter=String(sessionResponse.headers.get('retry-after')||'').trim();
+      const retrySeconds=Number(retryAfter),retryDateMs=Date.parse(retryAfter);
+      const retryAfterMs=Number.isFinite(retrySeconds)?Math.max(0,retrySeconds*1000):Number.isFinite(retryDateMs)?Math.max(0,retryDateMs-Date.now()):0;
+      return {ok:false,error:'/api/auth/session: ChatGPT HTTP 429',status:429,rate_limited:true,retry_after_ms:retryAfterMs};
+    }
     const session=await sessionResponse.json().catch(()=>({}));
     const accessToken=String(session?.accessToken||'');
     if(!accessToken)return {ok:false,error:'ChatGPT session không trả access token.'};
@@ -2047,7 +2068,7 @@ async function readCanonicalConversationPage(conversationId) {
     ];
     let lastError='';
     for(const endpoint of endpoints){
-      const response=await fetch(endpoint,{credentials:'include',cache:'no-store',headers});
+      const response=await fetch(endpoint,{credentials:'include',cache:'no-store',headers,signal:controller.signal});
       const payload=await response.json().catch(()=>({}));
       if(response.ok){
         const messages=messagesFromPayload(payload);
@@ -2057,11 +2078,70 @@ async function readCanonicalConversationPage(conversationId) {
         const responseReady=Boolean(assistantAfterUser?.end_turn===true);
         if(messages.length)return {ok:true,endpoint,messages,text:assistantAfterUser?.text||'',text_length:String(assistantAfterUser?.text||'').length,response_ready:responseReady,busy:Boolean(latestUserIndex>=0&&!responseReady),latest_user_id:String(messages[latestUserIndex]?.id||''),latest_user_create_time:Number(messages[latestUserIndex]?.create_time)||0,latest_assistant_id:String(assistantAfterUser?.id||latestAssistant?.id||'')};
         lastError=`${endpoint}: conversation chưa có assistant message.`;
-      }else lastError=`${endpoint}: ChatGPT HTTP ${response.status}`;
+      }else{
+        lastError=`${endpoint}: ChatGPT HTTP ${response.status}`;
+        if(response.status===429){
+          const retryAfter=String(response.headers.get('retry-after')||'').trim();
+          const retrySeconds=Number(retryAfter);
+          const retryDateMs=Date.parse(retryAfter);
+          const retryAfterMs=Number.isFinite(retrySeconds)
+            ? Math.max(0,retrySeconds*1000)
+            : Number.isFinite(retryDateMs)
+              ? Math.max(0,retryDateMs-Date.now())
+              : 0;
+          return {ok:false,error:lastError,status:429,rate_limited:true,retry_after_ms:retryAfterMs};
+        }
+      }
       if(![404,405].includes(response.status))break;
     }
     return {ok:false,error:lastError||'ChatGPT không trả conversation canonical.'};
-  }catch(error){return {ok:false,error:String(error?.message||error)};}
+  }catch(error){return {ok:false,error:error?.name==='AbortError'?'ChatGPT canonical fetch timed out.':String(error?.message||error),timed_out:error?.name==='AbortError'};}
+  finally{clearTimeout(timeout);}
+}
+
+function canonicalRateLimitBackoffMs(consecutive,retryAfterMs=0) {
+  const attempt=Math.max(1,Number(consecutive)||1);
+  const exponential=Math.min(CANONICAL_RATE_LIMIT_MAX_BACKOFF_MS,CANONICAL_RATE_LIMIT_BASE_BACKOFF_MS*(2**Math.min(4,attempt-1)));
+  const serverDelay=Math.max(0,Number(retryAfterMs)||0);
+  return Math.min(CANONICAL_RATE_LIMIT_MAX_BACKOFF_MS,Math.max(exponential,serverDelay));
+}
+
+async function readCanonicalConversationForTab(tabId,conversationId,timeoutMs=CANONICAL_READ_TIMEOUT_MS) {
+  const key=String(conversationId||'');
+  if(!Number.isInteger(tabId)||!key)return {ok:false,error:'Canonical read target is invalid.'};
+  const now=Date.now();
+  let state=canonicalReadStatesByConversation.get(key)||{count:0,next_allowed_at:0,last_result:null,in_flight:null,last_used_at:0};
+  if(state.in_flight)return state.in_flight;
+  if(Number(state.next_allowed_at)>now){
+    return {...(state.last_result||{ok:false,error:'ChatGPT canonical read is cooling down.'}),ok:false,rate_limited:true,cooldown:true,status:429,canonical_rate_limit_count:Number(state.count)||1,retry_at:new Date(state.next_allowed_at).toISOString(),retry_after_ms:Math.max(0,state.next_allowed_at-now)};
+  }
+  let operation;
+  operation=(async()=>{
+    try{
+      const [injected]=await promiseWithTimeout(
+        chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:readCanonicalConversationPage,args:[key]}),
+        Math.max(1000,Number(timeoutMs)||CANONICAL_READ_TIMEOUT_MS),
+        'ChatGPT không phản hồi khi đọc conversation canonical.'
+      );
+      const result=injected?.result&&typeof injected.result==='object'?injected.result:{ok:false,error:'ChatGPT canonical read returned no result.'};
+      if(result.rate_limited===true||Number(result.status)===429){
+        const previous=canonicalReadStatesByConversation.get(key)||state;
+        const count=Math.max(0,Number(previous.count)||0)+1;
+        const delay=canonicalRateLimitBackoffMs(count,result.retry_after_ms);
+        const nextAllowedAt=Date.now()+delay;
+        const throttled={...result,ok:false,rate_limited:true,status:429,canonical_rate_limit_count:count,retry_at:new Date(nextAllowedAt).toISOString(),retry_after_ms:delay};
+        canonicalReadStatesByConversation.set(key,{...previous,count,next_allowed_at:nextAllowedAt,last_result:throttled,last_used_at:Date.now(),in_flight:operation});
+        return throttled;
+      }
+      canonicalReadStatesByConversation.delete(key);
+      return result;
+    }finally{
+      const latest=canonicalReadStatesByConversation.get(key);
+      if(latest?.in_flight===operation)canonicalReadStatesByConversation.set(key,{...latest,in_flight:null,last_used_at:Date.now()});
+    }
+  })();
+  canonicalReadStatesByConversation.set(key,{...state,in_flight:operation,last_used_at:now});
+  return operation;
 }
 
 function canonicalResponseSupersedesDom(canonical,domResult) {
@@ -2302,7 +2382,10 @@ function canonicalActivityState(tabId,conversationId='') {
   const current=chatCanonicalActivityByTab.get(tabId);
   if(!current)return emptyCanonicalActivity();
   if(conversationScopedStateMismatch(current.conversation_id,conversationId)){chatCanonicalActivityByTab.delete(tabId);return emptyCanonicalActivity();}
-  const age=Date.now()-Math.max(Number(current.last_checked_at||0),Number(current.busy_since||0),Number(current.generation_started_at||0));
+  const activityAnchor=current.busy
+    ? Math.max(Number(current.busy_since||0),Number(current.generation_started_at||0))
+    : Math.max(Number(current.last_checked_at||0),Number(current.generation_started_at||0));
+  const age=Date.now()-activityAnchor;
   if(age>CANONICAL_ACTIVITY_STALE_MS){chatCanonicalActivityByTab.delete(tabId);return emptyCanonicalActivity();}
   return current;
 }
@@ -2329,6 +2412,10 @@ function rememberCanonicalActivity(tabId,conversationId,canonical) {
     ...previous,
     conversation_id:String(conversationId),
     last_checked_at:now,
+    canonical_rate_limited:false,
+    canonical_rate_limit_count:0,
+    canonical_retry_at:'',
+    canonical_error:'',
     latest_user_id:String(canonical.latest_user_id||previous.latest_user_id||''),
     latest_user_create_time:Number(canonical.latest_user_create_time)||Number(previous.latest_user_create_time)||0
   };
@@ -2351,16 +2438,14 @@ async function probeCanonicalActivity(tabId,conversationId,force=false) {
   if(running)return running;
   const probe=(async()=>{
     try{
-      const [injected]=await promiseWithTimeout(
-        chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:readCanonicalConversationPage,args:[conversationId]}),
-        CANONICAL_READ_TIMEOUT_MS,
-        'ChatGPT không phản hồi khi đọc activity canonical.'
-      );
-      return rememberCanonicalActivity(tabId,conversationId,injected?.result);
-    }catch{
+      const canonical=await readCanonicalConversationForTab(tabId,conversationId,CANONICAL_READ_TIMEOUT_MS);
+      if(canonical?.ok)return rememberCanonicalActivity(tabId,conversationId,canonical);
       const previous=canonicalActivityState(tabId,conversationId);
-      if(previous.conversation_id)chatCanonicalActivityByTab.set(tabId,{...previous,last_checked_at:Date.now()});
-      return previous;
+      const next={...previous,canonical_rate_limited:Boolean(canonical?.rate_limited),canonical_rate_limit_count:Number(canonical?.canonical_rate_limit_count)||0,canonical_retry_at:String(canonical?.retry_at||''),canonical_error:String(canonical?.error||'')};
+      if(previous.conversation_id)chatCanonicalActivityByTab.set(tabId,next);
+      return next;
+    }catch(error){
+      return {...canonicalActivityState(tabId,conversationId),canonical_error:String(error?.message||error)};
     }finally{
       chatCanonicalActivityProbesByTab.delete(tabId);
     }
@@ -2508,11 +2593,10 @@ async function readUnopenedChatResponse(tabs,conversation,args={},expiresAt=0) {
   if(args.read_dom===false&&args.canonical_only!==true)return withResponseAudit(base);
   const budget=expiresAt?Math.min(CANONICAL_READ_TIMEOUT_MS,expiresAt-Date.now()-1000):CANONICAL_READ_TIMEOUT_MS;
   if(budget<=0)throw new Error('COMMAND_EXPIRED: Không còn thời gian đọc lịch sử ChatGPT.');
-  const [injected]=await promiseWithTimeout(
-    chrome.scripting.executeScript({target:{tabId:source.id},world:'MAIN',func:readCanonicalConversationPage,args:[conversationId]}),
-    budget,'CHAT_HISTORY_TIMEOUT: ChatGPT không phản hồi khi đọc lịch sử; không điều hướng tab đang mở.'
-  );
-  const canonical=injected?.result;
+  const canonical=await readCanonicalConversationForTab(source.id,conversationId,budget);
+  if(!canonical?.ok&&canonical?.rate_limited){
+    return withResponseAudit({...base,canonical_error:String(canonical.error||'ChatGPT đang giới hạn tần suất đọc lịch sử.').slice(0,500),canonical_rate_limited:true,canonical_rate_limit_count:Number(canonical.canonical_rate_limit_count)||1,canonical_retry_at:String(canonical.retry_at||''),canonical_retry_after_ms:Number(canonical.retry_after_ms)||0,response_source:'canonical_cooldown',updated_at:new Date().toISOString()},{canonical});
+  }
   if(!canonical?.ok)throw new Error(`CHAT_HISTORY_UNAVAILABLE: ${String(canonical?.error||'Không đọc được lịch sử ChatGPT.').slice(0,500)}`);
   const messages=Array.isArray(canonical.messages)?canonical.messages:[];
   const latestAssistant=messages.findLast(message=>message.role==='assistant');
@@ -3177,12 +3261,7 @@ if(action==='rename_chat'){
     let canonical={ok:false,error:''};
     const canonicalReadStartedAt=Date.now();
     try{
-      const [canonicalInjection]=await promiseWithTimeout(
-        chrome.scripting.executeScript({target:{tabId:tab.id},world:'MAIN',func:readCanonicalConversationPage,args:[conversationId]}),
-        CANONICAL_READ_TIMEOUT_MS,
-        'ChatGPT không phản hồi khi đọc conversation canonical.'
-      );
-      canonical=canonicalInjection?.result||canonical;
+      canonical=await readCanonicalConversationForTab(tab.id,conversationId,CANONICAL_READ_TIMEOUT_MS);
     }catch(error){canonical={ok:false,error:String(error?.message||error).slice(0,500)};}
     addResponsePhaseTiming('canonical_read_ms',canonicalReadStartedAt);
     const canonicalGenerationMatches=canonicalMatchesCurrentGeneration(canonicalActivityState(tab.id,conversationId),canonical);
@@ -3190,7 +3269,7 @@ if(action==='rename_chat'){
     const currentCanonical=canonical.ok&&!canonicalGenerationMatches
       ? {...canonical,messages:[],text:'',text_length:0,response_ready:false,busy:true,generation_mismatch:true}
       : canonical;
-    let canonicalActivityPayload={canonical_busy:Boolean(rememberedCanonicalActivity.busy),canonical_response_ready:Boolean(rememberedCanonicalActivity.response_ready&&!rememberedCanonicalActivity.busy),canonical_observed:Boolean(canonical.ok)};
+    let canonicalActivityPayload={canonical_busy:Boolean(rememberedCanonicalActivity.busy),canonical_response_ready:Boolean(rememberedCanonicalActivity.response_ready&&!rememberedCanonicalActivity.busy),canonical_observed:Boolean(canonical.ok),canonical_rate_limited:Boolean(canonical.rate_limited),canonical_rate_limit_count:Number(canonical.canonical_rate_limit_count)||0,canonical_retry_at:String(canonical.retry_at||''),canonical_retry_after_ms:Number(canonical.retry_after_ms)||0};
     if(currentCanonical.ok&&currentCanonical.response_ready&&!currentCanonical.busy){
       const canonicalReconcileStartedAt=Date.now();
       await reconcileChatNetworkCompletion(tab.id,conversationId,'canonical_api');

@@ -32,6 +32,7 @@ import { conversationCompletedTaskCount, conversationMessageLimit, conversationT
 import { availableConversationIdsForProfile, conversationBelongsToProfile, isConversationUnavailableError } from "./conversation-target.js";
 import { activeLogicalTaskAdjustment } from "../electron/logical-chat-task.mjs";
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
+import { chatHistoryRateLimitRecoveryCandidate } from "./chat-recovery-policy.js";
 import { confirmChatResponseFinality, hasStrongerNetworkStreamEvidence } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileConnectionState, profileTabFailureState } from "./profile-card-state.js";
 import { mergeRuntimeStatus, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "./ui-performance.js";
@@ -1719,7 +1720,7 @@ function App() {
           return;
         }
         if (result?.renderer_unresponsive || result?.status === "hung") {
-          logRendererDiagnostic(api, "error", "chat", "Tab task chạy lâu vẫn bị treo sau một lần reload; đã dừng phục hồi", {
+          logRendererDiagnostic(api, "error", "chat", "Tab task chạy lâu vẫn bị treo sau một lần reload; chuyển sang chat tiếp nối", {
             action: "long-task-watchdog-hung",
             profile_id: candidate.profileId,
             task_id: candidate.taskId,
@@ -1735,20 +1736,19 @@ function App() {
             reload_probe: result?.reload_probe || null,
             retry_allowed: false
           });
-          requestTargetsRef.current = { ...requestTargetsRef.current, [candidate.profileId]: NEW_CHAT_TARGET };
-          requestTargetReasons.current.set(candidate.profileId, "long_task_watchdog_hung");
-          setRequestTargets((current) => ({ ...current, [candidate.profileId]: NEW_CHAT_TARGET }));
-          setRequestResponses((current) => ({ ...current, [candidate.profileId]: { visible: true, loading: false, transcriptLoading: false, error: "", conversationId: NEW_CHAT_TARGET, text: "", messages: [], busy: false, abandonedConversationId: candidate.conversationId } }));
-          setStatus((current) => current ? {
-            ...current,
-            browserProfiles: (current.browserProfiles || []).map((item) => item.profile_id !== candidate.profileId ? item : {
-              ...item,
-              activity: "idle",
-              conversation_tabs: (item.conversation_tabs || []).map((tab) => String(tab.url || "").includes(`/c/${candidate.conversationId}`) ? { ...tab, busy: false, settling: false, renderer_unresponsive: true, long_task_watchdog_hung: true, renderer_error: "LONG_TASK_WATCHDOG_UNRESPONSIVE", activity_text: "Tab bị treo · watchdog đã dừng retry" } : tab)
-            })
-          } : current);
-          setRequestSendErrors((current) => ({ ...current, [candidate.profileId]: "Tab cũ vẫn bị treo sau một lần reload. Watchdog đã dừng và sẽ không retry thêm." }));
-          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Tab task bị treo", body: `“${candidate.title}” không phản hồi sau một lần reload. Watchdog đã dừng, không retry thêm.` });
+          const targetTab = (profile.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(result?.recovery_tab_id || result?.target_id || candidate.targetId));
+          const continuation = await recoverProfileTab(profile, {
+            conversationId: candidate.conversationId,
+            taskId: candidate.taskId,
+            targetTab,
+            forceContinuation: true,
+            recoveryReason: "Tab vẫn không phản hồi sau một lần reload watchdog.",
+            silent: true,
+            automatic: true,
+            hardFailure: true
+          });
+          if (!continuation) throw new Error("Tab cũ vẫn bị treo và không tạo được chat tiếp nối.");
+          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã chuyển tab task", body: `“${candidate.title}” đã tiếp tục trong chat mới với cùng Task ID.` });
           return;
         }
         const statusLabel = "tab đã phản hồi sau reload";
@@ -1783,6 +1783,31 @@ function App() {
       void recoverProfileTab(profile, { targetTab, silent: true, automatic: true, hardFailure });
     }
   }, [managerSettings.autoRecovery, status?.browserProfiles, status?.workerJobs]);
+
+  useEffect(() => {
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
+    for (const profile of profiles) {
+      const response = requestResponses[profile.profile_id];
+      const candidate = chatHistoryRateLimitRecoveryCandidate({ profile, jobs, response });
+      if (!candidate) continue;
+      const key = `history-rate-limit:${candidate.profileId}:${candidate.conversationId}:${candidate.taskId}`;
+      const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
+      if (Date.now() - previous < 120_000) continue;
+      operationsRecoveryTimes.current.set(key, Date.now());
+      const targetTab = (profile.conversation_tabs || []).find((tab) => String(tab?.url || "").includes(`/c/${candidate.conversationId}`));
+      void recoverProfileTab(profile, {
+        conversationId: candidate.conversationId,
+        taskId: candidate.taskId,
+        targetTab,
+        forceContinuation: true,
+        recoveryReason: "ChatGPT giới hạn đọc lịch sử nhiều lần; chuyển task sang chat mới để chặn vòng lặp 429.",
+        silent: true,
+        automatic: true,
+        hardFailure: true
+      });
+    }
+  }, [requestResponses, status?.browserProfiles, status?.workerJobs]);
 
   useEffect(() => {
     if (!managerSettings.autoUpdateWorkers || busy || !status?.local?.ok || status?.workerSnapshotStale) return;
@@ -2549,15 +2574,21 @@ function App() {
     let cancelled = false;
     let timer = 0;
     const pollLatestResponse = async () => {
+      let nextPollMs = LATEST_RESPONSE_RECOVERY_POLL_MS;
       const profile = profilesRef.current.find((item) => item.profile_id === chatProfileId);
       if (cancelled) return;
       if (profile?.connected) {
         const canonical = await loadResponse(profile, conversationId, true, false, false, true);
-        if (!cancelled && completedResponseNeedsDomFallback(canonical)) {
+        if (canonical?.canonical_rate_limited) {
+          const retryAtMs = Date.parse(String(canonical.canonical_retry_at || ""));
+          const retryAfterMs = Number(canonical.canonical_retry_after_ms) || 0;
+          nextPollMs = Math.max(nextPollMs, Math.min(60_000, Number.isFinite(retryAtMs) ? retryAtMs - Date.now() : retryAfterMs));
+        }
+        if (!cancelled && !canonical?.canonical_rate_limited && completedResponseNeedsDomFallback(canonical)) {
           await loadResponse(profile, conversationId, true, true);
         }
       }
-      if (!cancelled) timer = window.setTimeout(pollLatestResponse, LATEST_RESPONSE_RECOVERY_POLL_MS);
+      if (!cancelled) timer = window.setTimeout(pollLatestResponse, Math.max(500, nextPollMs));
     };
     timer = window.setTimeout(pollLatestResponse, 500);
     return () => {
@@ -3474,66 +3505,77 @@ function App() {
     const tabs = profile.conversation_tabs || [];
     const conversationOf = (tab) => String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
     const selectedConversationId = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
-    const selectedTab = tabs.find((tab) => conversationOf(tab) === selectedConversationId);
-    const targetTab = options.targetTab || selectedTab || tabs.find((tab) => tab.active) || tabs[0];
-    const conversationId = conversationOf(targetTab);
+    const requestedConversationId = String(options.conversationId || selectedConversationId || "");
+    const selectedTab = tabs.find((tab) => conversationOf(tab) === requestedConversationId);
+    const exactTargetTab = options.targetTab && conversationOf(options.targetTab) === requestedConversationId ? options.targetTab : selectedTab;
+    const targetTab = exactTargetTab || tabs.find((tab) => tab.active) || tabs[0];
+    const conversationId = requestedConversationId || conversationOf(exactTargetTab);
     const selectedConversation = profileRequestChats(profile).find((chat) => String(chat.id) === conversationId);
-    const title = selectedConversation?.title || targetTab?.title || profile.active_chat_title || "";
+    const title = selectedConversation?.title || exactTargetTab?.title || profile.active_chat_title || "";
     const silent = options.silent === true;
-    if (!conversationId || !targetTab?.id) {
+    if (!conversationId) {
       const message = "Kh\u00f4ng x\u00e1c \u0111\u1ecbnh \u0111\u01b0\u1ee3c h\u1ed9i tho\u1ea1i c\u0169 c\u1ea7n kh\u00f4i ph\u1ee5c.";
       if (!silent) setError(message);
       logRendererDiagnostic(api, "error", "profile", message, { action: "recover-profile-missing-target", profile_id: profile.profile_id });
       return null;
     }
-    const snapshot = await recoveryContinuationSnapshot(profile, conversationId, targetTab);
+    const snapshot = await recoveryContinuationSnapshot(profile, conversationId, exactTargetTab || targetTab);
+    if (/^cpt_[a-f0-9]{24}$/.test(String(options.taskId || ""))) snapshot.repoTaskId = String(options.taskId);
     if (!silent) setBusy(`recover-profile:${profile.profile_id}`);
     if (!silent) setError("");
     try {
-      try {
+      let recoveryReason = String(options.recoveryReason || "").slice(0, 600);
+      if (!options.forceContinuation && exactTargetTab?.id) {
+        try {
         const restored = await api.recoverProfileChat({
           profileId: profile.profile_id,
           conversationId,
-          targetId: targetTab.id,
+          targetId: exactTargetTab.id,
           title,
           silent,
           newChat: false
         });
         requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: conversationId };
         setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
-        logRendererDiagnostic(api, "info", "profile", "Recovered original ChatGPT conversation", { action: "recover-profile-same-conversation", profile_id: profile.profile_id, conversation_id: conversationId, old_target_id: String(targetTab.id), result_target_id: String(restored?.target_id || ""), automatic: Boolean(options.automatic) });
+        logRendererDiagnostic(api, "info", "profile", "Recovered original ChatGPT conversation", { action: "recover-profile-same-conversation", profile_id: profile.profile_id, conversation_id: conversationId, old_target_id: String(exactTargetTab.id), result_target_id: String(restored?.target_id || ""), automatic: Boolean(options.automatic) });
         if (!silent) notify("\u0110\u00e3 kh\u00f4i ph\u1ee5c \u0111\u00fang h\u1ed9i tho\u1ea1i c\u0169");
         window.setTimeout(() => void refresh(false), 900);
         return { mode: "same_conversation", conversationId, result: restored };
-      } catch (restoreError) {
-        const recoveryReason = String(restoreError?.message || restoreError || "Original renderer could not be recovered.").slice(0, 600);
-        logRendererDiagnostic(api, "warn", "profile", `Original conversation recovery failed; creating continuation chat: ${recoveryReason}`, { action: "recover-profile-rollover-start", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(targetTab.id), automatic: Boolean(options.automatic), hard_failure: Boolean(options.hardFailure), error: restoreError });
-        const newConversationId = await rolloverFullConversation(profile, conversationId, {
-          ...snapshot,
-          title,
-          continuation_reason: "recovery",
-          recovery_reason: recoveryReason,
-          silent
-        });
-        if (!newConversationId) throw new Error(`Original chat recovery failed and continuation chat was not created. ${recoveryReason}`);
+        } catch (restoreError) {
+          recoveryReason = String(restoreError?.message || restoreError || "Original renderer could not be recovered.").slice(0, 600);
+        }
+      }
+      if (!recoveryReason) recoveryReason = exactTargetTab?.id
+        ? "Original conversation did not recover after the bounded attempt."
+        : "Original conversation no longer has an owned Chrome tab.";
+      logRendererDiagnostic(api, "warn", "profile", `Original conversation recovery failed; creating continuation chat: ${recoveryReason}`, { action: "recover-profile-rollover-start", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(exactTargetTab?.id || ""), automatic: Boolean(options.automatic), hard_failure: Boolean(options.hardFailure) });
+      const newConversationId = await rolloverFullConversation(profile, conversationId, {
+        ...snapshot,
+        title,
+        continuation_reason: "recovery",
+        recovery_reason: recoveryReason,
+        silent
+      });
+      if (!newConversationId) throw new Error(`Original chat recovery failed and continuation chat was not created. ${recoveryReason}`);
+      if (exactTargetTab?.id) {
         await api.recoverProfileChat({
           profileId: profile.profile_id,
           conversationId,
-          targetId: targetTab.id,
+          targetId: exactTargetTab.id,
           title,
           silent: true,
           discardOnly: true
         }).catch((discardError) => {
-          logRendererDiagnostic(api, "warn", "profile", `Continuation created but old tab could not be closed: ${discardError?.message || String(discardError)}`, { action: "recover-profile-discard-old-tab-failed", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(targetTab.id), error: discardError });
+          logRendererDiagnostic(api, "warn", "profile", `Continuation created but old tab could not be closed: ${discardError?.message || String(discardError)}`, { action: "recover-profile-discard-old-tab-failed", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(exactTargetTab.id), error: discardError });
         });
-        logRendererDiagnostic(api, "info", "profile", "Moved cached context from unrecoverable tab to continuation chat", { action: "recover-profile-rollover-done", profile_id: profile.profile_id, abandoned_conversation_id: conversationId, conversation_id: newConversationId, automatic: Boolean(options.automatic) });
-        if (!silent) notify("Tab c\u0169 kh\u00f4ng kh\u00f4i ph\u1ee5c \u0111\u01b0\u1ee3c \u00b7 \u0111\u00e3 chuy\u1ec3n sang chat ti\u1ebfp n\u1ed1i");
-        window.setTimeout(() => void refresh(false), 900);
-        return { mode: "continuation", conversationId: newConversationId };
       }
+      logRendererDiagnostic(api, "info", "profile", "Moved cached context from unrecoverable tab to continuation chat", { action: "recover-profile-rollover-done", profile_id: profile.profile_id, abandoned_conversation_id: conversationId, conversation_id: newConversationId, automatic: Boolean(options.automatic) });
+      if (!silent) notify("Tab c\u0169 kh\u00f4ng kh\u00f4i ph\u1ee5c \u0111\u01b0\u1ee3c \u00b7 \u0111\u00e3 chuy\u1ec3n sang chat ti\u1ebfp n\u1ed1i");
+      window.setTimeout(() => void refresh(false), 900);
+      return { mode: "continuation", conversationId: newConversationId };
     } catch (err) {
       const message = err?.message || String(err);
-      logRendererDiagnostic(api, "error", "profile", `Chat recovery failed: ${message}`, { action: "recover-profile-failed", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(targetTab.id), automatic: Boolean(options.automatic), error: err });
+      logRendererDiagnostic(api, "error", "profile", `Chat recovery failed: ${message}`, { action: "recover-profile-failed", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(exactTargetTab?.id || ""), automatic: Boolean(options.automatic), error: err });
       if (!silent) setError(message);
       return null;
     } finally {
@@ -3939,6 +3981,9 @@ function App() {
       const rolloverProjectRoot = result?.projectRoot || projectRootForProfile(profile);
       const rolloverWorkspaceExpanded = result?.repoTaskScope === "all_allowed" && result?.repoTaskRequest?.scope === "workspace" && rolloverProjectRoot !== ALL_ALLOWED_WORKSPACES;
       const rolloverAllAllowed = !rolloverWorkspaceExpanded && (result?.repo_task_scope === "all_allowed" || result?.repoTaskScope === "all_allowed" || rolloverProjectRoot === ALL_ALLOWED_WORKSPACES);
+      const recoveryTaskId = recoveryContinuation && /^cpt_[a-f0-9]{24}$/.test(String(result?.repoTaskId || profile.current_task_id || ""))
+        ? String(result?.repoTaskId || profile.current_task_id)
+        : "";
       const rolloverStartedAt = new Date().toISOString();
       const created = await api.sendProfileRequest({
         profileId,
@@ -3948,8 +3993,13 @@ function App() {
         projectRoot: rolloverAllAllowed ? "" : rolloverProjectRoot,
         workspaceCandidates: rolloverAllAllowed ? projects.map((project) => project.root) : [],
         text: handoffText,
-        attachments: Array.isArray(result?.rollover_attachments) ? result.rollover_attachments : []
+        attachments: Array.isArray(result?.rollover_attachments) ? result.rollover_attachments : [],
+        previousTaskId: recoveryTaskId,
+        taskMode: recoveryTaskId ? "recovery" : "new",
+        oneShotRecovery: recoveryContinuation
       });
+      if (String(created?.submission_state || "") === "uncertain") throw new Error("Chat tiếp nối có trạng thái gửi không chắc chắn; đã dừng để tránh duplicate.");
+      if (recoveryTaskId && String(created?.repo_task_id || "") !== recoveryTaskId) throw new Error("Manager đã đổi Task ID khi chuyển chat; đã dừng để tránh tạo task FIFO mới.");
       const newConversationId = String(created?.conversation_id || "").trim();
       if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT ch\u01b0a tr\u1ea3 conversation id cho chat ti\u1ebfp n\u1ed1i.");
 
@@ -3969,12 +4019,21 @@ function App() {
           text: "",
           messages: [],
           busy: true,
+          submissionState: "submitted",
+          sendUncertain: false,
           conversationLimitReached: false,
           rolloverStatus: "done",
           rolloverReason: continuationReason,
           rolloverFromConversationId: conversationId,
           activityStartedAt: rolloverStartedAt,
-          rolloverNotice: doneNotice
+          rolloverNotice: doneNotice,
+          repoTaskId: String(created?.repo_task_id || recoveryTaskId),
+          repoTaskDispatchedAt: String(created?.repo_task_dispatched_at || ""),
+          repoTaskScope: String(created?.repo_task_scope || result?.repoTaskScope || ""),
+          logicalTaskStatus: String(created?.worker_job_status || result?.logicalTaskStatus || "running"),
+          repoTaskStatus: "waiting",
+          repoTaskVerified: false,
+          repoTaskRequest: result?.repoTaskRequest || null
         }
       }));
       if (!result?.silent) {
@@ -4202,6 +4261,7 @@ function App() {
       if (!responseTargetStillCurrent()) return null;
       const domAvailable = result.dom_available !== false;
       const canonicalAvailable = result.canonical_available === true;
+      const canonicalRateLimited = result.canonical_rate_limited === true;
       const contentAvailable = domAvailable || canonicalAvailable;
       const networkStreamPayloadAvailable = Boolean(result.network_stream_available && (result.text || result.messages?.length || result.network_stream_activity_text));
       const responseAudit = result.response_audit && typeof result.response_audit === "object" ? result.response_audit : null;
@@ -4352,6 +4412,9 @@ function App() {
             domAvailable,
             domSkipped: Boolean(result.dom_skipped),
             canonicalAvailable: Boolean(canonicalAvailable || protectAuthoritativeSnapshot),
+            canonicalRateLimited,
+            canonicalRateLimitCount: canonicalRateLimited ? Math.max(1, Number(result.canonical_rate_limit_count) || 1) : 0,
+            canonicalRetryAt: canonicalRateLimited ? String(result.canonical_retry_at || "") : "",
             networkStreamAvailable,
             networkStreamEndpoint: String(result.network_stream_endpoint || previous.networkStreamEndpoint || ""),
             networkStreamEventCount: Number(result.network_stream_event_count) || Number(previous.networkStreamEventCount) || 0,

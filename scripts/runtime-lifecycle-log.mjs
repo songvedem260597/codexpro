@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
+const RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_STRING_LENGTH = 4_000;
 const SENSITIVE_KEY = /(authorization|cookie|password|passwd|secret|token|api[_-]?key|access[_-]?key|refresh[_-]?token|private[_-]?key)/i;
 
@@ -52,7 +53,19 @@ export function sanitizeRuntimeLifecycleValue(value, depth = 0) {
   return scrubString(value);
 }
 
+function pruneExpiredFiles(home) {
+  const cutoff = Date.now() - RETENTION_MS;
+  for (const file of runtimeLifecycleLogPaths(home)) {
+    try {
+      if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true });
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
 function rotateIfNeeded(home, incomingBytes) {
+  pruneExpiredFiles(home);
   const [, current] = runtimeLifecycleLogPaths(home);
   try {
     if (fs.statSync(current).size + incomingBytes <= MAX_LOG_BYTES) return;

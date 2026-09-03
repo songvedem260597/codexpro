@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import os from "node:os";
 import { promisify } from "node:util";
+import { runPowerShellProcess } from "./process-runner.mjs";
 
 const execFileAsync = promisify(execFile);
 const cpuSamples = new Map();
@@ -60,9 +61,8 @@ function parsePosixProcessRows(text, requestedPids) {
 async function collectProcessRows(pids) {
   if (process.platform === "win32") {
     const script = `$ids=@(${pids.join(",")}); $target=@(Get-Process -Id $ids -ErrorAction SilentlyContinue); $chrome=@(Get-Process chrome -ErrorAction SilentlyContinue); @($target + $chrome) | Sort-Object Id -Unique | Select-Object Id,ProcessName,CPU,WorkingSet64 | ConvertTo-Json -Compress`;
-    const result = await execFileAsync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
-      windowsHide: true,
-      timeout: 5000,
+    const result = await runPowerShellProcess(script, {
+      timeoutMs: 5_000,
       maxBuffer: 1024 * 1024
     });
     return parsePowerShellJson(result.stdout);

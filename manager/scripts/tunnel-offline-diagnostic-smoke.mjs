@@ -94,6 +94,9 @@ const launcher = await fs.readFile(new URL("../../scripts/codexpro.mjs", import.
 const managerMain = await fs.readFile(new URL("../electron/main.mjs", import.meta.url), "utf8");
 assert.match(launcher, /record\(process\.stdout, 'stdout', chunk\)/, "cloudflared stdout must retain its stream name and actual output chunk");
 assert.match(launcher, /record\(process\.stderr, 'stderr', chunk\)/, "cloudflared stderr must retain its stream name and actual output chunk");
+assert.match(launcher, /superviseQuickTunnel\(\{[\s\S]*?initialInstance[\s\S]*?startInstance: startQuickTunnelInstance[\s\S]*?onRestartReady/, "Cloudflare quick tunnel must use bounded restart supervision instead of fail-fast liveness only");
+assert.match(launcher, /startQuickTunnelInstance[\s\S]*?CODEXPRO_QUICK_TUNNEL_HEALTH_BASE[\s\S]*?waitForPublicHealth\(healthBase, token, child, 'Cloudflare quick tunnel'\)/, "every quick tunnel instance must pass a public health probe before becoming active");
+assert.match(launcher, /Object\.assign\(details, createConnectorDetails\(`\$\{instance\.publicBase\}\/mcp`[\s\S]*?runtimeOptions\.tunnelPid = cloudflared\.pid[\s\S]*?saveRuntimeConnection\(root, details, runtimeOptions\)/, "a restarted quick tunnel must persist its replacement endpoint and pid");
 assert.match(managerMain, /collectTunnelOfflineEvidence\([\s\S]*?Object\.assign\(tunnelHealthEvent\.details, offlineEvidence\)/, "Manager must attach correlated tunnel evidence to the first offline transition log");
 assert.match(managerMain, /if \(!isWindows\)[\s\S]*?const processSummaries = processCandidates\.map[\s\S]*?await recordRuntimeHealthDiagnostics\(\{ healthCycleId, localBase, publicBase, local, tunnel, processSummaries \}\)/, "macOS and other portable runtimes must record the same tunnel outage evidence as Windows");
 

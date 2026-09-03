@@ -15,6 +15,8 @@
     "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs",
     "test:chat-response-finality": "node scripts/chat-response-finality-smoke.mjs",
     "test:runtime-restart": "node scripts/runtime-restart-send-race-smoke.mjs && node scripts/browser-profile-recovery-smoke.mjs",
+    "test:process-runner": "node scripts/process-runner-smoke.mjs",
+    "test:api-worker-cancellation": "node scripts/api-worker-cancellation-smoke.mjs",
     "test:mcp-response-queue": "node scripts/mcp-response-queue-smoke.mjs",
     "test:api-worker-form": "node scripts/api-worker-form-smoke.mjs",
     "test:api-worker-models": "node scripts/api-worker-model-discovery-smoke.mjs",

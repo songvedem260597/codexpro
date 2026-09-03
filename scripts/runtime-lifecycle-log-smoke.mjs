@@ -47,6 +47,19 @@ try {
   assert.ok(!serialized.includes('fixture-bearer-secret'));
   assert.ok(serialized.includes('[REDACTED]'));
 
+  const [previous] = runtimeLifecycleLogPaths(home);
+  const staleAt = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  await fs.writeFile(previous, `${JSON.stringify({ timestamp: staleAt.toISOString(), action: 'stale-previous' })}\n`, 'utf8');
+  await fs.utimes(previous, staleAt, staleAt);
+  appendRuntimeLifecycleLog(home, { action: 'retention-prune-previous', message: 'fresh' });
+  await assert.rejects(fs.stat(previous), { code: 'ENOENT' });
+
+  await fs.utimes(current, staleAt, staleAt);
+  appendRuntimeLifecycleLog(home, { action: 'retention-reset-current', message: 'fresh' });
+  const retained = (await fs.readFile(current, 'utf8')).trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.equal(retained.length, 1, 'fully stale current runtime lifecycle log should be reset before append');
+  assert.equal(retained[0].action, 'retention-reset-current');
+
   const large = 'x'.repeat(3900);
   for (let index = 0; index < 1200; index += 1) {
     appendRuntimeLifecycleLog(home, {
@@ -55,7 +68,6 @@ try {
       details: { index }
     });
   }
-  const [previous] = runtimeLifecycleLogPaths(home);
   const [currentStat, previousStat] = await Promise.all([fs.stat(current), fs.stat(previous)]);
   assert.ok(currentStat.size <= 4 * 1024 * 1024);
   assert.ok(previousStat.size <= 4 * 1024 * 1024);

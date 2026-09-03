@@ -6,6 +6,7 @@ const RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_LOG_BYTES = 8 * 1024 * 1024;
 const COMPACTED_LOG_BYTES = 6 * 1024 * 1024;
 const MAX_READ_ENTRIES = 5000;
+const RECENT_QUERY_TAIL_BYTES = 2 * 1024 * 1024;
 const MAX_STRING_LENGTH = 4000;
 const MAX_WRITE_BATCH_ENTRIES = 250;
 const MAX_WRITE_BATCH_BYTES = 256 * 1024;
@@ -111,9 +112,34 @@ function parseLine(line) {
   }
 }
 
-async function readValidRecords(home) {
+async function readTextFile(file, tailBytes = 0) {
+  if (!(tailBytes > 0)) return { text: await fs.promises.readFile(file, "utf8"), truncated: false };
+  const handle = await fs.promises.open(file, "r");
   try {
-    const text = await fs.promises.readFile(logPath(home), "utf8");
+    const stat = await handle.stat();
+    const start = Math.max(0, stat.size - tailBytes);
+    const length = Math.max(0, stat.size - start);
+    const buffer = Buffer.alloc(length);
+    let offset = 0;
+    while (offset < length) {
+      const { bytesRead } = await handle.read(buffer, offset, length - offset, start + offset);
+      if (!bytesRead) break;
+      offset += bytesRead;
+    }
+    let text = buffer.subarray(0, offset).toString("utf8");
+    if (start > 0) {
+      const firstBreak = text.indexOf("\n");
+      text = firstBreak >= 0 ? text.slice(firstBreak + 1) : "";
+    }
+    return { text, truncated: start > 0 };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readValidRecords(home, options = {}) {
+  try {
+    const { text } = await readTextFile(logPath(home), Math.max(0, Number(options.tailBytes) || 0));
     const cutoff = Date.now() - RETENTION_MS;
     return text.split(/\r?\n/).filter(Boolean).map(parseLine).filter((item) => item && item.timestamp >= cutoff).map((item) => item.parsed);
   } catch (error) {
@@ -147,11 +173,11 @@ function normalizeProfileTaskEvent(parsed) {
   });
 }
 
-async function readProfileTaskEventRecords(home) {
+async function readProfileTaskEventRecords(home, options = {}) {
   const records = [];
   for (const file of profileTaskEventLogPaths(home)) {
     try {
-      const text = await fs.promises.readFile(file, "utf8");
+      const { text } = await readTextFile(file, Math.max(0, Number(options.tailBytes) || 0));
       for (const line of text.split(/\r?\n/).filter(Boolean)) {
         try {
           const record = normalizeProfileTaskEvent(JSON.parse(line));
@@ -166,11 +192,11 @@ async function readProfileTaskEventRecords(home) {
   return records.filter((record) => Date.parse(record.timestamp) >= cutoff);
 }
 
-async function readRuntimeLifecycleRecords(home) {
+async function readRuntimeLifecycleRecords(home, options = {}) {
   const records = [];
   for (const file of runtimeLifecycleLogPaths(home)) {
     try {
-      const text = await fs.promises.readFile(file, "utf8");
+      const { text } = await readTextFile(file, Math.max(0, Number(options.tailBytes) || 0));
       for (const line of text.split(/\r?\n/).filter(Boolean)) {
         const record = parseLine(line);
         if (!record) continue;
@@ -385,10 +411,12 @@ export async function readDiagnosticLogs(home, options = {}) {
   const category = String(options.category || "all").toLowerCase();
   const query = String(options.query || "").trim().toLowerCase().slice(0, 200);
   const limit = Math.max(1, Math.min(MAX_READ_ENTRIES, Number(options.limit) || 1000));
+  const tailBounded = limit <= 1000 && level === "all" && source === "all" && category === "all" && !query;
+  const readOptions = tailBounded ? { tailBytes: RECENT_QUERY_TAIL_BYTES } : {};
   const windowRecords = annotateIncidentOccurrences([
-    ...await readValidRecords(home),
-    ...await readProfileTaskEventRecords(home),
-    ...await readRuntimeLifecycleRecords(home)
+    ...await readValidRecords(home, readOptions),
+    ...await readProfileTaskEventRecords(home, readOptions),
+    ...await readRuntimeLifecycleRecords(home, readOptions)
   ].filter((item) => {
     const timestamp = Date.parse(item.timestamp || "");
     return Number.isFinite(timestamp) && timestamp >= cutoff;
@@ -426,6 +454,10 @@ export async function readDiagnosticLogs(home, options = {}) {
     retention_hours: 24,
     queried_hours: hours,
     checked_at: new Date().toISOString(),
+    scan: {
+      tail_bounded: tailBounded,
+      max_bytes_per_file: tailBounded ? RECENT_QUERY_TAIL_BYTES : null
+    },
     summary,
     available,
     entries,

@@ -594,6 +594,11 @@ async function targetFor(debugUrl: string, targetId?: string): Promise<BrowserTa
   return target;
 }
 
+const CDP_SESSION_IDLE_MS = 30_000;
+const CDP_CONNECT_TIMEOUT_MS = 2_500;
+const CDP_CONNECT_ATTEMPTS = 3;
+const CDP_CONNECT_BACKOFF_MS = 120;
+
 class CdpClient {
   private nextId = 1;
   private readonly pending = new Map<number, { resolve: (value: Record<string, any>) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
@@ -626,7 +631,7 @@ class CdpClient {
     socket.addEventListener("error", () => this.rejectPending(new CodexProError("Chrome DevTools WebSocket failed.")));
   }
 
-  static async connect(webSocketUrl: string): Promise<CdpClient> {
+  static async connect(webSocketUrl: string, timeoutMs = CDP_CONNECT_TIMEOUT_MS): Promise<CdpClient> {
     const socket = new WebSocket(webSocketUrl);
     await new Promise<void>((resolve, reject) => {
       let settled = false;
@@ -637,7 +642,11 @@ class CdpClient {
         try { socket.close(); } catch {}
         reject(error);
       };
-      const timer = setTimeout(() => fail(new CodexProError("Timed out connecting to the Chrome tab.")), 8_000);
+      const timer = setTimeout(() => fail(new CodexProError("Timed out connecting to the Chrome tab.", {
+        code: "BROWSER_CDP_ATTACH_TIMEOUT",
+        details: { timeout_ms: timeoutMs }
+      })), Math.max(250, timeoutMs));
+      timer.unref?.();
       socket.addEventListener("open", () => {
         if (settled) {
           try { socket.close(); } catch {}
@@ -647,7 +656,9 @@ class CdpClient {
         clearTimeout(timer);
         resolve();
       }, { once: true });
-      socket.addEventListener("error", () => fail(new CodexProError("Unable to connect to the Chrome tab.")), { once: true });
+      socket.addEventListener("error", () => fail(new CodexProError("Unable to connect to the Chrome tab.", {
+        code: "BROWSER_CDP_ATTACH_FAILED"
+      })), { once: true });
     });
     return new CdpClient(socket);
   }
@@ -692,8 +703,8 @@ class CdpClient {
   }
 }
 
-const CDP_SESSION_IDLE_MS = 30_000;
 const persistentClients = new Map<string, { client: CdpClient; timer: NodeJS.Timeout }>();
+const persistentClientPromises = new Map<string, Promise<CdpClient>>();
 
 function dropPersistentClient(webSocketUrl: string): void {
   const existing = persistentClients.get(webSocketUrl);
@@ -711,6 +722,28 @@ function refreshPersistentClient(webSocketUrl: string, client: CdpClient): void 
   persistentClients.set(webSocketUrl, { client, timer });
 }
 
+async function connectPersistentClient(webSocketUrl: string): Promise<CdpClient> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < CDP_CONNECT_ATTEMPTS; attempt += 1) {
+    try {
+      return await CdpClient.connect(webSocketUrl, CDP_CONNECT_TIMEOUT_MS);
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 >= CDP_CONNECT_ATTEMPTS) break;
+      const delayMs = CDP_CONNECT_BACKOFF_MS * (2 ** attempt);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new CodexProError(`Unable to attach to the Chrome tab after ${CDP_CONNECT_ATTEMPTS} attempts.`, {
+    code: "BROWSER_CDP_ATTACH_FAILED",
+    details: {
+      attempts: CDP_CONNECT_ATTEMPTS,
+      connect_timeout_ms: CDP_CONNECT_TIMEOUT_MS
+    },
+    cause: lastError
+  });
+}
+
 async function persistentClient(webSocketUrl: string): Promise<CdpClient> {
   const existing = persistentClients.get(webSocketUrl);
   if (existing?.client.isOpen()) {
@@ -718,9 +751,20 @@ async function persistentClient(webSocketUrl: string): Promise<CdpClient> {
     return existing.client;
   }
   if (existing) dropPersistentClient(webSocketUrl);
-  const client = await CdpClient.connect(webSocketUrl);
-  refreshPersistentClient(webSocketUrl, client);
-  return client;
+
+  const inFlight = persistentClientPromises.get(webSocketUrl);
+  if (inFlight) return await inFlight;
+
+  const promise = connectPersistentClient(webSocketUrl).then((client) => {
+    refreshPersistentClient(webSocketUrl, client);
+    return client;
+  });
+  persistentClientPromises.set(webSocketUrl, promise);
+  try {
+    return await promise;
+  } finally {
+    if (persistentClientPromises.get(webSocketUrl) === promise) persistentClientPromises.delete(webSocketUrl);
+  }
 }
 
 async function withTarget<T>(debugUrl: string, targetId: string | undefined, fn: (client: CdpClient, target: BrowserTarget) => Promise<T>): Promise<T> {

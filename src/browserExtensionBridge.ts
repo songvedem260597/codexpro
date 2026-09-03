@@ -492,15 +492,26 @@ function headlessExclusiveLock(profileId: string, workerId = ""): { locked: bool
   }
 }
 
+function rotateDiagnosticLogIfNeeded(logPath: string, maxBytes: number): void {
+  const cutoff = Date.now() - PROFILE_RETENTION_MS;
+  const previousPath = `${logPath}.1`;
+  for (const file of [previousPath, logPath]) {
+    try {
+      if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+    }
+  }
+  if (!fs.existsSync(logPath) || fs.statSync(logPath).size < maxBytes) return;
+  if (fs.existsSync(previousPath)) fs.rmSync(previousPath, { force: true });
+  fs.renameSync(logPath, previousPath);
+}
+
 export function recordBrowserProfileTaskEvent(event: string, details: Record<string, unknown> = {}): void {
   try {
     const logPath = browserProfileTaskEventLogPath();
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    if (fs.existsSync(logPath) && fs.statSync(logPath).size >= PROFILE_TASK_EVENT_LOG_MAX_BYTES) {
-      const previousPath = `${logPath}.1`;
-      if (fs.existsSync(previousPath)) fs.rmSync(previousPath, { force: true });
-      fs.renameSync(logPath, previousPath);
-    }
+    rotateDiagnosticLogIfNeeded(logPath, PROFILE_TASK_EVENT_LOG_MAX_BYTES);
     const safeDetails = Object.fromEntries(Object.entries(details).slice(0, 40).map(([key, value]) => [
       String(key).slice(0, 100),
       typeof value === "string" ? value.slice(0, 500) : typeof value === "number" || typeof value === "boolean" || value == null ? value : String(value).slice(0, 500)
@@ -546,11 +557,7 @@ function recordBrowserFlightRecorderIncident(incident: BrowserFlightRecorderInci
   try {
     const logPath = browserFlightRecorderLogPath();
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    if (fs.existsSync(logPath) && fs.statSync(logPath).size >= FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES) {
-      const previousPath = `${logPath}.1`;
-      if (fs.existsSync(previousPath)) fs.rmSync(previousPath, { force: true });
-      fs.renameSync(logPath, previousPath);
-    }
+    rotateDiagnosticLogIfNeeded(logPath, FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES);
     fs.appendFileSync(logPath, `${JSON.stringify(incident)}\n`, "utf8");
   } catch {
     // Flight-recorder persistence is diagnostic-only and must not break commands.
@@ -589,11 +596,7 @@ function recordBrowserRateLimitIncident(incident: BrowserFlightRecorderIncident)
   try {
     const logPath = browserRateLimitLogPath();
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    if (fs.existsSync(logPath) && fs.statSync(logPath).size >= FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES) {
-      const previousPath = `${logPath}.1`;
-      if (fs.existsSync(previousPath)) fs.rmSync(previousPath, { force: true });
-      fs.renameSync(logPath, previousPath);
-    }
+    rotateDiagnosticLogIfNeeded(logPath, FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES);
     fs.appendFileSync(logPath, `${JSON.stringify(incident)}\n`, "utf8");
   } catch {
     // Dedicated rate-limit diagnostics must never break the browser bridge.
@@ -1650,6 +1653,38 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
     task_title_source: "ai"
   });
   if (singleton) scheduleProfileNotification(singleton);
+}
+
+export function rebindBrowserExtensionProfileTaskConversation(profileId: string, taskId: string, conversationId: string): boolean {
+  const id = String(profileId || "").trim();
+  const normalizedTaskId = String(taskId || "").trim();
+  const normalizedConversationId = String(conversationId || "").trim();
+  if (!validPersistedProfileId(id) || !/^cpt_[a-f0-9]{24}$/.test(normalizedTaskId) || !/^[A-Za-z0-9-]{8,160}$/.test(normalizedConversationId)) return false;
+  if (profileTaskIds.get(id) !== normalizedTaskId) return false;
+  if (profileTaskConversationIds.get(id) === normalizedConversationId) return true;
+  const previousConversationId = profileTaskConversationIds.get(id) || "";
+  profileTaskConversationIds.set(id, normalizedConversationId);
+  profileTaskUpdatedAt.set(id, new Date().toISOString());
+  persistBrowserProfileTasks();
+  recordBrowserProfileTaskEvent("profile_task_conversation_rebound", {
+    profile_id: id,
+    task_id: normalizedTaskId,
+    previous_conversation_id: previousConversationId,
+    task_conversation_id: normalizedConversationId,
+    reason: "recovery_rollover"
+  });
+  if (singleton) scheduleProfileNotification(singleton);
+  return true;
+}
+
+export function getBrowserExtensionProfileTaskBinding(profileId: string): { taskId: string; conversationId: string } | undefined {
+  const id = String(profileId || "").trim();
+  const taskId = profileTaskIds.get(id) || "";
+  if (!id || !taskId) return undefined;
+  return {
+    taskId,
+    conversationId: profileTaskConversationIds.get(id) || ""
+  };
 }
 
 export function setBrowserExtensionProfilePendingTask(

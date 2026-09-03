@@ -35,6 +35,7 @@ import {
   runVerifiedOpenCodeInvestigation
 } from './opencode-subagent-runner.mjs';
 import { cloudflaredOutputLevel, createRuntimeLifecycleLogger } from './runtime-lifecycle-log.mjs';
+import { superviseQuickTunnel } from './quick-tunnel-supervisor.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UNTRACKED_FILE_HASH_BYTES = 64 * 1024;
@@ -4488,8 +4489,10 @@ async function main() {
   statusLine('wait', 'Starting local MCP server');
   const server = spawnLogged('codexpro', process.execPath, [httpPath], { cwd: projectRoot, env: serverEnv, verbose: verboseLogs });
   let cloudflared;
+  let tunnelSupervisorStopRequested = false;
   let cleanupTunnelCredentials = () => {};
   const cleanup = () => {
+    tunnelSupervisorStopRequested = true;
     logRuntimeLifecycle('cleanup-requested', 'CodexPro launcher is cleaning up child processes', {
       server_pid: server.pid ?? null,
       tunnel_pid: cloudflared?.pid ?? null
@@ -4681,26 +4684,37 @@ async function main() {
   if (tunnel === 'cloudflare') {
     statusLine('wait', 'Opening Cloudflare quick tunnel');
     const proxyUrl = outboundProxyFromEnv(process.env);
-    let publicBase = '';
-    if (proxyUrl) {
-      const quickTunnel = requestQuickTunnelViaCurl(proxyUrl);
-      const { tmpRoot, credentialsPath } = writeQuickTunnelCredentials(quickTunnel);
-      const removeCredentials = () => fs.rmSync(tmpRoot, { recursive: true, force: true });
-      cleanupTunnelCredentials = removeCredentials;
+    const startQuickTunnelInstance = async () => {
+      let child;
+      let publicBase = '';
+      let cleanupCredentials = () => {};
       try {
-        cloudflared = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase, '--credentials-file', credentialsPath, 'run', quickTunnel.id], { cwd: root, env: process.env, verbose: verboseLogs });
+        if (proxyUrl) {
+          const quickTunnel = requestQuickTunnelViaCurl(proxyUrl);
+          const { tmpRoot, credentialsPath } = writeQuickTunnelCredentials(quickTunnel);
+          cleanupCredentials = () => fs.rmSync(tmpRoot, { recursive: true, force: true });
+          child = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase, '--credentials-file', credentialsPath, 'run', quickTunnel.id], { cwd: root, env: process.env, verbose: verboseLogs });
+          child.once('exit', cleanupCredentials);
+          child.once('error', cleanupCredentials);
+          await waitForTunnelStartup(child, 'cloudflared');
+          publicBase = `https://${quickTunnel.hostname}`;
+        } else {
+          child = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase], { cwd: root, env: process.env, verbose: verboseLogs });
+          publicBase = await waitForCloudflareUrl(child);
+        }
+        const healthBase = String(process.env.CODEXPRO_QUICK_TUNNEL_HEALTH_BASE || publicBase).replace(/\/+$/, '');
+        await waitForPublicHealth(healthBase, token, child, 'Cloudflare quick tunnel');
+        return { child, publicBase, cleanupCredentials };
       } catch (error) {
-        removeCredentials();
+        if (child) killProcess(child);
+        cleanupCredentials();
         throw error;
       }
-      cloudflared.once('exit', removeCredentials);
-      cloudflared.once('error', removeCredentials);
-      await waitForTunnelStartup(cloudflared, 'cloudflared');
-      publicBase = `https://${quickTunnel.hostname}`;
-    } else {
-      cloudflared = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase], { cwd: root, env: process.env, verbose: verboseLogs });
-      publicBase = await waitForCloudflareUrl(cloudflared);
-    }
+    };
+    const initialInstance = await startQuickTunnelInstance();
+    cloudflared = initialInstance.child;
+    cleanupTunnelCredentials = initialInstance.cleanupCredentials;
+    const publicBase = initialInstance.publicBase;
     const details = printConnectorBlock(`${publicBase}/mcp`, token, {
       localBase,
       headless,
@@ -4719,7 +4733,53 @@ async function main() {
     });
     runtimeOptions.tunnelPid = cloudflared.pid ?? null;
     saveRuntimeConnection(root, details, runtimeOptions);
-    await holdRuntime(server, details, cleanup, headless, cloudflared);
+    const tunnelSupervisor = superviseQuickTunnel({
+      initialInstance,
+      shouldStop: () => tunnelSupervisorStopRequested,
+      startInstance: startQuickTunnelInstance,
+      onUnexpectedExit: ({ error, instance }) => {
+        statusLine('warn', 'Cloudflare quick tunnel disconnected; scheduling restart');
+        logRuntimeLifecycle('tunnel-restart-needed', 'Cloudflare quick tunnel exited unexpectedly', {
+          tunnel_pid: instance?.child?.pid ?? null,
+          error
+        }, 'warn');
+      },
+      onRestartScheduled: ({ restartCount, delayMs, error }) => {
+        logRuntimeLifecycle('tunnel-restart-scheduled', 'Cloudflare quick tunnel restart scheduled', {
+          restart_count: restartCount,
+          delay_ms: delayMs,
+          error
+        }, 'warn');
+      },
+      onRestartReady: ({ restartCount, instance }) => {
+        cloudflared = instance.child;
+        cleanupTunnelCredentials = instance.cleanupCredentials;
+        Object.assign(details, createConnectorDetails(`${instance.publicBase}/mcp`, token, localBase));
+        runtimeOptions.tunnelPid = cloudflared.pid ?? null;
+        saveRuntimeConnection(root, details, runtimeOptions);
+        logRuntimeLifecycle('tunnel-restarted', 'Cloudflare quick tunnel restarted successfully', {
+          restart_count: restartCount,
+          tunnel_pid: cloudflared.pid ?? null,
+          public_origin: instance.publicBase
+        });
+        statusLine('ok', `Cloudflare quick tunnel restored after restart ${restartCount}`);
+        console.log(`  Server URL ${details.serverUrl}`);
+        if (headless) console.log(`CODEXPRO_READY ${details.serverUrl}`);
+      },
+      onRestartFailed: ({ restartCount, error }) => {
+        logRuntimeLifecycle('tunnel-restart-failed', 'Cloudflare quick tunnel restart attempt failed', {
+          restart_count: restartCount,
+          error
+        }, 'error');
+      }
+    }).catch((error) => {
+      cleanup();
+      throw error;
+    });
+    await Promise.race([
+      holdRuntime(server, details, cleanup, headless),
+      tunnelSupervisor
+    ]);
     return;
   }
 
