@@ -90,12 +90,25 @@ assert.equal(Object.values(rateLimitTrace).includes("must-not-leak"), false, "42
 const flightRecorderEventIsIncidentSource = extractFunction("flightRecorderEventIsIncident");
 const flightRecorderEventIsIncident = Function(`${flightRecorderEventIsIncidentSource}; return flightRecorderEventIsIncident;`)();
 assert.equal(flightRecorderEventIsIncident(rateLimitTrace), true, "ChatGPT HTTP 429 must be promoted to a flight-recorder incident even without a console error");
+const flightRecorderEventIsRateLimitSource = extractFunction("flightRecorderEventIsRateLimit");
+const flightRecorderEventIsRateLimit = Function(`${flightRecorderEventIsRateLimitSource}; return flightRecorderEventIsRateLimit;`)();
+assert.equal(flightRecorderEventIsRateLimit(rateLimitTrace), true, "direct CDP 429 responses must remain dedicated rate-limit incidents");
+assert.equal(flightRecorderEventIsRateLimit({ event: "Log.entryAdded", level: "error", text: "Failed to load resource: the server responded with a status of 429 ()" }), true, "Chrome resource-error logs must provide a 429 fallback when Network.responseReceived is absent");
+assert.equal(flightRecorderEventIsRateLimit({ event: "Runtime.consoleAPICalled", level: "error", text: "RequestError: Too many requests" }), true, "ChatGPT console RequestError must provide a 429 fallback when the network event is absent");
+assert.equal(flightRecorderEventIsRateLimit({ event: "Runtime.consoleAPICalled", level: "error", text: "RequestError: Conversation not found" }), false, "unrelated ChatGPT console errors must not be mislabeled as rate limits");
+const normalizeFlightRecorderRateLimitEventSource = extractFunction("normalizeFlightRecorderRateLimitEvent");
+const normalizeFlightRecorderRateLimitEvent = Function("flightRecorderEventIsRateLimit", `${normalizeFlightRecorderRateLimitEventSource}; return normalizeFlightRecorderRateLimitEvent;`)(flightRecorderEventIsRateLimit);
+const fallbackRateLimitTrace = normalizeFlightRecorderRateLimitEvent({ event: "Log.entryAdded", level: "error", text: "Failed to load resource: the server responded with a status of 429 ()", url: "https://chatgpt.com/backend-api/conversations/123?secret=redacted" });
+assert.equal(fallbackRateLimitTrace.status, 429, "fallback 429 events must be normalized to the same status schema as direct network responses");
+assert.equal(fallbackRateLimitTrace.endpoint, "/backend-api/conversations/123", "fallback 429 events must preserve a correlation endpoint when Chrome supplies the failed resource URL");
+assert.equal(fallbackRateLimitTrace.rate_limit_fallback_source, "Log.entryAdded", "fallback 429 events must identify which CDP signal recovered the incident");
 const flightRecorderIncidentMessageSource = extractFunction("flightRecorderIncidentMessage");
 const flightRecorderIncidentMessage = Function(`${flightRecorderIncidentMessageSource}; return flightRecorderIncidentMessage;`)();
 assert.equal(flightRecorderIncidentMessage(rateLimitTrace), "ChatGPT HTTP 429 Too Many Requests: /backend-api/f/conversation", "429 incident messages must be immediately recognizable in logs");
-assert.match(worker, /persistFlightRecorderIncident\(tabId,event,'rate_limit'\)/, "429 incidents must bypass the generic five-second incident cooldown so intermittent rate limits are not lost");
+assert.equal(flightRecorderIncidentMessage(fallbackRateLimitTrace), "ChatGPT HTTP 429 Too Many Requests: /backend-api/conversations/123", "fallback 429 incidents must use the same recognizable diagnostic message");
+assert.match(worker, /flightRecorderEventIsRateLimit\(event\)[\s\S]*?persistFlightRecorderIncident\(tabId,normalizeFlightRecorderRateLimitEvent\(event\),'rate_limit'\)/, "direct and fallback 429 incidents must bypass the generic five-second incident cooldown so intermittent rate limits are not lost");
 assert.match(worker, /slice\(-\(reason==='rate_limit'\?20:120\)\)/, "high-frequency 429 incidents must keep only a compact 20-event context so diagnostics do not amplify the rate-limit storm");
-assert.match(bridge, /chatgpt-rate-limit\.jsonl[\s\S]*?recordBrowserRateLimitIncident/, "the bridge must persist a dedicated ChatGPT 429 JSONL investigation log");
+assert.match(bridge, /chatgpt-rate-limit\.jsonl[\s\S]*?normalizeBrowserRateLimitIncident[\s\S]*?recordBrowserRateLimitIncident/, "the bridge must normalize old-worker console/log 429 fallbacks and persist them to the dedicated JSONL investigation log");
 assert.match(managerMain, /ChatGPT trả về HTTP 429 Too Many Requests[\s\S]*?chatgpt-rate-limit/, "Manager diagnostics must surface each new rate-limit incident with correlation metadata");
 
 const generationSource = extractFunction("isChatGenerationRequest");

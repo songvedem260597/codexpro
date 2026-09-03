@@ -3974,8 +3974,27 @@ function flightRecorderEventIsIncident(event) {
   return false;
 }
 
+function flightRecorderEventIsRateLimit(event) {
+  const type=String(event?.event||'');
+  if(type==='Network.responseReceived')return Number(event?.status)===429&&String(event?.url||'').startsWith('https://chatgpt.com/');
+  if(!['Runtime.consoleAPICalled','Log.entryAdded'].includes(type))return false;
+  const text=String(event?.text||'');
+  return /\btoo many requests\b/i.test(text)
+    || /\b(?:http|status(?:\s+code)?(?:\s+of)?)\s*[:=]?\s*429\b/i.test(text)
+    || /\bserver responded with a status of 429\b/i.test(text);
+}
+
+function normalizeFlightRecorderRateLimitEvent(event) {
+  const current=event&&typeof event==='object'?event:{};
+  if(!flightRecorderEventIsRateLimit(current))return current;
+  const url=String(current.url||'');
+  let endpoint=String(current.endpoint||'');
+  if(!endpoint&&url){try{endpoint=new URL(url).pathname;}catch{}}
+  return {...current,status:429,endpoint:String(endpoint||'').slice(0,1000),rate_limit_fallback_source:String(current.event||'').slice(0,120)};
+}
+
 function flightRecorderIncidentMessage(event) {
-  if(String(event?.event||'')==='Network.responseReceived'&&Number(event?.status)===429){
+  if(Number(event?.status)===429){
     const endpoint=String(event?.endpoint||'').trim();
     return `ChatGPT HTTP 429 Too Many Requests${endpoint?`: ${endpoint}`:''}`.slice(0,1000);
   }
@@ -4031,7 +4050,7 @@ function noteFlightRecorderEvent(tabId,rawEvent) {
   events.push(event);
   if(events.length>FLIGHT_RECORDER_EVENT_LIMIT)events.splice(0,events.length-FLIGHT_RECORDER_EVENT_LIMIT);
   flightRecorderEventsByTab.set(tabId,events);
-  if(String(event?.event||'')==='Network.responseReceived'&&Number(event?.status)===429&&String(event?.url||'').startsWith('https://chatgpt.com/'))void persistFlightRecorderIncident(tabId,event,'rate_limit');
+  if(flightRecorderEventIsRateLimit(event))void persistFlightRecorderIncident(tabId,normalizeFlightRecorderRateLimitEvent(event),'rate_limit');
   else if(flightRecorderEventIsIncident(event))void persistFlightRecorderIncident(tabId,event,'cdp');
 }
 
