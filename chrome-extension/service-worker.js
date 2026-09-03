@@ -1051,6 +1051,8 @@ async function tabList() {
     const conversationId=conversationIdFromUrl(tab.url);
     const recorderMatches=recorderIncidents.filter(item=>Number(item?.tab_id)===Number(tab.id)||(conversationId&&String(item?.conversation_id||'')===conversationId));
     const latestRecorderIncident=recorderMatches.at(-1)||null;
+    const rateLimitMatches=recorderMatches.filter(item=>String(item?.reason||'')==='rate_limit'||Number(item?.event?.status)===429);
+    const latestRateLimitIncident=rateLimitMatches.at(-1)||null;
     const hungAudit=Object.values(longTaskAudits).find(record=>record?.status==='hung'&&String(record?.conversation_id||'')===conversationId);
     let networkState=await chatRequestState(tab.id,conversationId);
     const cachedDomActivity=chatDomActivityByTab.get(tab.id)?.value;
@@ -1129,6 +1131,17 @@ async function tabList() {
       flight_recorder_latest_kind:String(latestRecorderIncident?.kind||''),
       flight_recorder_latest_message:String(latestRecorderIncident?.message||'').slice(0,500),
       flight_recorder_latest_task_id:String(latestRecorderIncident?.task_id||''),
+      rate_limit_incident_count:rateLimitMatches.length,
+      rate_limit_latest_at:String(latestRateLimitIncident?.at||''),
+      rate_limit_latest_message:String(latestRateLimitIncident?.message||'').slice(0,500),
+      rate_limit_latest_status_code:Number(latestRateLimitIncident?.event?.status)||0,
+      rate_limit_latest_url:String(latestRateLimitIncident?.event?.url||'').slice(0,2000),
+      rate_limit_latest_endpoint:String(latestRateLimitIncident?.event?.endpoint||'').slice(0,1000),
+      rate_limit_latest_request_id:String(latestRateLimitIncident?.event?.request_id||'').slice(0,160),
+      rate_limit_latest_response_request_id:String(latestRateLimitIncident?.event?.response_request_id||'').slice(0,160),
+      rate_limit_latest_retry_after:String(latestRateLimitIncident?.event?.retry_after||'').slice(0,300),
+      rate_limit_latest_task_id:String(latestRateLimitIncident?.task_id||'').slice(0,160),
+      rate_limit_latest_conversation_id:String(latestRateLimitIncident?.conversation_id||'').slice(0,180),
       conversation_limit_reached:false,
       conversation_limit_message:''
     };
@@ -3695,9 +3708,9 @@ chrome.debugger.onEvent.addListener((source,method,params)=>{
 });
 
 function safeExtensionTraceEvent(event) {
-  const method=String(event?.method||''),params=event?.params||{},at=Number(event?.receivedAt)||Date.now(),bounded=(value,max)=>String(value??'').slice(0,max),safeUrl=value=>{const raw=bounded(value,8000);try{const url=new URL(raw);url.username='';url.password='';url.hash='';for(const key of [...url.searchParams.keys()])url.searchParams.set(key,'<redacted>');return bounded(url.toString(),2000);}catch{return bounded(raw.split(/[?#]/,1)[0],2000);}};
+  const method=String(event?.method||''),params=event?.params||{},at=Number(event?.receivedAt)||Date.now(),bounded=(value,max)=>String(value??'').slice(0,max),safeUrl=value=>{const raw=bounded(value,8000);try{const url=new URL(raw);url.username='';url.password='';url.hash='';for(const key of [...url.searchParams.keys()])url.searchParams.set(key,'<redacted>');return bounded(url.toString(),2000);}catch{return bounded(raw.split(/[?#]/,1)[0],2000);}},headerValue=(headers,name)=>{const wanted=String(name||'').toLowerCase();for(const [key,value] of Object.entries(headers&&typeof headers==='object'?headers:{})){if(String(key).toLowerCase()===wanted)return bounded(value,300);}return '';},endpointFor=value=>{try{return bounded(new URL(String(value||'')).pathname,1000);}catch{return '';}};
   if(method==='Network.requestWillBeSent')return {at,event:method,request_id:bounded(params.requestId,160),method:bounded(params.request?.method,16),url:safeUrl(params.request?.url),resource_type:bounded(params.type,40)};
-  if(method==='Network.responseReceived')return {at,event:method,request_id:bounded(params.requestId,160),status:Number(params.response?.status)||0,url:safeUrl(params.response?.url),mime_type:bounded(params.response?.mimeType,160),resource_type:bounded(params.type,40)};
+  if(method==='Network.responseReceived'){const headers=params.response?.headers||{};return {at,event:method,request_id:bounded(params.requestId,160),status:Number(params.response?.status)||0,url:safeUrl(params.response?.url),endpoint:endpointFor(params.response?.url),mime_type:bounded(params.response?.mimeType,160),resource_type:bounded(params.type,40),retry_after:headerValue(headers,'retry-after'),response_request_id:headerValue(headers,'x-request-id')||headerValue(headers,'openai-request-id')||headerValue(headers,'cf-ray')};}
   if(method==='Network.loadingFinished')return {at,event:method,request_id:bounded(params.requestId,160),encoded_bytes:Number(params.encodedDataLength)||0};
   if(method==='Network.loadingFailed')return {at,event:method,request_id:bounded(params.requestId,160),error:bounded(params.errorText,500),canceled:Boolean(params.canceled)};
   if(method==='Runtime.consoleAPICalled')return {at,event:method,level:bounded(params.type,40),text:(Array.isArray(params.args)?params.args.map(item=>bounded(item?.value??item?.description,300)).join(' '):'').slice(0,1000)};
@@ -3710,6 +3723,7 @@ function safeExtensionTraceEvent(event) {
 function flightRecorderEventIsIncident(event) {
   const type=String(event?.event||''),level=String(event?.level||'').toLowerCase();
   if(type==='Runtime.exceptionThrown'||type==='Inspector.targetCrashed')return true;
+  if(type==='Network.responseReceived'&&Number(event?.status)===429&&String(event?.url||'').startsWith('https://chatgpt.com/'))return true;
   if(type==='Network.loadingFailed')return !event?.canceled;
   if(type==='Runtime.consoleAPICalled')return ['error','assert'].includes(level);
   if(type==='Log.entryAdded')return ['error','warning'].includes(level);
@@ -3718,6 +3732,10 @@ function flightRecorderEventIsIncident(event) {
 }
 
 function flightRecorderIncidentMessage(event) {
+  if(String(event?.event||'')==='Network.responseReceived'&&Number(event?.status)===429){
+    const endpoint=String(event?.endpoint||'').trim();
+    return `ChatGPT HTTP 429 Too Many Requests${endpoint?`: ${endpoint}`:''}`.slice(0,1000);
+  }
   return String(event?.text||event?.error||event?.reason||event?.event||'Browser incident').slice(0,1000);
 }
 
@@ -3749,7 +3767,7 @@ async function persistFlightRecorderIncident(tabId,event,reason='cdp') {
     id:crypto.randomUUID(),at:new Date(now).toISOString(),at_ms:now,reason:String(reason||'cdp').slice(0,80),kind:String(event?.event||'unknown').slice(0,120),message:flightRecorderIncidentMessage(event),
     profile_id:String(context.profile_id||profile?.id||'').slice(0,160),tab_id:tabId,window_id:Number(tab?.windowId)||0,conversation_id:conversationId,
     task_id:String(context.task_id||'').slice(0,160),task_title:String(context.task_title||'').slice(0,300),command_id:String(context.command_id||'').slice(0,160),action:String(context.action||'').slice(0,160),
-    url:safeTabAuditUrl(tab?.url||''),event:event&&typeof event==='object'?event:{event:String(event||'unknown')},events:(flightRecorderEventsByTab.get(tabId)||[]).slice(-120)
+    url:safeTabAuditUrl(tab?.url||''),event:event&&typeof event==='object'?event:{event:String(event||'unknown')},events:(flightRecorderEventsByTab.get(tabId)||[]).slice(-(reason==='rate_limit'?20:120))
   };
   try{
     const incidents=await getFlightRecorderIncidents();
@@ -3770,7 +3788,8 @@ function noteFlightRecorderEvent(tabId,rawEvent) {
   events.push(event);
   if(events.length>FLIGHT_RECORDER_EVENT_LIMIT)events.splice(0,events.length-FLIGHT_RECORDER_EVENT_LIMIT);
   flightRecorderEventsByTab.set(tabId,events);
-  if(flightRecorderEventIsIncident(event))void persistFlightRecorderIncident(tabId,event,'cdp');
+  if(String(event?.event||'')==='Network.responseReceived'&&Number(event?.status)===429&&String(event?.url||'').startsWith('https://chatgpt.com/'))void persistFlightRecorderIncident(tabId,event,'rate_limit');
+  else if(flightRecorderEventIsIncident(event))void persistFlightRecorderIncident(tabId,event,'cdp');
 }
 
 async function stopFlightRecorderForTab(tabId) {

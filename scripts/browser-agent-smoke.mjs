@@ -871,7 +871,7 @@ assert.match(worker, /data_url:dataUrl/, "generated image previews must be retur
 assert.match(worker, /if\(domActivity\.busy&&!allowBusyFollowup\)\{[\s\S]*?probeCanonicalActivity\(tab\.id,targetConversationId,true\)[\s\S]*?canonicalCompleted[\s\S]*?send_preflight_canonical/, "automated send preflight must clear a stale DOM busy guard when canonical proves the previous turn completed while manual follow-ups bypass that guard");
 assert.match(worker, /allowBusyFollowup&&\(requestState\.busy&&requestState\.network_state==='generating'\|\|networkCaptureProbe\?\.in_progress===true\)/, "explicit manual follow-ups must accept either the live request state or an authoritative in-progress network stream");
 assert.match(worker, /SEND_POST_ACK_STABILITY_MS = 650/, "accepted sends must retain a short post-ACK stability gate before another send may start");
-assert.equal(manifest.version, "0.5.111");
+assert.equal(manifest.version, "0.5.112");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");

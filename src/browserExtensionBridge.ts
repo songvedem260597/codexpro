@@ -118,6 +118,18 @@ export interface ExtensionProfileSummary {
   flight_recorder_latest_at: string;
   flight_recorder_latest_kind: string;
   flight_recorder_latest_message: string;
+  rate_limit_incident_count: number;
+  rate_limit_latest_at: string;
+  rate_limit_latest_message: string;
+  rate_limit_latest_status_code: number;
+  rate_limit_latest_url: string;
+  rate_limit_latest_endpoint: string;
+  rate_limit_latest_request_id: string;
+  rate_limit_latest_response_request_id: string;
+  rate_limit_latest_retry_after: string;
+  rate_limit_latest_task_id: string;
+  rate_limit_latest_conversation_id: string;
+  rate_limit_latest_tab_id: number;
   chatgpt_tabs: Array<{
     id: number;
     title: string;
@@ -155,6 +167,18 @@ export interface ExtensionProfileSummary {
     flight_recorder_latest_at: string;
     flight_recorder_latest_kind: string;
     flight_recorder_latest_message: string;
+  rate_limit_incident_count: number;
+  rate_limit_latest_at: string;
+  rate_limit_latest_message: string;
+  rate_limit_latest_status_code: number;
+  rate_limit_latest_url: string;
+  rate_limit_latest_endpoint: string;
+  rate_limit_latest_request_id: string;
+  rate_limit_latest_response_request_id: string;
+  rate_limit_latest_retry_after: string;
+  rate_limit_latest_task_id: string;
+  rate_limit_latest_conversation_id: string;
+  rate_limit_latest_tab_id: number;
     flight_recorder_latest_task_id: string;
     long_task_watchdog_hung: boolean;
     long_task_watchdog_attempt_key: string;
@@ -422,6 +446,10 @@ function browserFlightRecorderLogPath(): string {
   return path.join(path.dirname(browserProfileTaskStatePath()), "browser-flight-recorder.jsonl");
 }
 
+function browserRateLimitLogPath(): string {
+  return path.join(path.dirname(browserProfileTaskStatePath()), "chatgpt-rate-limit.jsonl");
+}
+
 function sanitizeFlightRecorderEvent(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 40).map(([key, item]) => [
@@ -457,6 +485,22 @@ function recordBrowserFlightRecorderIncident(incident: BrowserFlightRecorderInci
     fs.appendFileSync(logPath, `${JSON.stringify(incident)}\n`, "utf8");
   } catch {
     // Flight-recorder persistence is diagnostic-only and must not break commands.
+  }
+}
+
+function recordBrowserRateLimitIncident(incident: BrowserFlightRecorderIncident): void {
+  if (String(incident.reason || "") !== "rate_limit" && Number(incident.event?.status) !== 429) return;
+  try {
+    const logPath = browserRateLimitLogPath();
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    if (fs.existsSync(logPath) && fs.statSync(logPath).size >= FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES) {
+      const previousPath = `${logPath}.1`;
+      if (fs.existsSync(previousPath)) fs.rmSync(previousPath, { force: true });
+      fs.renameSync(logPath, previousPath);
+    }
+    fs.appendFileSync(logPath, `${JSON.stringify(incident)}\n`, "utf8");
+  } catch {
+    // Dedicated rate-limit diagnostics must never break the browser bridge.
   }
 }
 
@@ -1012,6 +1056,7 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     profile.flightRecorderIncidents.push(incident);
     profile.flightRecorderIncidents = profile.flightRecorderIncidents.slice(-MAX_PROFILE_FLIGHT_RECORDER_INCIDENTS);
     recordBrowserFlightRecorderIncident(incident);
+    recordBrowserRateLimitIncident(incident);
     scheduleProfileNotification(state);
     sendJson(req, res, 200, { ok: true, profile_id: profile.id, incident_id: incident.id });
     return;
@@ -1188,6 +1233,18 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
           flight_recorder_latest_kind: String(tab.flight_recorder_latest_kind ?? "").trim().slice(0, 120),
           flight_recorder_latest_message: String(tab.flight_recorder_latest_message ?? "").trim().slice(0, 500),
           flight_recorder_latest_task_id: String(tab.flight_recorder_latest_task_id ?? "").trim().slice(0, 160),
+          rate_limit_incident_count: Math.max(0, Number(tab.rate_limit_incident_count) || 0),
+          rate_limit_latest_at: String(tab.rate_limit_latest_at ?? "").trim().slice(0, 64),
+          rate_limit_latest_message: String(tab.rate_limit_latest_message ?? "").trim().slice(0, 500),
+          rate_limit_latest_status_code: Number(tab.rate_limit_latest_status_code) || 0,
+          rate_limit_latest_url: String(tab.rate_limit_latest_url ?? "").trim().slice(0, 2000),
+          rate_limit_latest_endpoint: String(tab.rate_limit_latest_endpoint ?? "").trim().slice(0, 1000),
+          rate_limit_latest_request_id: String(tab.rate_limit_latest_request_id ?? "").trim().slice(0, 160),
+          rate_limit_latest_response_request_id: String(tab.rate_limit_latest_response_request_id ?? "").trim().slice(0, 160),
+          rate_limit_latest_retry_after: String(tab.rate_limit_latest_retry_after ?? "").trim().slice(0, 300),
+          rate_limit_latest_task_id: String(tab.rate_limit_latest_task_id ?? "").trim().slice(0, 160),
+          rate_limit_latest_conversation_id: String(tab.rate_limit_latest_conversation_id ?? "").trim().slice(0, 180),
+          rate_limit_latest_tab_id: tab.rate_limit_latest_at ? Number(tab.id) || 0 : 0,
           long_task_watchdog_hung: tab.long_task_watchdog_hung === true,
           long_task_watchdog_attempt_key: String(tab.long_task_watchdog_attempt_key ?? "").trim().slice(0, 300),
           network_recent_posts: Array.isArray(tab.network_recent_posts) ? tab.network_recent_posts.slice(-12) : []
@@ -1231,6 +1288,9 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       ));
       const connectorInstalled = profile.connectorInstalled && connectorProfileBound;
       const latestFlightRecorderIncident = profile.flightRecorderIncidents.at(-1);
+      const rateLimitIncidents = profile.flightRecorderIncidents.filter((incident) => String(incident.reason || "") === "rate_limit" || Number(incident.event?.status) === 429);
+      const latestRateLimitIncident = rateLimitIncidents.at(-1);
+      const latestRateLimitEvent = latestRateLimitIncident?.event || {};
       const connectorMessage = connectorUpdateRequired
         ? observedCodexProToolActivity
           ? "CodexPro đang gọi tool qua connector cũ chưa gắn đúng profile. Cần cập nhật connector."
@@ -1263,6 +1323,18 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       flight_recorder_latest_at: String(latestFlightRecorderIncident?.at || ""),
       flight_recorder_latest_kind: String(latestFlightRecorderIncident?.kind || ""),
       flight_recorder_latest_message: String(latestFlightRecorderIncident?.message || "").slice(0, 500),
+      rate_limit_incident_count: rateLimitIncidents.length,
+      rate_limit_latest_at: String(latestRateLimitIncident?.at || "").slice(0, 64),
+      rate_limit_latest_message: String(latestRateLimitIncident?.message || "").slice(0, 500),
+      rate_limit_latest_status_code: Number(latestRateLimitEvent.status) || 0,
+      rate_limit_latest_url: String(latestRateLimitEvent.url || "").slice(0, 2000),
+      rate_limit_latest_endpoint: String(latestRateLimitEvent.endpoint || "").slice(0, 1000),
+      rate_limit_latest_request_id: String(latestRateLimitEvent.request_id || "").slice(0, 160),
+      rate_limit_latest_response_request_id: String(latestRateLimitEvent.response_request_id || "").slice(0, 160),
+      rate_limit_latest_retry_after: String(latestRateLimitEvent.retry_after || "").slice(0, 300),
+      rate_limit_latest_task_id: String(latestRateLimitIncident?.task_id || "").slice(0, 160),
+      rate_limit_latest_conversation_id: String(latestRateLimitIncident?.conversation_id || "").slice(0, 180),
+      rate_limit_latest_tab_id: Math.max(0, Number(latestRateLimitIncident?.tab_id) || 0),
       chatgpt_tabs: chatgptTabSummaries,
       conversation_tabs: conversationSummaries,
       recent_conversations: recentConversations

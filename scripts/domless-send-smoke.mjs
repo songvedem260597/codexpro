@@ -65,6 +65,39 @@ const rendererWakeSource = extractFunction("ensureChatRendererReadyForSend");
 assert.match(rendererWakeSource, /probeChatRendererForSend[\s\S]*?tabs\.update\(tab\.id,\{active:true\}\)[\s\S]*?windows\.update\(tab\.windowId,\{focused:true\}\)[\s\S]*?probeChatRendererForSend/, "only an unresponsive renderer may trigger one automatic tab/window wake followed by a second pure probe");
 assert.match(rendererWakeSource, /RENDERER_NEEDS_FOREGROUND/, "a renderer that stays frozen must stop before prepare and request Manager native foreground recovery");
 
+const safeExtensionTraceEventSource = extractFunction("safeExtensionTraceEvent");
+const safeExtensionTraceEvent = Function(`${safeExtensionTraceEventSource}; return safeExtensionTraceEvent;`)();
+const rateLimitTrace = safeExtensionTraceEvent({
+  method: "Network.responseReceived",
+  receivedAt: Date.now(),
+  params: {
+    requestId: "cdp-429",
+    type: "Fetch",
+    response: {
+      status: 429,
+      url: "https://chatgpt.com/backend-api/f/conversation?secret=must-redact",
+      mimeType: "application/json",
+      headers: { "Retry-After": "3", "X-Request-ID": "server-429", Authorization: "must-not-leak" }
+    }
+  }
+});
+assert.equal(rateLimitTrace.status, 429, "CDP flight recorder must retain the 429 status");
+assert.equal(rateLimitTrace.endpoint, "/backend-api/f/conversation", "429 diagnostics must retain the exact ChatGPT endpoint without query secrets");
+assert.equal(rateLimitTrace.retry_after, "3", "429 diagnostics must retain Retry-After when available");
+assert.equal(rateLimitTrace.response_request_id, "server-429", "429 diagnostics must retain a server request id for support correlation");
+assert.ok(String(rateLimitTrace.url).includes("%3Credacted%3E") || String(rateLimitTrace.url).includes("<redacted>"), "429 diagnostic URLs must redact query values");
+assert.equal(Object.values(rateLimitTrace).includes("must-not-leak"), false, "429 diagnostics must never copy arbitrary response headers such as Authorization");
+const flightRecorderEventIsIncidentSource = extractFunction("flightRecorderEventIsIncident");
+const flightRecorderEventIsIncident = Function(`${flightRecorderEventIsIncidentSource}; return flightRecorderEventIsIncident;`)();
+assert.equal(flightRecorderEventIsIncident(rateLimitTrace), true, "ChatGPT HTTP 429 must be promoted to a flight-recorder incident even without a console error");
+const flightRecorderIncidentMessageSource = extractFunction("flightRecorderIncidentMessage");
+const flightRecorderIncidentMessage = Function(`${flightRecorderIncidentMessageSource}; return flightRecorderIncidentMessage;`)();
+assert.equal(flightRecorderIncidentMessage(rateLimitTrace), "ChatGPT HTTP 429 Too Many Requests: /backend-api/f/conversation", "429 incident messages must be immediately recognizable in logs");
+assert.match(worker, /persistFlightRecorderIncident\(tabId,event,'rate_limit'\)/, "429 incidents must bypass the generic five-second incident cooldown so intermittent rate limits are not lost");
+assert.match(worker, /slice\(-\(reason==='rate_limit'\?20:120\)\)/, "high-frequency 429 incidents must keep only a compact 20-event context so diagnostics do not amplify the rate-limit storm");
+assert.match(bridge, /chatgpt-rate-limit\.jsonl[\s\S]*?recordBrowserRateLimitIncident/, "the bridge must persist a dedicated ChatGPT 429 JSONL investigation log");
+assert.match(managerMain, /ChatGPT trả về HTTP 429 Too Many Requests[\s\S]*?chatgpt-rate-limit/, "Manager diagnostics must surface each new rate-limit incident with correlation metadata");
+
 const generationSource = extractFunction("isChatGenerationRequest");
 const isChatGenerationRequest = Function(`${generationSource}; return isChatGenerationRequest;`)();
 
