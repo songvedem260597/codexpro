@@ -745,6 +745,10 @@ assert.match(managerMain, /app\.requestSingleInstanceLock\(\)/, "normal Manager 
 assert.match(managerMain, /from "\.\/logical-chat-task\.mjs"/, "Electron must load logical-task classification from its packaged electron directory");
 assert.match(managerMain, /REPO_SCAN_CACHE_MS = 10 \* 60 \* 1000/, "repo discovery must use a durable cache");
 assert.match(managerMain, /GIT_SUMMARY_CACHE_MS = 2 \* 60 \* 1000/, "project Git summaries must be cached independently");
+assert.match(managerMain, /REPO_SCAN_SKIPPED_DIRECTORIES = new Set\(\[[\s\S]*?"\.codexpro"[\s\S]*?"\.codex"/, "repo discovery must not descend into CodexPro or Codex internal state directories");
+assert.match(managerMain, /function isInternalWorkspaceWorktree\(root\)[\s\S]*?path\.join\(codexProHome, "workspace-worktrees"\)/, "project discovery must recognize CodexPro task worktrees as internal roots");
+assert.match(managerMain, /const addSource = \(root, source\) => \{[\s\S]*?isInternalWorkspaceWorktree\(resolved\)[\s\S]*?sources\.set\(resolved, source\)/, "all explicit project sources must filter internal task worktrees");
+assert.match(managerMain, /for \(const root of discoveredRoots\) \{[\s\S]*?isInternalWorkspaceWorktree\(resolved\)[\s\S]*?continue/, "auto-discovered project roots must filter internal task worktrees");
 assert.match(managerUi, /api\.onBrowserProfiles/);
 assert.doesNotMatch(managerUi, /REALTIME_POLL_MS = 1000/, "Manager must not poll status every second");
 assert.match(managerUi, /responseScrollLocked/, "manual transcript scrolling must lock auto-scroll");

@@ -2810,12 +2810,19 @@ function pruneGitSummaryCache(liveRoots) {
 
 const REPO_SCAN_SKIPPED_DIRECTORIES = new Set([
   "$recycle.bin", "system volume information", "windows", "program files", "program files (x86)", "programdata",
-  "appdata", "node_modules", ".git", ".cache", ".gradle", ".idea", ".next", "dist", "build", "coverage", "vendor"
+  "appdata", "node_modules", ".git", ".codexpro", ".codex", ".cache", ".gradle", ".idea", ".next", "dist", "build", "coverage", "vendor"
 ]);
 
 function pathInside(child, parent) {
   const relative = path.relative(path.resolve(parent), path.resolve(child));
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function isInternalWorkspaceWorktree(root) {
+  if (!root) return false;
+  const resolved = path.resolve(root);
+  return pathInside(resolved, path.join(codexProHome, "workspace-worktrees"))
+    || pathInside(resolved, path.join(os.homedir(), ".codex", "worktrees"));
 }
 
 function allowedWorkspaceRoots(config) {
@@ -2911,21 +2918,31 @@ async function listProjects() {
     .filter((root) => typeof root === "string" && root.trim() && root !== ALL_ALLOWED_WORKSPACES)
     .map((root) => path.resolve(root).toLowerCase()));
   const sources = new Map();
+  const addSource = (root, source) => {
+    if (typeof root !== "string" || !root.trim()) return;
+    const resolved = path.resolve(root);
+    if (isInternalWorkspaceWorktree(resolved)) return;
+    sources.set(resolved, source);
+  };
   for (const file of jsonFiles(path.join(codexProHome, "profiles"))) {
     const profile = readJson(file);
-    if (typeof profile?.root === "string") sources.set(path.resolve(profile.root), "CodexPro profile");
+    addSource(profile?.root, "CodexPro profile");
   }
   for (const file of jsonFiles(path.join(codexProHome, "runtime"))) {
     const runtime = readJson(file);
-    if (typeof runtime?.root === "string") sources.set(path.resolve(runtime.root), "CodexPro runtime");
+    addSource(runtime?.root, "CodexPro runtime");
   }
-  for (const root of managerProjects()) sources.set(path.resolve(root), sources.get(path.resolve(root)) || "Đã thêm");
-  if (activeRoot) sources.set(path.resolve(activeRoot), "Đang chạy");
+  for (const root of managerProjects()) {
+    const resolved = path.resolve(root);
+    addSource(resolved, sources.get(resolved) || "Đã thêm");
+  }
+  addSource(activeRoot, "Đang chạy");
   const discoveryStartedAt = Date.now();
   const discoveredRoots = await discoverGitRepositories(repoScanRoots(taskConfig));
   const discoveryMs = Date.now() - discoveryStartedAt;
   for (const root of discoveredRoots) {
     const resolved = path.resolve(root);
+    if (isInternalWorkspaceWorktree(resolved)) continue;
     if (![...sources.keys()].some((known) => known.toLowerCase() === resolved.toLowerCase())) sources.set(resolved, "Tự quét");
   }
 
