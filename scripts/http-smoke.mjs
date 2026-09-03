@@ -222,6 +222,48 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     }
     await general.close();
     clients.splice(clients.indexOf(general), 1);
+    const statelessTaskId = 'cpt_121212121212121212121212';
+    const preparedStateless = await callTool(manager, 'prepare_repo_task', {
+      profile_id: 'stateless-smoke',
+      task_id: statelessTaskId,
+      scope: 'all_allowed'
+    });
+    if (!preparedStateless.structuredContent.prepared) throw new Error('manager could not prepare stateless worker task');
+    const statelessBeginClient = await createClient('repo-task-stateless-begin');
+    const statelessBegan = await callTool(statelessBeginClient, 'codexpro', {
+      action: 'begin_repo_task',
+      args: { task_id: statelessTaskId, task_title: 'Verify stateless task checkpoint', task_kind: 'general', scope: 'all_allowed' }
+    });
+    if (!statelessBegan.structuredContent.verified || statelessBegan.structuredContent.profile_id !== 'stateless-smoke') {
+      throw new Error(`stateless task did not recover its prepared worker owner: ${JSON.stringify(statelessBegan.structuredContent)}`);
+    }
+    await statelessBeginClient.close();
+    clients.splice(clients.indexOf(statelessBeginClient), 1);
+    const statelessResumeClient = await createClient('repo-task-stateless-resume');
+    const statelessProgress = await callTool(statelessResumeClient, 'codexpro', {
+      action: 'report_worker_job_progress',
+      args: {
+        task_id: statelessTaskId,
+        stage: 'verifying',
+        summary: 'Stateless connector recovered durable worker ownership.',
+        progress_percent: 99,
+        completed_parts: ['owner recovery', 'progress checkpoint'],
+        remaining_parts: []
+      }
+    });
+    if (!statelessProgress.structuredContent.reported || statelessProgress.structuredContent.job?.worker_id !== 'stateless-smoke') {
+      throw new Error(`stateless progress call did not recover durable worker ownership: ${JSON.stringify(statelessProgress.structuredContent)}`);
+    }
+    const statelessFinalized = await callTool(statelessResumeClient, 'codexpro', {
+      action: 'finalize_worker_job',
+      args: { task_id: statelessTaskId, outcome: 'completed', summary: 'stateless worker fixture complete' }
+    });
+    if (!statelessFinalized.structuredContent.finalized || statelessFinalized.structuredContent.job?.status !== 'completed') {
+      throw new Error(`stateless finalize call did not recover durable worker ownership: ${JSON.stringify(statelessFinalized.structuredContent)}`);
+    }
+    await statelessResumeClient.close();
+    clients.splice(clients.indexOf(statelessResumeClient), 1);
+
     const direct = await createClient('repo-direct-api-worker', 'api:direct-smoke');
     const directBegan = await callTool(direct, 'begin_repo_task', { task_title: 'Inspect current direct request', task_kind: 'code' });
     if (!directBegan.structuredContent.verified || !/^cpt_[a-f0-9]{24}$/.test(String(directBegan.structuredContent.task_id || ''))) {
