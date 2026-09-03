@@ -221,6 +221,12 @@ async function auditedReloadTab(tabOrId,source='reload_tab',reason='') {
   }
 }
 
+function debuggerSessionBlocksChatTabCleanup(tabId) {
+  const refs=Math.max(0,Number(debuggerSessionsByTab.get(tabId)?.refs||0));
+  const recorderRefs=flightRecorderTrackersByTab.has(tabId)?1:0;
+  return refs>recorderRefs;
+}
+
 function planChatTabCleanup(tabs,options={}) {
   const maxTabs=Math.max(1,Number(options.maxTabs)||MAX_CHATGPT_TABS);
   const recentIds=new Set((Array.isArray(options.recentConversationIds)?options.recentConversationIds:[]).map(String));
@@ -269,7 +275,7 @@ async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
   const summaryById=new Map((Array.isArray(tabSummaries)?tabSummaries:[]).map(tab=>[tab.id,tab]));
   const probeCandidates=rawTabs.filter(tab=>{
     const summary=summaryById.get(tab.id)||{};
-    const debuggerBusy=Number(debuggerSessionsByTab.get(tab.id)?.refs||0)>0;
+    const debuggerBusy=debuggerSessionBlocksChatTabCleanup(tab.id);
     return !tab.active&&!tab.pinned&&!tab.audible&&tab.status!=='loading'&&!summary.busy&&!summary.settling&&!pendingConversationByTab.has(tab.id)&&!chatAttachmentOwnershipByTab.has(tab.id)&&!browserMutationTailsByTab.has(tab.id)&&!debuggerBusy;
   });
   await Promise.all(probeCandidates.map(async tab=>{
@@ -280,7 +286,7 @@ async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
   }));
   const policyTabs=rawTabs.map(tab=>{
     const summary=summaryById.get(tab.id)||{};
-    const debuggerBusy=Number(debuggerSessionsByTab.get(tab.id)?.refs||0)>0;
+    const debuggerBusy=debuggerSessionBlocksChatTabCleanup(tab.id);
     const pending=pendingConversationByTab.has(tab.id)||chatAttachmentOwnershipByTab.has(tab.id)||browserMutationTailsByTab.has(tab.id)||debuggerBusy;
     return {...tab,...summary,last_accessed:Number(tab.lastAccessed)||0,pending,health_failures:Number(chatTabHealthByTab.get(tab.id)?.failures||0)};
   });
@@ -297,7 +303,7 @@ async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
       const networkState=await chatRequestState(tabId,conversationId);
       const canonicalActivity=canonicalActivityState(tabId,conversationId);
       const domActivity=chatDomActivityByTab.get(tabId)?.value;
-      const debuggerBusy=Number(debuggerSessionsByTab.get(tabId)?.refs||0)>0;
+      const debuggerBusy=debuggerSessionBlocksChatTabCleanup(tabId);
       if(current.active||current.pinned||current.audible||current.status==='loading'||pendingConversationByTab.has(tabId)||chatAttachmentOwnershipByTab.has(tabId)||browserMutationTailsByTab.has(tabId)||debuggerBusy||summary.busy||summary.settling||networkState.busy||canonicalActivity.busy||domActivity?.busy)continue;
       const closeReason=plan.reasons[tabId]||'tab_limit';
       await auditedRemoveTab(current,'cleanupChatGptTabs',closeReason);

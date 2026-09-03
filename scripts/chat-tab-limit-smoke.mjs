@@ -12,11 +12,31 @@ assert.match(worker, /load_observed/, "tab audit must retain repeated ChatGPT lo
 assert.match(worker, /recover_chat_tab[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\},'recover_chat_tab_new'\)/, "fresh-chat recovery must use the capped tab creator");
 assert.match(worker, /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:false\},'send_chat_request_new'\)/, "new chat requests must use the capped tab creator");
 assert.match(worker, /tab=await createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/c\/'\+conversationId,active:false\},'send_chat_request_existing'\)/, "conversation opens for send must use the capped tab creator");
-assert.match(worker, /tab=await createChatGptTab\(\{url:`https:\/\/chatgpt\.com\/c\/\$\{conversationId\}`,active:false\},'get_chat_response'\)/, "conversation opens for response reads must use the capped tab creator");
+assert.match(worker, /get_chat_response[\s\S]*?if\(!tab\)\{[\s\S]*?readUnopenedChatResponse\(tabs,conversation,args,commandExpiresAt\)/, "response reads for unopened recent conversations must stay tabless instead of consuming a capped ChatGPT tab slot");
 assert.match(worker, /if\(action==='open_tab'\)\{const tab=await createChatGptTab/, "browser open_tab must use the capped tab creator");
 assert.match(worker, /const tab=reusable[\s\S]*?: await createChatGptTab\(\{url,active:true\},'openChatGpt'\)/, "ChatGPT route opens must use the capped tab creator");
 assert.match(worker, /checkConnectorInstalled[\s\S]*?const tab=await createChatGptTab\(/, "connector checks must use the capped tab creator");
 assert.match(worker, /replaceUnresponsiveChatTab[\s\S]*?serializeChatGptTabCreation[\s\S]*?current\.length>=MAX_CHATGPT_TABS[\s\S]*?auditedRemoveTab\(replacedTabId,'replaceUnresponsiveChatTab','remove_old_tab'\)[\s\S]*?auditedCreateTab\(createArgs,'chat_tab_create'\)/, "renderer replacement must remove the dead tab before creating a replacement when already at the cap");
+
+const debuggerGuardSource = worker.match(/function debuggerSessionBlocksChatTabCleanup\(tabId\) \{[\s\S]*?\n\}/)?.[0];
+assert.ok(debuggerGuardSource, "tab cleanup must distinguish the persistent flight-recorder debugger ref from transient debugger work");
+{
+  const debuggerSessionsByTab = new Map([
+    [1, { refs: 1 }],
+    [2, { refs: 2 }],
+    [3, { refs: 1 }]
+  ]);
+  const flightRecorderTrackersByTab = new Map([[1, {}], [2, {}]]);
+  const debuggerSessionBlocksChatTabCleanup = Function(
+    "debuggerSessionsByTab",
+    "flightRecorderTrackersByTab",
+    `${debuggerGuardSource}; return debuggerSessionBlocksChatTabCleanup;`
+  )(debuggerSessionsByTab, flightRecorderTrackersByTab);
+  assert.equal(debuggerSessionBlocksChatTabCleanup(1), false, "a flight recorder by itself must not pin an idle ChatGPT tab forever");
+  assert.equal(debuggerSessionBlocksChatTabCleanup(2), true, "an extra transient debugger ref must still protect the tab from cleanup");
+  assert.equal(debuggerSessionBlocksChatTabCleanup(3), true, "a standalone debugger operation without a flight recorder must protect the tab");
+  assert.equal(debuggerSessionBlocksChatTabCleanup(4), false, "a tab with no debugger session must remain eligible for cleanup");
+}
 
 const helperSource = worker.slice(
   worker.indexOf("async function serializeChatGptTabCreation"),
