@@ -263,6 +263,34 @@ const matchingResponseAudit = buildChatResponseAuditRecord({
   ]
 });
 assert.equal(matchingResponseAudit.comparison, "match", "audit must confirm the ChatGPT DOM response reaches the Manager UI unchanged");
+const completedStreamText = "Đúng Flora thì kết quả rõ hơn: phản hồi đầy đủ từ network stream";
+const completedStreamAudit = buildChatResponseAuditRecord({
+  profileId: "profile-1",
+  conversationId: "conversation-1",
+  sourceAudit: {
+    selected_source: "network_stream_completed",
+    chatgpt_dom: {
+      source: "chatgpt_dom",
+      available: true,
+      latest_assistant: { fingerprint: responseAuditTextFingerprint("Đúng Flora thì kết") },
+      assistant_after_latest_user: { fingerprint: responseAuditTextFingerprint("Đúng Flora thì kết") }
+    },
+    canonical_api: { source: "canonical_api", available: false, error: "HTTP 429" },
+    network_stream: {
+      source: "network_stream",
+      available: true,
+      latest_assistant: { fingerprint: responseAuditTextFingerprint(completedStreamText) },
+      assistant_after_latest_user: { fingerprint: responseAuditTextFingerprint(completedStreamText) }
+    }
+  },
+  managerMessages: [{ role: "user", text: "lộn flora chứ" }, { role: "assistant", text: completedStreamText }],
+  renderedMessages: [
+    { role: "user", fingerprint: responseAuditTextFingerprint("lộn flora chứ") },
+    { role: "assistant", fingerprint: responseAuditTextFingerprint(completedStreamText) }
+  ]
+});
+assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
+assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
 const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
@@ -716,6 +744,9 @@ assert.match(server, /responseHasStrongerNetworkStreamEvidence\(result[\s\S]*?!r
 assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?network_last_completed_at/, "Chat reopening must compare the persisted response against the latest network completion before re-reading transcript content");
 assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?cached\?\.responseReady !== true/, "an unverified cached assistant fragment must never be accepted as the final ChatGPT response");
 assert.match(managerUi, /fastResult\?\.network_stream_available && fastResult\?\.network_stream_in_progress === true/, "only a currently running network stream may suppress canonical/DOM recovery");
+assert.match(worker, /networkStreamCompletedCurrent=Boolean\([\s\S]*?networkState\.network_state==='completed'[\s\S]*?networkStreamMatchesCurrentGeneration\(networkState,networkStream\)[\s\S]*?networkStreamUsable=Boolean/, "worker must retain a completed network stream only when it belongs to the current generation");
+assert.match(worker, /completedNetworkStreamReady[\s\S]*?mergeCompletedNetworkStreamResponse\(domResult,networkStream\)/, "a completed network stream must replace a shorter partial DOM response before it is returned as final");
+assert.match(managerUi, /networkStreamCompleted = Boolean\([\s\S]*?result\.network_stream_completed === true[\s\S]*?networkStreamAvailable = Boolean\([\s\S]*?networkStreamCompleted/, "Manager must accept a completed current-generation network stream after the request reaches a terminal state");
 assert.match(managerPreload, /getChatResponseCache[\s\S]*?saveChatResponseCache/, "Manager preload must expose persistent chat-response cache access");
 assert.match(managerPreload, /logChatLayout[\s\S]*?codexpro:log-chat-layout/, "Manager preload must expose fire-and-forget chat layout tracing");
 assert.match(managerPreload, /logChatResponseAudit[\s\S]*?codexpro:log-chat-response-audit/, "Manager preload must expose response comparison tracing");

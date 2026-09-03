@@ -83,8 +83,10 @@ export function buildChatResponseAuditRecord({ profileId, conversationId, reques
   const chatgptDom = normalizeSourceSummary(sourceAudit?.chatgpt_dom);
   const canonical = normalizeSourceSummary(sourceAudit?.canonical_api);
   const networkStream = normalizeSourceSummary(sourceAudit?.network_stream);
-  const basis = chatgptDom.available ? chatgptDom : canonical.available ? canonical : networkStream;
-  const basisName = chatgptDom.available ? "chatgpt_dom" : canonical.available ? "canonical_api" : networkStream.available ? "network_stream" : "none";
+  const selectedSource = String(sourceAudit?.selected_source || "");
+  const selectedBasis = selectedSource.startsWith("network_stream") ? networkStream : selectedSource === "canonical_api" ? canonical : selectedSource === "chatgpt_dom" ? chatgptDom : null;
+  const basis = selectedBasis?.available ? selectedBasis : chatgptDom.available ? chatgptDom : canonical.available ? canonical : networkStream;
+  const basisName = basis === chatgptDom ? "chatgpt_dom" : basis === canonical ? "canonical_api" : basis === networkStream && networkStream.available ? "network_stream" : "none";
   const managerState = summarizeResponseAuditMessages(managerMessages);
   const managerUi = renderedSummary(renderedMessages);
   const expected = basis.assistantAfterLatestUser || (!basis.latestUser ? basis.latestAssistant : null);
