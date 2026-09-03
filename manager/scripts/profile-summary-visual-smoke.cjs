@@ -18,13 +18,19 @@ for (const className of [
 const cards = `
   <div class="page-overview"><div class="visual-shell">
     <div class="visual-title">Worker status summary</div>
-    <div class="visual-row">
-      <span class="profile-summary-item is-working"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-working-bolt" d="m13.5 2-8 12h6l-1 8 8-12h-6l1-8Z"></path><circle class="summary-working-spark" cx="18.4" cy="5.2" r="1.25"></circle></svg></span><strong>2 working</strong></span>
-      <span class="profile-summary-item is-idle"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><circle class="summary-idle-ring" cx="12" cy="12" r="9"></circle><path class="summary-idle-check" d="m8 12 2.6 2.6L16.5 9"></path></svg></span><strong>4 idle</strong></span>
-      <span class="profile-summary-item is-hung"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-hung-triangle" d="M12 3 2.8 20h18.4L12 3Z"></path><path class="summary-hung-mark" d="M12 9v5"></path><circle class="summary-hung-dot" cx="12" cy="17.25" r=".75"></circle></svg></span><strong>1 hung</strong></span>
-      <span class="profile-summary-item is-missing"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-missing-plug" d="M8 3v5M12 3v5M6 8h8v2a4 4 0 0 1-4 4v3"></path><path class="summary-missing-plus" d="M16 16h6M19 13v6"></path></svg></span><strong>1 missing</strong></span>
+    <div class="header-server-actions">
+      <div class="profile-count">
+        <div class="profile-summary-states">
+          <span class="profile-summary-item is-working"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-working-bolt" d="m13.5 2-8 12h6l-1 8 8-12h-6l1-8Z"></path><circle class="summary-working-spark" cx="18.4" cy="5.2" r="1.25"></circle></svg></span><strong>1</strong><span>làm việc</span></span>
+          <span class="profile-summary-item is-idle"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><circle class="summary-idle-ring" cx="12" cy="12" r="9"></circle><path class="summary-idle-check" d="m8 12 2.6 2.6L16.5 9"></path></svg></span><strong>1</strong><span>rảnh</span></span>
+          <span class="profile-summary-item is-stopped"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><circle class="summary-stopped-ring" cx="12" cy="12" r="8.5"></circle><path class="summary-stopped-line" d="M12 3.5v7"></path></svg></span><strong>0</strong><span>đã tắt</span></span>
+          <span class="profile-summary-item is-hung"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-hung-triangle" d="M12 3 2.8 20h18.4L12 3Z"></path><path class="summary-hung-mark" d="M12 9v5"></path><circle class="summary-hung-dot" cx="12" cy="17.25" r=".75"></circle></svg></span><strong>0</strong><span>mất kết nối</span></span>
+          <span class="profile-summary-item is-missing"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-missing-plug" d="M8 3v5M12 3v5M6 8h8v2a4 4 0 0 1-4 4v3"></path><path class="summary-missing-plus" d="M16 16h6M19 13v6"></path></svg></span><strong>0</strong><span>chưa cài</span></span>
+        </div>
+        <div class="profile-summary-updates"><span class="profile-summary-update is-deferred"><strong>1</strong><span>chờ cập nhật</span></span></div>
+      </div>
     </div>
-  </div></div>`;
+  </div></div>`
 
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>
 ${styles}
@@ -43,10 +49,16 @@ async function inspectAnimations(win) {
     const shell = document.querySelector('.visual-shell');
     const icon = document.querySelector('.profile-summary-icon');
     const iconSvg = icon.querySelector('svg');
+    const summary = document.querySelector('.profile-count');
+    const states = document.querySelector('.profile-summary-states');
+    const update = document.querySelector('.profile-summary-update');
     const rect = shell.getBoundingClientRect();
+    const summaryRect = summary.getBoundingClientRect();
+    const statesRect = states.getBoundingClientRect();
+    const updateRect = update.getBoundingClientRect();
     const iconStyle = getComputedStyle(icon);
     const iconSvgStyle = getComputedStyle(iconSvg);
-    return { animations, icon: { width: parseFloat(iconStyle.width), height: parseFloat(iconStyle.height), svgWidth: parseFloat(iconSvgStyle.width), svgHeight: parseFloat(iconSvgStyle.height) }, shell: { left: rect.left, right: rect.right, width: rect.width, scrollWidth: shell.scrollWidth, clientWidth: shell.clientWidth }, viewportWidth: document.documentElement.clientWidth };
+    return { animations, icon: { width: parseFloat(iconStyle.width), height: parseFloat(iconStyle.height), svgWidth: parseFloat(iconSvgStyle.width), svgHeight: parseFloat(iconSvgStyle.height) }, summary: { width: summaryRect.width, height: summaryRect.height, scrollWidth: summary.scrollWidth, clientWidth: summary.clientWidth, statesTop: statesRect.top, updateTop: updateRect.top, statesBottom: statesRect.bottom, updateBottom: updateRect.bottom, statesScrollWidth: states.scrollWidth, statesClientWidth: states.clientWidth }, shell: { left: rect.left, right: rect.right, width: rect.width, scrollWidth: shell.scrollWidth, clientWidth: shell.clientWidth }, viewportWidth: document.documentElement.clientWidth };
   })()`);
 }
 
@@ -61,6 +73,11 @@ app.whenReady().then(async () => {
     }
     if (normal.icon.width < 18 || normal.icon.height < 18 || normal.icon.svgWidth < 18 || normal.icon.svgHeight < 18) {
       throw new Error(`Overview profile summary icons are too small: ${JSON.stringify(normal.icon)}`);
+    }
+    const statesCenter = (normal.summary.statesTop + normal.summary.statesBottom) / 2;
+    const updateCenter = (normal.summary.updateTop + normal.summary.updateBottom) / 2;
+    if (normal.summary.scrollWidth > normal.summary.clientWidth + 2 || normal.summary.statesScrollWidth > normal.summary.statesClientWidth + 2 || normal.summary.height > 70 || Math.abs(statesCenter - updateCenter) > 2) {
+      throw new Error(`Overview update status must stay centered in its side column without worker-state overflow: ${JSON.stringify(normal.summary)}`);
     }
     if (normal.shell.scrollWidth > normal.shell.clientWidth + 2 || normal.shell.left < -2 || normal.shell.right > normal.viewportWidth + 2) {
       throw new Error(`Profile summary fixture overflowed: ${JSON.stringify(normal.shell)}`);

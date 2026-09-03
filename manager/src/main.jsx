@@ -4863,13 +4863,26 @@ function App() {
           {activePage === "overview" && (
             <div className="header-server-actions">
               <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} rảnh, ${profileSummary.stopped} đã tắt, ${profileSummary.hung} mất kết nối, ${profileSummary.missing} chưa cài`}>
-                <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
-                <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
-                <ProfileSummaryItem state="stopped" count={profileSummary.stopped} label="đã tắt" />
-                <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
-                <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
-                {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
-                {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
+                <div className="profile-summary-states">
+                  <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
+                  <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
+                  <ProfileSummaryItem state="stopped" count={profileSummary.stopped} label="đã tắt" />
+                  <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
+                  <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
+                </div>
+                {profileSummary.outdated > 0 && (
+                  <div className="profile-summary-updates" aria-label="Trạng thái cập nhật worker">
+                    <span
+                      className={`profile-summary-update ${profileSummary.reload > 0 ? "is-required" : "is-deferred"}`}
+                      title={profileSummary.deferredUpdate > 0
+                        ? `${profileSummary.outdated} worker cần cập nhật · ${profileSummary.deferredUpdate} đang bận, sẽ tự cập nhật khi rảnh`
+                        : `${profileSummary.outdated} worker cần cập nhật`}
+                    >
+                      <strong>{profileSummary.outdated}</strong>
+                      <span>{profileSummary.reload > 0 ? "cần cập nhật" : "chờ cập nhật"}</span>
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           )}

@@ -165,12 +165,16 @@ header { display: flex; align-items: flex-start; justify-content: space-between;
 .page-overview { padding-top: 24px; }
 .page-overview > header { display: grid; grid-template-columns: minmax(300px, .8fr) minmax(0, 1.2fr); align-items: end; gap: 24px; margin-bottom: 24px; }
 .page-overview .header-server-actions { width: auto; max-width: 100%; justify-self: end; align-self: end; border-radius: 8px; }
-.page-overview .header-server-actions .profile-count { min-height: 42px; padding: 8px 12px; gap: 7px; font-size: 12px; line-height: 1.25; }
+.page-overview .header-server-actions .profile-count { min-height: 42px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; padding: 8px 10px 8px 12px; gap: 10px 12px; font-size: 12px; line-height: 1.25; }
+.page-overview .profile-summary-states { min-width: 0; display: grid; grid-template-columns: repeat(3, max-content); align-items: center; gap: 6px 7px; }
 .page-overview .profile-summary-item { gap: 5px; }
 .page-overview .profile-summary-item strong { font-size: 12px; }
 .page-overview .profile-summary-icon { width: 19px; height: 19px; flex-basis: 19px; }
 .page-overview .profile-summary-icon svg { width: 19px; height: 19px; stroke-width: 2; }
-.page-overview .profile-summary-update { min-height: 30px; padding: 5px 10px; font-size: 12px; }
+.page-overview .profile-summary-updates { align-self: stretch; display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; padding-left: 12px; border-left: 1px solid #29313e; }
+.page-overview .profile-summary-update { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; font-size: 11px; line-height: 1; }
+.page-overview .profile-summary-update::before { content: "↻"; font-size: 15px; line-height: 1; opacity: .9; }
+.page-overview .profile-summary-update strong { color: #ffd39a; font-size: 12px; }
 .page-overview #overview { margin-bottom: 22px; }
 .page-overview #overview .section-head { align-items: center; margin-bottom: 10px; }
 .page-overview #overview .section-head h2 { margin-bottom: 0; }
@@ -281,7 +285,6 @@ section { margin-bottom: 38px; }
   .profile-summary-svg * { animation: none !important; transform: none !important; opacity: 1 !important; }
   .profile-summary-item.is-idle .summary-idle-check { stroke-dashoffset: 0; }
 }
-.profile-summary-item + .profile-summary-update { margin-left: auto; }
 .profile-summary-update { min-height: 26px; display: inline-flex; align-items: center; padding: 4px 8px; color: #f4bc78; border: 1px solid #4a3923; border-radius: 6px; background: #241c12; white-space: nowrap; }
 @property --profile-border-shine-angle {
   syntax: "<angle>";
@@ -1455,7 +1458,9 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
 }
 
 @media (max-width: 680px) {
-  .profile-summary-item + .profile-summary-update { margin-left: 0; }
+  .page-overview .header-server-actions .profile-count { grid-template-columns: 1fr; }
+  .page-overview .profile-summary-states { grid-template-columns: repeat(2, max-content); }
+  .page-overview .profile-summary-updates { justify-content: flex-start; padding: 7px 0 0; border-left: 0; border-top: 1px solid #29313e; }
   .diagnostic-toolbar { grid-template-columns: 1fr; }
   .diagnostic-toolbar-actions { justify-content: stretch; }
   .diagnostic-toolbar-actions .button { flex: 1; }
