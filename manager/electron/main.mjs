@@ -982,6 +982,8 @@ function normalizeChatCacheEntry(value) {
     responseSource: String(value?.responseSource || "").slice(0, 80),
     messageCount: Math.max(0, Math.floor(Number(value?.messageCount) || 0)),
     totalMessageCount: Math.max(0, Math.floor(Number(value?.totalMessageCount) || 0)),
+    activityStartedAt: String(value?.activityStartedAt || "").slice(0, 80),
+    fastMessageLimitQualified: Boolean(value?.fastMessageLimitQualified),
     updatedAt: String(value?.updatedAt || new Date().toISOString()).slice(0, 80)
   };
 }

@@ -165,7 +165,6 @@ function pendingConversationBlocksChatTabCleanup(tabId) {
   pendingConversationByTab.delete(tabId);
   return false;
 }
-
 function planChatTabCleanup(tabs,options={}) {
   const requestedMaxTabs=Number(options.maxTabs);
   const maxTabs=Number.isFinite(requestedMaxTabs)?Math.max(0,Math.floor(requestedMaxTabs)):MAX_CHATGPT_TABS;
