@@ -414,7 +414,7 @@ function compactToolActivityMessages(messages, { collapseArgumentPayloads = fals
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.110";
+const WORKER_EXTENSION_VERSION = "0.5.111";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function chromeProfileIdLabel(profileId) {
