@@ -28,6 +28,7 @@ import { createChromeWorkerPlugin } from "./worker-plugins/chrome-worker-plugin.
 import { buildTaskWorkflowPrompt, resolveTaskWorkflow } from "./task-workflow-registry.mjs";
 import { createAppPluginRegistry } from "./app-plugins/app-plugin-registry.mjs";
 import { createManagedAppPluginInstaller } from "./app-plugins/managed-app-plugin-installer.mjs";
+import { buildGitDiagramArchitecture } from "./app-plugins/gitdiagram-analyzer.mjs";
 import { createPluginSkillBundle } from "./app-plugins/plugin-skill-bundle.mjs";
 import { registerReturnToManagerShortcut, RETURN_TO_MANAGER_ACCELERATOR } from "./return-to-manager-shortcut.mjs";
 import { acceptsLogicalTaskAdjustment } from "./logical-chat-task.mjs";
@@ -115,7 +116,8 @@ const appPluginRegistry = createAppPluginRegistry({ home: codexProHome });
 const managedAppPluginInstaller = createManagedAppPluginInstaller({
   home: codexProHome,
   registry: appPluginRegistry,
-  templateRoot: path.join(here, "app-plugins", "templates", "taste-skill")
+  templateRoot: path.join(here, "app-plugins", "templates", "taste-skill"),
+  gitDiagramTemplateRoot: path.join(here, "app-plugins", "templates", "gitdiagram")
 });
 const diagnostic = (level, source, category, message, details = {}) => {
   void appendDiagnosticLog(codexProHome, {
@@ -5393,6 +5395,24 @@ diagnosticIpcHandle("codexpro:list-app-plugin-catalog", {
   category: "app-plugin",
   action: "list-app-plugin-catalog"
 }, () => managedAppPluginInstaller.listCatalog());
+diagnosticIpcHandle("codexpro:analyze-app-plugin-repo", {
+  category: "app-plugin",
+  action: "analyze-app-plugin-repo",
+  logSuccess: true,
+  successMessage: "GitDiagram đã rút kiến trúc repo",
+  failureMessage: "GitDiagram không phân tích được repo",
+  details: (payload) => ({ plugin_id: String(payload?.pluginId || ""), root: String(payload?.root || "") }),
+  resultDetails: (result) => ({ components: Number(result?.stats?.components) || 0, connections: Number(result?.stats?.connections) || 0 })
+}, async (_event, payload) => {
+  const pluginId = String(payload?.pluginId || "").trim();
+  if (pluginId !== "gitdiagram") throw new Error("Repo analyzer này chỉ dành cho plugin GitDiagram.");
+  const plugin = appPluginRegistry.list().find((item) => item.id === pluginId);
+  if (!plugin || plugin.status !== "ready") throw new Error("GitDiagram chưa được cài hoặc plugin đang lỗi.");
+  const root = String(payload?.root || "").trim();
+  if (!root || root.length > 4096 || !path.isAbsolute(root)) throw new Error("Đường dẫn repo phân tích không hợp lệ.");
+  const inspection = await inspectThroughMcp(root);
+  return buildGitDiagramArchitecture({ ...inspection, root });
+});
 diagnosticIpcHandle("codexpro:prepare-app-plugin-task", {
   category: "app-plugin",
   action: "prepare-app-plugin-task",

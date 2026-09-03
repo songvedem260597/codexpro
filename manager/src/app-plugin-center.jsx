@@ -76,6 +76,7 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
 
   const selected = useMemo(() => plugins.find((plugin) => plugin.id === selectedId) || null, [plugins, selectedId]);
   const tasteSkill = useMemo(() => catalog.find((plugin) => plugin.id === "taste-skill") || null, [catalog]);
+  const gitDiagram = useMemo(() => catalog.find((plugin) => plugin.id === "gitdiagram") || null, [catalog]);
   const workers = useMemo(() => pluginWorkerOptions(status), [status]);
   const selectedWorker = useMemo(() => workers.find((worker) => worker.key === workerKey) || null, [workerKey, workers]);
 
@@ -90,8 +91,35 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
   }, [projects, workspaceRoot]);
 
   useEffect(() => {
+    const pluginProjects = projects.map((project) => ({
+      root: project.root,
+      name: project.name,
+      repoFullName: project.repoFullName,
+      branch: project.branch,
+      isGit: Boolean(project.isGit)
+    }));
     const receivePluginMessage = (event) => {
       if (!pluginFrameRef.current || event.source !== pluginFrameRef.current.contentWindow) return;
+      if (event.data?.type === "codexpro:plugin-ready") {
+        event.source.postMessage({ type: "codexpro:plugin-context", projects: pluginProjects }, "*");
+        return;
+      }
+      if (event.data?.type === "codexpro:gitdiagram-analyze") {
+        const requestId = String(event.data?.request_id || "").trim();
+        const root = String(event.data?.root || "").trim();
+        if (selected?.id !== "gitdiagram" || !/^[a-f0-9]{16}$/i.test(requestId) || !projects.some((project) => project.root === root)) {
+          event.source.postMessage({ type: "codexpro:gitdiagram-error", request_id: requestId, error: "Yêu cầu phân tích repo không hợp lệ." }, "*");
+          return;
+        }
+        const target = event.source;
+        void api.analyzeAppPluginRepo({ pluginId: "gitdiagram", root })
+          .then((result) => target.postMessage({ type: "codexpro:gitdiagram-result", request_id: requestId, result }, "*"))
+          .catch((error) => {
+            target.postMessage({ type: "codexpro:gitdiagram-error", request_id: requestId, error: String(error?.message || error) }, "*");
+            reportError(error);
+          });
+        return;
+      }
       if (event.data?.type === "codexpro:use-skills") {
         try {
           const skills = normalizePluginSkills(event.data?.skills);
@@ -109,13 +137,13 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
           return;
         }
         void api.copyText(text)
-          .then(() => notify?.(`Đã copy skill “${String(event.data?.label || selected?.name || "plugin").slice(0, 80)}”`))
+          .then(() => notify?.(`Đã copy “${String(event.data?.label || selected?.name || "plugin").slice(0, 80)}”`))
           .catch(reportError);
       }
     };
     window.addEventListener("message", receivePluginMessage);
     return () => window.removeEventListener("message", receivePluginMessage);
-  }, [api, notify, reportError, selected?.name]);
+  }, [api, notify, projects, reportError, selected?.id, selected?.name]);
 
   async function install() {
     setBusy("install");
@@ -164,7 +192,9 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
       setCatalog(Array.isArray(result?.catalog) ? result.catalog : []);
       setSelectedId(plugin.id);
       setFrameRevision((current) => current + 1);
-      notify?.(`${plugin.installed ? "Đã cập nhật" : "Đã cài"} ${plugin.name} · ${Number(result?.skill_count) || 0} skill`);
+      notify?.(plugin.id === "gitdiagram"
+        ? `${plugin.installed ? "Đã cập nhật" : "Đã cài"} GitDiagram · sẵn sàng phân tích repo local`
+        : `${plugin.installed ? "Đã cập nhật" : "Đã cài"} ${plugin.name} · ${Number(result?.skill_count) || 0} skill`);
     } catch (error) {
       await load();
       reportError(error);
@@ -265,6 +295,21 @@ export function AppPluginCenter({ api, status, projects = [], notify, onError, o
           </div>
           <button className={`button ${tasteSkill.installed ? "secondary" : "primary"}`} type="button" onClick={() => void installCatalogPlugin(tasteSkill)} disabled={Boolean(busy)}>
             {busy === `install-catalog:${tasteSkill.id}` ? "Đang tải repo…" : busy === `update-catalog:${tasteSkill.id}` ? "Đang cập nhật…" : tasteSkill.installed ? "Cập nhật" : "Cài Taste Skill"}
+          </button>
+        </article>
+      )}
+
+      {gitDiagram && (
+        <article className={`app-plugin-catalog-card ${gitDiagram.installed ? "is-installed" : ""}`}>
+          <div className="app-plugin-catalog-mark">G</div>
+          <div className="app-plugin-catalog-copy">
+            <div><span>ARCHITECTURE REPOSITORY</span>{gitDiagram.installed && <b>ĐÃ CÀI</b>}</div>
+            <h3>GitDiagram</h3>
+            <p>{gitDiagram.description}</p>
+            <small>Repo local · CodexGraph · Flow tổng quát · MIT{gitDiagram.source_commit ? ` · ${gitDiagram.source_commit.slice(0, 12)}` : ""}</small>
+          </div>
+          <button className={`button ${gitDiagram.installed ? "secondary" : "primary"}`} type="button" onClick={() => void installCatalogPlugin(gitDiagram)} disabled={Boolean(busy)}>
+            {busy === `install-catalog:${gitDiagram.id}` ? "Đang tải repo…" : busy === `update-catalog:${gitDiagram.id}` ? "Đang cập nhật…" : gitDiagram.installed ? "Cập nhật" : "Cài GitDiagram"}
           </button>
         </article>
       )}
