@@ -8,7 +8,7 @@ import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discard
 import { projectSelectionChanged } from "../manager/src/chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "../manager/src/chat-response-audit.js";
 import { CHATGPT_CONVERSATION_FAST_ACTIVITY_MS, CHATGPT_CONVERSATION_FAST_MESSAGE_LIMIT, CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationCompletedTaskCount, conversationMessageLimit, conversationTaskInProgress, conversationTotalMessageCount, recordCompletedLogicalTask, shouldQualifyFastMessageLimit, shouldRolloverConversation } from "../manager/src/conversation-message-limit.js";
-import { acceptsLogicalTaskAdjustment, activeLogicalTaskAdjustment } from "../manager/src/logical-chat-task.js";
+import { acceptsLogicalTaskAdjustment, activeLogicalTaskAdjustment } from "../manager/electron/logical-chat-task.mjs";
 import { LONG_TASK_WATCHDOG_AFTER_MS, longRunningChatWatchdogCandidate } from "../manager/src/long-task-watchdog.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -751,6 +751,7 @@ assert.match(managerUi, /network_evidence/);
 assert.match(managerUi, /REALTIME_WATCHDOG_MS = 30000/);
 assert.match(managerUi, /PROJECT_REFRESH_MS = 5 \* 60 \* 1000/, "project discovery must not run every status watchdog tick");
 assert.match(managerMain, /app\.requestSingleInstanceLock\(\)/, "normal Manager launches must hold a single-instance lock");
+assert.match(managerMain, /from "\.\/logical-chat-task\.mjs"/, "Electron must load logical-task classification from its packaged electron directory");
 assert.match(managerMain, /REPO_SCAN_CACHE_MS = 10 \* 60 \* 1000/, "repo discovery must use a durable cache");
 assert.match(managerMain, /GIT_SUMMARY_CACHE_MS = 2 \* 60 \* 1000/, "project Git summaries must be cached independently");
 assert.match(managerUi, /api\.onBrowserProfiles/);
