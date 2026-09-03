@@ -22,6 +22,11 @@ assert.match(source, /const completedTasks = taskWorkerJobs\.filter[\s\S]*?const
 assert.match(source, /const job = taskWorkerJobs\.find[\s\S]*?if \(!job\) return null/, "a busy browser profile must not become a live Task before source code actually changes");
 assert.match(source, /const unfinishedTasks = taskWorkerJobs\.filter[\s\S]*?job\?\.status === "running"[\s\S]*?!liveTaskIds\.has/, "only source-changing non-live running jobs must appear as unfinished coordination tasks");
 assert.match(source, /taskWorkerJobs\.filter\(\(job\) => job\?\.status === "running"\)[\s\S]*?coordinationRoots/, "workspace task coordination roots must ignore non-task worker jobs");
+assert.match(source, /function normalizeTaskName[\s\S]*?normalize\("NFD"\)[\s\S]*?replace\(\/đ\/g, "d"\)/, "task name search must be case/accent tolerant for Vietnamese titles");
+assert.match(source, /placeholder="Tìm task theo tên…"[\s\S]*?aria-label="Tìm task theo tên"/, "Task Center must expose a task-name search input");
+assert.match(source, /const visibleTasks = useMemo\(\(\) => tasks\.filter\(\(task\) => taskMatchesName\(task, normalizedTaskSearch\)\)/, "running task cards must filter by task title");
+assert.match(source, /const completedTasks = taskWorkerJobs\.filter[\s\S]*?taskMatchesName\(job, normalizedTaskSearch\)[\s\S]*?const failedTasks = taskWorkerJobs\.filter[\s\S]*?taskMatchesName\(job, normalizedTaskSearch\)/, "completed and failed task history must filter by task title");
+assert.match(source, /const unfinishedTasks = taskWorkerJobs\.filter[\s\S]*?taskMatchesName\(job, normalizedTaskSearch\)/, "unfinished task history must filter by task title");
 assert.ok(source.indexOf("UPDATE CENTER") < source.indexOf("TASK CENTER"), "Update Center must be the first coordination section before Task Center");
 assert.match(main, /"worker_job_history"[\s\S]*?statuses: \["running", "completed", "failed", "cancelled", "blocked"\]/, "Manager must load unfinished and terminal task history through MCP");
 assert.match(main, /const countedTaskIds = new Set\(workerJobs[\s\S]*?counts_as_task === true/, "runtime status must derive Task identity from proven source changes");
