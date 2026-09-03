@@ -121,6 +121,21 @@ try {
   assert.equal(publicBlocked.blocked_part, "tests");
   assert.equal(publicBlocked.blocked_reason, "Test environment is unavailable.");
   assert.deepEqual(publicBlocked.remaining_parts, ["tests", "commit", "push"]);
+  const errorProgress = await reportWorkerJobProgress({
+    jobId: codeId,
+    workerId: "api.custom",
+    stage: "error",
+    summary: "Verification command failed.",
+    reason: "Build command exited unexpectedly.",
+    blockedPart: "tests",
+    progressPercent: 40,
+    completedParts: ["implementation"],
+    remainingParts: ["tests", "commit", "push"]
+  });
+  const publicError = workerJobPublicRecord(errorProgress);
+  assert.equal(publicError.execution_state, "error");
+  assert.equal(publicError.blocked_part, "tests", "error progress must retain the exact failed part for Control Center");
+  assert.equal(publicError.blocked_reason, "Build command exited unexpectedly.");
   const partsDoneProgress = await reportWorkerJobProgress({
     jobId: codeId,
     workerId: "api.custom",

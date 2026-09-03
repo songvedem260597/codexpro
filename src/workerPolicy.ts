@@ -441,8 +441,6 @@ export async function reportWorkerJobProgress(input: {
     const sequence = Math.max(0, current.progressSequence || 0) + 1;
     const completedParts = Array.isArray(input.completedParts) ? uniqueStrings(input.completedParts, 50) : current.completedParts;
     const remainingParts = Array.isArray(input.remainingParts) ? uniqueStrings(input.remainingParts, 50) : current.remainingParts;
-
-
     const progressPercent = deriveProgressPercent({
       stage,
       explicit: input.progressPercent,
