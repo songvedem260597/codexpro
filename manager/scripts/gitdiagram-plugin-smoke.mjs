@@ -60,6 +60,19 @@ try {
   assert.equal(installer.listCatalog()[0].installed, true);
   assert.equal(installer.listCatalog()[0].skill_count, 0);
 
+  const managedUiRoot = path.join(managedRoot, ".codexpro-plugin", "ui");
+  const bundledUiRoot = path.join(managerRoot, "electron", "app-plugins", "templates", "gitdiagram");
+  fs.writeFileSync(path.join(managedUiRoot, "index.html"), '<select id="project"></select>\n', "utf8");
+  fs.writeFileSync(path.join(managedUiRoot, "styles.css"), 'button#analyze { background: green; }\n', "utf8");
+  const refreshedCatalog = installer.listCatalog();
+  assert.equal(refreshedCatalog[0].installed, true);
+  const refreshedIndex = fs.readFileSync(path.join(managedUiRoot, "index.html"), "utf8");
+  const refreshedStyles = fs.readFileSync(path.join(managedUiRoot, "styles.css"), "utf8");
+  assert.equal(refreshedIndex, fs.readFileSync(path.join(bundledUiRoot, "index.html"), "utf8"), "catalog load must refresh a stale managed GitDiagram adapter from the bundled Manager template");
+  assert.equal(refreshedStyles, fs.readFileSync(path.join(bundledUiRoot, "styles.css"), "utf8"));
+  assert.match(refreshedIndex, /project-dropdown-trigger/);
+  assert.doesNotMatch(refreshedIndex, /<select\b/i);
+
   const architecture = buildGitDiagramArchitecture({
     root: "C:\\repo",
     codexgraph: {
