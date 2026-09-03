@@ -337,7 +337,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.116";
+const WORKER_EXTENSION_VERSION = "0.5.117";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -3599,7 +3599,7 @@ async function recoverProfileChatTab(payload) {
     target_id: targetId || undefined,
     new_chat: newChat
   }, 60000);
-  const windowFocus = silent ? { ok: false, skipped: true, source: "auto-recovery" } : await focusChromeWindow(title);
+  const windowFocus = await focusChromeWindow(newChat ? "ChatGPT" : (title || "ChatGPT"));
   return { ...result, window_focus: windowFocus };
 }
 async function auditLongRunningProfileChat(payload) {
@@ -4038,6 +4038,17 @@ async function sendProfileRequestUnlocked(payload) {
     title: allowBusyFollowup ? "__codexpro_allow_busy_followup__" : undefined,
     one_shot_recovery: payload?.oneShotRecovery === true
   }, 235000);
+  let newChatWindowFocus = null;
+  if (newChat && /^\d+$/.test(String(result?.target_id ?? ""))) {
+    const newTabActivation = await localMcpToolInSession(session, "browser_control", {
+      action: "activate_tab",
+      profile_id: profileId,
+      target_id: String(result.target_id),
+      conversation_id: String(result?.conversation_id || "") || undefined
+    }, 30000);
+    newChatWindowFocus = await focusChromeWindow(String(newTabActivation?.title || "ChatGPT"));
+    if (!newChatWindowFocus?.ok) throw new Error("NEW_CHAT_FOCUS_FAILED: Đã tạo tab ChatGPT mới nhưng Windows chưa đưa tab Chrome đó ra foreground.");
+  }
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
   if (recoveryAccepted) {
     const recoveryConversationId = String(result?.conversation_id || "").trim();

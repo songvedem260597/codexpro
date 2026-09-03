@@ -104,7 +104,7 @@ function Fixture() {
         uiPerformance={{ fps: 60, longTasks: 0, maxLongTaskMs: 0 }}
         diagnosticEntries={[]}
         settings={{ autoRecovery: false, autoUpdateWorkers: true, taskNotifications: true }}
-        managerVersion="0.2.133"
+        managerVersion="0.2.134"
         workerVersion="0.5.113"
         profileSummary={{ reload: 0, deferredUpdate: 0 }}
         busy=""

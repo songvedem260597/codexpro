@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const worker = fs.readFileSync(new URL("../chrome-extension/service-worker.js", import.meta.url), "utf8");
+const managerMain = fs.readFileSync(new URL("../manager/electron/main.mjs", import.meta.url), "utf8");
 assert.match(worker, /const MAX_CHATGPT_TABS = 2;/, "Chrome worker must cap ChatGPT tabs at two");
 assert.match(worker, /CHAT_TAB_LIMIT_REACHED/, "worker must fail closed when both tabs are protected");
 assert.match(worker, /const TAB_AUDIT_STORAGE_KEY = 'codexproTabAuditV1';/, "tab lifecycle audit must persist in extension storage");
@@ -10,10 +11,15 @@ assert.match(worker, /chrome\.tabs\.onCreated\.addListener[\s\S]*?open_observed/
 assert.match(worker, /chrome\.tabs\.onRemoved\.addListener[\s\S]*?close_observed/, "tab audit must observe ChatGPT tab closes even outside CodexPro helpers");
 assert.match(worker, /load_observed/, "tab audit must retain repeated ChatGPT load events for reload-loop diagnosis");
 assert.match(worker, /recover_chat_tab[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\},'recover_chat_tab_new'\)/, "fresh-chat recovery must use the capped tab creator");
-assert.match(worker, /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:false\},'send_chat_request_new'\)/, "new chat requests must use the capped tab creator");
-assert.match(worker, /tab=await createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/c\/'\+conversationId,active:false\},'send_chat_request_existing'\)/, "conversation opens for send must use the capped tab creator");
+assert.match(worker, /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\},'send_chat_request_new'\)/, "new chat continuation requests must use the capped tab creator and open the new tab active");
+assert.match(worker, /tab=await createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/c\/'\+conversationId,active:true\},'send_chat_request_existing'\)/, "conversation reopens for send must use the capped tab creator and focus the newly created tab");
 assert.match(worker, /get_chat_response[\s\S]*?if\(!tab\)\{[\s\S]*?readUnopenedChatResponse\(tabs,conversation,args,commandExpiresAt\)/, "response reads for unopened recent conversations must stay tabless instead of consuming a capped ChatGPT tab slot");
-assert.match(worker, /if\(action==='open_tab'\)\{const tab=await createChatGptTab/, "browser open_tab must use the capped tab creator");
+assert.match(worker, /if\(action==='open_tab'\)\{const tab=await createChatGptTab\(\{url:args\.url,active:true\}[\s\S]*?background:false,focused:true/, "browser open_tab must foreground-focus the newly created ChatGPT tab");
+assert.match(worker, /async function focusNewChatGptTab[\s\S]*?chrome\.tabs\.update\(tab\.id,\{active:true\}\)[\s\S]*?chrome\.windows\.update\(windowId,\{focused:true\}\)/, "central ChatGPT tab creation must always activate the new tab and focus its Chrome window");
+assert.match(worker, /if\(action==='activate_tab'\)[\s\S]*?title:String\(activeTab\.title\|\|''\)/, "activate_tab must return the current tab title so Manager can native-focus the exact Chrome window");
+assert.match(worker, /const forceChatFocus=isChatGptTabUrl\(requestedUrl\)[\s\S]*?effectiveArgs=forceChatFocus\?\{\.\.\.createArgs,active:true\}:createArgs/, "audited ChatGPT tab creation must force active mode even when a caller forgets it");
+assert.match(managerMain, /async function recoverProfileChatTab[\s\S]*?action: "recover_chat_tab"[\s\S]*?focusChromeWindow\(newChat \? "ChatGPT" : \(title \|\| "ChatGPT"\)\)/, "Manager must native-focus the recovered Chrome window for every hung-tab recovery, including silent auto recovery");
+assert.match(managerMain, /let newChatWindowFocus = null[\s\S]*?if \(newChat && [\s\S]*?const newTabActivation = await localMcpToolInSession[\s\S]*?action: "activate_tab"[\s\S]*?focusChromeWindow\(String\(newTabActivation\?\.title \|\| "ChatGPT"\)\)[\s\S]*?NEW_CHAT_FOCUS_FAILED/, "Manager must activate and native-focus every new continuation/recovery chat using the created tab's current title before returning");
 assert.match(worker, /const tab=reusable[\s\S]*?: await createChatGptTab\(\{url,active:true\},'openChatGpt'\)/, "ChatGPT route opens must use the capped tab creator");
 assert.match(worker, /checkConnectorInstalled[\s\S]*?const tab=await createChatGptTab\(/, "connector checks must use the capped tab creator");
 assert.match(worker, /replaceUnresponsiveChatTab[\s\S]*?serializeChatGptTabCreation[\s\S]*?current\.length>=MAX_CHATGPT_TABS[\s\S]*?auditedRemoveTab\(replacedTabId,'replaceUnresponsiveChatTab','remove_old_tab'\)[\s\S]*?auditedCreateTab\(createArgs,'chat_tab_create'\)/, "renderer replacement must remove the dead tab before creating a replacement when already at the cap");
