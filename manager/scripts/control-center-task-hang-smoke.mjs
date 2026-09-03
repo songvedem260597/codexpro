@@ -118,8 +118,8 @@ assert.match(controlStyles, /\.control-hang-row\.is-active\.is-openai/, "OpenAI 
 assert.match(main, /async function continueTaskAfterHang\(incident\)[\s\S]*?forceContinuation: true[\s\S]*?taskId,[\s\S]*?conversationId,[\s\S]*?targetTab/, "close-and-continue must force a continuation while preserving the current task id and exact tab");
 assert.match(main, /onContinueAfterHang=\{\(incident\) => void continueTaskAfterHang\(incident\)\}/, "Control Center must receive the continuation handler");
 assert.match(electronMain, /createTaskHangTracker\(\{ home: codexProHome \}\)/, "Manager must persist task hang incidents under CodexPro home");
-assert.match(electronMain, /taskHangTracker\.reconcile\(browserProfiles\)/, "runtime status must reconcile hang state from live browser profiles");
-assert.match(electronMain, /browserProfileSnapshot\.available[\s\S]*?\? taskHangTracker\.reconcile\(browserProfiles\)[\s\S]*?: taskHangTracker\.snapshot\(\)/, "a temporary profile snapshot outage must preserve active hang incidents instead of falsely resolving them");
+assert.match(electronMain, /taskHangTracker\.reconcile\(taskBrowserProfiles\)/, "runtime status must reconcile hang state only from live browser profiles that already qualify as source-changing Tasks");
+assert.match(electronMain, /browserProfileSnapshot\.available && workerJobSnapshot\.available[\s\S]*?\? taskHangTracker\.reconcile\(taskBrowserProfiles\)[\s\S]*?: taskHangTracker\.snapshot\(\)/, "a temporary profile or worker-job snapshot outage must preserve active hang incidents instead of falsely resolving them");
 assert.match(electronMain, /taskHangIncidents: taskHangTracking\.incidents[\s\S]*?taskHangSummary: taskHangTracking\.summary/, "runtime status must expose hang incidents and aggregate statistics");
 
 console.log("✓ Control Center task hang management smoke test passed");

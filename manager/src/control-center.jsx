@@ -215,11 +215,12 @@ export function ControlCenter({
   const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
   const workers = Array.isArray(status?.workers) ? status.workers : [];
   const workerJobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
+  const taskWorkerJobs = useMemo(() => workerJobs.filter((job) => job?.counts_as_task === true), [workerJobs]);
   const taskHangIncidents = Array.isArray(status?.taskHangIncidents) ? status.taskHangIncidents : [];
   const taskHangSummary = status?.taskHangSummary && typeof status.taskHangSummary === "object" ? status.taskHangSummary : {};
   const recentTaskHangIncidents = taskHangIncidents.slice(0, 24);
-  const completedTasks = workerJobs.filter((job) => job?.status === "completed");
-  const failedTasks = workerJobs.filter((job) => ["failed", "cancelled", "blocked"].includes(String(job?.status)));
+  const completedTasks = taskWorkerJobs.filter((job) => job?.status === "completed");
+  const failedTasks = taskWorkerJobs.filter((job) => ["failed", "cancelled", "blocked"].includes(String(job?.status)));
   const tasks = useMemo(() => profiles
     .filter((profile) => {
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
@@ -228,7 +229,8 @@ export function ControlCenter({
     .map((profile) => {
       const tab = activeProfileTab(profile);
       const taskId = String(profile.current_task_id || "");
-      const job = workerJobs.find((item) => String(item?.job_id || "") === taskId) || null;
+      const job = taskWorkerJobs.find((item) => String(item?.job_id || "") === taskId) || null;
+      if (!job) return null;
       const executionState = taskExecutionState(job);
       return {
         profile,
@@ -240,12 +242,12 @@ export function ControlCenter({
         state: tab?.renderer_unresponsive ? "hung" : ["blocked", "stalled", "error", "verifying"].includes(executionState) ? executionState : (tab?.busy || profile.activity === "working") ? "working" : tab?.settling ? "settling" : "idle",
         startedAt: String(profile.busy_since || tab?.network_last_started_at || "")
       };
-    }), [profiles, workerJobs]);
+    }).filter(Boolean), [profiles, taskWorkerJobs]);
   const liveTaskIds = new Set([
     ...tasks.map((task) => task.taskId),
     ...workers.filter((worker) => worker?.activity === "working").map((worker) => String(worker.current_task_id || ""))
   ].filter(Boolean));
-  const unfinishedTasks = workerJobs.filter((job) => job?.status === "running" && !liveTaskIds.has(String(job?.job_id || "")));
+  const unfinishedTasks = taskWorkerJobs.filter((job) => job?.status === "running" && !liveTaskIds.has(String(job?.job_id || "")));
 
   const taskProjects = useMemo(() => new Map(tasks.map((task) => [task.profile.profile_id, projectForTask(task, projects)])), [tasks, projects]);
   const rootUsage = useMemo(() => {
@@ -275,9 +277,9 @@ export function ControlCenter({
   const problematicRepos = projects.filter((project) => Number(project.conflicted || 0) > 0 || Number(project.behind || 0) > 0 || Number(project.changes || 0) > 0 || (rootUsage.get(String(project.root || "").toLowerCase()) || 0) > 1).slice(0, 12);
   const coordinationRoots = useMemo(() => [...new Set([
     ...tasks.map((task) => String(task.root || "").trim()),
-    ...workerJobs.filter((job) => job?.status === "running").map((job) => String(job.root || "").trim()),
+    ...taskWorkerJobs.filter((job) => job?.status === "running").map((job) => String(job.root || "").trim()),
     ...projects.filter((project) => project?.active || project?.inUse).map((project) => String(project.root || "").trim())
-  ].filter(Boolean))], [tasks, workerJobs, projects]);
+  ].filter(Boolean))], [tasks, taskWorkerJobs, projects]);
 
   return (
     <div className="control-center">

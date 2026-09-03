@@ -1357,6 +1357,30 @@ function durableRepoTaskProof(job: WorkerJobRecord | undefined, taskId: string, 
   return job;
 }
 
+function workerJobSourceChanges(job: WorkerJobRecord | undefined): string[] {
+  if (!job || job.kind !== "code" || !job.root) return [];
+  try {
+    const task = readWorkspaceCoordination(job.root).tasks[job.jobId];
+    return [...new Set((Array.isArray(task?.touchedPaths) ? task.touchedPaths : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean))].slice(0, 100);
+  } catch {
+    return [];
+  }
+}
+
+function classifiedWorkerJobPublicRecord(job: WorkerJobRecord | undefined): Record<string, unknown> | undefined {
+  const publicRecord = workerJobPublicRecord(job);
+  if (!publicRecord) return undefined;
+  const sourceChangedPaths = workerJobSourceChanges(job);
+  return {
+    ...publicRecord,
+    counts_as_task: sourceChangedPaths.length > 0,
+    source_change_count: sourceChangedPaths.length,
+    source_changed_paths: sourceChangedPaths
+  };
+}
+
 function rememberRepoTaskProof(proof: RepoTaskProof): void {
   repoTaskProofs.set(proof.taskId, proof);
   if (repoTaskProofs.size <= 500) return;
@@ -1988,14 +2012,14 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     "begin_repo_task",
     {
       title: "Register Profile Task",
-      description: "Mandatory lightweight first call for every profile-bound worker task. Always provide a clear, natural, easy-to-understand 4-6 word task_title. Use task_kind=general for answers/research without source access; only task_kind=code loads global rules, activates CodexGraph, and unlocks repository tools.",
+      description: "Mandatory lightweight first call for every profile-bound worker request. Always provide a clear, natural, easy-to-understand 4-6 word task_title. task_kind only controls MCP workspace access: general is for answers/research without source access; code loads global rules, activates CodexGraph, and unlocks repository tools. Manager counts the worker job as a Task only after an actual write/edit/apply_patch source change.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional().describe("Exact task id included by CodexPro Manager. Omit only for a request typed directly in ChatGPT."),
         task_title: z.string().trim().min(4).max(56)
           .refine((value) => { const words = value.split(/\s+/).filter(Boolean).length; return words >= 4 && words <= 6; }, "Task title must contain 4-6 words.")
           .refine((value) => !/^(?:làm sao|sửa đi|làm đi|fix đi|check lỗi|kiểm tra|tiếp tục)$/iu.test(value.trim()), "Task title must describe the actual work, not a vague request.")
           .describe("Required title chosen and returned by the AI: 4-6 short, clear, natural words describing the actual work."),
-        task_kind: z.enum(["general", "code"]).describe("Use general when no source/workspace tool is needed. Use code before reading, changing, building, or testing a repository."),
+        task_kind: z.enum(["general", "code"]).describe("Workspace access mode, not the Manager Task classification. Use general when no source/workspace tool is needed. Use code before reading, changing, building, testing, committing, or pushing in a repository; Manager counts it as a Task only after an actual write/edit/apply_patch source change."),
         root: z.string().min(1).optional().describe("Initial workspace root included by CodexPro Manager. Omit for a direct ChatGPT request to use the profile's locked workspace."),
         scope: z.enum(["workspace", "all_allowed"]).optional().describe("Task scope. Omit or use workspace for a locked workspace; use all_allowed only when Manager explicitly enables all allowed roots.")
       },
@@ -2222,7 +2246,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           global_rules_loaded: false,
           codexgraph_active: false,
           policy_version: durableJob.policyVersion,
-          worker_job: workerJobPublicRecord(durableJob)
+          worker_job: classifiedWorkerJobPublicRecord(durableJob)
         });
       }
       if (!workspace || !globalRules || !codexGraph) {
@@ -2282,7 +2306,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         codexgraph_active: true,
         codexgraph: codexGraph,
         policy_version: durableJob.policyVersion,
-        worker_job: workerJobPublicRecord(durableJob)
+        worker_job: classifiedWorkerJobPublicRecord(durableJob)
       });
     }
   );
@@ -2391,7 +2415,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           integrated_head: coordinationTask?.integratedHead
         } : {}),
         policy_version: workerJob?.policyVersion || WORKER_POLICY_VERSION,
-        worker_job: workerJobPublicRecord(workerJob)
+        worker_job: classifiedWorkerJobPublicRecord(workerJob)
       });
     }
   );
@@ -2434,7 +2458,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       return textResult(record ? `# Worker Job\n\n${args.task_id}: ${record.status}` : `# Worker Job Missing\n\n${args.task_id} has no durable worker policy record.`, {
         found: Boolean(record),
         policy_version: record?.policyVersion || WORKER_POLICY_VERSION,
-        job: workerJobPublicRecord(record)
+        job: classifiedWorkerJobPublicRecord(record)
       });
     }
   );
@@ -2456,7 +2480,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const jobs = listWorkerJobs({ statuses: args.statuses, limit: args.limit });
       return textResult(`# Worker Job History\n\n${jobs.length} recent job(s).`, {
         count: jobs.length,
-        jobs: jobs.map((record) => workerJobPublicRecord(record))
+        jobs: jobs.map((record) => classifiedWorkerJobPublicRecord(record))
       });
     }
   );
@@ -2505,7 +2529,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         return textResult(`# Worker Job Progress\n\n${record.jobId}: ${record.lastProgressStage || "running"} · checkpoint ${record.progressSequence}`, {
           reported: true,
           policy_version: record.policyVersion,
-          job: workerJobPublicRecord(record)
+          job: classifiedWorkerJobPublicRecord(record)
         });
       } catch (error) {
         throw new CodexProError(`WORKER_JOB_PROGRESS_REJECTED: ${error instanceof Error ? error.message : String(error)}`, {
@@ -2561,7 +2585,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         return textResult(`# Worker Job Finalized\n\n${record.jobId}: ${record.status}`, {
           finalized: true,
           policy_version: record.policyVersion,
-          job: workerJobPublicRecord(record)
+          job: classifiedWorkerJobPublicRecord(record)
         });
       } catch (error) {
         throw new CodexProError(`WORKER_JOB_FINALIZE_REJECTED: ${error instanceof Error ? error.message : String(error)}`, {
