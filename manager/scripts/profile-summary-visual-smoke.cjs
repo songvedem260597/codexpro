@@ -16,7 +16,7 @@ for (const className of [
 }
 
 const cards = `
-  <div class="visual-shell">
+  <div class="page-overview"><div class="visual-shell">
     <div class="visual-title">Worker status summary</div>
     <div class="visual-row">
       <span class="profile-summary-item is-working"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-working-bolt" d="m13.5 2-8 12h6l-1 8 8-12h-6l1-8Z"></path><circle class="summary-working-spark" cx="18.4" cy="5.2" r="1.25"></circle></svg></span><strong>2 working</strong></span>
@@ -24,7 +24,7 @@ const cards = `
       <span class="profile-summary-item is-hung"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-hung-triangle" d="M12 3 2.8 20h18.4L12 3Z"></path><path class="summary-hung-mark" d="M12 9v5"></path><circle class="summary-hung-dot" cx="12" cy="17.25" r=".75"></circle></svg></span><strong>1 hung</strong></span>
       <span class="profile-summary-item is-missing"><span class="profile-summary-icon"><svg class="profile-summary-svg" viewBox="0 0 24 24"><path class="summary-missing-plug" d="M8 3v5M12 3v5M6 8h8v2a4 4 0 0 1-4 4v3"></path><path class="summary-missing-plus" d="M16 16h6M19 13v6"></path></svg></span><strong>1 missing</strong></span>
     </div>
-  </div>`;
+  </div></div>`;
 
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>
 ${styles}
@@ -41,8 +41,12 @@ async function inspectAnimations(win) {
     const selectors = ['.summary-working-bolt', '.summary-working-spark', '.summary-idle-ring', '.summary-idle-check', '.summary-hung-triangle', '.summary-hung-mark', '.summary-hung-dot', '.summary-missing-plug', '.summary-missing-plus'];
     const animations = Object.fromEntries(selectors.map((selector) => [selector, getComputedStyle(document.querySelector(selector)).animationName]));
     const shell = document.querySelector('.visual-shell');
+    const icon = document.querySelector('.profile-summary-icon');
+    const iconSvg = icon.querySelector('svg');
     const rect = shell.getBoundingClientRect();
-    return { animations, shell: { left: rect.left, right: rect.right, width: rect.width, scrollWidth: shell.scrollWidth, clientWidth: shell.clientWidth }, viewportWidth: document.documentElement.clientWidth };
+    const iconStyle = getComputedStyle(icon);
+    const iconSvgStyle = getComputedStyle(iconSvg);
+    return { animations, icon: { width: parseFloat(iconStyle.width), height: parseFloat(iconStyle.height), svgWidth: parseFloat(iconSvgStyle.width), svgHeight: parseFloat(iconSvgStyle.height) }, shell: { left: rect.left, right: rect.right, width: rect.width, scrollWidth: shell.scrollWidth, clientWidth: shell.clientWidth }, viewportWidth: document.documentElement.clientWidth };
   })()`);
 }
 
@@ -54,6 +58,9 @@ app.whenReady().then(async () => {
     const normal = await inspectAnimations(win);
     for (const [selector, animationName] of Object.entries(normal.animations)) {
       if (!animationName || animationName === "none") throw new Error(`${selector} is not animated at runtime`);
+    }
+    if (normal.icon.width < 18 || normal.icon.height < 18 || normal.icon.svgWidth < 18 || normal.icon.svgHeight < 18) {
+      throw new Error(`Overview profile summary icons are too small: ${JSON.stringify(normal.icon)}`);
     }
     if (normal.shell.scrollWidth > normal.shell.clientWidth + 2 || normal.shell.left < -2 || normal.shell.right > normal.viewportWidth + 2) {
       throw new Error(`Profile summary fixture overflowed: ${JSON.stringify(normal.shell)}`);

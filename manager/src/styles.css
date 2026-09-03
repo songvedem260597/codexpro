@@ -165,11 +165,12 @@ header { display: flex; align-items: flex-start; justify-content: space-between;
 .page-overview { padding-top: 24px; }
 .page-overview > header { display: grid; grid-template-columns: minmax(300px, .8fr) minmax(0, 1.2fr); align-items: end; gap: 24px; margin-bottom: 24px; }
 .page-overview .header-server-actions { width: auto; max-width: 100%; justify-self: end; align-self: end; border-radius: 8px; }
-.page-overview .header-server-actions .profile-count { min-height: 34px; padding: 6px 10px; gap: 5px; font-size: 11px; }
-.page-overview .profile-summary-item { gap: 3px; }
-.page-overview .profile-summary-item strong { font-size: 11px; }
-.page-overview .profile-summary-icon,
-.page-overview .profile-summary-icon svg { width: 12px; height: 12px; }
+.page-overview .header-server-actions .profile-count { min-height: 42px; padding: 8px 12px; gap: 7px; font-size: 12px; line-height: 1.25; }
+.page-overview .profile-summary-item { gap: 5px; }
+.page-overview .profile-summary-item strong { font-size: 12px; }
+.page-overview .profile-summary-icon { width: 19px; height: 19px; flex-basis: 19px; }
+.page-overview .profile-summary-icon svg { width: 19px; height: 19px; stroke-width: 2; }
+.page-overview .profile-summary-update { min-height: 30px; padding: 5px 10px; font-size: 12px; }
 .page-overview #overview { margin-bottom: 22px; }
 .page-overview #overview .section-head { align-items: center; margin-bottom: 10px; }
 .page-overview #overview .section-head h2 { margin-bottom: 0; }
