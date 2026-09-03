@@ -3175,6 +3175,10 @@ async function collectRuntimeStatus(options = {}) {
     });
   }
   const workerJobs = workerJobSnapshot.jobs;
+  const countedTaskIds = new Set(workerJobs
+    .filter((job) => job?.counts_as_task === true)
+    .map((job) => String(job?.job_id || ""))
+    .filter(Boolean));
   const browserProfilesVisible = browserProfilesRaw.filter((profile) => {
     const headless = profile.headless === true || String(profile.profile_id || "").startsWith("headless-");
     return profile.connected || !headless;
@@ -3185,10 +3189,11 @@ async function collectRuntimeStatus(options = {}) {
     return { ...profile, current_workspace_repo: await githubRepoForRoot(workspaceRoot) };
   }));
   const workerStatus = await workerPluginRegistry.list({ browserProfiles });
-  const taskHangTracking = browserProfileSnapshot.available
-    ? taskHangTracker.reconcile(browserProfiles)
+  const taskBrowserProfiles = browserProfiles.filter((profile) => countedTaskIds.has(String(profile?.current_task_id || "")));
+  const taskHangTracking = browserProfileSnapshot.available && workerJobSnapshot.available
+    ? taskHangTracker.reconcile(taskBrowserProfiles)
     : taskHangTracker.snapshot();
-  for (const incident of taskUnfinalizedIncidents(workerJobs, { profiles: browserProfiles, workers: workerStatus.workers })) {
+  for (const incident of taskUnfinalizedIncidents(workerJobs.filter((job) => job?.counts_as_task === true), { profiles: taskBrowserProfiles, workers: workerStatus.workers })) {
     if (!diagnosticAllowed(incident.fingerprint, TASK_UNFINALIZED_REPEAT_MS)) continue;
     diagnostic(incident.level, incident.source, incident.category, incident.message, {
       action: incident.action,
@@ -4644,6 +4649,7 @@ async function sendProfileRequestUnlocked(payload) {
         `Task ID bắt buộc: ${taskId}`,
         "BẮT BUỘC tự đặt task_title tự nhiên, dễ hiểu, dài 4-6 từ và mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
         "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
+        "Lưu ý: task_kind chỉ điều khiển quyền MCP. Manager chỉ tính worker job là Task khi có thay đổi source thật do write/edit/apply_patch; hỏi đáp, phân tích/read-only, build/test-only, commit-only hoặc push-only không được tính là Task.",
         `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"general","scope":"all_allowed"}.`,
         `Nếu task_kind=code: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"code","root":"${selectedProject.root.replace(/\\/g, "\\\\")}","scope":"all_allowed"} trước mọi câu trả lời. Workspace CodexPro vẫn là workspace chính để sửa/build/test.`,
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
@@ -4657,6 +4663,7 @@ async function sendProfileRequestUnlocked(payload) {
         `Task ID bắt buộc: ${taskId}`,
         "BẮT BUỘC tự đặt task_title tự nhiên, dễ hiểu, dài 4-6 từ và mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
         "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
+        "Lưu ý: task_kind chỉ điều khiển quyền MCP. Manager chỉ tính worker job là Task khi có thay đổi source thật do write/edit/apply_patch; hỏi đáp, phân tích/read-only, build/test-only, commit-only hoặc push-only không được tính là Task.",
         `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"general","scope":"all_allowed"}. Không truyền root vì task này không dùng workspace.`,
         `Nếu task_kind=code: BẮT BUỘC tự chọn đúng repo/thư mục thực sự liên quan tới yêu cầu rồi gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"code","root":"<đường dẫn repo/thư mục thực sự cần thao tác>","scope":"all_allowed"}. Không được mặc định dùng workspace CodexPro hiện tại/default chỉ vì nó đang mở; nếu chưa biết repo cụ thể, chọn vùng được cấp quyền hẹp nhất phù hợp để tìm từ đó.`,
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
@@ -4667,6 +4674,7 @@ async function sendProfileRequestUnlocked(payload) {
         `Task ID bắt buộc: ${taskId}`,
         "BẮT BUỘC tự đặt task_title tự nhiên, dễ hiểu, dài 4-6 từ và mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
         "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
+        "Lưu ý: task_kind chỉ điều khiển quyền MCP. Manager chỉ tính worker job là Task khi có thay đổi source thật do write/edit/apply_patch; hỏi đáp, phân tích/read-only, build/test-only, commit-only hoặc push-only không được tính là Task.",
         `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"<general hoặc code>","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Phải thay cả hai placeholder bằng giá trị thật. task_kind=general chỉ ghi title, không đọc CODEXPRO.md và không chạy CodexGraph; task_kind=code mới nạp rule, chạy CodexGraph và mở tool workspace.`,
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
         "Sau khi begin_repo_task với task_kind=code thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác."

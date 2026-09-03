@@ -46,7 +46,7 @@ const profile = {
 const status = {
   browserProfiles: [profile],
   workers: [],
-  workerJobs: [{ job_id: taskId, worker_id: profile.profile_id, root: profile.current_workspace_root, title: profile.current_task_title, status: "running", started_at: isoAgo(420), updated_at: isoAgo(5) }],
+  workerJobs: [{ job_id: taskId, worker_id: profile.profile_id, root: profile.current_workspace_root, title: profile.current_task_title, status: "running", counts_as_task: true, source_change_count: 1, source_changed_paths: ["src/workerPolicy.ts"], started_at: isoAgo(420), updated_at: isoAgo(5) }],
   taskHangSummary: { active_count: 1, total_count: 4, network_count: 2, openai_count: 2, total_duration_ms: 387_000, longest_duration_ms: 221_000 },
   taskHangIncidents: [
     {
