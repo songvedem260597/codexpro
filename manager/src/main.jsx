@@ -29,6 +29,7 @@ import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discard
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
 import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shouldRolloverConversation } from "./conversation-message-limit.js";
+import { availableConversationIdsForProfile, conversationBelongsToProfile, isConversationUnavailableError } from "./conversation-target.js";
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { confirmChatResponseFinality, hasStrongerNetworkStreamEvidence } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
@@ -519,7 +520,7 @@ function normalizedTaskTitleTokens(value) {
 
 function taskConversationIdForProfile(profile) {
   const persisted = String(profile?.current_task_conversation_id || "").trim();
-  if (/^[A-Za-z0-9-]{8,160}$/.test(persisted)) return persisted;
+  if (conversationBelongsToProfile(profile, persisted)) return persisted;
   const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
   const liveTab = tabs.find((tab) =>
     Boolean(conversationIdFromTab(tab))
@@ -3127,7 +3128,16 @@ function App() {
   function openChat(profile) {
     const taskConversationId = taskConversationIdForProfile(profile);
     const conversations = profileRequestChats(profile, taskConversationId);
-    const pinnedConversationId = String(requestTargetsRef.current[profile.profile_id] || "");
+    const availableConversationIds = availableConversationIdsForProfile(profile);
+    const persistedTaskConversationId = String(profile?.current_task_conversation_id || "").trim();
+    const staleTaskConversationId = persistedTaskConversationId && !availableConversationIds.has(persistedTaskConversationId)
+      ? persistedTaskConversationId
+      : "";
+    const pinnedConversationCandidate = String(requestTargetsRef.current[profile.profile_id] || "");
+    const pinnedConversationId = pinnedConversationCandidate === NEW_CHAT_TARGET || availableConversationIds.has(pinnedConversationCandidate)
+      ? pinnedConversationCandidate
+      : "";
+    const stalePinnedConversationId = pinnedConversationCandidate && !pinnedConversationId ? pinnedConversationCandidate : "";
     const activeTab = (profile.conversation_tabs || []).find((tab) => tab.active);
     const activeConversationId = conversationIdFromTab(activeTab);
     const activeTabReady = Boolean(activeConversationId && !activeTab?.busy && !activeTab?.settling && String(activeTab?.network_state || "") !== "generating");
@@ -3136,7 +3146,8 @@ function App() {
       ? (String(profile?.current_task_conversation_id || "").trim() === taskConversationId ? "open_task_bound_conversation" : "open_task_inferred_conversation")
       : activeTabReady
         ? (pinnedConversationId && pinnedConversationId !== activeConversationId ? "open_active_idle_tab_overrode_pinned" : "open_active_idle_tab")
-        : pinnedConversationId ? "reopen_pinned_selection" : "initial_open";
+        : pinnedConversationId ? "reopen_pinned_selection"
+          : staleTaskConversationId || stalePinnedConversationId ? "open_new_chat_after_stale_selection" : "initial_open";
     if (conversationId) {
       requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: conversationId };
       requestTargetReasons.current.set(profile.profile_id, selectionReason);
@@ -3144,15 +3155,21 @@ function App() {
     }
     const resolvedTaskTab = (profile.conversation_tabs || []).find((tab) => conversationIdFromTab(tab) === taskConversationId);
     const taskTabDiffersFromChromeActive = Boolean(taskConversationId && activeConversationId && taskConversationId !== activeConversationId);
-    logRendererDiagnostic(api, taskTabDiffersFromChromeActive ? "warn" : "info", "chat", taskTabDiffersFromChromeActive
+    const staleSelectionIgnored = Boolean(staleTaskConversationId || stalePinnedConversationId);
+    logRendererDiagnostic(api, taskTabDiffersFromChromeActive || staleSelectionIgnored ? "warn" : "info", "chat", taskTabDiffersFromChromeActive
       ? `Task ${profile.current_task_title || profile.current_task_id || profile.profile_id} nằm ở tab khác tab Chrome đang active`
-      : `Mở composer ${profile.profile_id} tại ${conversationId}`, {
+      : staleSelectionIgnored
+        ? `Bỏ qua conversation cũ không còn thuộc profile ${profile.profile_id}; mở Chat mới`
+        : `Mở composer ${profile.profile_id} tại ${conversationId}`, {
       action: "open-chat-target-selection",
       profile_id: profile.profile_id,
       task_id: String(profile?.current_task_id || ""),
       task_title: String(profile?.current_task_title || ""),
       task_bound_conversation_id: String(profile?.current_task_conversation_id || ""),
       task_resolved_conversation_id: taskConversationId,
+      stale_task_conversation_id: staleTaskConversationId,
+      stale_pinned_conversation_id: stalePinnedConversationId,
+      available_conversation_ids: [...availableConversationIds],
       task_resolved_title: String(resolvedTaskTab?.title || "").slice(0, 160),
       task_tab_differs_from_chrome_active: taskTabDiffersFromChromeActive,
       from_conversation_id: pinnedConversationId,
@@ -4211,6 +4228,27 @@ function App() {
       return result;
     } catch (err) {
       const message = err?.message || String(err);
+      if (isConversationUnavailableError(err) && responseTargetStillCurrent()) {
+        requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: NEW_CHAT_TARGET };
+        requestTargetReasons.current.set(profile.profile_id, "recover_stale_conversation_as_new_chat");
+        setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
+        setRequestResponses((current) => ({
+          ...current,
+          [profile.profile_id]: { visible: true, loading: false, transcriptLoading: false, error: "", conversationId: NEW_CHAT_TARGET, text: "", messages: [], busy: false }
+        }));
+        logRendererDiagnostic(api, "warn", "chat", `Conversation ${conversationId} đã rời profile ${profile.profile_id}; chuyển composer sang Chat mới`, {
+          action: "recover-stale-conversation-selection",
+          profile_id: profile.profile_id,
+          stale_conversation_id: conversationId,
+          available_conversation_ids: [...availableConversationIdsForProfile(profile)],
+          read_dom: readDom,
+          recover_stale_dom: recoverStaleDom,
+          canonical_only: canonicalOnly,
+          silent,
+          error: err
+        });
+        return null;
+      }
       logRendererDiagnostic(api, "error", "chat", `Đọc phản hồi thất bại: ${message}`, { action: "load-response", profile_id: profile.profile_id, conversation_id: conversationId, read_dom: readDom, recover_stale_dom: recoverStaleDom, canonical_only: canonicalOnly, silent, error: err });
       setRequestResponses((current) => responseTargetStillCurrent()
         ? { ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: false, transcriptLoading: false, error: message, conversationId } }
