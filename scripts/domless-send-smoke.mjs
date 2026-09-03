@@ -58,6 +58,13 @@ function extractFunction(name) {
   assert.fail(`Could not find the end of ${name}`);
 }
 
+const rendererProbeSource = extractFunction("probeChatRendererForSend");
+assert.match(rendererProbeSource, /Runtime\.evaluate/, "renderer send preflight must use a pure CDP evaluation instead of queueing mutable page work");
+assert.doesNotMatch(rendererProbeSource, /scripting\.executeScript|tabs\.sendMessage/, "renderer send preflight must not enqueue DOM mutations that can resume after the profile wakes");
+const rendererWakeSource = extractFunction("ensureChatRendererReadyForSend");
+assert.match(rendererWakeSource, /probeChatRendererForSend[\s\S]*?tabs\.update\(tab\.id,\{active:true\}\)[\s\S]*?windows\.update\(tab\.windowId,\{focused:true\}\)[\s\S]*?probeChatRendererForSend/, "only an unresponsive renderer may trigger one automatic tab/window wake followed by a second pure probe");
+assert.match(rendererWakeSource, /RENDERER_NEEDS_FOREGROUND/, "a renderer that stays frozen must stop before prepare and request Manager native foreground recovery");
+
 const generationSource = extractFunction("isChatGenerationRequest");
 const pendingConversationByTab = new Map([[9, { at: Date.now() }]]);
 const chatNetworkStateByTab = new Map();
@@ -370,10 +377,12 @@ assert.match(sendBlock, /definitelyNotDispatched&&!attachmentSubmit&&remainingCo
 assert.match(sendBlock, /trusted-enter-pre-dispatch','trusted-click-fallback'/, "a definitely-unsent focus failure may use one trusted-click fallback");
 assert.match(worker, /expectedText&&normalized\(composerText\)===normalized\(expectedText\)/, "trusted click fallback must recover a React-replaced composer only for an exact owned payload");
 assert.match(sendBlock, /cleanup_skipped:!definitelyUnsent/, "ambiguous attempts must not delete a possibly submitted draft");
-assert.match(sendBlock, /replaceUnresponsiveChatTab\(tab,recoveryUrl/, "only a confirmed renderer hang may replace the exact unresponsive conversation tab");
+assert.match(sendBlock, /ensureChatRendererReadyForSend\(tab[\s\S]*?Promise\.all\(\[/, "send must prove renderer responsiveness through CDP before any DOM preflight can queue work in a frozen profile");
+assert.ok(sendBlock.indexOf("ensureChatRendererReadyForSend(tab") < sendBlock.indexOf("sendChatRequestPage"), "renderer responsiveness must be verified before draft or attachment preparation mutates the page");
+assert.match(sendBlock, /hardRendererHang[\s\S]*?submission_state:'uncertain'[\s\S]*?PREPARE_UNCERTAIN:[\s\S]*?cleanup_skipped:true/, "a renderer timeout after preflight must become uncertain and must not queue a second prepare that could resume later");
 assert.doesNotMatch(sendBlock, /chrome\.tabs\.reload\(tab\.id\)/, "a missing or slow composer must wait and retry instead of blindly reloading an active response");
 assert.match(sendBlock, /prepare_waited:true/, "a soft pre-submit failure must expose its bounded wait-and-retry path");
-assert.match(sendBlock, /preparationRecovery\.renderer_replaced\?\['prepare','replace-tab','prepare'\]:preparationRecovery\.prepare_waited\?\['prepare','wait','prepare'\]/, "pre-submit diagnostics must distinguish safe waiting from hard renderer replacement");
+assert.match(sendBlock, /preparationRecovery\.prepare_waited\?\['prepare','wait','prepare'\]/, "soft pre-submit recovery must retain a single bounded wait path without queuing a second renderer-hang prepare");
 assert.match(sendBlock, /submission_state:'failed'.*PREPARE_FAILED:/s, "a second pre-submit failure is definitely unsent, not SEND_UNCERTAIN");
 assert.match(worker, /const ATTACHMENT_PREPARE_TIMEOUT_MS = 60000;/, "attachment preparation must allow ChatGPT enough time to render and stabilize uploaded files");
 assert.match(sendBlock, /const prepareTimeoutMs=attachments\.length\?ATTACHMENT_PREPARE_TIMEOUT_MS:DOM_PREPARE_TIMEOUT_MS;/, "attachment sends must use the dedicated preparation deadline");

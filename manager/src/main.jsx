@@ -548,7 +548,6 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
   const target = WORKER_EXTENSION_VERSION.split(".").map(Number);

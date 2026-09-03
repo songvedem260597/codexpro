@@ -3934,6 +3934,52 @@ $foregroundMatch=($foreground -eq $found)
   }
 }
 
+function rendererNeedsForegroundError(error) {
+  return String(error?.code || "") === "RENDERER_NEEDS_FOREGROUND" || /^RENDERER_NEEDS_FOREGROUND:/i.test(String(error?.message || ""));
+}
+
+function rendererWakeTargetTitle(profile, targetId) {
+  const wanted = String(targetId || "");
+  const tabs = [
+    ...(Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : []),
+    ...(Array.isArray(profile?.chatgpt_tabs) ? profile.chatgpt_tabs : [])
+  ];
+  return String(tabs.find((tab) => String(tab?.id ?? "") === wanted)?.title || profile?.active_chat_title || "ChatGPT").trim() || "ChatGPT";
+}
+
+async function localMcpChatSendWithRendererRecovery(session, profile, args, timeoutMs = 235000) {
+  try {
+    return await localMcpToolInSession(session, "browser_control", args, timeoutMs);
+  } catch (error) {
+    if (!rendererNeedsForegroundError(error)) throw error;
+    const targetId = String(error?.details?.target_id ?? "").trim();
+    if (!/^\d+$/.test(targetId)) throw error;
+    let activation;
+    try {
+      activation = await localMcpToolInSession(session, "browser_control", {
+        action: "activate_tab",
+        profile_id: String(args?.profile_id || ""),
+        target_id: targetId,
+        conversation_id: String(args?.conversation_id || "") || undefined
+      }, 30000);
+    } catch (activationError) {
+      error.details = { ...(error?.details || {}), native_renderer_recovery: "activate_failed", activation_error: activationError?.message || String(activationError) };
+      throw error;
+    }
+    const title = rendererWakeTargetTitle(profile, targetId);
+    const nativeFocus = await focusChromeWindow(title);
+    if (!nativeFocus?.ok) {
+      const recoveryError = new Error(`RENDERER_RECOVERY_FAILED: CodexPro đã kích hoạt tab nhưng Windows chưa đưa Chrome profile "${title}" ra foreground; chưa gửi để tránh thao tác muộn hoặc trùng.`);
+      recoveryError.code = "RENDERER_RECOVERY_FAILED";
+      recoveryError.details = { target_id: targetId, title, activation, native_focus: nativeFocus, original_error: error?.message || String(error) };
+      throw recoveryError;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const retried = await localMcpToolInSession(session, "browser_control", { ...args, renderer_native_wake_retry: true }, timeoutMs);
+    return { ...retried, renderer_native_wake_retry: true, renderer_native_wake: { target_id: targetId, title, activation, native_focus: nativeFocus } };
+  }
+}
+
 function isMissingChromeTabError(error) {
   return /No tab with id|tab (?:was )?(?:closed|removed|not found)|không (?:còn|tìm thấy) tab/i.test(error instanceof Error ? error.message : String(error || ""));
 }
@@ -4543,7 +4589,7 @@ async function sendProfileRequestUnlocked(payload) {
       ].join("\n");
   const dispatchStartedAt = Date.now();
   const taskDispatchedAt = new Date(dispatchStartedAt).toISOString();
-  const result = await localMcpToolInSession(session, "browser_control", {
+  const result = await localMcpChatSendWithRendererRecovery(session, profile, {
     action: "send_chat_request",
     profile_id: profileId,
     conversation_id: newChat ? undefined : conversationId,
