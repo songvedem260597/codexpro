@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 
 const RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_LOG_BYTES = 8 * 1024 * 1024;
+const COMPACTED_LOG_BYTES = 6 * 1024 * 1024;
 const MAX_READ_ENTRIES = 5000;
 const MAX_STRING_LENGTH = 4000;
 const MAX_WRITE_BATCH_ENTRIES = 250;
@@ -189,11 +190,11 @@ function trimToByteLimit(records) {
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const line = `${JSON.stringify(records[index])}\n`;
     const lineBytes = Buffer.byteLength(line, "utf8");
-    if (kept.length && bytes + lineBytes > MAX_LOG_BYTES) break;
+    if (kept.length && bytes + lineBytes > COMPACTED_LOG_BYTES) break;
     bytes += lineBytes;
-    kept.unshift(records[index]);
+    kept.push(records[index]);
   }
-  return kept;
+  return kept.reverse();
 }
 
 function annotateIncidentOccurrences(records) {
