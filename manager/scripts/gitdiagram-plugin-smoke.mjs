@@ -54,8 +54,8 @@ try {
   assert.ok(fs.existsSync(path.join(managedRoot, ".codexpro-plugin", "ui", "app.js")));
   const entry = registry.resolveResource("gitdiagram", "/");
   const appAsset = registry.resolveResource("gitdiagram", "/app.js");
-  assert.equal(entry.path, path.join(managedRoot, ".codexpro-plugin", "ui", "index.html"));
-  assert.equal(appAsset.path, path.join(managedRoot, ".codexpro-plugin", "ui", "app.js"));
+  assert.equal(entry.path, fs.realpathSync(path.join(managedRoot, ".codexpro-plugin", "ui", "index.html")));
+  assert.equal(appAsset.path, fs.realpathSync(path.join(managedRoot, ".codexpro-plugin", "ui", "app.js")));
   assert.equal(appAsset.mime_type, "text/javascript; charset=utf-8");
   assert.equal(installer.listCatalog()[0].installed, true);
   assert.equal(installer.listCatalog()[0].skill_count, 0);
