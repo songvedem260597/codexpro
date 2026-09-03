@@ -390,6 +390,13 @@ assert.match(worker, /normalized\(composerText\(current\)\)===normalized\(expect
 assert.match(worker, /ok:true,focused:document\.activeElement===composer/, "the first ownership check must not require a background tab to already own keyboard focus");
 assert.match(worker, /refocused\?\.result\?\.focused!==true/, "trusted Enter must require focus after bringing the page to the foreground");
 assert.match(worker, /focusAttempt<15.*setTimeout\(resolve,50\)/s, "foreground focus verification must tolerate a bounded Chrome/React focus race");
+const blockingModalSource = extractFunction("dismissKnownBlockingChatModalPage");
+assert.match(blockingModalSource, /modal-subscription-failure/, "send recovery must recognize ChatGPT's subscription failure modal");
+assert.match(blockingModalSource, /draftOwned/, "a blocking modal may only be dismissed while the exact CodexPro draft is still owned");
+assert.match(blockingModalSource, /button\[data-testid="close-button"\]/, "blocking modal recovery must use the modal's explicit close control");
+assert.doesNotMatch(blockingModalSource, /plan-upgrade-payment-method|\.click\(\).*Pay now/s, "blocking modal recovery must never activate payment actions");
+assert.match(worker, /quietChecks>=3/, "known modal recovery must require a quiet stability window instead of dispatching immediately after one close");
+assert.match(worker, /Modal thanh toán liên tục xuất hiện lại; dừng trước khi phát Enter/, "a repeatedly reopening modal must fail while the send is still definitely unsent");
 assert.match(worker, /TRUSTED_ENTER_PRE_DISPATCH:/, "trusted Enter must distinguish a definitely-unsent pre-dispatch failure");
 assert.match(worker, /TRUSTED_ENTER_DISPATCH_UNCERTAIN:/, "trusted Enter must preserve ambiguity after key dispatch starts");
 assert.match(worker, /let refocusedResult=null/, "trusted Enter metadata must retain the refocus result outside the dispatch block");
@@ -438,12 +445,20 @@ assert.match(prepareSource, /const currentComposer=findComposer\(\)/, "composer 
 const clickSource = extractFunction("prepareTrustedClickFallbackPage");
 assert.match(clickSource, /composer-submit-button|send-button/, "Send selectors may remain only in the fallback locator");
 assert.match(clickSource, /codexproSendAttempt/, "fallback click must be scoped to the exact send attempt");
+assert.match(clickSource, /modal-subscription-failure/, "click fallback must refuse to run behind the subscription modal");
+const trustedClickSource = extractFunction("trustedActivateChatSendButtonTab");
+assert.match(trustedClickSource, /modal-subscription-failure/, "trusted click must re-check the modal immediately before mouse dispatch");
+assert.match(trustedClickSource, /point\?\.blocked/, "trusted click must stop before mouse dispatch when the modal reappears");
 
 const enterSource = extractFunction("trustedSubmitChatComposerTab");
 assert.match(enterSource, /focusChatComposerForSubmitPage/, "trusted Enter must focus the prepared composer without locating Send");
 assert.match(enterSource, /Input\.dispatchKeyEvent/, "trusted Enter must use CDP keyboard input");
 assert.doesNotMatch(enterSource, /Page\.bringToFront/, "trusted Enter must not bring the Chrome profile to the foreground");
 assert.match(enterSource, /Emulation\.setFocusEmulationEnabled/, "trusted Enter must emulate focus without depending on the OS foreground window");
+assert.match(enterSource, /dismissKnownBlockingChatModalPage/, "trusted Enter must dismiss a known safe blocking modal before dispatch");
+assert.match(enterSource, /const \[finalFocus\]/, "trusted Enter must verify composer focus again immediately before dispatch");
+assert.ok(enterSource.indexOf("const [finalFocus]") < enterSource.indexOf("keyDispatchStarted=true"), "final focus verification must happen while the attempt is still definitely unsent");
+assert.match(enterSource, /blocking_modal_dismissed:blockingModalDismissed/, "send diagnostics must report modal recovery");
 assert.match(enterSource, /background_submit:true/, "trusted Enter must report background submission metadata");
 assert.match(enterSource, /cdp_tracker_armed:true/, "trusted Enter must return after dispatch while leaving the CDP tracker armed");
 assert.doesNotMatch(enterSource, /await tracker\.started/, "trusted Enter must not hide the dispatch result behind a second network wait");
