@@ -45,6 +45,26 @@ assert.equal(await makeLimitHarness("mac")(), 1, "macOS must resolve to exactly 
 assert.equal(await makeLimitHarness("win")(), 3, "Windows must retain the three-tab cap");
 assert.equal(await makeLimitHarness("linux")(), 3, "non-mac platforms must retain the normal cap");
 
+const debuggerGuardSource = worker.match(/function debuggerSessionBlocksChatTabCleanup\(tabId\) \{[\s\S]*?\n\}/)?.[0];
+assert.ok(debuggerGuardSource, "tab cleanup must distinguish the persistent flight-recorder debugger ref from transient debugger work");
+{
+  const debuggerSessionsByTab = new Map([
+    [1, { refs: 1 }],
+    [2, { refs: 2 }],
+    [3, { refs: 1 }]
+  ]);
+  const flightRecorderTrackersByTab = new Map([[1, {}], [2, {}]]);
+  const debuggerSessionBlocksChatTabCleanup = Function(
+    "debuggerSessionsByTab",
+    "flightRecorderTrackersByTab",
+    `${debuggerGuardSource}; return debuggerSessionBlocksChatTabCleanup;`
+  )(debuggerSessionsByTab, flightRecorderTrackersByTab);
+  assert.equal(debuggerSessionBlocksChatTabCleanup(1), false, "a flight recorder by itself must not pin an idle ChatGPT tab forever");
+  assert.equal(debuggerSessionBlocksChatTabCleanup(2), true, "an extra transient debugger ref must still protect the tab from cleanup");
+  assert.equal(debuggerSessionBlocksChatTabCleanup(3), true, "a standalone debugger operation without a flight recorder must protect the tab");
+  assert.equal(debuggerSessionBlocksChatTabCleanup(4), false, "a tab with no debugger session must remain eligible for cleanup");
+}
+
 const helperSource = worker.slice(
   worker.indexOf("async function serializeChatGptTabCreation"),
   worker.indexOf("function isChatGenerationRequest")
