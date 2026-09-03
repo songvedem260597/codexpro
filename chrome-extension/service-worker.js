@@ -86,6 +86,7 @@ let profileLifecycleWriteTail = Promise.resolve();
 const tabRemovalIntents = new Map();
 const windowRemovalIntents = new Map();
 const flightRecorderTrackersByTab = new Map();
+const flightRecorderStartPromisesByTab = new Map();
 const flightRecorderEventsByTab = new Map();
 const flightRecorderContextByTab = new Map();
 const flightRecorderIncidentAtByTab = new Map();
@@ -157,6 +158,14 @@ function debuggerSessionBlocksChatTabCleanup(tabId) {
   return refs>recorderRefs;
 }
 
+function pendingConversationBlocksChatTabCleanup(tabId) {
+  const pending=pendingConversationByTab.get(tabId);
+  if(!pending)return false;
+  if(Date.now()-Number(pending?.at||0)<PENDING_CONVERSATION_TTL_MS)return true;
+  pendingConversationByTab.delete(tabId);
+  return false;
+}
+
 function planChatTabCleanup(tabs,options={}) {
   const requestedMaxTabs=Number(options.maxTabs);
   const maxTabs=Number.isFinite(requestedMaxTabs)?Math.max(0,Math.floor(requestedMaxTabs)):MAX_CHATGPT_TABS;
@@ -212,7 +221,7 @@ async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
   const probeCandidates=rawTabs.filter(tab=>{
     const summary=summaryById.get(tab.id)||{};
     const debuggerBusy=debuggerSessionBlocksChatTabCleanup(tab.id);
-    return (!tab.active||allowActiveIdle)&&!tab.pinned&&!tab.audible&&tab.status!=='loading'&&!summary.busy&&!summary.settling&&!pendingConversationByTab.has(tab.id)&&!chatAttachmentOwnershipByTab.has(tab.id)&&!browserMutationTailsByTab.has(tab.id)&&!debuggerBusy;
+    return (!tab.active||allowActiveIdle)&&!tab.pinned&&!tab.audible&&tab.status!=='loading'&&!summary.busy&&!summary.settling&&!pendingConversationBlocksChatTabCleanup(tab.id)&&!chatAttachmentOwnershipByTab.has(tab.id)&&!browserMutationTailsByTab.has(tab.id)&&!debuggerBusy;
   });
   await Promise.all(probeCandidates.map(async tab=>{
     const healthy=await probeChatGptTabHealth(tab.id);
@@ -223,7 +232,7 @@ async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
   const policyTabs=rawTabs.map(tab=>{
     const summary=summaryById.get(tab.id)||{};
     const debuggerBusy=debuggerSessionBlocksChatTabCleanup(tab.id);
-    const pending=pendingConversationByTab.has(tab.id)||chatAttachmentOwnershipByTab.has(tab.id)||browserMutationTailsByTab.has(tab.id)||debuggerBusy;
+    const pending=pendingConversationBlocksChatTabCleanup(tab.id)||chatAttachmentOwnershipByTab.has(tab.id)||browserMutationTailsByTab.has(tab.id)||debuggerBusy;
     return {...tab,...summary,last_accessed:Number(tab.lastAccessed)||0,pending,health_failures:Number(chatTabHealthByTab.get(tab.id)?.failures||0)};
   });
   const plan=planChatTabCleanup(policyTabs,{
@@ -242,7 +251,7 @@ async function cleanupChatGptTabs(tabSummaries,recentConversations,options={}) {
       const canonicalActivity=canonicalActivityState(tabId,conversationId);
       const domActivity=chatDomActivityByTab.get(tabId)?.value;
       const debuggerBusy=debuggerSessionBlocksChatTabCleanup(tabId);
-      if((current.active&&!allowActiveIdle)||current.pinned||current.audible||current.status==='loading'||pendingConversationByTab.has(tabId)||chatAttachmentOwnershipByTab.has(tabId)||browserMutationTailsByTab.has(tabId)||debuggerBusy||summary.busy||summary.settling||networkState.busy||canonicalActivity.busy||domActivity?.busy)continue;
+      if((current.active&&!allowActiveIdle)||current.pinned||current.audible||current.status==='loading'||pendingConversationBlocksChatTabCleanup(tabId)||chatAttachmentOwnershipByTab.has(tabId)||browserMutationTailsByTab.has(tabId)||debuggerBusy||summary.busy||summary.settling||networkState.busy||canonicalActivity.busy||domActivity?.busy)continue;
       if(singleTabProfile&&plan.reasons[tabId]==='codexpro_unreachable'){
         const remaining=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(tab=>Number.isInteger(tab.id));
         if(remaining.length===1&&remaining[0].id===tabId){
@@ -3961,6 +3970,8 @@ function noteFlightRecorderEvent(tabId,rawEvent) {
 }
 
 async function stopFlightRecorderForTab(tabId) {
+  const starting=flightRecorderStartPromisesByTab.get(tabId);
+  if(starting){try{await starting;}catch{}}
   const tracker=flightRecorderTrackersByTab.get(tabId);
   if(!tracker)return false;
   flightRecorderTrackersByTab.delete(tabId);
@@ -3974,18 +3985,30 @@ async function ensureFlightRecorderForTab(tabId,url='') {
   if(url&&!isChatGptTabUrl(url)){await stopFlightRecorderForTab(tabId);return null;}
   const existing=flightRecorderTrackersByTab.get(tabId);
   if(existing)return existing;
-  const target=await acquireDebuggerTab(tabId);
-  const unsubscribe=subscribeDebuggerEvents(tabId,event=>noteFlightRecorderEvent(tabId,event));
-  const tracker={target,unsubscribe};
-  flightRecorderTrackersByTab.set(tabId,tracker);
-  try{
-    await Promise.allSettled([
-      chrome.debugger.sendCommand(target,'Network.enable',{}),chrome.debugger.sendCommand(target,'Runtime.enable',{}),chrome.debugger.sendCommand(target,'Log.enable',{}),chrome.debugger.sendCommand(target,'Page.enable',{}),chrome.debugger.sendCommand(target,'Page.setLifecycleEventsEnabled',{enabled:true})
-    ]);
-    return tracker;
-  }catch(error){
-    flightRecorderTrackersByTab.delete(tabId);try{unsubscribe();}catch{}releaseDebuggerTab(tabId);throw error;
-  }
+  const starting=flightRecorderStartPromisesByTab.get(tabId);
+  if(starting)return await starting;
+  const start=(async()=>{
+    const current=flightRecorderTrackersByTab.get(tabId);
+    if(current)return current;
+    const target=await acquireDebuggerTab(tabId);
+    const unsubscribe=subscribeDebuggerEvents(tabId,event=>noteFlightRecorderEvent(tabId,event));
+    const tracker={target,unsubscribe};
+    flightRecorderTrackersByTab.set(tabId,tracker);
+    try{
+      await Promise.allSettled([
+        chrome.debugger.sendCommand(target,'Network.enable',{}),chrome.debugger.sendCommand(target,'Runtime.enable',{}),chrome.debugger.sendCommand(target,'Log.enable',{}),chrome.debugger.sendCommand(target,'Page.enable',{}),chrome.debugger.sendCommand(target,'Page.setLifecycleEventsEnabled',{enabled:true})
+      ]);
+      return tracker;
+    }catch(error){
+      if(flightRecorderTrackersByTab.get(tabId)===tracker)flightRecorderTrackersByTab.delete(tabId);
+      try{unsubscribe();}catch{}
+      releaseDebuggerTab(tabId);
+      throw error;
+    }
+  })();
+  flightRecorderStartPromisesByTab.set(tabId,start);
+  try{return await start;}
+  finally{if(flightRecorderStartPromisesByTab.get(tabId)===start)flightRecorderStartPromisesByTab.delete(tabId);}
 }
 
 async function ensureFlightRecordersForTabs(tabs) {
