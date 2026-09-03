@@ -1,6 +1,11 @@
-const state = { projects: [], result: null, requestId: "", meta: null, viewKey: "overview" };
+const state = { projects: [], projectRoot: "", result: null, requestId: "", meta: null, viewKey: "overview", busy: false };
 const elements = {
   project: document.querySelector("#project"),
+  projectTrigger: document.querySelector("#project-trigger"),
+  projectMenu: document.querySelector("#project-menu"),
+  projectOptions: document.querySelector("#project-options"),
+  projectName: document.querySelector("#project-name"),
+  projectHint: document.querySelector("#project-hint"),
   analyze: document.querySelector("#analyze"),
   copy: document.querySelector("#copy"),
   status: document.querySelector("#status"),
@@ -30,19 +35,103 @@ function setStatus(text, tone = "") {
   elements.status.className = `status ${tone ? `is-${tone}` : ""}`.trim();
 }
 
-function renderProjects() {
-  const current = elements.project.value;
+function selectedProject() {
+  return state.projects.find((project) => project.root === state.projectRoot) || null;
+}
+
+function projectHint(project) {
+  if (!project) return "Chọn một workspace đã lưu trong CodexPro";
+  const source = project.repoFullName ? `${project.repoFullName} · ` : "";
+  const kind = project.isGit ? (project.branch || "git") : "thư mục";
+  return `${source}${kind} · ${project.root}`;
+}
+
+function setProjectOpen(open) {
+  const next = Boolean(open && state.projects.length && !elements.projectTrigger.disabled);
+  elements.project.classList.toggle("is-open", next);
+  elements.projectMenu.hidden = !next;
+  elements.projectTrigger.setAttribute("aria-expanded", String(next));
+}
+
+function renderProjectTrigger() {
+  const project = selectedProject();
+  if (!project) {
+    elements.projectName.textContent = state.projects.length ? "Chọn dự án hoặc đường dẫn" : "Chưa có workspace đã lưu";
+    elements.projectHint.textContent = state.projects.length ? "Chọn một workspace cụ thể" : "CodexPro chưa cung cấp workspace cho plugin";
+    return;
+  }
+  elements.projectName.textContent = project.name || project.repoFullName || project.root;
+  elements.projectHint.textContent = projectHint(project);
+  elements.projectTrigger.title = project.root;
+}
+
+function renderProjectOptions() {
+  if (!state.projects.length) {
+    const empty = document.createElement("div");
+    empty.className = "project-dropdown-empty";
+    empty.textContent = "Chưa có workspace đã lưu trong CodexPro.";
+    elements.projectOptions.replaceChildren(empty);
+    return;
+  }
   const options = state.projects.map((project) => {
-    const option = document.createElement("option");
-    option.value = project.root;
-    option.textContent = project.repoFullName ? `${project.name} · ${project.repoFullName}` : project.name || project.root;
-    option.title = project.root;
-    return option;
+    const active = project.root === state.projectRoot;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.role = "option";
+    button.className = `project-dropdown-option ${active ? "is-selected" : ""}`.trim();
+    button.setAttribute("aria-selected", String(active));
+    button.title = project.root;
+
+    const mark = document.createElement("span");
+    mark.className = "project-dropdown-mark";
+    mark.textContent = "⌘";
+    mark.setAttribute("aria-hidden", "true");
+
+    const copy = document.createElement("span");
+    copy.className = "project-dropdown-copy";
+    const name = document.createElement("strong");
+    name.textContent = project.name || project.repoFullName || project.root;
+    const hint = document.createElement("small");
+    hint.textContent = projectHint(project);
+    copy.append(name, hint);
+    button.append(mark, copy);
+
+    if (active) {
+      const check = document.createElement("span");
+      check.className = "project-dropdown-check";
+      check.textContent = "✓";
+      check.setAttribute("aria-hidden", "true");
+      button.append(check);
+    }
+    button.addEventListener("click", () => {
+      state.projectRoot = project.root;
+      renderProjectTrigger();
+      renderProjectOptions();
+      setProjectOpen(false);
+      elements.projectTrigger.focus();
+    });
+    return button;
   });
-  elements.project.replaceChildren(...options);
-  if (state.projects.some((project) => project.root === current)) elements.project.value = current;
-  elements.analyze.disabled = !state.projects.length;
-  if (!state.projects.length) setStatus("Chưa có workspace đã lưu trong CodexPro.", "error");
+  elements.projectOptions.replaceChildren(...options);
+}
+
+function renderProjects() {
+  const current = state.projectRoot;
+  state.projectRoot = state.projects.some((project) => project.root === current) ? current : (state.projects[0]?.root || "");
+  const hasProjects = state.projects.length > 0;
+  elements.projectTrigger.disabled = !hasProjects;
+  elements.project.classList.toggle("is-disabled", !hasProjects);
+  elements.analyze.disabled = state.busy || !hasProjects;
+  renderProjectTrigger();
+  renderProjectOptions();
+  if (!hasProjects) {
+    setProjectOpen(false);
+    setStatus("Chưa có workspace đã lưu trong CodexPro.", "error");
+    return;
+  }
+  const waitingForProjects = elements.status.textContent.includes("Đang đồng bộ danh sách workspace");
+  const staleEmptyError = elements.status.classList.contains("is-error") && elements.status.textContent.includes("Chưa có workspace");
+  if (waitingForProjects || staleEmptyError) setStatus("Chọn repo rồi bấm “Phân tích repo”.");
 }
 
 function layoutNodes(result) {
@@ -207,12 +296,35 @@ function renderResult(result) {
   setStatus(`Đã rút ${stats.components || 0} component lớn và ${stats.detail_modules || 0} module chi tiết từ CodexGraph.`, "");
 }
 
+elements.projectTrigger.addEventListener("click", () => {
+  setProjectOpen(!elements.project.classList.contains("is-open"));
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (elements.project.classList.contains("is-open") && !elements.project.contains(event.target)) setProjectOpen(false);
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && elements.project.classList.contains("is-open")) {
+    setProjectOpen(false);
+    elements.projectTrigger.focus();
+    return;
+  }
+  if (event.key === "ArrowDown" && document.activeElement === elements.projectTrigger && !elements.projectTrigger.disabled) {
+    event.preventDefault();
+    setProjectOpen(true);
+    elements.projectOptions.querySelector(".project-dropdown-option")?.focus();
+  }
+});
+
 elements.analyze.addEventListener("click", () => {
-  const root = elements.project.value;
+  const root = state.projectRoot;
   if (!root || !state.projects.some((project) => project.root === root)) return;
   state.requestId = requestId();
+  state.busy = true;
   elements.analyze.disabled = true;
   elements.copy.disabled = true;
+  setProjectOpen(false);
   setStatus("CodexPro đang đọc CodexGraph và rút kiến trúc tổng quát…", "busy");
   window.parent.postMessage({ type: "codexpro:gitdiagram-analyze", request_id: state.requestId, root }, "*");
 });
@@ -233,11 +345,13 @@ window.addEventListener("message", (event) => {
     return;
   }
   if (event.data?.type === "codexpro:gitdiagram-result" && event.data?.request_id === state.requestId) {
+    state.busy = false;
     elements.analyze.disabled = !state.projects.length;
     renderResult(event.data.result || {});
     return;
   }
   if (event.data?.type === "codexpro:gitdiagram-error" && event.data?.request_id === state.requestId) {
+    state.busy = false;
     elements.analyze.disabled = !state.projects.length;
     setStatus(String(event.data.error || "Không phân tích được repo."), "error");
   }

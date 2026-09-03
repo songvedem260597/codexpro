@@ -18,15 +18,27 @@
     </header>
 
     <section class="controls">
-      <label>
+      <label class="project-field">
         <span>Dự án</span>
-        <select id="project" aria-label="Chọn dự án cần phân tích"></select>
+        <div class="project-dropdown" id="project">
+          <button id="project-trigger" class="project-dropdown-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Chọn dự án cần phân tích" disabled>
+            <span class="project-dropdown-mark" aria-hidden="true">⌘</span>
+            <span class="project-dropdown-value">
+              <strong id="project-name">Đang tải workspace…</strong>
+              <small id="project-hint">CodexPro</small>
+            </span>
+            <svg class="project-dropdown-chevron" aria-hidden="true" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4" /></svg>
+          </button>
+          <div class="project-dropdown-menu" id="project-menu" role="listbox" aria-label="Chọn dự án cần phân tích" hidden>
+            <div class="project-dropdown-options" id="project-options"></div>
+          </div>
+        </div>
       </label>
-      <button id="analyze" type="button">Phân tích repo</button>
-      <button id="copy" class="secondary" type="button" disabled>Copy Mermaid</button>
+      <button id="analyze" class="action primary" type="button" disabled>Phân tích repo</button>
+      <button id="copy" class="action secondary" type="button" disabled>Copy Mermaid</button>
     </section>
 
-    <section class="status" id="status">Chọn repo rồi bấm “Phân tích repo”.</section>
+    <section class="status" id="status">Đang đồng bộ danh sách workspace từ CodexPro…</section>
 
     <section class="summary" id="summary" hidden>
       <div><strong id="components">0</strong><span>components</span></div>
@@ -37,7 +49,7 @@
     </section>
 
     <section class="viewbar" id="viewbar" hidden>
-      <button id="back" class="secondary compact" type="button" hidden>← Tổng quan</button>
+      <button id="back" class="action secondary compact" type="button" hidden>← Tổng quan</button>
       <div><strong id="view-title">Tổng quan hệ thống</strong><span id="view-hint">Nhấp một component để xem module bên trong.</span></div>
     </section>
 

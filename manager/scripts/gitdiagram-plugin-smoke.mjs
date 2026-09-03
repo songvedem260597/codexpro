@@ -108,15 +108,24 @@ try {
   const preload = fs.readFileSync(path.join(managerRoot, "electron", "preload.cjs"), "utf8");
   const center = fs.readFileSync(path.join(managerRoot, "src", "app-plugin-center.jsx"), "utf8");
   const template = fs.readFileSync(path.join(managerRoot, "electron", "app-plugins", "templates", "gitdiagram", "app.js"), "utf8");
+  const templateHtml = fs.readFileSync(path.join(managerRoot, "electron", "app-plugins", "templates", "gitdiagram", "index.html"), "utf8");
+  const templateStyles = fs.readFileSync(path.join(managerRoot, "electron", "app-plugins", "templates", "gitdiagram", "styles.css"), "utf8");
   assert.match(managerMain, /codexpro:analyze-app-plugin-repo/);
   assert.match(managerMain, /buildGitDiagramArchitecture/);
   assert.match(preload, /analyzeAppPluginRepo/);
   assert.match(center, /ARCHITECTURE REPOSITORY/);
   assert.match(center, /codexpro:gitdiagram-analyze/);
   assert.match(center, /projects\.some\(\(project\) => project\.root === root\)/, "sandbox bridge must restrict analysis to a project already exposed by Manager");
+  assert.match(center, /postPluginContext\(\);/, "Manager must republish plugin context when saved projects change after iframe readiness");
   assert.match(template, /codexpro:plugin-ready/);
   assert.match(template, /codexpro:gitdiagram-result/);
   assert.match(template, /GitDiagram Mermaid/);
+  assert.match(template, /projectRoot/, "GitDiagram must keep custom project selection without relying on a native select element");
+  assert.match(template, /project-dropdown-option/);
+  assert.match(templateHtml, /class="project-dropdown-trigger"/);
+  assert.doesNotMatch(templateHtml, /<select\b/i, "GitDiagram project picker should use the app-style custom dropdown instead of the browser native select");
+  assert.match(templateStyles, /\.action\.primary \{ color: #101219; border-color: #e9edf4; background: #e9edf4; \}/, "primary GitDiagram action should follow Manager's light primary button convention");
+  assert.match(templateStyles, /\.project-dropdown-trigger \{[^}]*min-height: 58px/s, "GitDiagram project trigger should match the Manager project dropdown control sizing");
 
   console.log("gitdiagram-plugin-smoke: ok");
 } finally {
