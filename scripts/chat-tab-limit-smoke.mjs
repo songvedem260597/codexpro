@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const worker = fs.readFileSync(new URL("../chrome-extension/service-worker.js", import.meta.url), "utf8");
-assert.match(worker, /const MAX_CHATGPT_TABS = 3;/, "Chrome worker must cap ChatGPT tabs at three");
-assert.match(worker, /CHAT_TAB_LIMIT_REACHED/, "worker must fail closed when all three tabs are protected");
+assert.match(worker, /const MAX_CHATGPT_TABS = 2;/, "Chrome worker must cap ChatGPT tabs at two");
+assert.match(worker, /CHAT_TAB_LIMIT_REACHED/, "worker must fail closed when both tabs are protected");
 assert.match(worker, /const TAB_AUDIT_STORAGE_KEY = 'codexproTabAuditV1';/, "tab lifecycle audit must persist in extension storage");
 assert.match(worker, /tab_audit:await tabAuditSnapshot\(80\)/, "list_tabs must expose recent tab lifecycle diagnostics");
 assert.match(worker, /chrome\.tabs\.onCreated\.addListener[\s\S]*?open_observed/, "tab audit must observe ChatGPT tab opens even outside CodexPro helpers");
@@ -150,7 +150,7 @@ function makeHarness(initialTabs) {
     "auditedCreateTab",
     `let chatTabCreationTail = Promise.resolve(); ${helperSource}; return { createChatGptTab };`
   );
-  const { createChatGptTab } = factory(chrome, 3, isChatGptTabUrl, tabList, recentConversationList, cleanupChatGptTabs, auditedCreateTab);
+  const { createChatGptTab } = factory(chrome, 2, isChatGptTabUrl, tabList, recentConversationList, cleanupChatGptTabs, auditedCreateTab);
   return {
     createChatGptTab,
     state: () => ({ count: tabs.length, maxObserved, creates, tabs: tabs.map(tab => ({ ...tab })) })
@@ -159,37 +159,34 @@ function makeHarness(initialTabs) {
 
 {
   const harness = makeHarness([
-    { id: 1, url: "https://chatgpt.com/c/a1111111" },
-    { id: 2, url: "https://chatgpt.com/c/b2222222" }
+    { id: 1, url: "https://chatgpt.com/c/a1111111" }
   ]);
   await harness.createChatGptTab({ url: "https://chatgpt.com/", active: false });
-  assert.equal(harness.state().count, 3);
-  assert.equal(harness.state().maxObserved, 3, "opening the third tab must never transiently exceed the cap");
+  assert.equal(harness.state().count, 2);
+  assert.equal(harness.state().maxObserved, 2, "opening the second tab must never transiently exceed the cap");
 }
 
 {
   const harness = makeHarness([
     { id: 1, url: "https://chatgpt.com/c/a1111111", protected: true },
-    { id: 2, url: "https://chatgpt.com/c/b2222222" },
-    { id: 3, url: "https://chatgpt.com/c/c3333333", protected: true }
+    { id: 2, url: "https://chatgpt.com/c/b2222222" }
   ]);
-  await harness.createChatGptTab({ url: "https://chatgpt.com/c/d4444444", active: false });
-  assert.equal(harness.state().count, 3);
-  assert.equal(harness.state().maxObserved, 3, "cleanup must happen before opening a replacement slot");
+  await harness.createChatGptTab({ url: "https://chatgpt.com/c/c3333333", active: false });
+  assert.equal(harness.state().count, 2);
+  assert.equal(harness.state().maxObserved, 2, "cleanup must happen before opening a replacement slot");
 }
 
 {
   const harness = makeHarness([
     { id: 1, url: "https://chatgpt.com/c/a1111111", protected: true },
-    { id: 2, url: "https://chatgpt.com/c/b2222222", protected: true },
-    { id: 3, url: "https://chatgpt.com/c/c3333333", protected: true }
+    { id: 2, url: "https://chatgpt.com/c/b2222222", protected: true }
   ]);
   await assert.rejects(
     harness.createChatGptTab({ url: "https://chatgpt.com/", active: false }),
     /CHAT_TAB_LIMIT_REACHED/
   );
-  assert.equal(harness.state().count, 3);
-  assert.equal(harness.state().creates, 0, "no fourth tab may be created when all three existing tabs are protected");
+  assert.equal(harness.state().count, 2);
+  assert.equal(harness.state().creates, 0, "no third tab may be created when both existing tabs are protected");
 }
 
 {
@@ -201,8 +198,8 @@ function makeHarness(initialTabs) {
     harness.createChatGptTab({ url: "https://chatgpt.com/c/c3333333", active: false }),
     harness.createChatGptTab({ url: "https://chatgpt.com/c/d4444444", active: false })
   ]);
-  assert.equal(harness.state().count, 3);
-  assert.equal(harness.state().maxObserved, 3, "concurrent requests must be serialized so the worker never reaches four ChatGPT tabs");
+  assert.equal(harness.state().count, 2);
+  assert.equal(harness.state().maxObserved, 2, "concurrent requests must be serialized so the worker never reaches three ChatGPT tabs");
 }
 
-console.log("✓ ChatGPT three-tab cap smoke test passed");
+console.log("✓ ChatGPT two-tab cap smoke test passed");
