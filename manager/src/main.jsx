@@ -24,7 +24,7 @@ import { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, 
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, latestTurnHasProvisionalAssistant, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
-import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shouldRolloverConversation } from "./conversation-message-limit.js";
+import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationCompletedTaskCount, conversationTotalMessageCount, shouldRolloverConversation } from "./conversation-message-limit.js";
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
@@ -3461,8 +3461,11 @@ function App() {
         return false;
       }
     }
-    if (!newChat && currentResponse?.conversationId === conversationId && shouldRolloverConversation(currentResponse)) {
-      const observedMessageCount = conversationTotalMessageCount(currentResponse);
+    const rolloverTaskInProgress = Boolean(requestedTab?.busy || requestedTab?.settling || String(requestedTab?.network_state || "").toLowerCase() === "generating" || currentResponse?.busy || currentResponse?.loading || currentResponse?.transcriptLoading || currentResponse?.incomplete || currentResponse?.finalityPending || currentResponse?.canonicalBusy || currentResponse?.networkStreamInProgress);
+    const rolloverSource = { ...currentResponse, taskInProgress: rolloverTaskInProgress };
+    if (!newChat && currentResponse?.conversationId === conversationId && shouldRolloverConversation(rolloverSource)) {
+      const observedCompletedTaskCount = conversationCompletedTaskCount(rolloverSource);
+      const observedTotalMessageCount = conversationTotalMessageCount(currentResponse);
       const cleanMessages = materializeTranscriptMessages(currentResponse, conversationId).filter((item) => !item?.pending);
       const rolloverMessages = text
         ? trimRecentTranscriptMessages([...cleanMessages, { id: `rollover-user-${Date.now()}`, role: "user", text, submissionState: "submitted", createdAt: new Date().toISOString() }])
@@ -3477,19 +3480,21 @@ function App() {
           messages: rolloverMessages,
           continuation_reason: "message_limit",
           conversation_limit_reached: true,
-          conversation_limit_message: `Đoạn chat đã đạt giới hạn an toàn ${CHATGPT_CONVERSATION_MESSAGE_LIMIT} tin nhắn.`,
+          conversation_limit_message: `Đoạn chat đã hoàn thành ${CHATGPT_CONVERSATION_MESSAGE_LIMIT} task; yêu cầu mới được chuyển sang tab tiếp theo.`,
           projectRoot,
           rollover_attachments: attachments
         });
         if (!newConversationId) return false;
         setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
-        logRendererDiagnostic(api, "info", "chat", "Automatically moved a full conversation to a new ChatGPT tab", {
+        logRendererDiagnostic(api, "info", "chat", "Automatically moved a completed-task-limit conversation to a new ChatGPT tab", {
           action: "conversation-message-limit-rollover",
           profile_id: profile.profile_id,
           previous_conversation_id: conversationId,
           conversation_id: newConversationId,
           message_limit: CHATGPT_CONVERSATION_MESSAGE_LIMIT,
-          message_count: observedMessageCount
+          message_count: observedCompletedTaskCount,
+          completed_task_count: observedCompletedTaskCount,
+          total_message_count: observedTotalMessageCount
         });
         return true;
       } finally {

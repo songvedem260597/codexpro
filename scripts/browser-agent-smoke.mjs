@@ -6,16 +6,20 @@ import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRepoTaskCompletionCur
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "../manager/src/chat-transcript.js";
 import { projectSelectionChanged } from "../manager/src/chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "../manager/src/chat-response-audit.js";
-import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationTotalMessageCount, shouldRolloverConversation } from "../manager/src/conversation-message-limit.js";
+import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationCompletedTaskCount, conversationTaskInProgress, conversationTotalMessageCount, shouldRolloverConversation } from "../manager/src/conversation-message-limit.js";
 import { LONG_TASK_WATCHDOG_AFTER_MS, longRunningChatWatchdogCandidate } from "../manager/src/long-task-watchdog.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
-assert.equal(CHATGPT_CONVERSATION_MESSAGE_LIMIT, 5, "ChatGPT conversations must roll over at the requested five-message safety limit");
+assert.equal(CHATGPT_CONVERSATION_MESSAGE_LIMIT, 5, "ChatGPT conversations must roll over after five completed tasks, not five raw transcript messages");
 assert.equal(conversationTotalMessageCount({ totalMessageCount: 5, messageCount: 2, messages: [] }), 5, "the canonical total must win over the assistant-only response count");
 assert.equal(conversationTotalMessageCount({ messageCount: 2, messages: [{ role: "user", text: "latest" }] }), 5, "legacy assistant counts must conservatively reconstruct the total conversation size including a trailing user turn");
-assert.equal(shouldRolloverConversation({ totalMessageCount: 4 }), false, "a conversation below the safety limit must stay on the current ChatGPT tab");
-assert.equal(shouldRolloverConversation({ totalMessageCount: 5 }), true, "a conversation at the safety limit must move the next request to a new ChatGPT tab");
+assert.equal(conversationCompletedTaskCount({ totalMessageCount: 11, messageCount: 5 }), 5, "raw user follow-ups must not increase the completed-task counter");
+assert.equal(conversationTaskInProgress({ messageCount: 5, totalMessageCount: 11, messages: [{ role: "user", text: "follow-up while task is running" }] }), true, "a transcript ending at the user must remain an open task even if the completed-task limit was already reached");
+assert.equal(shouldRolloverConversation({ messageCount: 4, totalMessageCount: 99 }), false, "raw transcript size alone must never trigger rollover before five tasks have completed");
+assert.equal(shouldRolloverConversation({ messageCount: 5, totalMessageCount: 10, messages: [{ role: "assistant", text: "task five complete" }] }), true, "the next task must roll over only after five completed assistant tasks");
+assert.equal(shouldRolloverConversation({ messageCount: 5, totalMessageCount: 11, busy: true, messages: [{ role: "assistant", text: "task five complete" }, { role: "user", text: "change one more thing" }] }), false, "a busy task at the limit must keep accepting follow-ups in the current conversation");
+assert.equal(shouldRolloverConversation({ messageCount: 5, totalMessageCount: 11, messages: [{ role: "user", text: "follow-up still awaiting assistant" }] }), false, "an open user follow-up at the limit must not be forced into a new tab");
 assert.equal(shouldRolloverConversation({ totalMessageCount: 5 }, 0), false, "an invalid disabled limit must never create rollover loops");
 
 const longTaskProfile = {
@@ -610,7 +614,7 @@ assert.match(managerSendUiSource, /draftOverride !== null \? draftOverride : \(r
 assert.match(managerUi, /const submittedDraft = draft[\s\S]*?const submitted = await onSend\(submittedDraft\);[\s\S]*?if \(submitted && draftRef\.current === submittedDraft\) updateDraft\(""\)/, "the local composer must clear only the exact submitted draft after confirmation and preserve text typed for the next follow-up");
 assert.match(managerSendUiSource, /scope: allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "all_allowed sends must preserve scope and provide known workspace candidates to the backend");
 assert.match(managerSendUiSource, /restoreSubmittedInputs\(\)[\s\S]*?Trạng thái gửi chưa chắc chắn[\s\S]*?return false/, "an uncertain submission must preserve the local composer draft instead of silently clearing it");
-assert.match(managerSendUiSource, /shouldRolloverConversation\(currentResponse\)[\s\S]*?continuation_reason: "message_limit"[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a settled conversation at the five-message safety limit must roll the pending request and attachments into a fresh ChatGPT tab");
+assert.match(managerSendUiSource, /rolloverTaskInProgress[\s\S]*?shouldRolloverConversation\(rolloverSource\)[\s\S]*?continuation_reason: "message_limit"[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a conversation must stay on the current tab while its task is active, then roll the next request only after five completed tasks");
 assert.match(managerSendUiSource, /conversation-message-limit-rollover[\s\S]*?message_limit:[\s\S]*?message_count:/, "automatic message-limit rollover must leave a diagnostic trail with the configured and observed counts");
 assert.match(managerSendUiSource, /requestedTab\?\.long_task_watchdog_hung \|\| requestedConversation\?\.long_task_watchdog_hung[\s\S]*?conversationId = forcedNewChat \? NEW_CHAT_TARGET[\s\S]*?long-task-watchdog-force-new-chat/, "new work must never be sent back into a conversation marked hung by the one-shot watchdog, even after its tab was closed");
 assert.match(managerUi, /totalMessageCount: contentAvailable[\s\S]*?result\.total_message_count/, "Manager response state must retain ChatGPT's complete user-plus-assistant message count");
