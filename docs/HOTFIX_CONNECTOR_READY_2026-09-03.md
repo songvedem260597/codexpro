@@ -104,3 +104,50 @@ profile đã kết nối hiện READY, đồng thời bản nháp và task khác
 - `npm run smoke` của lần 0.5.107 **không đạt**: dừng tại
   `scripts/smoke.mjs:50`, `timeout waiting for tools/call:apply_patch` (exit 1).
   Không tính kết quả full smoke của 0.5.106 thay cho lần này.
+
+## Sửa tiếp 0.5.108: false missing và reload liên tục
+
+Người dùng báo sau 0.5.107 cả hai profile đã có CodexPro nhưng Manager vẫn hiện
+nút “Thêm CodexPro”. Đây là báo lỗi, không phải kết quả xác minh cả hai tài khoản.
+Ba nguyên nhân độc lập được tái hiện:
+
+1. `preparePluginSearch()` coi nút `Create app` của khung trang là kết quả tìm
+   kiếm đã tải; danh sách xuất hiện trễ bị kết luận `missing`.
+2. Trạng thái Connection chỉ được tìm trong button/link. ChatGPT hiện
+   `Connection / Connected` bằng `div/span`, khiến kết quả thành `unknown`.
+3. Manager dùng nút setup cho mọi trạng thái không READY và tự gọi check theo
+   mỗi chu kỳ trạng thái. Trên macOS một-tab, check điều hướng tab sang Plugins
+   rồi tải lại URL chat cũ; thời gian check dài hơn backoff nên có thể lặp ngay.
+
+0.5.108 chờ riêng kết quả tìm kiếm, đọc trạng thái tĩnh trong đúng panel chi
+tiết CodexPro, bỏ cả background check và background migration. Profile chưa rõ
+chỉ hiện “Kiểm tra CodexPro”; “Thêm CodexPro” chỉ xuất hiện sau khi người dùng
+chủ động kiểm tra và chính lần kiểm tra đó xác nhận `missing`. Bộ đếm “chưa cài”
+cũng chỉ đếm các xác nhận thiếu trong phiên Manager hiện tại.
+
+Kiểm thử đạt: connector-verification, browser-agent, chat-link, connected-worker
+overview, manual-migration safety, DOM Electron với plugin xuất hiện trễ và
+Connection dạng `div/span`, `npm run build`, `npm run manager:check` và
+`npm run smoke` (exit 0).
+
+## Sửa tiếp 0.5.109: phân biệt đã cài và chưa kết nối
+
+Kiểm tra trực tiếp UI thật cho thấy `0261e4f4` có CodexPro trong mục **Đã cài
+đặt**. Diagnostic panel Connection trả chuỗi **Kết nối**, nhưng chưa phân biệt
+được đó là tiêu đề hay nút. 0.5.108 đã gộp trường hợp này vào `missing`, khiến
+Manager lại hiện sai **Thêm CodexPro**.
+
+0.5.109 dùng trạng thái riêng `disconnected`: Manager hiện **Chưa kết nối
+CodexPro** và nút **Kết nối CodexPro**. Chỉ kết quả kiểm tra thủ công không tìm
+thấy definition mới hiện **Chưa cài CodexPro** và **Thêm CodexPro**. Không có
+thao tác cài hoặc kết nối tự động.
+
+## Hoàn thiện 0.5.110: trạng thái xuyên worker → bridge → Manager
+
+- Test mới tái hiện bridge bỏ `disconnected` thành `unknown`. Thêm trạng thái
+  này vào cả bước nhận heartbeat và bước xuất snapshot; không nâng thành READY.
+- Không coi nhãn tĩnh “Kết nối” là nút Connect. Phải có button/link/role=button
+  hoặc trạng thái “chưa kết nối” rõ ràng mới kết luận disconnected. Chờ trạng
+  thái tải trễ thay vì chốt ngay khi chỉ có tiêu đề. Diagnostic ghi tag/actionable.
+- Test DOM bổ sung nhãn tiếng Việt, trạng thái tải trễ và heading không có giá
+  trị. Kết quả mơ hồ phải là unknown, không tự kết nối hay thêm connector.

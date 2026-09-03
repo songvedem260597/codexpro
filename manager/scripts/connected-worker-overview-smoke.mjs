@@ -39,8 +39,10 @@ assert.match(source, /workerSnapshotStaleReason === "empty-grace"[\s\S]*?Đang x
 assert.match(source, /const clearedEmptyGrace = !stabilized\.preserved[\s\S]*?browserProfiles === current\.browserProfiles && !clearedEmptyGrace/, "a heartbeat recovery must clear the empty-snapshot warning even when profile UI identity is unchanged");
 assert.match(source, /autoUpdateWorkers \|\| busy \|\| !status\?\.local\?\.ok \|\| status\?\.workerSnapshotStale/, "automatic worker updates must wait for a current online runtime snapshot");
 assert.match(electronSource, /status\.workerSnapshotAvailable === false[\s\S]*?mode: "runtime_unavailable"/, "worker reload must defer instead of reporting no profiles when the MCP snapshot is temporarily unavailable");
-assert.match(source, /connectorAutoMigrationInFlight\.current[\s\S]*?connector_update_required !== true[\s\S]*?profileSafeForWorkerUpdate\(profile\)[\s\S]*?api\.setupProfile\(profileId\)/, "outdated profile-bound connectors must auto-migrate sequentially only after the worker becomes idle");
-assert.match(source, /CONNECTOR_AUTO_MIGRATION_RETRY_MS[\s\S]*?connectorAutoMigrationAttempts\.current\.get\(profile\.profile_id\)/, "failed automatic connector migration must use retry backoff");
-assert.match(source, /autoMigratingProfileId === profile\.profile_id[\s\S]*?Đang cập nhật \+ test/, "the card must surface automatic connector migration as an in-progress update");
+assert.doesNotMatch(source, /status\?\.browserProfiles[\s\S]*?api\.checkProfile\(profile\.profile_id\)/, "status heartbeats must not navigate ChatGPT to verify connectors automatically");
+assert.doesNotMatch(source, /connectorAutoMigrationInFlight|connectorAutoMigrationAttempts/, "connector migration must not run from a background status effect");
+assert.match(source, /async function checkProfileConnector\(profile\)[\s\S]*?api\.checkProfile\(profileId\)/, "connector verification must run only from the explicit card action");
+assert.match(source, /connectorActionIsSetup \? setupProfile\(profile\) : checkProfileConnector\(profile\)/, "an unverified profile must check before setup is offered");
+assert.match(source, /connectorDisconnected \? "CHƯA KẾT NỐI CODEXPRO"/, "overview must distinguish disconnected definitions from missing definitions");
 
-console.log("✓ Connected worker overview, queued refresh, and connector auto-migration smoke test passed");
+console.log("✓ Connected worker overview, queued refresh, and manual connector verification smoke test passed");

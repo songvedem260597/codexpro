@@ -4,17 +4,12 @@ import fs from "node:fs";
 const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const bridge = fs.readFileSync(new URL("../../src/browserExtensionBridge.ts", import.meta.url), "utf8");
 
-assert.match(source, /const CONNECTOR_AUTO_MIGRATION_RETRY_MS = 5 \* 60 \* 1000;/, "automatic connector migration must back off for five minutes after an attempt");
-assert.match(source, /if \(busy \|\| connectorAutoMigrationInFlight\.current\) return;/, "only one connector migration may run at a time and normal busy work must take priority");
-assert.match(source, /profile\.connector_update_required !== true/, "automatic migration must only target profiles explicitly marked for connector update");
-assert.match(source, /!profileSafeForWorkerUpdate\(profile\)/, "automatic migration must wait until a browser worker is truly idle");
-assert.match(source, /profileChecksInFlight\.current\.has\(profile\.profile_id\)/, "automatic migration must not race the connector verification probe for the same profile");
-assert.match(source, /connectorAutoMigrationAttempts\.current\.set\(profileId, now\)/, "automatic migration must remember each attempt for retry throttling");
-assert.match(source, /\.finally\(\(\) => \{[\s\S]*?connectorAutoMigrationAttempts\.current\.set\(profileId, Date\.now\(\)\)/, "retry backoff must restart when a migration finishes, including slow or failed migrations");
-assert.match(source, /void api\.setupProfile\(profileId\)/, "automatic migration must reuse the verified setup-profile migration path");
-assert.match(source, /connectorAutoMigrationInFlight\.current === profileId[\s\S]*?setAutoMigratingProfileId/, "automatic migration must release its single-flight guard after completion");
-assert.match(source, /const profileBusy = busy === `profile:\$\{profile\.profile_id\}` \|\| autoMigratingProfileId === profile\.profile_id;/, "worker card must expose automatic migration as profile busy state");
-assert.match(source, /disabled=\{Boolean\(busy\) \|\| Boolean\(autoMigratingProfileId\) \|\| profileChecking/, "manual connector setup must not collide with automatic migration");
-assert.match(bridge, /!profile\.connectorInstalled && profile\.connectorServerFingerprint/, "a failed migration with the new fingerprint must remain queued for retry instead of becoming a false READY state");
+assert.doesNotMatch(source, /connectorAutoMigrationInFlight|connectorAutoMigrationAttempts|CONNECTOR_AUTO_MIGRATION_RETRY_MS/, "connector migration must never be triggered by background status updates");
+assert.match(source, /async function setupProfile\(profile\)[\s\S]*?api\.setupProfile\(profile\.profile_id\)/, "connector migration remains available as an explicit user action");
+assert.match(source, /connectorActionIsSetup \? setupProfile\(profile\) : checkProfileConnector\(profile\)/, "unknown connector state must check rather than setup");
+assert.match(source, /connectorMissingConfirmed[\s\S]*?confirmedMissingProfiles\.includes/, "setup is exposed only after a manual missing result in the current Manager session");
+assert.match(source, /connectorDisconnected \? "CHƯA KẾT NỐI CODEXPRO"/, "a listed but disconnected definition must not be labelled as missing");
+assert.match(source, /connectorDisconnected[\s\S]*?"Kết nối CodexPro"/, "a disconnected definition must offer Connect rather than Add");
+assert.match(bridge, /connectorInstalled = profile\.connectorInstalled && connectorProfileBound && !connectorVerificationRequired/, "only current connected evidence may produce READY after a manual migration");
 
-console.log("✓ Connector auto-migration safety smoke test passed");
+console.log("✓ Connector manual-migration safety smoke test passed");

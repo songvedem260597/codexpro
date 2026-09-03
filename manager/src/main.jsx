@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import managerPackage from "../package.json";
-import { shouldCheckProfileConnector } from "./profile-connector-check.js";
+import { profileConnectorCardAction } from "./profile-connector-check.js";
 import "./styles.css";
 import "@fontsource/be-vietnam-pro/400.css";
 import "@fontsource/be-vietnam-pro/500.css";
@@ -47,8 +47,7 @@ const ResponseText = React.lazy(() => loadResponseMarkdownModule().then((module)
 const CodeGraphView = React.lazy(() => import("./code-graph-view.jsx").then((module) => ({ default: module.CodeGraphView })));
 const ControlCenter = React.lazy(() => import("./control-center.jsx").then((module) => ({ default: module.ControlCenter })));
 const api = window.codexpro;
-// Connector checks are serialized and deferred while a worker is busy.
-const CONNECTOR_AUTO_MIGRATION_RETRY_MS = 5 * 60 * 1000;
+// Connector checks are explicit user actions; never navigate tabs from polling.
 const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
 const RESPONSE_MANUAL_SCROLL_RESUME_MS = 5000;
 const REALTIME_WATCHDOG_MS = 30000;
@@ -338,7 +337,7 @@ function compactToolActivityMessages(messages, { collapseArgumentPayloads = fals
   return output;
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.107";
+const WORKER_EXTENSION_VERSION = "0.5.110";
 const PROFILE_REPO_CACHE_KEY = "codexpro-profile-repo-roots-v1";
 
 function chromeProfileIdLabel(profileId) {
@@ -1075,7 +1074,7 @@ function App() {
   const [apiJobWorker, setApiJobWorker] = useState(null);
   const [inspection, setInspection] = useState(null);
   const [checkingProfiles, setCheckingProfiles] = useState([]);
-  const [autoMigratingProfileId, setAutoMigratingProfileId] = useState("");
+  const [confirmedMissingProfiles, setConfirmedMissingProfiles] = useState([]);
   const requestDraftsRef = useRef({});
   const [requestDraftResetVersions, setRequestDraftResetVersions] = useState({});
   const [requestTargets, setRequestTargets] = useState({});
@@ -1100,10 +1099,7 @@ function App() {
   const emptyBrowserSnapshotSince = useRef(0);
   const emptyBrowserSnapshotTimer = useRef(0);
   const refreshStatusRef = useRef(null);
-  const profileCheckTimes = useRef(new Map());
   const profileChecksInFlight = useRef(new Set());
-  const connectorAutoMigrationAttempts = useRef(new Map());
-  const connectorAutoMigrationInFlight = useRef("");
   const responseFetches = useRef(new Set());
   const responseCacheLoads = useRef(new Map());
   const responseMemoryCache = useRef(new Map());
@@ -1145,8 +1141,6 @@ function App() {
   useEffect(() => {
     const sweepRetentionCaches = () => {
       const timedMaps = [
-        profileCheckTimes.current,
-        connectorAutoMigrationAttempts.current,
         networkStreamReads.current,
         networkCompletionReads.current,
         connectionRecoveryReads.current,
@@ -2250,69 +2244,6 @@ function App() {
   const platform = status?.platform || status?.task?.platform || "Windows";
 
   useEffect(() => {
-    const profiles = status?.browserProfiles || [];
-    if (busy || connectorAutoMigrationInFlight.current || profileChecksInFlight.current.size) return;
-    for (const profile of profiles) {
-      const lastCheck = profileCheckTimes.current.get(profile.profile_id) || 0;
-      if (!extensionReady(profile.extension_version) || !shouldCheckProfileConnector(profile, { lastCheck, safe: profileSafeForWorkerUpdate(profile) })) continue;
-      profileCheckTimes.current.set(profile.profile_id, Date.now());
-      profileChecksInFlight.current.add(profile.profile_id);
-      setCheckingProfiles((current) => [...new Set([...current, profile.profile_id])]);
-      void api.checkProfile(profile.profile_id)
-        .catch((err) => {
-          logRendererDiagnostic(api, "warn", "profile", `Kiểm tra profile ${profile.profile_id} lỗi: ${err?.message || String(err)}`, { action: "check-profile", profile_id: profile.profile_id, error: err });
-          return null;
-        })
-        .finally(() => {
-          profileChecksInFlight.current.delete(profile.profile_id);
-          setCheckingProfiles((current) => current.filter((id) => id !== profile.profile_id));
-          window.setTimeout(() => void refresh(false), 1200);
-        });
-      break;
-    }
-  }, [status?.browserProfiles, refresh, busy]);
-
-  useEffect(() => {
-    if (busy || connectorAutoMigrationInFlight.current) return;
-    const now = Date.now();
-    const candidate = (status?.browserProfiles || []).find((profile) => {
-      if (!profile?.connected || profile.connector_update_required !== true || !extensionReady(profile.extension_version)) return false;
-      if (!profileSafeForWorkerUpdate(profile) || profileChecksInFlight.current.has(profile.profile_id) || checkingProfiles.includes(profile.profile_id)) return false;
-      const lastAttempt = connectorAutoMigrationAttempts.current.get(profile.profile_id) || 0;
-      return now - lastAttempt >= CONNECTOR_AUTO_MIGRATION_RETRY_MS;
-    });
-    if (!candidate) return;
-
-    const profileId = candidate.profile_id;
-    connectorAutoMigrationInFlight.current = profileId;
-    connectorAutoMigrationAttempts.current.set(profileId, now);
-    setAutoMigratingProfileId(profileId);
-    logRendererDiagnostic(api, "info", "profile", `Tự cập nhật connector ${profileId}`, { action: "auto-migrate-profile-connector", profile_id: profileId });
-    void api.setupProfile(profileId)
-      .then((result) => {
-        logRendererDiagnostic(api, "info", "profile", `Tự cập nhật connector ${profileId} hoàn tất`, {
-          action: "auto-migrate-profile-connector-success",
-          profile_id: profileId,
-          connector_profile_bound: result?.connector_profile_bound,
-          connector_installed: result?.connector_installed
-        });
-      })
-      .catch((err) => {
-        logRendererDiagnostic(api, "warn", "profile", `Tự cập nhật connector ${profileId} lỗi: ${err?.message || String(err)}`, {
-          action: "auto-migrate-profile-connector-error",
-          profile_id: profileId,
-          error: err
-        });
-      })
-      .finally(() => {
-        connectorAutoMigrationAttempts.current.set(profileId, Date.now());
-        if (connectorAutoMigrationInFlight.current === profileId) connectorAutoMigrationInFlight.current = "";
-        setAutoMigratingProfileId((current) => current === profileId ? "" : current);
-        window.setTimeout(() => void refresh(false), 1200);
-      });
-  }, [busy, checkingProfiles, status?.browserProfiles, refresh]);
-
-  useEffect(() => {
     profilesRef.current = status?.browserProfiles || [];
   }, [status?.browserProfiles]);
 
@@ -2846,14 +2777,15 @@ function App() {
     const outdated = connectedProfiles.filter((profile) => !extensionReady(profile.extension_version));
     return {
       working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length + apiWorkers.filter((worker) => worker.connected && worker.activity === "working").length,
-      idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile.extension_version))).length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
       hung: visibleProfiles.filter((profile) => !profile.connected).length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
-      missing: profiles.filter((profile) => !profile.connector_installed).length,
+      idle: profiles.filter((profile) => profile.activity === "idle").length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
+      missing: profiles.filter((profile) => confirmedMissingProfiles.includes(profile.profile_id)
+        && profile.connector_verification_state === "missing").length,
       reload: outdated.filter(profileSafeForWorkerUpdate).length,
       deferredUpdate: outdated.filter((profile) => !profileSafeForWorkerUpdate(profile)).length,
       outdated: outdated.length
     };
-  }, [status?.browserProfiles, status?.workers]);
+  }, [status?.browserProfiles, status?.workers, confirmedMissingProfiles]);
 
   async function copyLink() {
     if (!status?.mcpLink) return;
@@ -2997,6 +2929,35 @@ function App() {
       setError(setupError.replace(/\s*\[CODEXPRO_SETUP_EVIDENCE\s+[\s\S]*$/, ""));
     } finally {
       setBusy("");
+    }
+  }
+
+  async function checkProfileConnector(profile) {
+    const profileId = String(profile?.profile_id || "");
+    if (!profileId || profileChecksInFlight.current.has(profileId)) return;
+    profileChecksInFlight.current.add(profileId);
+    setCheckingProfiles((current) => [...new Set([...current, profileId])]);
+    setError("");
+    try {
+      const result = await api.checkProfile(profileId);
+      const state = String(result?.verification_state || "unknown");
+      setConfirmedMissingProfiles((current) => state === "missing"
+        ? [...new Set([...current, profileId])]
+        : current.filter((id) => id !== profileId));
+      notify(result?.message || (result?.installed ? "CodexPro READY" : "Đã kiểm tra CodexPro"));
+      await refresh(false);
+    } catch (err) {
+      const message = err?.message || String(err);
+      logRendererDiagnostic(api, "warn", "profile", `Kiểm tra profile ${profileId} lỗi: ${message}`, {
+        action: "check-profile-manual",
+        profile_id: profileId,
+        error: err
+      });
+      setConfirmedMissingProfiles((current) => current.filter((id) => id !== profileId));
+      setError(message);
+    } finally {
+      profileChecksInFlight.current.delete(profileId);
+      setCheckingProfiles((current) => current.filter((id) => id !== profileId));
     }
   }
 
@@ -4754,7 +4715,7 @@ function App() {
               })
               .map((profile) => {
               const ready = extensionReady(profile.extension_version);
-              const profileBusy = busy === `profile:${profile.profile_id}` || autoMigratingProfileId === profile.profile_id;
+              const profileBusy = busy === `profile:${profile.profile_id}`;
               const profileChecking = checkingProfiles.includes(profile.profile_id);
               const hung = !profile.connected;
               const settling = profile.connected && profile.activity === "settling";
@@ -4766,6 +4727,10 @@ function App() {
               const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
               const connectorInstalled = Boolean(profile.connector_installed && profile.connector_profile_bound !== false);
               const connectorUpdateRequired = Boolean(profile.connector_update_required);
+              const connectorDisconnected = profile.connector_verification_state === "disconnected";
+              const connectorMissingConfirmed = confirmedMissingProfiles.includes(profile.profile_id);
+              const connectorCardAction = profileConnectorCardAction(profile, { confirmedMissing: connectorMissingConfirmed });
+              const connectorActionIsSetup = ["update", "connect", "setup"].includes(connectorCardAction);
               const connectorMessage = connectorInstalled ? "CodexPro READY" : profile.connector_message;
               const idle = profile.connected && profile.activity === "idle" && (connectorInstalled || !ready);
               const noChatGpt = profile.connected && profile.activity === "no_chatgpt";
@@ -4826,7 +4791,7 @@ function App() {
                       {noBrowserTabs && <span className="badge profile-missing">CHROME CHẠY NỀN</span>}
                       {noChatGpt && !noBrowserTabs && <span className="badge profile-missing">CHƯA MỞ CHATGPT</span>}
                       {connectorUpdateRequired && <span className="badge profile-missing">CẦN CẬP NHẬT CONNECTOR</span>}
-                      {!connectorInstalled && !connectorUpdateRequired && !profileChecking && <span className="badge profile-missing">{profile.connector_verification_required ? "CẦN KIỂM TRA CODEXPRO" : "CHƯA SẴN SÀNG CODEXPRO"}</span>}
+                      {!connectorInstalled && !connectorUpdateRequired && !profileChecking && <span className="badge profile-missing">{connectorDisconnected ? "CHƯA KẾT NỐI CODEXPRO" : connectorMissingConfirmed ? "CHƯA CÀI CODEXPRO" : "CẦN KIỂM TRA CODEXPRO"}</span>}
                       <span
                         className={`active-repo-chip ${repoLabel ? "" : "is-empty"}`}
                         title={repoTitle}
@@ -4882,10 +4847,20 @@ function App() {
                     ) : (
                       <button
                         className="button primary profile-setup"
-                        onClick={() => setupProfile(profile)}
-                        disabled={Boolean(busy) || Boolean(autoMigratingProfileId) || profileChecking || !profile.connected || !ready}
+                        onClick={() => connectorActionIsSetup ? setupProfile(profile) : checkProfileConnector(profile)}
+                        disabled={Boolean(busy) || profileChecking || !profile.connected || !ready}
                       >
-                        {profileBusy ? (connectorUpdateRequired ? "Đang cập nhật + test…" : "Đang thêm + test…") : (connectorUpdateRequired ? "Cập nhật CodexPro" : "Thêm CodexPro")}
+                        {profileChecking
+                          ? "Đang kiểm tra…"
+                          : profileBusy
+                            ? (connectorUpdateRequired ? "Đang cập nhật + test…" : connectorDisconnected ? "Đang kết nối + test…" : "Đang thêm + test…")
+                            : connectorUpdateRequired
+                              ? "Cập nhật CodexPro"
+                              : connectorDisconnected
+                                ? "Kết nối CodexPro"
+                              : connectorMissingConfirmed
+                                ? "Thêm CodexPro"
+                                : "Kiểm tra CodexPro"}
                       </button>
                     )}
                   </div>

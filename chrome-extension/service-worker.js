@@ -3582,7 +3582,7 @@ async function checkConnectorInstalled() {
       ...(profile.connector_install?.worker_id?{worker_id:String(profile.connector_install.worker_id)}:{})
     };
     await chrome.storage.local.set({connectorInstall:saved});
-    return {ok:true,installed:saved.ok,message:saved.message,checked_at:saved.at,diagnostic:{...result.diagnostic,...connection?.diagnostic}};
+    return {ok:true,installed:saved.ok,verification_state:saved.verification_state,message:saved.message,checked_at:saved.at,diagnostic:{...result.diagnostic,...connection?.diagnostic}};
   }catch(error){
     const saved={ok:false,verification_state:'unknown',message:`Chưa xác minh được CodexPro: ${String(error?.message||error).slice(0,350)}`,at:new Date().toISOString()};
     await chrome.storage.local.set({connectorInstall:saved});

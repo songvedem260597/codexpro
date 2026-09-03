@@ -1,5 +1,5 @@
 (() => {
-  const INSTALLER_REVISION = '2026-09-03-29';
+  const INSTALLER_REVISION = '2026-09-03-32';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
   document.querySelector('#codexpro-setup-status')?.remove();
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
@@ -243,9 +243,11 @@
     if (!input) throw new Error('ChatGPT chưa tải được trang Plugins.');
     if (normalize(input.value) !== 'codexpro') {
       setNativeValue(input, 'CodexPro');
-      await sleep(1200);
     }
-    await waitFor(() => connectorAlreadyListed() || document.querySelector('button[aria-label="Create app"]'), 10000);
+    // "Create app" belongs to the persistent page shell and can appear before
+    // filtered plugin results. Give the result list its own settle window.
+    await sleep(1200);
+    await waitFor(() => connectorAlreadyListed(), 10000, 200);
     return input;
   }
 
@@ -432,20 +434,44 @@
 
   const hasConnectionMarker = value => value.includes('connection') || value.includes('ket noi');
 
-  function connectorDetailVisible(root) {
-    if (!root) return false;
-    // A /plugin_ route or a sidebar listing CodexPro does not identify the
-    // currently selected plugin. Require the detail heading itself.
-    const namedHeading = [...root.querySelectorAll('h1,h2,h3,[role="heading"]')]
-      .filter(visible).some(element => text(element) === 'codexpro');
-    return namedHeading && hasConnectionMarker(text(root));
+  function connectorDetailRoot(root) {
+    if (!root) return null;
+    const heading = [...root.querySelectorAll('h1,h2,h3,[role="heading"]')]
+      .filter(visible).find(element => text(element) === 'codexpro');
+    if (!heading) return null;
+    let container = heading.parentElement;
+    for (let depth = 0; container && container !== root && depth < 7; depth += 1, container = container.parentElement) {
+      if (hasConnectionMarker(text(container))) return container;
+    }
+    return hasConnectionMarker(text(root)) ? root : null;
   }
 
-  function connectorConnectionStatus(value) {
-    if (/\b(disconnected|not connected|chua ket noi|khong ket noi|ngat ket noi)\b/.test(value)) return 'missing';
+  function connectorDetailVisible(root) {
+    return Boolean(connectorDetailRoot(root));
+  }
+
+  function connectorConnectionStatus(value, actionable = false) {
+    if (/\b(disconnected|not connected|chua ket noi|khong ket noi)\b/.test(value)) return 'disconnected';
     if (/\b(connected|da ket noi)\b/.test(value)) return 'connected';
-    if (['connect', 'ket noi', 'connection connect', 'ket noi ket noi'].includes(value)) return 'missing';
+    // A listed definition with an explicit Connect action is different from a
+    // missing definition. Keep that distinction so Manager never tells users
+    // to add an app that ChatGPT already lists under Installed.
+    if (actionable && ['connect', 'ket noi', 'connection connect', 'ket noi ket noi'].includes(value)) return 'disconnected';
     return 'unknown';
+  }
+
+  function connectorConnectionEvidence(root) {
+    const detail = connectorDetailRoot(root);
+    if (!detail) return null;
+    const elements = [detail, ...detail.querySelectorAll('button,a,[role="button"],div,section,span,p,label')]
+      .filter(visible)
+      .map(element => ({ element, value: text(element), actionable: Boolean(element.matches?.('button,a,[role="button"]')) }))
+      .filter(item => hasConnectionMarker(item.value));
+    return elements
+      .filter(item => connectorConnectionStatus(item.value, item.actionable) !== 'unknown')
+      .sort((left, right) => left.value.length - right.value.length)[0]
+      || elements.sort((left, right) => left.value.length - right.value.length)[0]
+      || null;
   }
 
   async function checkConnectorConnection() {
@@ -454,16 +480,19 @@
       return connectorDetailVisible(current) ? current : null;
     }, 12000, 150);
     if (!root) throw new Error('Chưa xác minh được trang chi tiết CodexPro.');
-    const connection = await waitFor(() => candidates(root).find(element => hasConnectionMarker(text(element))) || null, 5000, 100);
-    const value = text(connection);
-    const connectionState = connectorConnectionStatus(value);
+    const connection = await waitFor(() => {
+      const evidence = connectorConnectionEvidence(root);
+      return evidence && connectorConnectionStatus(evidence.value, evidence.actionable) !== 'unknown' ? evidence : null;
+    }, 5000, 100) || connectorConnectionEvidence(root);
+    const value = connection?.value || '';
+    const connectionState = connectorConnectionStatus(value, connection?.actionable);
     return {
       ok: true,
       connected: connectionState === 'connected',
       connection_state: connectionState,
-      message: connectionState === 'missing' ? 'CodexPro đã có trong danh sách nhưng chưa kết nối với ChatGPT.'
+      message: connectionState === 'disconnected' ? 'CodexPro đã có trong danh sách nhưng chưa kết nối với ChatGPT.'
         : connectionState === 'unknown' ? 'Chưa xác minh được kết nối CodexPro trong ChatGPT.' : 'CodexPro READY',
-      diagnostic: { revision: INSTALLER_REVISION, detail_identity_verified: true, connection_state: connectionState, connection_text: value.slice(0, 160) }
+      diagnostic: { revision: INSTALLER_REVISION, detail_identity_verified: true, connection_state: connectionState, connection_text: value.slice(0, 160), connection_actionable: Boolean(connection?.actionable), connection_tag: String(connection?.element?.tagName || '').toLowerCase() }
     };
   }
 

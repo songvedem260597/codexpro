@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { shouldCheckProfileConnector } from '../manager/src/profile-connector-check.js';
+import { profileConnectorCardAction, shouldCheckProfileConnector } from '../manager/src/profile-connector-check.js';
 
 const installer = readFileSync(new URL('../chrome-extension/connector-installer.js', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../src/browserExtensionBridge.ts', import.meta.url), 'utf8');
@@ -29,16 +29,40 @@ assert.equal(detectCard({ ...cardLink, getAttribute: name => name === 'href' ? '
 assert.equal(detectCard({ ...cardLink, closest: () => ({}) }), null, 'actual transcript containers remain excluded');
 
 const connectionStatus = Function(`${section(installer, 'function connectorConnectionStatus', 'async function checkConnectorConnection')}; return connectorConnectionStatus;`)();
-for (const value of ['connection disconnected', 'connection not connected', 'ket noi chua ket noi', 'connection connect', 'ket noi ket noi']) {
-  assert.equal(connectionStatus(value), 'missing', value);
+for (const value of ['connection disconnected', 'connection not connected', 'ket noi chua ket noi']) {
+  assert.equal(connectionStatus(value), 'disconnected', value);
+}
+for (const value of ['connect', 'ket noi', 'connection connect', 'ket noi ket noi']) {
+  assert.equal(connectionStatus(value), 'unknown', 'a static Connection label must not prove disconnection');
+  assert.equal(connectionStatus(value, true), 'disconnected', 'an explicit Connect action can prove disconnection');
 }
 assert.equal(connectionStatus('connection connected'), 'connected');
 assert.equal(connectionStatus('ket noi da ket noi'), 'connected');
 assert.equal(connectionStatus('connection loading'), 'unknown');
-const detailVisible = Function('visible', 'text', 'hasConnectionMarker', `${section(installer, 'function connectorDetailVisible', 'function connectorConnectionStatus')}; return connectorDetailVisible;`)(() => true, element => element?.value || '', value => value.includes('connection'));
+const detailVisible = Function('visible', 'text', `${section(installer, 'const hasConnectionMarker', 'function connectorConnectionStatus')}; return connectorDetailVisible;`)(() => true, element => element?.value || '');
 assert.equal(detailVisible({ value: 'settings codexpro other connection connected', querySelectorAll: () => [{ value: 'Other' }] }), false,
   'another plugin detail with CodexPro in the sidebar must not pass identity verification');
 assert.equal(detailVisible({ value: 'codexpro connection connected', querySelectorAll: () => [{ value: 'codexpro' }] }), true);
+
+const connectionEvidence = Function('visible', 'text', `${section(installer, 'const hasConnectionMarker', 'async function checkConnectorConnection')}; return connectorConnectionEvidence;`)(() => true, element => String(element?.value || '').toLowerCase());
+const connectedStatus = { value: 'Connected', querySelectorAll: () => [] };
+const connectionLabel = { value: 'Connection', querySelectorAll: () => [] };
+const detailPanel = { value: 'CodexPro Connection Connected', querySelectorAll: selector => selector.includes('button,a') ? [connectionLabel, connectedStatus] : [] };
+const detailHeading = { value: 'codexpro', parentElement: detailPanel };
+const settingsRoot = { value: 'Settings Plugins CodexPro Connection Connected Other', querySelectorAll: selector => selector.includes('h1') ? [detailHeading] : [] };
+detailPanel.parentElement = settingsRoot;
+assert.equal(connectionEvidence(settingsRoot)?.value, 'codexpro connection connected', 'static Connection text inside the selected CodexPro detail must be detected');
+
+const prepareSource = section(installer, 'async function preparePluginSearch()', 'function creationDialog()');
+assert.doesNotMatch(prepareSource, /querySelector\([^\n]*Create app/, 'persistent Create app shell must not be treated as settled plugin results');
+let pluginPolls = 0;
+const prepareSearch = Function('document', 'waitFor', 'visible', 'normalize', 'setNativeValue', 'sleep', 'connectorAlreadyListed', `${prepareSource}; return preparePluginSearch;`)(
+  { querySelector: selector => selector === '#plugin-search' ? { value: 'CodexPro' } : { aria: 'Create app' } },
+  async check => { for (let index = 0; index < 5; index += 1) { const value = check(); if (value) return value; } return null; },
+  () => true, value => String(value).toLowerCase(), () => {}, async () => {}, () => ++pluginPolls >= 3
+);
+await prepareSearch();
+assert.equal(pluginPolls, 3, 'plugin search must wait for a delayed CodexPro result instead of exiting on the page shell');
 
 const merge = Function('profile', 'source', section(bridge, '  if (source.connector_install && typeof source.connector_install', '  profile.lastSeen = Date.now();'));
 const profile = { connectorInstalled: true, connectorCheckedAt: '2026-09-03T01:00:00Z', connectorServerFingerprint: 'bound' };
@@ -54,6 +78,8 @@ assert.equal(profile.connectorInstalled, false, 'undated legacy positives must n
 merge(profile, { connector_install: { ok: true, at: '2026-09-03T03:00:00Z', message: 'READY' }, connector_server_fingerprint: 'new' });
 assert.equal(profile.connectorInstalled, true, 'a genuinely newer successful setup may promote READY');
 assert.equal(profile.connectorServerFingerprint, 'new');
+merge(profile, { connector_install: { ok: false, verification_state: 'disconnected', at: '2026-09-03T04:00:00Z', message: 'Chưa kết nối' } });
+assert.equal(profile.connectorVerificationState, 'disconnected', 'bridge must preserve a listed but disconnected definition from the worker');
 
 const now = Date.parse('2026-09-03T03:00:00Z');
 const fresh = { connected: true, connector_checked_at: new Date(now - 5000).toISOString() };
@@ -70,12 +96,21 @@ const summarize = Function('profile', 'expectedFingerprint', 'CONNECTOR_VERIFICA
 `);
 const currentProfile = { connectorInstalled: true, connectorVerificationState: 'connected', connectorServerFingerprint: 'bound', connectorCheckedAt: new Date().toISOString(), connectorMessage: 'CodexPro READY' };
 assert.equal(summarize(currentProfile, 'bound', 900000).connectorInstalled, true);
+const disconnectedSummary = summarize({ ...currentProfile, connectorInstalled: false, connectorVerificationState: 'disconnected', connectorMessage: 'Chưa kết nối' }, 'bound', 900000);
+assert.equal(disconnectedSummary.connectorVerificationRequired, false, 'fresh disconnected evidence must survive the public profile summary');
+assert.equal(disconnectedSummary.connectorInstalled, false);
+assert.equal(disconnectedSummary.connectorMessage, 'Chưa kết nối');
 assert.equal(summarize({ ...currentProfile, connectorVerificationState: undefined }, 'bound', 900000).connectorInstalled, false, 'legacy list-only READY must be reverified even if its timestamp is recent');
 assert.equal(summarize({ ...currentProfile, connectorVerificationState: 'missing' }, 'bound', 900000).connectorInstalled, false, 'contradictory missing/ok payload must fail closed');
 assert.equal(summarize({ ...currentProfile, connectorCheckedAt: '2020-01-01T00:00:00Z' }, 'bound', 900000).connectorInstalled, false, 'expired success must not be displayed as READY');
 assert.equal(summarize({ ...currentProfile, connectorInstalled: false }, 'bound', 900000).connectorUpdateRequired, false, 'missing/disconnected is not a URL migration and must not trigger automatic reinstallation');
 assert.equal(summarize({ ...currentProfile, connectorVerificationState: 'unknown' }, 'old', 900000).connectorUpdateRequired, false, 'unknown status must not automatically delete/recreate a connector');
 assert.equal(shouldCheckProfileConnector({ ...fresh, connector_verification_required: true }, { now, lastCheck: now - 61000 }), true, 'retry an inconclusive check after one minute instead of treating it as verified absence');
+assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'unknown' }), 'check');
+assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'missing' }), 'check', 'persisted missing evidence must not expose setup before a manual recheck');
+assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'missing' }, { confirmedMissing: true }), 'setup');
+assert.equal(profileConnectorCardAction({ connector_installed: false, connector_verification_state: 'disconnected' }), 'connect', 'a listed definition must offer Connect rather than Add');
+assert.equal(profileConnectorCardAction({ connector_installed: true, connector_profile_bound: true }), 'ready');
 
 const worker = readFileSync(new URL('../chrome-extension/service-worker.js', import.meta.url), 'utf8');
 const checkSource = section(worker, 'async function checkConnectorInstalled()', 'async function pollLoop()');
@@ -97,7 +132,7 @@ async function runCheck({ listed = true, connected = true, busy = false, failure
       if (failure) throw new Error(failure);
       return message.type === 'codexpro-check-connector'
         ? { ok: true, installed: listed, diagnostic: { matched: listed } }
-        : { ok: true, connected, connection_state: connected ? 'connected' : 'missing', message: connected ? 'CodexPro READY' : 'Chưa kết nối', diagnostic: { connection_state: connected ? 'connected' : 'missing' } };
+        : { ok: true, connected, connection_state: connected ? 'connected' : 'disconnected', message: connected ? 'CodexPro READY' : 'Chưa kết nối', diagnostic: { connection_state: connected ? 'connected' : 'disconnected' } };
     },
     navigateInstallerTab: async () => calls.push('navigate_detail'), ensureConnectorDetailTab: async () => {},
     removeTabWithReason: async (_id, reason) => calls.push(reason), isChatGptTabUrl: () => false
@@ -113,7 +148,7 @@ assert.equal(check.calls.includes('navigate_detail'), false, 'a missing definiti
 check = await runCheck({ connected: false });
 assert.equal(check.result.installed, false, 'a listed but disconnected definition is not READY');
 assert.equal(check.writes.at(-1).connectorInstall.ok, false);
-assert.equal(check.writes.at(-1).connectorInstall.verification_state, 'missing');
+assert.equal(check.writes.at(-1).connectorInstall.verification_state, 'disconnected');
 check = await runCheck();
 assert.equal(check.result.installed, true, 'READY requires both list and connection evidence');
 assert.equal(check.result.diagnostic.connection_state, 'connected');

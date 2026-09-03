@@ -784,7 +784,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
         || incomingCheckedAtMs === currentCheckedAtMs && (profile.connectorInstalled === incomingInstalled || !incomingInstalled)));
     if (acceptObservation) {
       profile.connectorInstalled = incomingInstalled;
-      profile.connectorVerificationState = ['connected', 'missing'].includes(source.connector_install.verification_state)
+      profile.connectorVerificationState = ['connected', 'disconnected', 'missing'].includes(source.connector_install.verification_state)
         ? source.connector_install.verification_state : 'unknown';
       profile.connectorMessage = String(source.connector_install.message ?? "").trim().slice(0, 500);
       profile.connectorCheckedAt = incomingCheckedAt;
@@ -1228,7 +1228,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
         ? Boolean(profile.connectorServerFingerprint && profile.connectorServerFingerprint === expectedFingerprint)
         : profile.connectorInstalled;
       const checkedAtMs = Date.parse(profile.connectorCheckedAt);
-      const connectorVerificationRequired = !['connected', 'missing'].includes(profile.connectorVerificationState || '')
+      const connectorVerificationRequired = !['connected', 'disconnected', 'missing'].includes(profile.connectorVerificationState || '')
         || !Number.isFinite(checkedAtMs) || checkedAtMs > Date.now()
         || Date.now() - checkedAtMs >= CONNECTOR_VERIFICATION_TTL_MS;
       const connectorUpdateRequired = Boolean(!connectorVerificationRequired && profile.connectorVerificationState === 'connected' && expectedFingerprint

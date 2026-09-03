@@ -776,7 +776,7 @@ assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
 assert.match(worker, /if\(domActivity\.busy\)\{[\s\S]*?probeCanonicalActivity\(tab\.id,targetConversationId,true\)[\s\S]*?canonicalCompleted[\s\S]*?send_preflight_canonical/, "send preflight must clear a stale DOM busy guard when canonical proves the previous turn completed");
-assert.equal(manifest.version, "0.5.107");
+assert.equal(manifest.version, "0.5.110");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
 assert.match(responseReaderSource, /if\(canonicalResponseSupersedesDom\(currentCanonical,domResult\)\)/, "a current canonical response must replace a shorter stale DOM response even when the DOM incorrectly marks itself ready");
 assert.doesNotMatch(responseReaderSource, /if\(!domResult\.response_ready&&canonicalResponseSupersedesDom/, "DOM response_ready must not prevent canonical stale-response correction");
@@ -810,8 +810,8 @@ assert.match(managerMain, /confirmationDeadline[\s\S]*?versionAtLeast\(profile\.
 assert.match(managerMain, /profile\.connector_update_required \|\| profile\.connector_profile_bound === false[\s\S]*?action: "setup_chatgpt"[\s\S]*?profile\.connector_installed && profile\.connector_profile_bound/, "Manager send preflight must rebind an old connector before dispatching a task");
 assert.match(managerMain, /function profileDiagnosticSnapshot[\s\S]*?connector_installed[\s\S]*?connector_profile_bound[\s\S]*?connector_checked_at/, "profile transition diagnostics must retain connector verification state");
 assert.match(managerMain, /CodexPro connector bị hạ xuống chưa xác minh[\s\S]*?CodexPro connector đã được xác minh[\s\S]*?CodexPro connector không còn khớp profile/, "Manager must log connector verification and binding transitions");
-assert.match(managerMain, /codexpro:check-profile[\s\S]*?result\?\.installed \?\? result\?\.connector_installed[\s\S]*?connector_check_diagnostic/, "automatic connector checks must log the actual installed result and selector evidence");
-assert.match(managerUi, /connectorUpdateRequired \? "Cập nhật CodexPro" : "Thêm CodexPro"/, "old profile connectors must offer an update action instead of pretending CodexPro is missing");
+assert.match(managerMain, /codexpro:check-profile[\s\S]*?result\?\.installed \?\? result\?\.connector_installed[\s\S]*?connector_check_diagnostic/, "connector checks must log the actual installed result and selector evidence");
+assert.match(managerUi, /connectorUpdateRequired[\s\S]*?"Cập nhật CodexPro"[\s\S]*?connectorMissingConfirmed[\s\S]*?"Thêm CodexPro"[\s\S]*?"Kiểm tra CodexPro"/, "unverified profiles must check before setup while outdated connectors retain an explicit update action");
 assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");
 assert.match(managerUi, /className="worker-update-dialog"[\s\S]*?Cập nhật CodexPro Worker[\s\S]*?Cập nhật worker/, "Manager must render the custom worker update confirmation dialog");
 assert.match(managerUi, /Đã update thành công.*result\.version/, "Manager must only announce update success after the backend confirms the target version");
