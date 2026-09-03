@@ -59,7 +59,9 @@ assert.equal(new Set(workflow.steps.map((step) => step.id)).size, workflow.steps
 
 const registered = getTaskWorkflow(APP_HANG_RESILIENCE_WORKFLOW_ID);
 assert.equal(registered?.label, workflow.label, "anti-hang workflow must be registered");
-assert.ok(listTaskWorkflows().some((candidate) => candidate.id === APP_HANG_RESILIENCE_WORKFLOW_ID));
+const registeredWorkflowIds = listTaskWorkflows().map((candidate) => candidate.id);
+assert.ok(registeredWorkflowIds.includes(APP_HANG_RESILIENCE_WORKFLOW_ID));
+assert.deepEqual(registeredWorkflowIds.slice(0, 3), ["system_stability_maintenance", "project_performance_optimization", APP_HANG_RESILIENCE_WORKFLOW_ID], "adding anti-hang must not change the existing default workflow order");
 assert.equal(resolveTaskWorkflow("", "Chống treo cho app này")?.id, APP_HANG_RESILIENCE_WORKFLOW_ID);
 assert.equal(resolveTaskWorkflow("", "Bảo trì ổn định project này")?.id, "system_stability_maintenance", "anti-hang detection must not steal maintenance requests");
 assert.equal(resolveTaskWorkflow("", "Tối ưu tốc độ project này")?.id, "project_performance_optimization", "anti-hang detection must not steal performance requests");
