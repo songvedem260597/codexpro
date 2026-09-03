@@ -448,7 +448,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.109";
+const WORKER_EXTENSION_VERSION = "0.5.110";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -4006,7 +4006,8 @@ function App() {
         const nextNetworkState = String(result.network_state || previous.networkState || (result.busy ? "generating" : "idle"));
         const networkTerminal = isTerminalChatNetworkState(nextNetworkState);
         const networkStreamInProgress = Boolean(networkStreamCurrentGeneration && result.network_stream_in_progress);
-        const networkStreamAvailable = Boolean(networkStreamCurrentGeneration && (!networkTerminal || networkStreamInProgress));
+        const networkStreamCompleted = Boolean(networkStreamCurrentGeneration && result.network_stream_completed === true && !result.network_stream_error);
+        const networkStreamAvailable = Boolean(networkStreamCurrentGeneration && (!networkTerminal || networkStreamInProgress || networkStreamCompleted));
         const domResponseVerified = Boolean(result.response_ready === true && domAvailable && result.dom_busy !== true && result.network_stream_in_progress !== true);
         const canonicalBusyFromSource = Object.prototype.hasOwnProperty.call(result, "canonical_busy")
           ? Boolean(result.canonical_busy)
