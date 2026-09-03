@@ -1,4 +1,5 @@
-.app-plugin-center { min-height: calc(100vh - 190px); display: grid; grid-template-rows: auto auto minmax(560px, 1fr); gap: 14px; padding-bottom: 28px; }
+.app-plugin-center { min-height: calc(100vh - 190px); display: flex; flex-direction: column; gap: 14px; padding-bottom: 28px; }
+.app-plugin-center > .app-plugin-layout { flex: 1 0 auto; min-height: 560px; }
 .app-plugin-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 20px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--panel); }
 .app-plugin-toolbar h2 { margin: 3px 0 4px; }
 .app-plugin-toolbar .button { min-width: 150px; }
