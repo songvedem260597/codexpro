@@ -488,6 +488,33 @@ function recordBrowserFlightRecorderIncident(incident: BrowserFlightRecorderInci
   }
 }
 
+function browserFlightRecorderIncidentIsRateLimit(incident: BrowserFlightRecorderIncident): boolean {
+  if (String(incident.reason || "") === "rate_limit" || Number(incident.event?.status) === 429) return true;
+  const kind = String(incident.kind || incident.event?.event || "");
+  if (!["Runtime.consoleAPICalled", "Log.entryAdded"].includes(kind)) return false;
+  const text = `${String(incident.message || "")} ${String(incident.event?.text || "")}`;
+  return /\btoo many requests\b/i.test(text)
+    || /\b(?:http|status(?:\s+code)?(?:\s+of)?)\s*[:=]?\s*429\b/i.test(text)
+    || /\bserver responded with a status of 429\b/i.test(text);
+}
+
+function normalizeBrowserRateLimitIncident(incident: BrowserFlightRecorderIncident): BrowserFlightRecorderIncident {
+  if (!browserFlightRecorderIncidentIsRateLimit(incident)) return incident;
+  const event: Record<string, unknown> = { ...(incident.event || {}), status: 429 };
+  const rawUrl = String(event.url || "");
+  if (!String(event.endpoint || "") && rawUrl) {
+    try { event.endpoint = new URL(rawUrl).pathname.slice(0, 1000); } catch {}
+  }
+  if (!String(event.rate_limit_fallback_source || "")) event.rate_limit_fallback_source = String(incident.kind || event.event || "").slice(0, 120);
+  const endpoint = String(event.endpoint || "").trim();
+  return {
+    ...incident,
+    reason: "rate_limit",
+    message: `ChatGPT HTTP 429 Too Many Requests${endpoint ? `: ${endpoint}` : ""}`.slice(0, 2000),
+    event
+  };
+}
+
 function recordBrowserRateLimitIncident(incident: BrowserFlightRecorderIncident): void {
   if (String(incident.reason || "") !== "rate_limit" && Number(incident.event?.status) !== 429) return;
   try {
@@ -1045,7 +1072,8 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
 
   if (req.url === "/flight-recorder") {
     const profile = profileFromBody(state, body);
-    const incident = sanitizeFlightRecorderIncident(body.incident, profile.id);
+    const sanitizedIncident = sanitizeFlightRecorderIncident(body.incident, profile.id);
+    const incident = sanitizedIncident ? normalizeBrowserRateLimitIncident(sanitizedIncident) : null;
     if (!incident) {
       sendJson(req, res, 400, { error: "Invalid flight recorder incident." });
       return;

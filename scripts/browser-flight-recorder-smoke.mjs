@@ -117,7 +117,55 @@ try {
   });
   assert.equal(incidentResponse.incident_id, "flight-recorder-smoke-incident", "the bridge must acknowledge the persisted incident id");
 
-  const rateLimitAt = new Date(Date.now() + 1).toISOString();
+  const logFallbackAt = new Date(Date.now() + 1).toISOString();
+  await post("/flight-recorder", {
+    profile: { id: profileId, enabled: true, label: "Flight Recorder Smoke", version: "0.0.0-smoke" },
+    incident: {
+      id: "flight-recorder-rate-limit-log-fallback",
+      at: logFallbackAt,
+      at_ms: Date.parse(logFallbackAt),
+      reason: "cdp",
+      kind: "Log.entryAdded",
+      message: "Failed to load resource: the server responded with a status of 429 ()",
+      profile_id: profileId,
+      tab_id: 77,
+      window_id: 9,
+      conversation_id: "12345678-abcd",
+      task_id: "",
+      task_title: "",
+      command_id: polled.command.id,
+      action: "read_chat_response",
+      url: "https://chatgpt.com/c/12345678-abcd",
+      event: { event: "Log.entryAdded", level: "error", text: "Failed to load resource: the server responded with a status of 429 ()", url: "https://chatgpt.com/backend-api/conversations/12345678-abcd" },
+      events: []
+    }
+  });
+
+  const consoleFallbackAt = new Date(Date.now() + 2).toISOString();
+  await post("/flight-recorder", {
+    profile: { id: profileId, enabled: true, label: "Flight Recorder Smoke", version: "0.0.0-smoke" },
+    incident: {
+      id: "flight-recorder-rate-limit-console-fallback",
+      at: consoleFallbackAt,
+      at_ms: Date.parse(consoleFallbackAt),
+      reason: "cdp",
+      kind: "Runtime.consoleAPICalled",
+      message: "RequestError: Too many requests",
+      profile_id: profileId,
+      tab_id: 77,
+      window_id: 9,
+      conversation_id: "12345678-abcd",
+      task_id: "",
+      task_title: "",
+      command_id: polled.command.id,
+      action: "read_chat_response",
+      url: "https://chatgpt.com/c/12345678-abcd",
+      event: { event: "Runtime.consoleAPICalled", level: "error", text: "RequestError: Too many requests" },
+      events: []
+    }
+  });
+
+  const rateLimitAt = new Date(Date.now() + 3).toISOString();
   const rateLimitResponse = await post("/flight-recorder", {
     profile: {
       id: profileId,
@@ -161,10 +209,10 @@ try {
 
   const profile = bridge.listBrowserExtensionProfiles().find((item) => item.profile_id === profileId);
   assert.ok(profile, "the synthetic profile must remain visible after the incident post");
-  assert.equal(profile.flight_recorder_incident_count, 2, "profile status must surface every recorder incident");
+  assert.equal(profile.flight_recorder_incident_count, 4, "profile status must surface every recorder incident including console/log 429 fallbacks");
   assert.equal(profile.flight_recorder_latest_kind, "Network.responseReceived", "profile status must surface the latest recorder incident kind");
   assert.equal(profile.flight_recorder_latest_message, "ChatGPT HTTP 429 Too Many Requests: /backend-api/f/conversation", "profile status must surface the latest 429 incident message");
-  assert.equal(profile.rate_limit_incident_count, 1, "profile status must expose a dedicated ChatGPT rate-limit counter");
+  assert.equal(profile.rate_limit_incident_count, 3, "profile status must count direct plus console/log fallback ChatGPT rate-limit incidents");
   assert.equal(profile.rate_limit_latest_status_code, 429, "profile status must expose the 429 status code");
   assert.equal(profile.rate_limit_latest_endpoint, "/backend-api/f/conversation", "profile status must expose the rate-limited endpoint");
   assert.equal(profile.rate_limit_latest_request_id, "cdp-request-429", "profile status must expose the CDP request id for correlation");
@@ -178,7 +226,7 @@ try {
   const logPath = path.join(home, "browser-flight-recorder.jsonl");
   assert.equal(fs.existsSync(logPath), true, "the flight recorder must write a durable JSONL file");
   const lines = fs.readFileSync(logPath, "utf8").trim().split(/\r?\n/).filter(Boolean);
-  assert.equal(lines.length, 2, "the isolated smoke run must persist both the generic and 429 recorder incidents");
+  assert.equal(lines.length, 4, "the isolated smoke run must persist generic, fallback, and direct 429 recorder incidents");
   const persisted = JSON.parse(lines[0]);
   assert.equal(persisted.id, "flight-recorder-smoke-incident");
   assert.equal(persisted.profile_id, profileId);
@@ -187,7 +235,20 @@ try {
   assert.equal(persisted.tab_id, 77);
   assert.equal(persisted.events.length, 2, "the durable snapshot must include the bounded pre-incident event context");
 
-  const persistedRateLimit = JSON.parse(lines[1]);
+  const persistedLogFallback = JSON.parse(lines[1]);
+  assert.equal(persistedLogFallback.id, "flight-recorder-rate-limit-log-fallback");
+  assert.equal(persistedLogFallback.reason, "rate_limit", "old-worker Log.entryAdded 429 incidents must be normalized by the bridge");
+  assert.equal(persistedLogFallback.event.status, 429);
+  assert.equal(persistedLogFallback.event.endpoint, "/backend-api/conversations/12345678-abcd");
+  assert.equal(persistedLogFallback.event.rate_limit_fallback_source, "Log.entryAdded");
+
+  const persistedConsoleFallback = JSON.parse(lines[2]);
+  assert.equal(persistedConsoleFallback.id, "flight-recorder-rate-limit-console-fallback");
+  assert.equal(persistedConsoleFallback.reason, "rate_limit", "old-worker Runtime.consoleAPICalled Too many requests incidents must be normalized by the bridge");
+  assert.equal(persistedConsoleFallback.event.status, 429);
+  assert.equal(persistedConsoleFallback.event.rate_limit_fallback_source, "Runtime.consoleAPICalled");
+
+  const persistedRateLimit = JSON.parse(lines[3]);
   assert.equal(persistedRateLimit.id, "flight-recorder-rate-limit");
   assert.equal(persistedRateLimit.reason, "rate_limit");
   assert.equal(persistedRateLimit.task_id, taskId, "the bridge must backfill task correlation on 429 incidents too");
@@ -197,8 +258,16 @@ try {
   const rateLimitLogPath = path.join(home, "chatgpt-rate-limit.jsonl");
   assert.equal(fs.existsSync(rateLimitLogPath), true, "ChatGPT 429 incidents must also be written to the dedicated investigation log");
   const rateLimitLines = fs.readFileSync(rateLimitLogPath, "utf8").trim().split(/\r?\n/).filter(Boolean);
-  assert.equal(rateLimitLines.length, 1, "the dedicated rate-limit log must contain only rate-limit incidents");
-  const dedicatedRateLimit = JSON.parse(rateLimitLines[0]);
+  assert.equal(rateLimitLines.length, 3, "the dedicated rate-limit log must contain direct plus console/log fallback incidents and nothing else");
+  const dedicatedLogFallback = JSON.parse(rateLimitLines[0]);
+  assert.equal(dedicatedLogFallback.id, "flight-recorder-rate-limit-log-fallback");
+  assert.equal(dedicatedLogFallback.event.status, 429);
+  assert.equal(dedicatedLogFallback.event.rate_limit_fallback_source, "Log.entryAdded");
+  const dedicatedConsoleFallback = JSON.parse(rateLimitLines[1]);
+  assert.equal(dedicatedConsoleFallback.id, "flight-recorder-rate-limit-console-fallback");
+  assert.equal(dedicatedConsoleFallback.event.status, 429);
+  assert.equal(dedicatedConsoleFallback.event.rate_limit_fallback_source, "Runtime.consoleAPICalled");
+  const dedicatedRateLimit = JSON.parse(rateLimitLines[2]);
   assert.equal(dedicatedRateLimit.id, "flight-recorder-rate-limit");
   assert.equal(dedicatedRateLimit.event.endpoint, "/backend-api/f/conversation");
   assert.equal(dedicatedRateLimit.event.response_request_id, "server-request-429");
