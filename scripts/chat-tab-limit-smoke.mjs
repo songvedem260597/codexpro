@@ -13,7 +13,9 @@ assert.match(worker, /function chatNavigationSupersedesNetworkState[\s\S]*?track
 assert.match(worker, /async function resetSupersededChatActivity[\s\S]*?chatNetworkStateByTab\.delete\(tabId\)[\s\S]*?persistChatNetworkState/, "superseded network state must be cleared and persisted");
 assert.match(worker, /plan\.reasons\[tabId\]==='codexpro_unreachable'[\s\S]*?chrome\.tabs\.create[\s\S]*?removeTabWithReason\(tabId/, "health cleanup must create the last macOS tab's replacement before closing it");
 assert.match(worker, /recover_chat_tab[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\}\)/, "fresh-chat recovery must use the capped tab creator");
-assert.match(worker, /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:false\}\)/, "new chat requests must use the capped tab creator");
+assert.match(worker, /async function focusNewChatGptTab[\s\S]*?chrome\.tabs\.update\(tab\.id,\{active:true\}\)[\s\S]*?chrome\.windows\.update\(windowId,\{focused:true\}\)/, "ChatGPT tab creation must activate the tab and focus its Chrome window");
+assert.match(worker, /if\(action==='open_tab'\)\{const tab=await createChatGptTab\(\{url:args\.url,active:true\},'browser_control_open_tab'\)[\s\S]*?background:false,focused:true/, "browser open_tab must foreground the created ChatGPT tab");
+assert.match(worker, /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\},'send_chat_request_new'\)/, "new chat requests must use the capped creator and request foreground focus");
 const replacementSource = worker.slice(
   worker.indexOf("async function replaceUnresponsiveChatTab"),
   worker.indexOf("async function waitForConversationUrl")
