@@ -33,7 +33,7 @@ assert.match(panel, /Mở worktree/);
 assert.match(styles, /coordination-repo\.has-conflict/);
 assert.match(styles, /coordination-badges span\.is-danger/);
 assert.match(server, /"workspace_coordination_status"/);
-assert.match(coordination, /export function readWorkspaceCoordinationStatus/);
+assert.match(coordination, /export async function readWorkspaceCoordinationStatus/);
 assert.match(coordination, /stale_paths/);
 assert.match(coordination, /queue_position/);
 
