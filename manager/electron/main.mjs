@@ -4380,6 +4380,34 @@ async function reloadChromeProfiles() {
 }
 
 const profileSendOperations = new Map();
+const RESUMABLE_BROWSER_TASK_STATUSES = new Set(["prepared", "running", "failed", "cancelled", "blocked"]);
+
+function browserProfileIdleForTaskResume(profile) {
+  if (!profile?.connected || String(profile.activity || "") !== "idle") return false;
+  const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
+  return !tabs.some((tab) => tab?.busy === true || tab?.settling === true || tab?.renderer_unresponsive === true || String(tab?.network_state || "") === "generating");
+}
+
+function workerJobField(job, snake, camel = "") {
+  return job?.[snake] ?? (camel ? job?.[camel] : undefined);
+}
+
+function workerJobResumeCheckpointText(job) {
+  const completed = Array.isArray(workerJobField(job, "completed_parts", "completedParts")) ? workerJobField(job, "completed_parts", "completedParts") : [];
+  const remaining = Array.isArray(workerJobField(job, "remaining_parts", "remainingParts")) ? workerJobField(job, "remaining_parts", "remainingParts") : [];
+  const progress = Math.max(0, Math.min(100, Number(workerJobField(job, "progress_percent", "progressPercent")) || 0));
+  const reason = String(workerJobField(job, "blocked_reason", "blockedReason") || workerJobField(job, "last_progress_reason", "lastProgressReason") || job?.error || job?.summary || "").trim();
+  const evidence = String(workerJobField(job, "completion_evidence", "completionEvidence") || workerJobField(job, "last_progress_evidence", "lastProgressEvidence") || "").trim();
+  return [
+    `Tiếp tục task “${String(job?.title || "Task CodexPro").trim()}” từ checkpoint bền vững gần nhất.`,
+    `Trạng thái trước khi tiếp tục: ${String(job?.status || "unknown")}. Tiến độ đã ghi nhận: ${Math.round(progress)}%.`,
+    completed.length ? `Phần đã xong: ${completed.join(" | ")}` : "Phần đã xong: chưa có checkpoint chi tiết.",
+    remaining.length ? `Phần còn lại: ${remaining.join(" | ")}` : "Phần còn lại: hãy đối chiếu source/trạng thái hiện tại để xác định chính xác, không làm lại phần đã hoàn tất.",
+    reason ? `Lý do lỗi/chặn gần nhất: ${reason}` : "Không có lý do lỗi/chặn được lưu.",
+    evidence ? `Bằng chứng gần nhất: ${evidence}` : "",
+    "Không bắt đầu lại từ đầu. Kiểm tra trạng thái hiện tại, giữ nguyên các phần đã hoàn tất, xử lý phần còn lại và verify đầy đủ trước khi kết thúc."
+  ].filter(Boolean).join("\n");
+}
 
 async function sendProfileRequestUnlocked(payload) {
   const sendDebug = process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1";
@@ -4489,6 +4517,7 @@ async function sendProfileRequestUnlocked(payload) {
     profilePreflightSource = "list-profiles-refresh";
   }
   if (!profile) throw new Error("Profile Chrome này không còn được CodexPro nhận diện.");
+  if (payload?.requireIdleProfile === true && !browserProfileIdleForTaskResume(profile)) throw new Error("WORKER_NOT_IDLE: Chỉ có thể tiếp tục task khi worker đang ở trạng thái ĐANG RẢNH.");
   const profileHadChatGptTab = Boolean(
     (Array.isArray(profile.chatgpt_tabs) && profile.chatgpt_tabs.length)
     || (Array.isArray(profile.conversation_tabs) && profile.conversation_tabs.length)
@@ -4655,7 +4684,10 @@ async function sendProfileRequestUnlocked(payload) {
         "@CodexPro",
         `Đây là chat phục hồi cho task CodexPro đang chạy, Task ID: ${taskId}.`,
         "Giữ nguyên task hiện tại, task title, task kind, workspace và Task ID; đây không phải task FIFO mới.",
-        "Không gọi begin_repo_task lần nữa. Hãy kiểm tra trạng thái workspace/repo hiện tại, không lặp lại thao tác đã hoàn thành, rồi tiếp tục từ checkpoint gần nhất trong nội dung dưới đây.",
+        existingWorkerJobStatus === "prepared"
+          ? `Task đang được chuẩn bị lại để tiếp tục: hãy gọi begin_repo_task đúng Task ID ${taskId} với task title/kind/workspace đã lưu trước khi dùng tool workspace.`
+          : "Task đã begin_repo_task: không gọi begin_repo_task lần nữa và không thay đổi task gate hiện tại.",
+        "Hãy kiểm tra trạng thái workspace/repo hiện tại, không lặp lại thao tác đã hoàn thành, rồi tiếp tục từ checkpoint gần nhất trong nội dung dưới đây.",
         "Chỉ coi task hoàn tất khi phần việc còn lại đã trả phản hồi cuối.",
         ...taskStatusProtocolLines,
         "",
@@ -4742,6 +4774,56 @@ async function sendProfileRequest(payload) {
   profileSendOperations.set(profileId,operation);
   try{return await operation;}
   finally{if(profileSendOperations.get(profileId)===operation)profileSendOperations.delete(profileId);}
+}
+
+async function resumeProfileTask(payload) {
+  const profileId = String(payload?.profileId || "").trim();
+  const taskId = String(payload?.taskId || "").trim();
+  if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
+  if (!/^cpt_[a-f0-9]{24}$/.test(taskId)) throw new Error("CodexPro task id không hợp lệ.");
+  if (profileSendOperations.has(profileId)) throw new Error("Profile này đang gửi một yêu cầu khác. Chỉ có thể tiếp tục task khi worker đang rảnh.");
+
+  const base = await readyRuntimeBaseStatus();
+  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  const profiles = await listBrowserProfilesThroughMcp(base.config, base.token);
+  const profile = (Array.isArray(profiles) ? profiles : []).find((item) => String(item?.profile_id || "") === profileId);
+  if (!profile) throw new Error("Profile Chrome này không còn được CodexPro nhận diện.");
+  if (!browserProfileIdleForTaskResume(profile)) throw new Error("WORKER_NOT_IDLE: Chỉ có thể tiếp tục task khi worker đang ở trạng thái ĐANG RẢNH.");
+
+  const workerJobResult = await localMcpTool(base.config, base.token, "worker_job_status", { task_id: taskId }, 15000);
+  const job = workerJobResult?.job;
+  if (!job) throw new Error("Không tìm thấy task đã chọn trong lịch sử CodexPro.");
+  const jobWorkerId = String(workerJobField(job, "worker_id", "workerId") || "");
+  if (jobWorkerId !== profileId) throw new Error("Task này không thuộc worker đang chọn.");
+  const previousStatus = String(job?.status || "").trim().toLowerCase();
+  if (previousStatus === "completed" || workerJobField(job, "completion_confirmed", "completionConfirmed") === true) throw new Error("Task đã hoàn thành nên không thể tiếp tục lại từ popup.");
+  if (!RESUMABLE_BROWSER_TASK_STATUSES.has(previousStatus)) throw new Error(`Task ở trạng thái ${previousStatus || "không xác định"} nên chưa thể tiếp tục.`);
+
+  const scope = job.scope === "all_allowed" ? "all_allowed" : "workspace";
+  const root = String(job.root || "").trim();
+  if (scope === "workspace" && !root) throw new Error("Task cũ không còn thông tin workspace để tiếp tục an toàn.");
+  if (["failed", "cancelled", "blocked"].includes(previousStatus)) {
+    const prepared = await localMcpTool(base.config, base.token, "prepare_repo_task", {
+      profile_id: profileId,
+      task_id: taskId,
+      ...(scope === "workspace" ? { root } : {}),
+      scope
+    }, 15000);
+    if (prepared?.prepared !== true || String(prepared?.task_id || "") !== taskId) throw new Error("CodexPro không thể chuẩn bị lại task cũ để tiếp tục.");
+  }
+
+  const result = await sendProfileRequest({
+    profileId,
+    newChat: true,
+    taskMode: "recovery",
+    previousTaskId: taskId,
+    text: workerJobResumeCheckpointText(job),
+    scope,
+    projectRoot: scope === "workspace" ? root : "",
+    workspaceCandidates: [],
+    requireIdleProfile: true
+  });
+  return { ...result, resumed_task_id: taskId, resumed_from_status: previousStatus };
 }
 
 async function getRepoTaskStatus(payload) {
@@ -5429,6 +5511,18 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
   recordUserReportedError(payload, { request_channel: "chat_composer" });
   return ipcResult(() => sendProfileRequest(payload));
 });
+diagnosticIpcHandle("codexpro:resume-profile-task", {
+  category: "task",
+  action: "resume-profile-task",
+  logSuccess: true,
+  successMessage: "Đã gửi yêu cầu tiếp tục task",
+  failureMessage: "Tiếp tục task thất bại",
+  details: (payload) => ({ profile_id: String(payload?.profileId || ""), task_id: String(payload?.taskId || "") }),
+  resultDetails: (result) => {
+    const value = result?.ok ? result.value : result;
+    return { profile_id: String(value?.profile_id || ""), task_id: String(value?.resumed_task_id || value?.repo_task_id || ""), resumed_from_status: String(value?.resumed_from_status || ""), conversation_id: String(value?.conversation_id || "") };
+  }
+}, (_event, payload) => ipcResult(() => resumeProfileTask(payload)));
 diagnosticIpcHandle("codexpro:rename-profile-chat", {
   category: "chat",
   action: "rename-profile-chat",
