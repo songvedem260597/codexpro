@@ -3408,12 +3408,19 @@ function pruneGitSummaryCache(liveRoots) {
 
 const REPO_SCAN_SKIPPED_DIRECTORIES = new Set([
   "$recycle.bin", "system volume information", "windows", "program files", "program files (x86)", "programdata",
-  "appdata", "node_modules", ".git", ".cache", ".gradle", ".idea", ".next", "dist", "build", "coverage", "vendor"
+  "appdata", "node_modules", ".git", ".codexpro", ".codex", ".cache", ".gradle", ".idea", ".next", "dist", "build", "coverage", "vendor"
 ]);
 
 function pathInside(child, parent) {
   const relative = path.relative(path.resolve(parent), path.resolve(child));
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function isInternalWorkspaceWorktree(root) {
+  if (!root) return false;
+  const resolved = path.resolve(root);
+  return pathInside(resolved, path.join(codexProHome, "workspace-worktrees"))
+    || pathInside(resolved, path.join(os.homedir(), ".codex", "worktrees"));
 }
 
 function allowedWorkspaceRoots(config) {
@@ -3523,11 +3530,16 @@ async function listProjects() {
     .filter((root) => typeof root === "string" && root.trim() && root !== ALL_ALLOWED_WORKSPACES)
     .map((root) => path.resolve(root).toLowerCase()));
   const sources = new Map();
-
+  const addSource = (root, source) => {
+    if (typeof root !== "string" || !root.trim()) return;
+    const resolved = path.resolve(root);
+    if (isInternalWorkspaceWorktree(resolved)) return;
+    sources.set(resolved, source);
+  };
   for (const workspace of chatGptWorkspaces) {
     if (typeof workspace?.root !== "string" || !workspace.root) continue;
     const root = path.resolve(workspace.root);
-    sources.set(root, {
+    addSource(root, {
       source: "ChatGPT",
       active: Number(workspace.sessionCount) > 0,
       sessionCount: Number(workspace.sessionCount) || 0,
@@ -3540,24 +3552,25 @@ async function listProjects() {
   for (const savedRoot of managerProjects()) {
     const root = path.resolve(savedRoot);
     if (!sources.has(root)) {
-      sources.set(root, { source: "Đã ghim", active: false, sessionCount: 0, lastSeenAt: "", clients: [], workers: [] });
+      addSource(root, { source: "Đã ghim", active: false, sessionCount: 0, lastSeenAt: "", clients: [], workers: [] });
     }
   }
 
-  if (activeRoot) {
+  if (activeRoot && !isInternalWorkspaceWorktree(path.resolve(activeRoot))) {
     const root = path.resolve(activeRoot);
     const current = sources.get(root);
-    sources.set(root, current
+    addSource(root, current
       ? { ...current, active: true }
       : { source: "Đang chạy", active: true, sessionCount: 0, lastSeenAt: "", clients: [], workers: [] });
   }
   const discoveryStartedAt = Date.now();
   const discoveredRoots = await discoverGitRepositories(repoScanRoots(taskConfig));
   const discoveryMs = Date.now() - discoveryStartedAt;
-  for (const discoveredRoot of discoveredRoots) {
-    const root = path.resolve(discoveredRoot);
-    if (![...sources.keys()].some((known) => known.toLowerCase() === root.toLowerCase())) {
-      sources.set(root, { source: "Tự quét", active: false, sessionCount: 0, lastSeenAt: "", clients: [], workers: [] });
+  for (const root of discoveredRoots) {
+    const resolved = path.resolve(root);
+    if (isInternalWorkspaceWorktree(resolved)) continue;
+    if (![...sources.keys()].some((known) => known.toLowerCase() === resolved.toLowerCase())) {
+      addSource(resolved, { source: "Tự quét", active: false, sessionCount: 0, lastSeenAt: "", clients: [], workers: [] });
     }
   }
 
