@@ -4629,6 +4629,14 @@ async function sendProfileRequestUnlocked(payload) {
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
         "Sau khi begin_repo_task với task_kind=code thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác."
       ];
+  const taskStatusProtocolLines = [
+    "BẮT BUỘC báo tiến độ task qua MCP CodexPro bằng trạng thái có cấu trúc, không chỉ mô tả bằng câu trả lời văn bản.",
+    `Sau mỗi phần việc có ý nghĩa đã xong, gọi tool MCP CodexPro "codexpro" với action="report_worker_job_progress" và args có "task_id":"${taskId}", "stage":"partial", "summary":"<đã xong gì>", "completed_parts":[...], "remaining_parts":[...].`,
+    `Khi đã xong toàn bộ phần triển khai nhưng còn build/test/verify/commit/push, báo stage="all_parts_done" hoặc stage="verifying" cho Task ID ${taskId}; không được gọi completed sớm.`,
+    "Nếu bị chặn, gặp lỗi, hoặc nghi task đang treo nhưng model vẫn còn phản hồi được, BẮT BUỘC báo stage=\"blocked\", \"error\" hoặc \"stalled\" kèm reason rõ ràng và evidence nếu có để Manager điều tra.",
+    `TRƯỚC mọi câu trả lời cuối cho người dùng, BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="finalize_worker_job" cho Task ID ${taskId}. Chỉ dùng outcome="completed" khi toàn bộ yêu cầu đã xong và mọi bước verify bắt buộc đã đạt; nếu không phải dùng outcome="failed" hoặc "cancelled" với summary/error rõ ràng.`,
+    "Nếu chưa finalize_worker_job thành công thì task chưa được coi là hoàn tất dù ChatGPT đã ngừng streaming hoặc profile chuyển sang rảnh."
+  ];
   const taskText = recoveryAccepted
     ? [
         "@CodexPro",
@@ -4636,6 +4644,7 @@ async function sendProfileRequestUnlocked(payload) {
         "Giữ nguyên task hiện tại, task title, task kind, workspace và Task ID; đây không phải task FIFO mới.",
         "Không gọi begin_repo_task lần nữa. Hãy kiểm tra trạng thái workspace/repo hiện tại, không lặp lại thao tác đã hoàn thành, rồi tiếp tục từ checkpoint gần nhất trong nội dung dưới đây.",
         "Chỉ coi task hoàn tất khi phần việc còn lại đã trả phản hồi cuối.",
+        ...taskStatusProtocolLines,
         "",
         text
       ].join("\n")
@@ -4647,12 +4656,14 @@ async function sendProfileRequestUnlocked(payload) {
           ? `Task đang ở trạng thái prepared: hãy gọi begin_repo_task đúng Task ID ${taskId} theo yêu cầu ban đầu rồi tiếp tục với điều chỉnh này.`
           : "Task đã begin_repo_task: không gọi begin_repo_task lần nữa và không thay đổi task gate hiện tại.",
         "Áp dụng nội dung dưới đây như chỉ dẫn mới nhất cho phần việc đang chạy. Chỉ coi task hoàn tất khi lượt xử lý sau điều chỉnh đã trả phản hồi cuối.",
+        ...taskStatusProtocolLines,
         "",
         text ? `Điều chỉnh của người dùng:\n${text}` : "Điều chỉnh của người dùng nằm trong file đính kèm."
       ].join("\n")
     : [
         ...(newChat ? ["@CodexPro"] : ["Hãy sử dụng MCP CodexPro đã được kích hoạt trong đoạn chat này."]),
         ...taskScopeLines,
+        ...taskStatusProtocolLines,
         ...(toolRetry ? ["Đây là lần gửi lại vì phản hồi trước không trả task title qua CodexPro. Phải gọi codexpro action=begin_repo_task với task_title và task_kind ngay."] : []),
         ...(taskWorkflow ? ["", buildTaskWorkflowPrompt(taskWorkflow.id)] : []),
         "",

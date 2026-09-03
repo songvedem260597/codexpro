@@ -214,6 +214,16 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (!generalWorkerStatus.structuredContent.found || generalWorkerStatus.structuredContent.job?.policy_version !== 'worker-policy-v1' || generalWorkerStatus.structuredContent.job?.status !== 'running') {
       throw new Error(`general task did not persist MCP worker policy evidence: ${JSON.stringify(generalWorkerStatus.structuredContent)}`);
     }
+    const generalProgress = await callTool(general, 'report_worker_job_progress', {
+      task_id: generalBegan.structuredContent.task_id,
+      stage: 'verifying',
+      summary: 'General fixture implementation is complete; final verification remains.',
+      completed_parts: ['implementation'],
+      remaining_parts: ['verification']
+    });
+    if (!generalProgress.structuredContent.reported || generalProgress.structuredContent.job?.last_progress_stage !== 'verifying' || generalProgress.structuredContent.job?.progress_sequence !== 1) {
+      throw new Error(`general task did not persist structured progress through MCP: ${JSON.stringify(generalProgress.structuredContent)}`);
+    }
     const generalFinalized = await callTool(general, 'finalize_worker_job', { task_id: generalBegan.structuredContent.task_id, outcome: 'completed', summary: 'general fixture complete' });
     if (!generalFinalized.structuredContent.finalized || generalFinalized.structuredContent.job?.status !== 'completed') {
       throw new Error(`general task did not finalize through MCP policy: ${JSON.stringify(generalFinalized.structuredContent)}`);
@@ -296,7 +306,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (!preparedA.structuredContent.prepared) throw new Error('manager could not prepare repo task A');
     await expectToolErrorCode(gatedSibling, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
     for (const action of actionNames) {
-      if (['begin_repo_task', 'repo_task_status', 'workspace_coordination_status', 'worker_job_status', 'worker_job_history', 'finalize_worker_job'].includes(action)) continue;
+      if (['begin_repo_task', 'repo_task_status', 'workspace_coordination_status', 'worker_job_status', 'worker_job_history', 'report_worker_job_progress', 'finalize_worker_job'].includes(action)) continue;
       await expectToolErrorCode(gated, 'codexpro', { action, args: {} }, 'BEGIN_REPO_TASK_REQUIRED');
     }
     await expectToolErrorCode(gated, 'edit', { path: 'gate.txt', old_text: 'gate initial', new_text: 'gate changed' }, 'BEGIN_REPO_TASK_REQUIRED');
@@ -1109,7 +1119,7 @@ try {
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);
   const queryToolNames = toolNames(queryTools);
-  for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'worker_job_status', 'worker_job_history', 'finalize_worker_job', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+  for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'worker_job_status', 'worker_job_history', 'report_worker_job_progress', 'finalize_worker_job', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
     if (!queryToolNames.includes(expected)) {
       throw new Error(`URL-token MCP tools/list missing ${expected}; got ${queryToolNames.join(', ')}`);
     }

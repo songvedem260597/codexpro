@@ -5,6 +5,8 @@ import path from "node:path";
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-worker-policy-"));
 process.env.CODEXPRO_HOME = home;
+const managerMain = fs.readFileSync(new URL("../manager/electron/main.mjs", import.meta.url), "utf8");
+assert.match(managerMain, /\.\.\.taskScopeLines,\s*\.\.\.taskStatusProtocolLines,/, "new tasks must receive the structured progress/finalization protocol, not only recovery and adjustment turns");
 
 const {
   WORKER_POLICY_VERSION,
@@ -14,6 +16,7 @@ const {
   prepareWorkerJob,
   readWorkerJob,
   reconcileCompletedWorkerJob,
+  reportWorkerJobProgress,
   workerJobPublicRecord
 } = await import("../dist/workerPolicy.js");
 
@@ -77,7 +80,28 @@ try {
     codexGraphRelationshipCount: 20
   });
   assert.deepEqual(bootstrapped.completedObligations, ["global_rules", "agents_chain", "codexgraph"]);
+  const partialProgress = await reportWorkerJobProgress({
+    jobId: codeId,
+    workerId: "api.custom",
+    stage: "partial",
+    summary: "Implementation complete; tests remain.",
+    reason: "Waiting for verification before finalizing.",
+    evidence: "src/workerPolicy.ts updated",
+    completedParts: ["implementation"],
+    remainingParts: ["tests", "commit", "push"]
+  });
+  const publicProgress = workerJobPublicRecord(partialProgress);
+  assert.equal(publicProgress.progress_sequence, 1);
+  assert.equal(publicProgress.last_progress_stage, "partial");
+  assert.equal(publicProgress.last_progress_summary, "Implementation complete; tests remain.");
+  assert.equal(publicProgress.last_progress_reason, "Waiting for verification before finalizing.");
+  assert.deepEqual(publicProgress.progress_reports[0].completed_parts, ["implementation"]);
+  assert.deepEqual(publicProgress.progress_reports[0].remaining_parts, ["tests", "commit", "push"]);
   assert.equal((await finalizeWorkerJob({ jobId: codeId, workerId: "api.custom", outcome: "completed" })).status, "completed");
+  await assert.rejects(
+    () => reportWorkerJobProgress({ jobId: codeId, workerId: "api.custom", stage: "verifying", summary: "late update" }),
+    /not running/
+  );
   assert.equal(readWorkerJob(codeId)?.codexGraphSymbolCount, 12);
   assert.deepEqual(listWorkerJobs({ statuses: ["completed"], limit: 10 }).map((job) => job.jobId), [codeId, generalId], "completed job history must be newest first");
   assert.deepEqual(listWorkerJobs({ statuses: ["failed"], limit: 10 }), [], "job history status filter must exclude other terminal states");
