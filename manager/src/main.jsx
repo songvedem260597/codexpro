@@ -24,7 +24,7 @@ import { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, 
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, latestTurnHasProvisionalAssistant, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
-import { CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationCompletedTaskCount, conversationTotalMessageCount, shouldRolloverConversation } from "./conversation-message-limit.js";
+import { conversationCompletedTaskCount, conversationMessageLimit, conversationTotalMessageCount, shouldQualifyFastMessageLimit, shouldRolloverConversation } from "./conversation-message-limit.js";
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
@@ -2981,6 +2981,8 @@ function App() {
       Boolean(response?.truncated),
       Number(response?.messageCount) || 0,
       Number(response?.totalMessageCount) || 0,
+      String(response?.activityStartedAt || ""),
+      Boolean(response?.fastMessageLimitQualified),
       text,
       messages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain), Boolean(message?.provisional), message?.endTurn])
     ]);
@@ -2996,6 +2998,8 @@ function App() {
       responseSource: String(response?.responseSource || ""),
       messageCount: Number(response?.messageCount) || 0,
       totalMessageCount: Number(response?.totalMessageCount) || 0,
+      activityStartedAt: String(response?.activityStartedAt || ""),
+      fastMessageLimitQualified: Boolean(response?.fastMessageLimitQualified),
       updatedAt: String(response?.updatedAt || new Date().toISOString())
     };
     rememberResponseCacheEntry(key, cacheEntry);
@@ -3031,6 +3035,10 @@ function App() {
             Boolean(cached.responseReady),
             String(cached.responseSource || ""),
             Boolean(cached.truncated),
+            Number(cached.messageCount) || 0,
+            Number(cached.totalMessageCount) || 0,
+            String(cached.activityStartedAt || ""),
+            Boolean(cached.fastMessageLimitQualified),
             cachedText,
             cachedMessages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain), Boolean(message?.provisional), message?.endTurn])
           ]));
@@ -3463,7 +3471,8 @@ function App() {
     }
     const rolloverTaskInProgress = Boolean(requestedTab?.busy || requestedTab?.settling || String(requestedTab?.network_state || "").toLowerCase() === "generating" || currentResponse?.busy || currentResponse?.loading || currentResponse?.transcriptLoading || currentResponse?.incomplete || currentResponse?.finalityPending || currentResponse?.canonicalBusy || currentResponse?.networkStreamInProgress);
     const rolloverSource = { ...currentResponse, taskInProgress: rolloverTaskInProgress };
-    if (!newChat && currentResponse?.conversationId === conversationId && shouldRolloverConversation(rolloverSource)) {
+    const rolloverMessageLimit = conversationMessageLimit(rolloverSource);
+    if (!newChat && currentResponse?.conversationId === conversationId && shouldRolloverConversation(rolloverSource, rolloverMessageLimit)) {
       const observedCompletedTaskCount = conversationCompletedTaskCount(rolloverSource);
       const observedTotalMessageCount = conversationTotalMessageCount(currentResponse);
       const cleanMessages = materializeTranscriptMessages(currentResponse, conversationId).filter((item) => !item?.pending);
@@ -3480,7 +3489,7 @@ function App() {
           messages: rolloverMessages,
           continuation_reason: "message_limit",
           conversation_limit_reached: true,
-          conversation_limit_message: `Đoạn chat đã hoàn thành ${CHATGPT_CONVERSATION_MESSAGE_LIMIT} task; yêu cầu mới được chuyển sang tab tiếp theo.`,
+          conversation_limit_message: `Đoạn chat đã hoàn thành ${rolloverMessageLimit} task; yêu cầu mới được chuyển sang tab tiếp theo.`,
           projectRoot,
           rollover_attachments: attachments
         });
@@ -3491,10 +3500,11 @@ function App() {
           profile_id: profile.profile_id,
           previous_conversation_id: conversationId,
           conversation_id: newConversationId,
-          message_limit: CHATGPT_CONVERSATION_MESSAGE_LIMIT,
+          message_limit: rolloverMessageLimit,
           message_count: observedCompletedTaskCount,
           completed_task_count: observedCompletedTaskCount,
-          total_message_count: observedTotalMessageCount
+          total_message_count: observedTotalMessageCount,
+          activity_started_at: String(currentResponse?.activityStartedAt || "")
         });
         return true;
       } finally {
@@ -3515,6 +3525,7 @@ function App() {
     setError("");
     setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
     setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: null }));
+    const requestSubmittedAt = new Date().toISOString();
     const clearKey = `${profile.profile_id}:${conversationId}`;
     setClearedResponseTargets((current) => {
       if (!current[clearKey]) return current;
@@ -3539,7 +3550,7 @@ function App() {
               text,
               pending: true,
               submissionState: "pending",
-              createdAt: new Date().toISOString()
+              createdAt: requestSubmittedAt
             }])
           }
         };
@@ -3609,7 +3620,7 @@ function App() {
         if (text && matchingPendingIndex >= 0) {
           optimisticMessages = previousMessages.map((message, index) => index === matchingPendingIndex ? { ...message, pending: false, uncertain: false, submissionState: "submitted" } : message);
         } else if (text) {
-          optimisticMessages = trimRecentTranscriptMessages([...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: false, uncertain: false, submissionState: "submitted", createdAt: new Date().toISOString() }]);
+          optimisticMessages = trimRecentTranscriptMessages([...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: false, uncertain: false, submissionState: "submitted", createdAt: requestSubmittedAt }]);
         }
         return {
           ...current,
@@ -3619,6 +3630,12 @@ function App() {
             loading: generationState === "generating",
             error: "",
             conversationId: resolvedConversationId,
+            activityStartedAt: previous.conversationId === resolvedConversationId
+              ? String(previous.activityStartedAt || "")
+              : (newChat ? requestSubmittedAt : ""),
+            fastMessageLimitQualified: previous.conversationId === resolvedConversationId
+              ? Boolean(previous.fastMessageLimitQualified)
+              : false,
             messages: optimisticMessages,
             submissionState: "submitted",
             sendUncertain: false,
@@ -3730,6 +3747,7 @@ function App() {
       const rolloverProjectRoot = result?.projectRoot || projectRootForProfile(profile);
       const rolloverWorkspaceExpanded = result?.repoTaskScope === "all_allowed" && result?.repoTaskRequest?.scope === "workspace" && rolloverProjectRoot !== ALL_ALLOWED_WORKSPACES;
       const rolloverAllAllowed = !rolloverWorkspaceExpanded && (result?.repo_task_scope === "all_allowed" || result?.repoTaskScope === "all_allowed" || rolloverProjectRoot === ALL_ALLOWED_WORKSPACES);
+      const rolloverStartedAt = new Date().toISOString();
       const created = await api.sendProfileRequest({
         profileId,
         conversationId: "",
@@ -3763,6 +3781,7 @@ function App() {
           rolloverStatus: "done",
           rolloverReason: continuationReason,
           rolloverFromConversationId: conversationId,
+          activityStartedAt: rolloverStartedAt,
           rolloverNotice: doneNotice
         }
       }));
@@ -4063,6 +4082,15 @@ function App() {
         else responseFinalCandidates.current.delete(finalityKey);
         const responseReady = Boolean(rawResponseReady && finality.confirmed);
         const finalityPending = Boolean(rawResponseReady && !finality.confirmed);
+        const nextTotalMessageCount = contentAvailable
+          ? Number(result.total_message_count) || Number(result.message_count) || nextMessages.length
+          : Number(previous.totalMessageCount) || 0;
+        const activityStartedAt = sameConversation ? String(previous.activityStartedAt || "") : "";
+        const fastMessageLimitQualified = Boolean(sameConversation && shouldQualifyFastMessageLimit({
+          ...previous,
+          totalMessageCount: nextTotalMessageCount,
+          activityStartedAt
+        }));
         return {
           ...current,
           [profile.profile_id]: {
@@ -4118,9 +4146,9 @@ function App() {
             responseAuditFetchMode,
             responseAuditKey,
             messageCount: contentAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
-            totalMessageCount: contentAvailable
-              ? Number(result.total_message_count) || Number(result.message_count) || nextMessages.length
-              : Number(previous.totalMessageCount) || 0,
+            totalMessageCount: nextTotalMessageCount,
+            activityStartedAt,
+            fastMessageLimitQualified,
             awaitingAssistant: transcriptAwaitingAssistant(nextMessages),
             updatedAt: result.updated_at || new Date().toISOString()
           }

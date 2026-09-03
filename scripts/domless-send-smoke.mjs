@@ -418,6 +418,10 @@ assert.match(worker, /readCanonicalConversationPage/, "canonical conversation re
 assert.match(bridge, /expires_at_ms: number/, "bridge commands must carry an explicit expiry");
 assert.match(bridge, /profile\.queued = profile\.queued\.filter\(\(queued\) => queued\.id !== command\.id\)/, "timed-out commands must be removed from the extension queue");
 assert.match(bridge, /command\.expires_at_ms<=Date\.now\(\)\|\|!state\.pending\.has\(command\.id\)/, "poll must discard expired or orphaned commands before delivery");
+assert.match(bridge, /const COMMAND_HEARTBEAT_TIMEOUT_MS = 35_000;/, "an in-flight command must not inherit the three-minute profile TTL when its extension heartbeat disappears");
+assert.match(bridge, /heartbeatAgeMs <= COMMAND_HEARTBEAT_TIMEOUT_MS[\s\S]*?code: "EXTENSION_HEARTBEAT_LOST"/, "bridge must release a command whose assigned extension worker stops heartbeating");
+assert.match(bridge, /function clearPendingCommandTimers[\s\S]*?clearInterval\(pending\.heartbeatTimer\)/, "command settlement must clean up its heartbeat watchdog");
+assert.match(bridge, /function markCommandDispatched[\s\S]*?armPendingCommandHeartbeat\(state, profile, command, pending\)/, "heartbeat monitoring must begin when an already-connected profile receives the command");
 assert.match(worker, /started_at_ms:\/\^\(\?:started\|cdp-started\)\$\/[\s\S]*?observedAtMs/, "network POST evidence must retain the request start timestamp instead of treating a later completion as a fresh request");
 assert.match(worker, /started_at_ms:Number\(current\[index\]\.started_at_ms\)\|\|Number\(entry\.started_at_ms\)\|\|0/, "later phases for the same request must preserve its original start timestamp");
 assert.match(worker, /\.filter\(item=>!cutoff\|\|Number\(item\.started_at_ms\|\|0\)>=cutoff\)/, "fresh submission ACK evidence must be filtered by request start time, not completion observation time");

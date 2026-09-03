@@ -21,6 +21,8 @@ const SETUP_COMMAND_TIMEOUT_MS = 300_000;
 const SEND_COMMAND_TIMEOUT_MS = 180_000;
 const LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS = 125_000;
 const COMMAND_EXPIRY_HEADROOM_MS = 5_000;
+const COMMAND_HEARTBEAT_TIMEOUT_MS = 35_000;
+const COMMAND_HEARTBEAT_CHECK_MS = 2_500;
 const READ_RESPONSE_TIMEOUT_MS = 75_000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const PROFILE_TASK_STATE_VERSION = 1;
@@ -300,9 +302,12 @@ interface PendingResult {
   resolve: (value: Record<string, any>) => void;
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
+  heartbeatTimer?: NodeJS.Timeout;
   timeoutMs: number;
   waitingForReconnect: boolean;
   dispatchedAtMs: number;
+  profileId: string;
+  action: string;
 }
 
 interface BridgeState {
@@ -827,6 +832,47 @@ function clearWaiter(profile: ExtensionProfile): void {
   profile.waiter = undefined;
 }
 
+function clearPendingCommandTimers(pending: PendingResult): void {
+  if (pending.timer) clearTimeout(pending.timer);
+  if (pending.heartbeatTimer) clearInterval(pending.heartbeatTimer);
+  pending.timer = undefined;
+  pending.heartbeatTimer = undefined;
+}
+
+function armPendingCommandHeartbeat(
+  state: BridgeState,
+  profile: ExtensionProfile,
+  command: BridgeCommand,
+  pending: PendingResult
+): void {
+  if (pending.heartbeatTimer) clearInterval(pending.heartbeatTimer);
+  pending.heartbeatTimer = undefined;
+  if (pending.waitingForReconnect || !pending.dispatchedAtMs) return;
+  pending.heartbeatTimer = setInterval(() => {
+    if (!state.pending.has(command.id)) {
+      clearPendingCommandTimers(pending);
+      return;
+    }
+    const heartbeatAgeMs = Math.max(0, Date.now() - profile.lastSeen);
+    if (heartbeatAgeMs <= COMMAND_HEARTBEAT_TIMEOUT_MS) return;
+    state.pending.delete(command.id);
+    profile.queued = profile.queued.filter((queued) => queued.id !== command.id);
+    clearPendingCommandTimers(pending);
+    pending.reject(new CodexProError(
+      `Extension của profile ${profile.label} đã ngừng phản hồi khi đang chạy ${pending.action}. Hãy kiểm tra Chrome trước khi gửi lại để tránh trùng tin.`,
+      {
+        code: "EXTENSION_HEARTBEAT_LOST",
+        details: {
+          profile_id: profile.id,
+          action: pending.action,
+          heartbeat_age_ms: heartbeatAgeMs
+        }
+      }
+    ));
+  }, COMMAND_HEARTBEAT_CHECK_MS);
+  pending.heartbeatTimer.unref?.();
+}
+
 function armPendingCommandTimeout(
   state: BridgeState,
   profile: ExtensionProfile,
@@ -836,20 +882,25 @@ function armPendingCommandTimeout(
 ): void {
   const pending = state.pending.get(command.id);
   if (!pending) return;
-  if (pending.timer) clearTimeout(pending.timer);
+  clearPendingCommandTimers(pending);
   pending.timer = setTimeout(() => {
     state.pending.delete(command.id);
     profile.queued = profile.queued.filter((queued) => queued.id !== command.id);
+    clearPendingCommandTimers(pending);
     pending.reject(new CodexProError(message));
   }, timeoutMs);
   pending.timer.unref?.();
+  armPendingCommandHeartbeat(state, profile, command, pending);
 }
 
 function markCommandDispatched(state: BridgeState, profile: ExtensionProfile, command: BridgeCommand): void {
   const pending = state.pending.get(command.id);
   if (!pending) return;
   if (!pending.dispatchedAtMs) pending.dispatchedAtMs = Date.now();
-  if (!pending.waitingForReconnect) return;
+  if (!pending.waitingForReconnect) {
+    armPendingCommandHeartbeat(state, profile, command, pending);
+    return;
+  }
   pending.waitingForReconnect = false;
   armPendingCommandTimeout(
     state,
@@ -1017,7 +1068,7 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     const commandId = String(body.command_id ?? "");
     const pending = state.pending.get(commandId);
     if (pending) {
-      if (pending.timer) clearTimeout(pending.timer);
+      clearPendingCommandTimers(pending);
       state.pending.delete(commandId);
       if (body.error) {
         const envelope = bridgeErrorEnvelope(body.error);
@@ -1244,7 +1295,7 @@ export function forgetBrowserExtensionProfile(profileId: string): boolean {
   for (const command of profile.queued) {
     const pending = state.pending.get(command.id);
     if (!pending) continue;
-    if (pending.timer) clearTimeout(pending.timer);
+    clearPendingCommandTimers(pending);
     state.pending.delete(command.id);
     pending.reject(new CodexProError(`Chrome profile ${profile.label || id} was forgotten by CodexPro Manager.`));
   }
@@ -1459,7 +1510,7 @@ async function runBrowserExtensionCommandCore(
   };
   let pendingRecord: PendingResult;
   const result = new Promise<Record<string, any>>((resolve, reject) => {
-    pendingRecord = { resolve, reject, timeoutMs, waitingForReconnect, dispatchedAtMs: 0 };
+    pendingRecord = { resolve, reject, timeoutMs, waitingForReconnect, dispatchedAtMs: 0, profileId: profile.id, action };
     state.pending.set(command.id, pendingRecord);
     armPendingCommandTimeout(
       state,
