@@ -88,6 +88,7 @@ const recorderStartSource = worker.slice(
   worker.indexOf("async function ensureFlightRecordersForTabs")
 );
 assert.ok(recorderStartSource.includes("flightRecorderStartPromisesByTab"), "flight recorder startup must serialize concurrent starts per tab");
+assert.match(worker, /async function stopFlightRecorderForTab\(tabId\)[\s\S]*?flightRecorderStartPromisesByTab\.get\(tabId\)[\s\S]*?await starting/, "stopping a flight recorder must wait for an in-flight serialized startup before releasing its debugger ref");
 {
   const flightRecorderTrackersByTab = new Map();
   const flightRecorderStartPromisesByTab = new Map();
