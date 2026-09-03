@@ -6,7 +6,8 @@ import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRepoTaskCompletionCur
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "../manager/src/chat-transcript.js";
 import { projectSelectionChanged } from "../manager/src/chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "../manager/src/chat-response-audit.js";
-import { CHATGPT_CONVERSATION_FAST_ACTIVITY_MS, CHATGPT_CONVERSATION_FAST_MESSAGE_LIMIT, CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationCompletedTaskCount, conversationMessageLimit, conversationTaskInProgress, conversationTotalMessageCount, shouldQualifyFastMessageLimit, shouldRolloverConversation } from "../manager/src/conversation-message-limit.js";
+import { CHATGPT_CONVERSATION_FAST_ACTIVITY_MS, CHATGPT_CONVERSATION_FAST_MESSAGE_LIMIT, CHATGPT_CONVERSATION_MESSAGE_LIMIT, conversationCompletedTaskCount, conversationMessageLimit, conversationTaskInProgress, conversationTotalMessageCount, recordCompletedLogicalTask, shouldQualifyFastMessageLimit, shouldRolloverConversation } from "../manager/src/conversation-message-limit.js";
+import { acceptsLogicalTaskAdjustment, activeLogicalTaskAdjustment } from "../manager/src/logical-chat-task.js";
 import { LONG_TASK_WATCHDOG_AFTER_MS, longRunningChatWatchdogCandidate } from "../manager/src/long-task-watchdog.js";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -17,6 +18,52 @@ assert.equal(CHATGPT_CONVERSATION_FAST_ACTIVITY_MS, 10 * 60 * 1000, "fast activi
 assert.equal(conversationTotalMessageCount({ totalMessageCount: 5, messageCount: 2, messages: [] }), 5, "the canonical total must win over the assistant-only response count");
 assert.equal(conversationTotalMessageCount({ messageCount: 2, messages: [{ role: "user", text: "latest" }] }), 5, "legacy assistant counts must conservatively reconstruct the total conversation size including a trailing user turn");
 assert.equal(conversationCompletedTaskCount({ totalMessageCount: 11, messageCount: 5 }), 5, "raw user follow-ups must not increase the completed-task counter");
+assert.equal(conversationCompletedTaskCount({ logicalTaskCount: 2, totalMessageCount: 11, messageCount: 5 }), 2, "an explicit logical-task count must override raw assistant-turn count");
+const logicalTaskId = "cpt_1234567890abcdef12345678";
+const logicalConversationId = "12345678-abcd-1234-abcd-1234567890ab";
+assert.deepEqual(activeLogicalTaskAdjustment({
+  profileId: "chrome-logical-task",
+  conversationId: logicalConversationId,
+  taskInProgress: true,
+  response: { conversationId: logicalConversationId, repoTaskId: logicalTaskId },
+  jobs: [{ job_id: logicalTaskId, worker_id: "chrome-logical-task", status: "running" }]
+}), { taskId: logicalTaskId, status: "running" }, "a message sent during the same running conversation must adjust the current logical task");
+assert.equal(activeLogicalTaskAdjustment({
+  profileId: "chrome-logical-task",
+  conversationId: logicalConversationId,
+  taskInProgress: false,
+  response: { conversationId: logicalConversationId, repoTaskId: logicalTaskId },
+  jobs: [{ job_id: logicalTaskId, worker_id: "chrome-logical-task", status: "completed" }]
+}), null, "a message after the terminal response must start a new logical task");
+assert.equal(activeLogicalTaskAdjustment({
+  profileId: "chrome-logical-task",
+  conversationId: "different-conversation",
+  taskInProgress: true,
+  response: { conversationId: logicalConversationId, repoTaskId: logicalTaskId },
+  jobs: [{ job_id: logicalTaskId, worker_id: "chrome-logical-task", status: "running" }]
+}), null, "a running task from another conversation must never be adjusted");
+assert.equal(acceptsLogicalTaskAdjustment({
+  profileId: "chrome-logical-task",
+  conversationId: logicalConversationId,
+  workerJob: { job_id: logicalTaskId, worker_id: "chrome-logical-task", status: "prepared" },
+  profile: {},
+  tab: { busy: true, network_state: "generating" }
+}), true, "a prepared task may receive an adjustment while its original ChatGPT turn is still starting");
+assert.equal(acceptsLogicalTaskAdjustment({
+  profileId: "chrome-logical-task",
+  conversationId: logicalConversationId,
+  workerJob: { job_id: logicalTaskId, worker_id: "chrome-logical-task", status: "running" },
+  profile: { current_task_id: logicalTaskId, current_task_conversation_id: logicalConversationId },
+  tab: { response_ready: true, busy: false, network_state: "completed" }
+}), false, "a final response must close the task even if its durable status has not yet been reconciled");
+assert.deepEqual(recordCompletedLogicalTask({ logicalTaskCount: 2, completedLogicalTaskIds: [] }, logicalTaskId, "running"), {
+  logicalTaskCount: 2,
+  completedLogicalTaskIds: []
+}, "a logical task must not count as completed while its worker job is still running");
+assert.deepEqual(recordCompletedLogicalTask(recordCompletedLogicalTask({ logicalTaskCount: 2, completedLogicalTaskIds: [] }, logicalTaskId, "completed"), logicalTaskId, "completed"), {
+  logicalTaskCount: 3,
+  completedLogicalTaskIds: [logicalTaskId]
+}, "a completed logical task must be counted exactly once even when response finality is polled repeatedly");
 assert.equal(conversationTaskInProgress({ messageCount: 5, totalMessageCount: 11, messages: [{ role: "user", text: "follow-up while task is running" }] }), true, "a transcript ending at the user must remain an open task even if the completed-task limit was already reached");
 assert.equal(shouldRolloverConversation({ messageCount: 4, totalMessageCount: 99 }), false, "raw transcript size alone must never trigger rollover before five tasks have completed");
 const fastConversationStartedAt = Date.parse("2026-09-03T06:00:00.000Z");
@@ -640,7 +687,7 @@ assert.doesNotMatch(sendProfileRequestSource, /const base = await readyRuntimeBa
 assert.match(sendProfileRequestSource, /workspaceSelectSkipped[\s\S]*?if \(!workspaceSelectSkipped\)/, "Manager must skip redundant workspace selection when the profile is already scoped correctly");
 assert.match(sendProfileRequestSource, /action: "select_workspace"[\s\S]*?}, 75000\)/, "workspace selection must allow the bounded reconnect window");
 assert.match(sendProfileRequestSource, /isCodexProWorkspaceRequest[\s\S]*?config\?\.root[\s\S]*?codexProWorkspaceExpanded = isCodexProWorkspaceRequest\(base\.config\)[\s\S]*?requestScope = codexProWorkspaceExpanded \? "all_allowed" : requestedScope/, "selecting the active CodexPro workspace must automatically expand the task to all configured allowed roots");
-assert.match(sendProfileRequestSource, /workspaceSelectSkipped = \(!codexProWorkspaceExpanded && requestScope === "all_allowed"\)/, "generic all_allowed requests must stay unbound while a CodexPro-expanded request keeps CodexPro as its main workspace");
+assert.match(sendProfileRequestSource, /workspaceSelectSkipped = adjustmentAccepted \|\| \(!codexProWorkspaceExpanded && requestScope === "all_allowed"\)/, "adjustments must retain their existing workspace while generic all_allowed requests stay unbound and CodexPro-expanded requests keep the main workspace");
 assert.match(sendProfileRequestSource, /Workspace chính đã được CodexPro Manager chọn[\s\S]*?TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN[\s\S]*?all_allowed[\s\S]*?DeepSeek Harness/, "CodexPro workspace requests must carry all allowed regions so the agent can inspect external reference source such as DeepSeek Harness");
 assert.match(sendProfileRequestSource, /codexpro_workspace_expanded_scope: codexProWorkspaceExpanded/, "send diagnostics must expose when the CodexPro workspace was expanded to all allowed roots");
 assert.match(sendProfileRequestSource, /localMcpToolInSession\(session, "prepare_repo_task", \{[\s\S]*?profile_id: profileId[\s\S]*?task_id: taskId[\s\S]*?requestScope === "workspace" \? \{ root: initialWorkspaceRoot \} : \{\}[\s\S]*?scope: requestScope[\s\S]*?preparedTask\?\.prepared !== true[\s\S]*?action: "send_chat_request"/, "Manager must prepare workspace tasks with an exact root while leaving all_allowed task roots unbound");
@@ -749,13 +796,17 @@ assert.match(managerMain, /manager-chat-layout\.jsonl[\s\S]*?appendManagerChatLa
 assert.match(managerMain, /manager-chat-response-audit\.jsonl[\s\S]*?appendManagerChatResponseAuditLog[\s\S]*?codexpro:log-chat-response-audit/, "Manager must persist bounded ChatGPT-to-Manager response comparison logs");
 assert.match(managerMain, /manager-chat-cache\.json[\s\S]*?MAX_CHAT_CACHE_ENTRIES = 30/, "Manager must persist a bounded local response cache instead of rebuilding every transcript on open");
 assert.match(managerUi, /currentResponse\?\.repoTaskId && canVerifyRepoTaskUse\(/, "CodexPro verification must wait for a canonical-ready settled response");
-assert.match(managerMain, /const previousTaskId = String\(payload\?\.previousTaskId[\s\S]*?const taskId = previousTaskId \|\| `cpt_/, "task-title retry and chat rollover must preserve the original prepared task id");
+assert.match(managerMain, /const previousTaskId = String\(payload\?\.previousTaskId[\s\S]*?let taskId = previousTaskId \|\| `cpt_/, "task-title retry, chat rollover, and active-task adjustments must preserve the original prepared task id");
 assert.match(managerMain, /repo_task_id_reused: taskIdReused[\s\S]*?repo_task_dispatched_at: taskDispatchedAt/, "Manager send results must expose task-id reuse and the attempt dispatch boundary");
+assert.match(sendProfileRequestSource, /adjustmentRequested[\s\S]*?worker_job_status[\s\S]*?acceptsLogicalTaskAdjustment\([\s\S]*?if \(!adjustmentAccepted\) \{[\s\S]*?prepare_repo_task/, "Manager backend must reuse a task only while its durable job is active and must prepare a new task after a terminal state");
+assert.match(sendProfileRequestSource, /Đây là lệnh điều chỉnh cho task CodexPro đang chạy[\s\S]*?không tạo task mới[\s\S]*?repo_task_adjustment: adjustmentAccepted/, "accepted follow-ups must be explicitly framed and reported as adjustments to the same logical task");
 assert.match(managerUi, /repoTaskDispatchedAt: currentResponse\.repoTaskDispatchedAt/, "renderer task verification must compare network completion with the active send-attempt boundary");
 assert.match(managerUi, /repoTaskDispatchedAt: String\(result\?\.repo_task_dispatched_at[\s\S]*?repoTaskDispatchedAt: String\(created\?\.repo_task_dispatched_at[\s\S]*?repoTaskDispatchedAt: String\(retried\?\.repo_task_dispatched_at/, "initial sends, retries, and chat rollovers must all retain their dispatch boundary");
 assert.match(managerUi, /String\(created\?\.repo_task_id \|\| ""\) !== taskId[\s\S]*?String\(retried\?\.repo_task_id \|\| ""\) !== taskId/, "renderer must reject any retry or rollover that unexpectedly replaces the prepared task id");
 assert.match(managerUi, /action: "repo-task-title-rollover"[\s\S]*?task_id_reused:[\s\S]*?action: "repo-task-title-retry"[\s\S]*?task_id_reused:/, "retry diagnostics must record task-id continuity for both same-chat and new-chat recovery");
 assert.match(managerUi, /allowBusyFollowup: !newChat/, "manual existing-chat sends must opt into serialized busy follow-up steering");
+assert.match(managerUi, /activeLogicalTaskAdjustment\([\s\S]*?taskMode: logicalAdjustment \? "adjustment" : "new"[\s\S]*?previousTaskId: logicalAdjustment\?\.taskId/, "the renderer must send the active task ID only for an in-flight message in the same conversation");
+assert.match(server, /const currentWorkerJob = readWorkerJob\(args\.task_id\)[\s\S]*?result\.worker_job_status = currentWorkerJob\.status/, "every task-bound response poll must expose durable terminal status, including polls after finalization");
 assert.match(managerUi, /ChatGPT đang xác minh lại một lượt bị hủy transport/, "uncertain aborted-transport recovery must still block a new send");
 assert.match(managerUi, /setRequestSendEvidence\(\(current\) => \(\{ \.\.\.current, \[profile\.profile_id\]: null \}\)\)/, "opening Chrome must clear stale send evidence");
 assert.match(managerUi, /heartbeat\|offline\|did not reconnect[\s\S]*?refreshStatus\(\)/, "a final heartbeat failure must immediately reconcile the visible profile status");

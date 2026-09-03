@@ -24,7 +24,8 @@ import { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, 
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, latestTurnHasProvisionalAssistant, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
 import { projectSelectionChanged } from "./chat-project.js";
 import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
-import { conversationCompletedTaskCount, conversationMessageLimit, conversationTotalMessageCount, shouldQualifyFastMessageLimit, shouldRolloverConversation } from "./conversation-message-limit.js";
+import { conversationCompletedTaskCount, conversationMessageLimit, conversationTotalMessageCount, logicalTaskTracking, recordCompletedLogicalTask, shouldQualifyFastMessageLimit, shouldRolloverConversation } from "./conversation-message-limit.js";
+import { activeLogicalTaskAdjustment } from "./logical-chat-task.js";
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
@@ -1517,6 +1518,7 @@ function App() {
             workspaceCandidates: resumeAllAllowed ? projects.map((project) => project.root) : [],
             text: "tiếp tục",
             attachments: [],
+            taskMode: "adjustment",
             toolRetry: false,
             previousTaskId: recoveryTaskId,
             oneShotRecovery: true,
@@ -1544,6 +1546,7 @@ function App() {
                 repoTaskId: recoveryTaskId,
                 repoTaskDispatchedAt: String(resumed?.repo_task_dispatched_at || ""),
                 repoTaskScope: String(resumed?.repo_task_scope || (resumeAllAllowed ? "all_allowed" : "workspace")),
+                logicalTaskStatus: String(resumed?.worker_job_status || previous.logicalTaskStatus || "running"),
                 repoTaskStatus: "waiting",
                 repoTaskVerified: false,
                 repoTaskRequest: snapshot?.repoTaskRequest || previous.repoTaskRequest || null
@@ -2971,6 +2974,7 @@ function App() {
     const messages = cacheableTranscriptMessages(response?.messages);
     const text = String(response?.text || "").trim();
     const networkState = String(response?.networkState || "");
+    const logicalTrackingState = logicalTaskTracking(response);
     if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId) || (!messages.length && !text)) return;
     const key = responseCacheKey(profileId, conversationId);
     const signature = JSON.stringify([
@@ -2981,6 +2985,10 @@ function App() {
       Boolean(response?.truncated),
       Number(response?.messageCount) || 0,
       Number(response?.totalMessageCount) || 0,
+      logicalTrackingState.logicalTaskCount,
+      logicalTrackingState.completedLogicalTaskIds.join("|"),
+      String(response?.repoTaskId || ""),
+      String(response?.logicalTaskStatus || ""),
       String(response?.activityStartedAt || ""),
       Boolean(response?.fastMessageLimitQualified),
       text,
@@ -2998,6 +3006,10 @@ function App() {
       responseSource: String(response?.responseSource || ""),
       messageCount: Number(response?.messageCount) || 0,
       totalMessageCount: Number(response?.totalMessageCount) || 0,
+      logicalTaskCount: logicalTrackingState.logicalTaskCount,
+      completedLogicalTaskIds: logicalTrackingState.completedLogicalTaskIds,
+      repoTaskId: String(response?.repoTaskId || ""),
+      logicalTaskStatus: String(response?.logicalTaskStatus || ""),
       activityStartedAt: String(response?.activityStartedAt || ""),
       fastMessageLimitQualified: Boolean(response?.fastMessageLimitQualified),
       updatedAt: String(response?.updatedAt || new Date().toISOString())
@@ -3037,6 +3049,10 @@ function App() {
             Boolean(cached.truncated),
             Number(cached.messageCount) || 0,
             Number(cached.totalMessageCount) || 0,
+            Number(cached.logicalTaskCount) || 0,
+            (cached.completedLogicalTaskIds || []).join("|"),
+            String(cached.repoTaskId || ""),
+            String(cached.logicalTaskStatus || ""),
             String(cached.activityStartedAt || ""),
             Boolean(cached.fastMessageLimitQualified),
             cachedText,
@@ -3469,8 +3485,17 @@ function App() {
         return false;
       }
     }
-    const rolloverTaskInProgress = Boolean(requestedTab?.busy || requestedTab?.settling || String(requestedTab?.network_state || "").toLowerCase() === "generating" || currentResponse?.busy || currentResponse?.loading || currentResponse?.transcriptLoading || currentResponse?.incomplete || currentResponse?.finalityPending || currentResponse?.canonicalBusy || currentResponse?.networkStreamInProgress);
+    const rolloverNetworkState = String(requestedTab?.network_state || currentResponse?.networkState || "").toLowerCase();
+    const rolloverTaskInProgress = Boolean(requestedTab?.busy || requestedTab?.settling || ["generating", "pending", "streaming"].includes(rolloverNetworkState) || currentResponse?.busy || currentResponse?.loading || currentResponse?.transcriptLoading || currentResponse?.incomplete || currentResponse?.finalityPending || currentResponse?.canonicalBusy || currentResponse?.networkStreamInProgress || currentResponse?.awaitingAssistant);
     const rolloverSource = { ...currentResponse, taskInProgress: rolloverTaskInProgress };
+    const logicalAdjustment = !newChat ? activeLogicalTaskAdjustment({
+      profileId: profile.profile_id,
+      conversationId,
+      taskInProgress: rolloverTaskInProgress,
+      response: currentResponse,
+      profile,
+      jobs: status?.workerJobs
+    }) : null;
     const rolloverMessageLimit = conversationMessageLimit(rolloverSource);
     if (!newChat && currentResponse?.conversationId === conversationId && shouldRolloverConversation(rolloverSource, rolloverMessageLimit)) {
       const observedCompletedTaskCount = conversationCompletedTaskCount(rolloverSource);
@@ -3565,7 +3590,7 @@ function App() {
       };
       setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
       const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
-      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, allowBusyFollowup: !newChat, scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
+      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, allowBusyFollowup: !newChat, taskMode: logicalAdjustment ? "adjustment" : "new", previousTaskId: logicalAdjustment?.taskId || "", scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence(result) }));
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
@@ -3614,6 +3639,12 @@ function App() {
       }
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
+        const sameConversation = previous.conversationId === resolvedConversationId;
+        const tracking = logicalTaskTracking(sameConversation ? previous : {});
+        const repoTaskId = String(result?.repo_task_id || "");
+        const adjustmentAccepted = result?.repo_task_adjustment === true
+          && sameConversation
+          && repoTaskId === String(previous.repoTaskId || "");
         const previousMessages = materializeTranscriptMessages(previous, resolvedConversationId);
         const matchingPendingIndex = text ? previousMessages.findIndex((message) => message?.role === "user" && message?.pending && message?.text === text) : -1;
         let optimisticMessages = previousMessages;
@@ -3642,14 +3673,18 @@ function App() {
             networkState: generationState,
             networkError: String(result?.network_error || previous.networkError || ""),
             networkStatusCode: Number(result?.network_status_code) || Number(previous.networkStatusCode) || 0,
-            repoTaskId: String(result?.repo_task_id || ""),
+            logicalTaskCount: tracking.logicalTaskCount,
+            completedLogicalTaskIds: tracking.completedLogicalTaskIds,
+            logicalTaskStatus: String(result?.worker_job_status || (adjustmentAccepted ? previous.logicalTaskStatus : "prepared")),
+            repoTaskAdjustment: adjustmentAccepted,
+            repoTaskId,
             repoTaskDispatchedAt: String(result?.repo_task_dispatched_at || ""),
             repoTaskScope: String(result?.repo_task_scope || (allAllowedScope ? "all_allowed" : "workspace")),
-            repoTaskRetryCount: Number(result?.repo_task_retry_count) || 0,
-            repoTaskRolloverCount: Number(result?.repo_task_rollover_count) || 0,
-            repoTaskStatus: "waiting",
-            repoTaskVerified: false,
-            repoTaskRequest: { text, attachments, projectRoot, scope: allAllowedScope ? "all_allowed" : "workspace" }
+            repoTaskRetryCount: adjustmentAccepted ? Number(previous.repoTaskRetryCount) || 0 : Number(result?.repo_task_retry_count) || 0,
+            repoTaskRolloverCount: adjustmentAccepted ? Number(previous.repoTaskRolloverCount) || 0 : Number(result?.repo_task_rollover_count) || 0,
+            repoTaskStatus: adjustmentAccepted ? String(previous.repoTaskStatus || "waiting") : "waiting",
+            repoTaskVerified: adjustmentAccepted ? Boolean(previous.repoTaskVerified) : false,
+            repoTaskRequest: adjustmentAccepted ? previous.repoTaskRequest : { text, attachments, projectRoot, scope: allAllowedScope ? "all_allowed" : "workspace" }
           }
         };
       });
@@ -3657,6 +3692,8 @@ function App() {
         logRendererDiagnostic(api, "error", "network", `AI gặp lỗi network${result?.network_error ? `: ${result.network_error}` : ""}`, { action: "generation-failed", profile_id: profile.profile_id, conversation_id: resolvedConversationId, network_status_code: result?.network_status_code, network_error: result?.network_error });
         setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Tin nhắn đã gửi nhưng AI gặp lỗi network${result?.network_error ? `: ${result.network_error}` : ""}.` }));
         notify("Tin nhắn đã gửi · AI gặp lỗi network");
+      } else if (result?.repo_task_adjustment === true) {
+        notify("Đã gửi điều chỉnh vào task hiện tại");
       } else {
         notify("Đã gửi tin nhắn thành công");
       }
@@ -3885,6 +3922,7 @@ function App() {
               repoTaskId: String(created?.repo_task_id || ""),
               repoTaskDispatchedAt: String(created?.repo_task_dispatched_at || ""),
               repoTaskScope: String(created?.repo_task_scope || originalScope),
+              logicalTaskStatus: String(created?.worker_job_status || "prepared"),
               repoTaskRetryCount: 0,
               repoTaskRolloverCount: rolloverCount + 1,
               repoTaskStatus: "waiting",
@@ -3939,6 +3977,7 @@ function App() {
             repoTaskId: String(retried?.repo_task_id || ""),
             repoTaskDispatchedAt: String(retried?.repo_task_dispatched_at || ""),
             repoTaskScope: String(retried?.repo_task_scope || originalScope),
+            logicalTaskStatus: String(retried?.worker_job_status || "prepared"),
             repoTaskRetryCount: 1,
             repoTaskRolloverCount: rolloverCount,
             repoTaskStatus: "waiting",
@@ -4086,8 +4125,13 @@ function App() {
           ? Number(result.total_message_count) || Number(result.message_count) || nextMessages.length
           : Number(previous.totalMessageCount) || 0;
         const activityStartedAt = sameConversation ? String(previous.activityStartedAt || "") : "";
+        const logicalTaskStatus = String(result.worker_job_status || (sameConversation ? previous.logicalTaskStatus : "") || "").toLowerCase();
+        const logicalTrackingState = responseReady
+          ? recordCompletedLogicalTask(sameConversation ? previous : {}, responseTaskId, logicalTaskStatus)
+          : logicalTaskTracking(sameConversation ? previous : {});
         const fastMessageLimitQualified = Boolean(sameConversation && shouldQualifyFastMessageLimit({
           ...previous,
+          ...logicalTrackingState,
           totalMessageCount: nextTotalMessageCount,
           activityStartedAt
         }));
@@ -4147,6 +4191,9 @@ function App() {
             responseAuditKey,
             messageCount: contentAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
             totalMessageCount: nextTotalMessageCount,
+            logicalTaskCount: logicalTrackingState.logicalTaskCount,
+            completedLogicalTaskIds: logicalTrackingState.completedLogicalTaskIds,
+            logicalTaskStatus,
             activityStartedAt,
             fastMessageLimitQualified,
             awaitingAssistant: transcriptAwaitingAssistant(nextMessages),

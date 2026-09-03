@@ -3956,8 +3956,11 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             }, terminalOutcome);
           }
           result.worker_job_finalized = true;
-          result.worker_job_status = finalized.status;
-          result.worker_job_finished_at = finalized.finishedAt;
+        }
+        const currentWorkerJob = readWorkerJob(args.task_id);
+        if (currentWorkerJob && currentWorkerJob.workerId === selectedProfile) {
+          result.worker_job_status = currentWorkerJob.status;
+          result.worker_job_finished_at = currentWorkerJob.finishedAt;
         }
       }
       if (result.image_base64) {
