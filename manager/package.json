@@ -29,6 +29,7 @@
     "test:project-performance": "node scripts/project-performance-workflow-smoke.mjs",
     "test:task-workflows": "node scripts/task-workflow-center-smoke.mjs",
     "test:app-plugins": "node scripts/app-plugin-registry-smoke.mjs && node scripts/gitdiagram-plugin-smoke.mjs",
+    "test:app-plugin-layout": "electron scripts/app-plugin-catalog-visual-smoke.cjs",
     "test:gitdiagram-visual": "electron scripts/gitdiagram-visual-smoke.cjs",
     "app-plugin:install": "node scripts/install-catalog-app-plugin.mjs",
     "test:api-worker-job-modal": "node scripts/api-worker-job-modal-smoke.mjs",
