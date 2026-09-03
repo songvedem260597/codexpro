@@ -23,6 +23,8 @@ const ATTACHMENT_PREPARE_TIMEOUT_MS = 60000;
 const NETWORK_START_TIMEOUT_MS = 30000;
 const SEND_POST_ACK_STABILITY_MS = 650;
 const CDP_NETWORK_START_TIMEOUT_MS = 15000;
+const RENDERER_SEND_PREFLIGHT_TIMEOUT_MS = 1800;
+const RENDERER_SEND_WAKE_SETTLE_MS = 650;
 const CDP_NETWORK_TRACKER_MAX_MS = 30 * 60 * 1000;
 const CANONICAL_COMPLETION_PROBE_MS = 30000;
 const CANONICAL_COMPLETION_PROBE_AFTER_MS = 60000;
@@ -2458,12 +2460,13 @@ async function execute(command) {
     const commandQueuedMs=Math.max(0,Date.now()-(Number(command?.created_at_ms)||Date.now()));
     const sendTimingStartedAt=Date.now();
     const sendPhaseTimings={command_queue_ms:commandQueuedMs};
+    let rendererSendDiagnostics={renderer_preflight:null,renderer_wake_attempted:false,renderer_wake_succeeded:false};
     const timedSendPhase=async(name,work)=>{
       const startedAt=Date.now();
       try{return await work();}
       finally{sendPhaseTimings[name]=Math.max(0,Number(sendPhaseTimings[name]||0)+(Date.now()-startedAt));}
     };
-    const sendTimingPayload=()=>({send_phase_timings:{...sendPhaseTimings,extension_total_ms:Math.max(0,Date.now()-sendTimingStartedAt)}});
+    const sendTimingPayload=()=>({...rendererSendDiagnostics,send_phase_timings:{...sendPhaseTimings,extension_total_ms:Math.max(0,Date.now()-sendTimingStartedAt)}});
     const text=String(args.text||'').trim();
     const attachments=Array.isArray(args.attachments)?args.attachments.slice(0,4).map(file=>({name:String(file?.name||'').trim().slice(0,255),mime_type:String(file?.mime_type||'application/octet-stream').trim().slice(0,160),data_base64:String(file?.data_base64||'')})):[];
     const newChat=Boolean(args.new_chat);
@@ -2508,6 +2511,9 @@ async function execute(command) {
       pendingConversationByTab.set(tab.id,{conversation_id:conversationId,source:'codexpro-rebound',at:Date.now()});
       return {previous_tab_id:previousTabId,replacement_tab_id:tab.id};
     };
+    const rendererSendRecovery=await timedSendPhase('renderer_preflight_ms',()=>ensureChatRendererReadyForSend(tab,Math.max(250,Math.min(RENDERER_SEND_PREFLIGHT_TIMEOUT_MS,remainingCommandMs()-1000))));
+    tab=rendererSendRecovery.tab;
+    rendererSendDiagnostics={renderer_preflight:rendererSendRecovery.renderer_preflight,renderer_wake_attempted:Boolean(rendererSendRecovery.renderer_wake_attempted),renderer_wake_succeeded:Boolean(rendererSendRecovery.renderer_wake_succeeded),renderer_wake_probe:rendererSendRecovery.renderer_wake_probe||null,renderer_wake_errors:Array.isArray(rendererSendRecovery.renderer_wake_errors)?rendererSendRecovery.renderer_wake_errors:[]};
     const [networkCaptureProbe,requestState,domActivity,staleAttachmentOwnership,conversationLimit]=await Promise.all([
       timedSendPhase('network_capture_probe_ms',()=>chatNetworkStreamCapture(tab.id,targetConversationId)),
       timedSendPhase('network_state_ms',()=>chatRequestState(tab.id,conversationId)),
@@ -2648,7 +2654,11 @@ async function execute(command) {
         let networkAck=null;
         try{if(remainingCommandMs()>500)networkAck=await waitForNetworkGeneration(tab.id,networkAckStartedAfterMs,Math.max(100,Math.min(5000,remainingCommandMs()-500)));}catch{}
         if(networkAck)return await resultForNetwork(networkAck,{dom_timeout:true,dom_error:prepareError,prepare_attempts:prepareAttempt+1});
-        if(!hardRendererHang)await cleanupAttempt();
+        if(hardRendererHang){
+          pendingConversationByTab.delete(tab.id);
+          return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'prepare-renderer-timeout',submit_path:'prepare-renderer-timeout',path_attempted:['renderer-preflight','prepare'],send_uncertain:true,error:'PREPARE_UNCERTAIN: Chrome renderer ngừng phản hồi sau CDP preflight. CodexPro không queue lần prepare thứ hai vì executeScript đầu có thể tiếp tục khi profile thức lại; không tự gửi lại để tránh draft hoặc tin nhắn xuất hiện muộn.',attempt_id:attemptId,prepare_attempts:prepareAttempt+1,cleanup:null,cleanup_skipped:true,cleanup_reason:'Renderer timeout có thể để lại executeScript đang chờ; không đụng draft cho tới khi trạng thái được xác minh.',...sendTimingPayload()};
+        }
+        await cleanupAttempt();
         if(prepareAttempt===0&&!oneShotRecovery){
           try{
             if(hardRendererHang){
@@ -3631,6 +3641,44 @@ async function withDebuggerTab(tabId,callback) {
   const target=await acquireDebuggerTab(tabId);
   try{return await callback(target);}
   finally{releaseDebuggerTab(tabId);}
+}
+
+async function probeChatRendererForSend(tabId,timeoutMs=RENDERER_SEND_PREFLIGHT_TIMEOUT_MS) {
+  const startedAt=Date.now();
+  try{
+    const value=await promiseWithTimeout(withDebuggerTab(tabId,async target=>{
+      const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression:"(()=>({ready:Boolean(document.documentElement),host:location.hostname,visibility:document.visibilityState}))()",awaitPromise:false,returnByValue:true});
+      if(evaluated?.exceptionDetails)throw new Error(String(evaluated.exceptionDetails.text||'Runtime.evaluate failed'));
+      return evaluated?.result?.value||null;
+    }),Math.max(250,Number(timeoutMs)||RENDERER_SEND_PREFLIGHT_TIMEOUT_MS),'RENDERER_PREFLIGHT_TIMEOUT: Chrome renderer không phản hồi CDP preflight trước khi gửi.');
+    const responsive=Boolean(value?.ready&&value?.host==='chatgpt.com');
+    return {responsive,visibility:String(value?.visibility||''),duration_ms:Math.max(0,Date.now()-startedAt),error:responsive?'':'Renderer không trả trạng thái ChatGPT hợp lệ.'};
+  }catch(error){
+    return {responsive:false,visibility:'',duration_ms:Math.max(0,Date.now()-startedAt),error:String(error?.message||error).slice(0,500)};
+  }
+}
+
+async function ensureChatRendererReadyForSend(tab,timeoutMs=RENDERER_SEND_PREFLIGHT_TIMEOUT_MS) {
+  if(!tab?.id)throw new Error('Không tìm thấy tab ChatGPT để kiểm tra renderer trước khi gửi.');
+  const before=await probeChatRendererForSend(tab.id,timeoutMs);
+  if(before.responsive)return {tab,renderer_preflight:before,renderer_wake_attempted:false,renderer_wake_succeeded:false};
+  const wakeErrors=[];
+  try{await chrome.tabs.update(tab.id,{active:true});}catch(error){wakeErrors.push('activate_tab: '+String(error?.message||error).slice(0,240));}
+  if(Number.isInteger(tab.windowId)){
+    try{await chrome.windows.update(tab.windowId,{state:'maximized'});}catch(error){wakeErrors.push('maximize_window: '+String(error?.message||error).slice(0,240));}
+    try{await chrome.windows.update(tab.windowId,{focused:true});}catch(error){wakeErrors.push('focus_window: '+String(error?.message||error).slice(0,240));}
+  }
+  await new Promise(resolve=>setTimeout(resolve,RENDERER_SEND_WAKE_SETTLE_MS));
+  const after=await probeChatRendererForSend(tab.id,timeoutMs);
+  if(after.responsive){
+    const current=await chrome.tabs.get(tab.id).catch(()=>tab);
+    return {tab:current,renderer_preflight:before,renderer_wake_attempted:true,renderer_wake_succeeded:true,renderer_wake_probe:after,renderer_wake_errors:wakeErrors};
+  }
+  const error=new Error('RENDERER_NEEDS_FOREGROUND: Chrome renderer vẫn chưa phản hồi sau khi CodexPro tự kích hoạt profile; cần native foreground recovery trước khi gửi.');
+  error.code='RENDERER_NEEDS_FOREGROUND';
+  error.stage='prepare';
+  error.details={target_id:tab.id,window_id:Number(tab.windowId)||0,renderer_preflight:before,renderer_wake_probe:after,renderer_wake_errors:wakeErrors};
+  throw error;
 }
 
 function subscribeDebuggerEvents(tabId,listener) {
