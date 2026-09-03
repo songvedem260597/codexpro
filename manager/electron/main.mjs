@@ -338,7 +338,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.111";
+const WORKER_EXTENSION_VERSION = "0.5.112";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -1425,6 +1425,18 @@ function profileDiagnosticSnapshot(profile) {
     network_state: String(incidentTab?.network_state || ""),
     network_status_code: Number(incidentTab?.network_status_code) || 0,
     network_error: String(incidentTab?.network_error || ""),
+    rate_limit_incident_count: Math.max(0, Number(profile?.rate_limit_incident_count) || 0),
+    rate_limit_latest_at: String(profile?.rate_limit_latest_at || "").slice(0, 64),
+    rate_limit_latest_message: String(profile?.rate_limit_latest_message || "").slice(0, 500),
+    rate_limit_latest_status_code: Number(profile?.rate_limit_latest_status_code) || 0,
+    rate_limit_latest_url: String(profile?.rate_limit_latest_url || "").slice(0, 2000),
+    rate_limit_latest_endpoint: String(profile?.rate_limit_latest_endpoint || "").slice(0, 1000),
+    rate_limit_latest_request_id: String(profile?.rate_limit_latest_request_id || "").slice(0, 160),
+    rate_limit_latest_response_request_id: String(profile?.rate_limit_latest_response_request_id || "").slice(0, 160),
+    rate_limit_latest_retry_after: String(profile?.rate_limit_latest_retry_after || "").slice(0, 300),
+    rate_limit_latest_task_id: String(profile?.rate_limit_latest_task_id || "").slice(0, 160),
+    rate_limit_latest_conversation_id: String(profile?.rate_limit_latest_conversation_id || "").slice(0, 180),
+    rate_limit_latest_tab_id: String(profile?.rate_limit_latest_tab_id || ""),
     activity: String(profile?.activity || "idle"),
     task_id: String(profile?.current_task_id || ""),
     task_title: String(profile?.current_task_title || "").trim(),
@@ -1490,6 +1502,14 @@ function recordBrowserProfileTransitions(profiles, checkedAt) {
         diagnostic("error", "browser", "network", "ChatGPT generation chuyển sang trạng thái lỗi", details);
       } else if (previous.network_failed && !current.network_failed) {
         diagnostic("info", "browser", "network", "ChatGPT generation đã thoát trạng thái lỗi", details);
+      }
+      if (current.rate_limit_latest_at && current.rate_limit_latest_at !== previous.rate_limit_latest_at) {
+        diagnostic("error", "browser", "rate-limit", "ChatGPT trả về HTTP 429 Too Many Requests", {
+          ...details,
+          action: "chatgpt-rate-limit",
+          incident_fingerprint: `chatgpt-rate-limit:${profileId}:${current.rate_limit_latest_request_id || current.rate_limit_latest_response_request_id || current.rate_limit_latest_at}`,
+          rate_limit_log_file: "chatgpt-rate-limit.jsonl"
+        });
       }
       if (previous.extension_version && current.extension_version && previous.extension_version !== current.extension_version) {
         diagnostic("info", "browser", "profile", `Worker extension đổi từ ${previous.extension_version} sang ${current.extension_version}`, details);
