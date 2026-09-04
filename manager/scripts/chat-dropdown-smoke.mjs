@@ -13,6 +13,7 @@ assert.match(dropdown, /export function ChatDropdown\(/, "chat dropdown module m
 assert.match(dropdown, /import \{ AppDropdown \} from "\.\.\/\.\.\/app-dropdown\.jsx";/, "ChatDropdown must keep using the shared AppDropdown component");
 assert.match(dropdown, /value === NEW_CHAT_TARGET[\s\S]*?\[selectedDraft, \.\.\.conversations\]/, "new-chat selection must inject the draft option when it is absent");
 assert.match(dropdown, /chat\.draft \? "Chưa tạo trên ChatGPT" : chat\.open \? "Đang mở trong Chrome" : "Chat gần đây"/, "conversation hints must remain unchanged");
+assert.match(dropdown, /ariaLabel="Chọn đoạn chat dự án"/, "ChatDropdown must preserve its accessible selector label");
 assert.match(dropdown, /searchThreshold=\{6\}/, "conversation search threshold must remain six options");
 assert.match(dropdown, /option\.chat\.active[\s\S]*?ACTIVE/, "active conversation metadata must remain visible");
 assert.equal((main.match(/<ChatDropdown\b/g) || []).length, 1, "chat popup must keep exactly one conversation selector");
