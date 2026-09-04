@@ -9,6 +9,7 @@ for (const component of ["StatusCard", "Icon", "ProfileSummaryItem", "TitleGalax
   assert.doesNotMatch(main, new RegExp(`function ${component}\\(`), `${component} implementation must stay out of main.jsx`);
   assert.match(overviewUi, new RegExp(`export function ${component}\\(`), `${component} must be exported from the overview UI module`);
 }
+assert.doesNotMatch(main, /function ProfileSummaryIcon\(/, "ProfileSummaryIcon implementation must stay out of main.jsx");
 assert.match(overviewUi, /function ProfileSummaryIcon\(/, "profile summary SVG variants must stay colocated with ProfileSummaryItem");
 for (const marker of ["summary-missing-plug", "summary-working-bolt", "summary-idle-check", "summary-hung-triangle"]) {
   assert.match(overviewUi, new RegExp(marker), `profile summary state marker ${marker} must remain represented`);
