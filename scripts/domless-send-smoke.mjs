@@ -4,8 +4,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
-const [worker, bridge, managerMain] = await Promise.all([
+const [worker, networkPolicyWorker, bridge, managerMain] = await Promise.all([
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
+  readFile(join(root, "chrome-extension", "service-worker", "network-policy.js"), "utf8"),
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
   readFile(join(root, "manager", "electron", "main.mjs"), "utf8")
 ]);
@@ -58,6 +59,15 @@ function extractFunction(name) {
   assert.fail(`Could not find the end of ${name}`);
 }
 
+const networkPolicy = Function("globalThis", `${networkPolicyWorker}; return globalThis.CodexProNetworkPolicy;`)({});
+const {
+  isChatSubmitLifecycleEvidence,
+  isChatSubmissionAckEvidence,
+  isAttachmentUploadEndpoint,
+  isRecoverableAttachmentUploadAbort,
+  isCompletedAttachmentUpload,
+  shouldUseTrustedClickFallback
+} = networkPolicy;
 const rendererProbeSource = extractFunction("probeChatRendererForSend");
 assert.match(rendererProbeSource, /Runtime\.evaluate/, "renderer send preflight must use a pure CDP evaluation instead of queueing mutable page work");
 assert.doesNotMatch(rendererProbeSource, /scripting\.executeScript|tabs\.sendMessage/, "renderer send preflight must not enqueue DOM mutations that can resume after the profile wakes");
@@ -371,7 +381,7 @@ assert.match(sendBlock, /timedSendPhase\('trusted_submit_ms'/, "send diagnostics
 assert.match(sendBlock, /timedSendPhase\('submit_lifecycle_ack_ms'/, "send diagnostics must time submit-lifecycle ACK");
 const submitLifecycleWaitSource = extractFunction("waitForChatSubmitLifecycle");
 assert.match(submitLifecycleWaitSource, /filter\(isChatSubmissionAckEvidence\)/, "fast send ACK must require strict conversation/responses evidence, not generic sentinel preparation traffic");
-const strictSubmitAckSource = extractFunction("isChatSubmissionAckEvidence");
+const strictSubmitAckSource = networkPolicyWorker.slice(networkPolicyWorker.indexOf("function isChatSubmissionAckEvidence"), networkPolicyWorker.indexOf("function isAttachmentUploadEndpoint"));
 assert.doesNotMatch(strictSubmitAckSource, /sentinel/, "sentinel chat-requirements traffic must not be treated as proof that the user message was submitted");
 assert.match(sendBlock, /lateLifecycleEvidence=recentChatPostEvidence\(tab\.id,networkAckStartedAfterMs\)\.filter\(isChatSubmissionAckEvidence\)/, "late send ACK must reject sentinel preparation traffic just like the early ACK path");
 assert.match(sendBlock, /submitted_by:'trusted-enter'/);
@@ -428,13 +438,9 @@ assert.match(sendBlock, /attachmentSubmit\?submitChatAttachmentButtonTab\(tab\.i
 assert.match(worker, /async function submitChatAttachmentButtonTab\(tabId,attemptId,expectedText=''/, "attachment submit must install the network tracker before invoking the scoped page click");
 assert.match(worker, /func:clickPreparedChatSendButtonPage,args:\[attemptId\]/, "attachment submit must click only the Send button marked for the exact attempt");
 assert.match(sendBlock, /ATTACHMENT_UPLOAD_FAILED:/, "a failed upload must stop before submit and clean only the owned draft");
-const recoverableAttachmentAbortSource = extractFunction("isRecoverableAttachmentUploadAbort");
-const isRecoverableAttachmentUploadAbort = Function(`${recoverableAttachmentAbortSource}; return isRecoverableAttachmentUploadAbort;`)();
 assert.equal(isRecoverableAttachmentUploadAbort({ endpoint: "/backend-api/files/library/reuse", phase: "failed", status_code: 0, error: "net::ERR_ABORTED" }), true, "ChatGPT cancelling its library reuse optimization must not fail an otherwise recoverable attachment upload");
 assert.equal(isRecoverableAttachmentUploadAbort({ endpoint: "/backend-api/files", phase: "failed", status_code: 0, error: "net::ERR_ABORTED" }), false, "an aborted primary file upload must remain fatal");
 assert.equal(isRecoverableAttachmentUploadAbort({ endpoint: "/backend-api/files/library/reuse", phase: "failed", status_code: 429, error: "net::ERR_ABORTED" }), false, "an HTTP failure on library reuse must remain fatal even if Chrome also reports ERR_ABORTED");
-const completedAttachmentUploadSource = extractFunction("isCompletedAttachmentUpload");
-const isCompletedAttachmentUpload = Function(`${completedAttachmentUploadSource}; return isCompletedAttachmentUpload;`)();
 assert.equal(isCompletedAttachmentUpload({ endpoint: "/backend-api/files/library/reuse", phase: "completed", status_code: 200 }, "/backend-api/files/library/reuse"), true, "a successful library reuse response is definitive attachment upload evidence");
 const attachmentUploadWaitSource = extractFunction("waitForAttachmentUploadNetwork");
 assert.match(attachmentUploadWaitSource, /isCompletedAttachmentUpload\(item,'\/backend-api\/files\/process_upload_stream'\)[\s\S]*?isCompletedAttachmentUpload\(item,'\/backend-api\/files\/library\/reuse'\)[\s\S]*?isRecoverableAttachmentUploadAbort/, "attachment upload wait must accept definitive success before rejecting failures and must exclude the recoverable reuse abort");
@@ -445,8 +451,11 @@ const waitForAttachmentUploadNetwork = Function(
   "chatNetworkPostWaitersByTab",
   "ATTACHMENT_UPLOAD_TIMEOUT_MS",
   "ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS",
-  `${extractFunction("isAttachmentUploadEndpoint")};${recoverableAttachmentAbortSource};${completedAttachmentUploadSource};async ${attachmentUploadWaitSource}; return waitForAttachmentUploadNetwork;`
-)(attachmentWaitLog, attachmentWaiters, 30000, 2500);
+  "isAttachmentUploadEndpoint",
+  "isRecoverableAttachmentUploadAbort",
+  "isCompletedAttachmentUpload",
+  `async ${attachmentUploadWaitSource}; return waitForAttachmentUploadNetwork;`
+)(attachmentWaitLog, attachmentWaiters, 30000, 2500, isAttachmentUploadEndpoint, isRecoverableAttachmentUploadAbort, isCompletedAttachmentUpload);
 const uploadNow = Date.now();
 attachmentWaitLog.set(91, [
   { endpoint: "/backend-api/files/library/reuse", phase: "failed", status_code: 0, error: "net::ERR_ABORTED", observed_at_ms: uploadNow - 1200 },
@@ -513,14 +522,10 @@ assert.doesNotMatch(enterSource, /dispatchMouseEvent|composer-submit-button|send
 const trustedKeySource = extractFunction("trustedKeyTab");
 assert.match(trustedKeySource, /Emulation\.setFocusEmulationEnabled/, "generic trusted keys must work in a background tab without raising its Chrome window");
 
-const evidenceSource = extractFunction("isChatSubmitLifecycleEvidence");
-const isChatSubmitLifecycleEvidence = Function(`${evidenceSource}; return isChatSubmitLifecycleEvidence;`)();
-const submissionAckSource = extractFunction("isChatSubmissionAckEvidence");
-const isChatSubmissionAckEvidence = Function(`${submissionAckSource}; return isChatSubmissionAckEvidence;`)();
+assert.equal(isChatSubmitLifecycleEvidence({ endpoint: "/backend-api/sentinel/chat-requirements/prepare", matched_generation: false }), true, "Sentinel preparation remains submit-lifecycle evidence without becoming submission ACK");
+assert.equal(isChatSubmissionAckEvidence({ endpoint: "/backend-api/sentinel/chat-requirements/prepare", matched_generation: false }), false, "Sentinel preparation must never be treated as submission ACK");
 assert.equal(isChatSubmissionAckEvidence({ endpoint: "/backend-api/f/conversation/prepare", matched_generation: false }), false, "conversation prepare is pre-submit lifecycle, not submission ACK");
 assert.equal(isChatSubmissionAckEvidence({ endpoint: "/backend-api/f/conversation", matched_generation: true }), true, "generation endpoint remains authoritative submission ACK");
-const fallbackSource = extractFunction("shouldUseTrustedClickFallback");
-const shouldUseTrustedClickFallback = Function(`${submissionAckSource}; ${fallbackSource}; return shouldUseTrustedClickFallback;`)();
 assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, []), true, "unchanged owned draft with no network activity can use click fallback");
 assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, [{ endpoint: "/backend-api/sentinel/chat-requirements/prepare", matched_generation: false }]), true, "pre-submit Sentinel activity must not block a safe fallback while the owned draft is still present");
 assert.equal(shouldUseTrustedClickFallback({ draft_owned: true, draft_present: true }, [{ endpoint: "/backend-api/f/conversation/prepare", matched_generation: false }]), true, "conversation prepare activity must not be mistaken for a generation ACK");

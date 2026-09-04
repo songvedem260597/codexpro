@@ -623,7 +623,7 @@ assert.match(worker, /Page\.captureScreenshot/);
 assert.doesNotMatch(worker, /chrome\.tabs\.captureVisibleTab/, "extension screenshots must not activate/capture the foreground tab");
 assert.doesNotMatch(worker, /composer_html|connector_debug/, "generic snapshots must not contain ChatGPT-specific diagnostics");
 assert.match(worker, /chatNetworkPostWaitersByTab/, "attachment upload waits must subscribe to network events");
-const attachmentWait = worker.slice(worker.indexOf("async function waitForAttachmentUploadNetwork"), worker.indexOf("function shouldUseTrustedClickFallback"));
+const attachmentWait = worker.slice(worker.indexOf("async function waitForAttachmentUploadNetwork"), worker.indexOf("async function ensureChatNetworkStateLoaded"));
 assert.doesNotMatch(attachmentWait, /setTimeout\(resolve,100\)/, "attachment upload waits must not poll every 100 ms");
 assert.match(attachmentWait, /isRecoverableAttachmentUploadAbort/, "library reuse ERR_ABORTED must be treated as a recoverable branch while waiting for definitive upload evidence");
 const extensionBatch = worker.slice(worker.indexOf("if(action==='batch')"), worker.indexOf("if(action==='snapshot')"));

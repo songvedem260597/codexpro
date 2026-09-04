@@ -1,4 +1,4 @@
-importScripts('service-worker/tab-policy.js');
+importScripts('service-worker/tab-policy.js', 'service-worker/network-policy.js');
 const {
   conversationIdFromUrl,
   isChatGptTabUrl,
@@ -6,6 +6,14 @@ const {
   tabAuditTabRecord,
   planChatTabCleanup
 } = globalThis.CodexProTabPolicy;
+const {
+  isChatSubmitLifecycleEvidence,
+  isChatSubmissionAckEvidence,
+  isAttachmentUploadEndpoint,
+  isRecoverableAttachmentUploadAbort,
+  isCompletedAttachmentUpload,
+  shouldUseTrustedClickFallback
+} = globalThis.CodexProNetworkPolicy;
 
 const BRIDGE = 'http://127.0.0.1:9224';
 const HEADERS = {'content-type':'application/json','x-codexpro-extension':'profile-bridge-v1'};
@@ -423,36 +431,6 @@ function rejectChatNetworkWaiters(tabId,error) {
   for(const waiter of waiters){clearTimeout(waiter.timer);waiter.reject(error);}
 }
 
-function isChatSubmitLifecycleEvidence(item) {
-  const endpoint=String(item?.endpoint||'');
-  return Boolean(item?.matched_generation)||/\/(?:backend-api|backend-anon)\/(?:sentinel\/|(?:f\/)?(?:conversation|steer_turn)|(?:f\/)?(?:codex\/)?responses)/.test(endpoint);
-}
-
-function isChatSubmissionAckEvidence(item) {
-  const endpoint=String(item?.endpoint||'').replace(/\/+$/,'');
-  return Boolean(item?.matched_generation)
-    || /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|steer_turn)$/.test(endpoint)
-    || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(endpoint);
-}
-
-function isAttachmentUploadEndpoint(endpoint) {
-  return /\/backend-api\/files(?:\/|$)/.test(String(endpoint||''));
-}
-
-function isRecoverableAttachmentUploadAbort(item) {
-  return String(item?.endpoint||'')==='/backend-api/files/library/reuse'
-    && Number(item?.status_code||0)===0
-    && /failed$/i.test(String(item?.phase||''))
-    && /(?:net::)?ERR_ABORTED/i.test(String(item?.error||''));
-}
-
-function isCompletedAttachmentUpload(item,endpoint) {
-  return String(item?.endpoint||'')===endpoint
-    && /completed$/i.test(String(item?.phase||''))
-    && Number(item?.status_code)>0
-    && Number(item?.status_code)<400;
-}
-
 async function waitForChatSubmitLifecycle(tabId,startedAfterMs,timeoutMs=1800) {
   const deadline=Date.now()+Math.max(100,Number(timeoutMs)||1800);
   const readEvidence=()=>recentChatPostEvidence(tabId,startedAfterMs).filter(isChatSubmissionAckEvidence);
@@ -503,10 +481,6 @@ async function waitForAttachmentUploadNetwork(tabId,startedAfterMs,timeoutMs=ATT
     await waitForChange(Math.min(deadline-Date.now(),quietRemaining===null?deadline-Date.now():quietRemaining));
   }
   throw new Error('ChatGPT chưa hoàn tất upload file trong thời gian cho phép; chưa submit để tránh gửi thiếu attachment.');
-}
-
-function shouldUseTrustedClickFallback(attemptState,evidence=[]) {
-  return Boolean(attemptState?.draft_owned&&attemptState?.draft_present&&!evidence.some(isChatSubmissionAckEvidence));
 }
 
 async function ensureChatNetworkStateLoaded() {
