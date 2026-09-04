@@ -6,12 +6,15 @@ const settingsView = fs.readFileSync(new URL("../src/features/settings/settings-
 const apiWorkerCards = fs.readFileSync(new URL("../src/features/api-workers/api-worker-cards.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const managerMain = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
+const managerSettingsStore = fs.readFileSync(new URL("../electron/manager-settings-store.mjs", import.meta.url), "utf8");
 const borderSync = fs.readFileSync(new URL("../src/worker-border-sync.js", import.meta.url), "utf8");
 
-assert.match(managerMain, /workingBorderStyle:\s*"shine"/, "the existing rotating shine must remain the default");
-assert.match(managerMain, /MANAGER_WORKING_BORDER_STYLES\s*=\s*new Set\(\["shine",\s*"beam",\s*"mint"\]\)/, "Manager settings must accept shine, beam, and the added mint border");
-assert.match(managerMain, /parsed\?\.workingBorderStyle[\s\S]*?defaults\.workingBorderStyle/, "stored border style must be normalized safely");
-assert.match(managerMain, /patch,\s*"workingBorderStyle"[\s\S]*?next\.workingBorderStyle/, "the selected border style must persist");
+assert.match(managerSettingsStore, /workingBorderStyle:\s*"shine"/, "the existing rotating shine must remain the default");
+assert.match(managerSettingsStore, /MANAGER_WORKING_BORDER_STYLES\s*=\s*new Set\(\["shine",\s*"beam",\s*"mint"\]\)/, "Manager settings must accept shine, beam, and the added mint border");
+assert.match(managerSettingsStore, /parsed\?\.workingBorderStyle[\s\S]*?defaults\.workingBorderStyle/, "stored border style must be normalized safely");
+assert.match(managerSettingsStore, /patch,\s*"workingBorderStyle"[\s\S]*?next\.workingBorderStyle/, "the selected border style must persist");
+assert.match(managerMain, /createManagerSettingsStore\(\{\s*home:\s*codexProHome,\s*mimeTypeForFile\s*\}\)/, "Electron main must delegate Manager settings persistence to the extracted store");
+assert.doesNotMatch(managerMain, /function readManagerSettings\(/, "Manager settings persistence must not drift back into electron/main.mjs");
 assert.match(renderer, /import \{ SettingsView \} from "\.\/features\/settings\/settings-view\.jsx";/, "Manager must keep Settings UI behind the extracted SettingsView seam");
 assert.match(renderer, /<SettingsView[\s\S]*?active=\{activePage === "settings"\}/, "App must mount the extracted SettingsView only for the Settings page");
 assert.doesNotMatch(renderer, /<div className="settings-view" hidden=\{activePage !== "settings"\}/, "the large Settings JSX must not drift back into main.jsx");

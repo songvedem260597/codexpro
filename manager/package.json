@@ -39,6 +39,7 @@
     "test:api-worker-streaming": "node scripts/api-worker-streaming-smoke.mjs",
     "test:dropdowns": "node scripts/app-dropdown-smoke.mjs",
     "test:settings-controls": "node scripts/settings-controls-smoke.mjs && electron scripts/settings-controls-visual-smoke.cjs",
+    "test:settings-store": "electron scripts/manager-settings-store-smoke.mjs",
     "test:chat-dropdown": "node scripts/chat-dropdown-smoke.mjs && electron scripts/chat-dropdown-visual-smoke.cjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
