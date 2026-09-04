@@ -50,7 +50,7 @@ export interface BrowserProfilePersistenceRecord {
   lastSeen: number;
 }
 
-function normalizePersistedRecentConversations(value: unknown): Array<Record<string, unknown>> {
+function normalizeRecentConversations(value: unknown): Array<Record<string, unknown>> {
   return (Array.isArray(value) ? value : [])
     .filter((conversation) => conversation && typeof conversation === "object" && !Array.isArray(conversation))
     .map((conversation: any) => {
@@ -102,8 +102,7 @@ export function browserProfilePersistenceSnapshot(
       connectorCheckedAt: String(profile.connectorCheckedAt || "").slice(0, 64),
       connectorServerFingerprint: String(profile.connectorServerFingerprint || "").slice(0, 128),
       workspaceRoot: String(profile.workspaceRoot || "").slice(0, 4_096),
-      lastSeen: Math.max(0, Number(profile.lastSeen) || 0),
-      recentConversations: normalizePersistedRecentConversations((profile as any).recentConversations)
+      lastSeen: Math.max(0, Number(profile.lastSeen) || 0)
     }))
     .filter((profile) => Boolean(profile.id))
     .slice(0, 100);
@@ -429,7 +428,7 @@ function loadBrowserProfileRegistry(state: BridgeState, now = Date.now()): void 
         ...saved,
         restored: true,
         tabs: [],
-        recentConversations: normalizePersistedRecentConversations((saved as any).recentConversations),
+        recentConversations: [],
         flightRecorderIncidents: [],
         queued: []
       };
@@ -890,7 +889,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
       .filter((tab: any) => tab && typeof tab === "object" && Number.isInteger(Number(tab.id)))
       .map((tab: any) => ({ ...(existingTabsById.get(Number(tab.id)) || {}), ...tab }));
   }
-  if (Array.isArray(body.recent_conversations) && body.recent_conversations.length) profile.recentConversations = normalizePersistedRecentConversations(body.recent_conversations);
+  if (Array.isArray(body.recent_conversations)) profile.recentConversations = normalizeRecentConversations(body.recent_conversations);
   const observedCodexProToolActivity = profile.tabs.some((tab: any) =>
     Boolean(tab?.busy || tab?.settling) && /^CodexPro đang\b/i.test(String(tab?.activity_text ?? "").trim())
   );

@@ -33,6 +33,16 @@ assert.match(cachedRead, /managerRecentChatCacheUsable/, "Manager must recognize
 assert.match(cachedRead, /cache_hit:\s*true/, "reopening a cached recent conversation must bypass the live ChatGPT response load");
 assert.match(cachedRead, /response_source:\s*"manager_recent_chat_cache"/, "cached response reads must expose their source explicitly");
 
+const taskCheckpointPrompt = between(managerMain, "function workerJobResumeCheckpointText", "async function sendProfileRequestUnlocked");
+assert.match(taskCheckpointPrompt, /checkpoints = \[\]/, "task resume prompt must accept worker/project checkpoints independently of ChatGPT conversations");
+assert.match(taskCheckpointPrompt, /slice\(-3\)/, "task resume prompt must consume at most the three newest worker/project checkpoints");
+assert.match(taskCheckpointPrompt, /Không truy lại conversation cũ/, "task resume prompt must forbid recovering context by reopening an old conversation");
+const taskResume = between(managerMain, "async function resumeProfileTask", "async function getRepoTaskStatus");
+assert.match(taskResume, /"worker_context_history"/, "task resume must load worker/project context checkpoints from MCP");
+assert.match(taskResume, /worker_id:\s*profileId/, "task resume context must be isolated by worker");
+assert.match(taskResume, /workerJobResumeCheckpointText\(job, workerContexts\)/, "task resume must inject worker/project checkpoints into the new recovery chat");
+assert.match(taskResume, /newChat:\s*true/, "task resume must create a new chat instead of reopening a remembered conversation id");
+
 const rolloverPrompt = between(managerUi, "function buildConversationRolloverPrompt", "function ChatRequestComposer");
 assert.match(rolloverPrompt, /continuation_reason \|\| ""\) === "recovery"/, "handoff prompt must distinguish recovery from conversation-limit rollover");
 assert.match(rolloverPrompt, /recovery_reason/, "handoff prompt must include why the old tab could not be safely recovered");

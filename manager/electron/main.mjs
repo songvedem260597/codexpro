@@ -3853,20 +3853,44 @@ function workerJobField(job, snake, camel = "") {
   return job?.[snake] ?? (camel ? job?.[camel] : undefined);
 }
 
-function workerJobResumeCheckpointText(job) {
+function workerJobResumeCheckpointText(job, checkpoints = []) {
+  const recent = (Array.isArray(checkpoints) ? checkpoints : []).slice(-3);
+  const contextLines = recent.flatMap((checkpoint, index) => {
+    const completed = Array.isArray(checkpoint?.completedParts) ? checkpoint.completedParts : [];
+    const remaining = Array.isArray(checkpoint?.remainingParts) ? checkpoint.remainingParts : [];
+    const progress = Math.max(0, Math.min(100, Number(checkpoint?.progressPercent) || 0));
+    const reason = String(checkpoint?.reason || checkpoint?.blockedPart || "").trim();
+    const evidence = String(checkpoint?.evidence || "").trim();
+    return [
+      `Checkpoint ${index + 1}/${recent.length} · ${String(checkpoint?.taskTitle || job?.title || "Task CodexPro").trim()} · ${String(checkpoint?.stage || "unknown")} · ${Math.round(progress)}%.`,
+      `Tóm tắt: ${String(checkpoint?.summary || "").trim() || "Không có tóm tắt."}`,
+      completed.length ? `Đã xong: ${completed.join(" | ")}` : "",
+      remaining.length ? `Còn lại: ${remaining.join(" | ")}` : "",
+      reason ? `Lỗi/chặn: ${reason}` : "",
+      evidence ? `Bằng chứng: ${evidence}` : ""
+    ].filter(Boolean);
+  });
+  if (contextLines.length) {
+    return [
+      `Tiếp tục task “${String(job?.title || "Task CodexPro").trim()}” bằng 3 checkpoint công việc gần nhất của worker trong project này.`,
+      "Ngữ cảnh phục hồi bên dưới độc lập với ChatGPT conversation/tab cũ:",
+      ...contextLines,
+      "Không truy lại conversation cũ. Đối chiếu source/trạng thái hiện tại, tiếp tục từ phần còn lại và verify đầy đủ trước khi kết thúc."
+    ].join("\n");
+  }
   const completed = Array.isArray(workerJobField(job, "completed_parts", "completedParts")) ? workerJobField(job, "completed_parts", "completedParts") : [];
   const remaining = Array.isArray(workerJobField(job, "remaining_parts", "remainingParts")) ? workerJobField(job, "remaining_parts", "remainingParts") : [];
   const progress = Math.max(0, Math.min(100, Number(workerJobField(job, "progress_percent", "progressPercent")) || 0));
   const reason = String(workerJobField(job, "blocked_reason", "blockedReason") || workerJobField(job, "last_progress_reason", "lastProgressReason") || job?.error || job?.summary || "").trim();
   const evidence = String(workerJobField(job, "completion_evidence", "completionEvidence") || workerJobField(job, "last_progress_evidence", "lastProgressEvidence") || "").trim();
   return [
-    `Tiếp tục task “${String(job?.title || "Task CodexPro").trim()}” từ checkpoint bền vững gần nhất.`,
+    `Tiếp tục task “${String(job?.title || "Task CodexPro").trim()}” từ checkpoint task gần nhất.`,
     `Trạng thái trước khi tiếp tục: ${String(job?.status || "unknown")}. Tiến độ đã ghi nhận: ${Math.round(progress)}%.`,
     completed.length ? `Phần đã xong: ${completed.join(" | ")}` : "Phần đã xong: chưa có checkpoint chi tiết.",
     remaining.length ? `Phần còn lại: ${remaining.join(" | ")}` : "Phần còn lại: hãy đối chiếu source/trạng thái hiện tại để xác định chính xác, không làm lại phần đã hoàn tất.",
     reason ? `Lý do lỗi/chặn gần nhất: ${reason}` : "Không có lý do lỗi/chặn được lưu.",
     evidence ? `Bằng chứng gần nhất: ${evidence}` : "",
-    "Không bắt đầu lại từ đầu. Kiểm tra trạng thái hiện tại, giữ nguyên các phần đã hoàn tất, xử lý phần còn lại và verify đầy đủ trước khi kết thúc."
+    "Không truy lại conversation cũ. Kiểm tra trạng thái hiện tại, giữ nguyên các phần đã hoàn tất, xử lý phần còn lại và verify đầy đủ trước khi kết thúc."
   ].filter(Boolean).join("\n");
 }
 
@@ -4238,6 +4262,17 @@ async function resumeProfileTask(payload) {
   const scope = job.scope === "all_allowed" ? "all_allowed" : "workspace";
   const root = String(job.root || "").trim();
   if (scope === "workspace" && !root) throw new Error("Task cũ không còn thông tin workspace để tiếp tục an toàn.");
+  let workerContexts = [];
+  try {
+    const contextResult = await localMcpTool(base.config, base.token, "worker_context_history", {
+      worker_id: profileId,
+      root,
+      scope
+    }, 15000);
+    workerContexts = Array.isArray(contextResult?.checkpoints) ? contextResult.checkpoints.slice(-3) : [];
+  } catch {
+    workerContexts = [];
+  }
   if (["failed", "cancelled", "blocked"].includes(previousStatus)) {
     const prepared = await localMcpTool(base.config, base.token, "prepare_repo_task", {
       profile_id: profileId,
@@ -4253,7 +4288,7 @@ async function resumeProfileTask(payload) {
     newChat: true,
     taskMode: "recovery",
     previousTaskId: taskId,
-    text: workerJobResumeCheckpointText(job),
+    text: workerJobResumeCheckpointText(job, workerContexts),
     scope,
     projectRoot: scope === "workspace" ? root : "",
     workspaceCandidates: [],

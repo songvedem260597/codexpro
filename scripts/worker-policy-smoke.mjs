@@ -21,6 +21,7 @@ const {
   reportWorkerJobProgress,
   workerJobPublicRecord
 } = await import("../dist/workerPolicy.js");
+const { listWorkerContextCheckpoints, MAX_WORKER_CONTEXT_CHECKPOINTS } = await import("../dist/workerContext.js");
 
 try {
   const generalId = "cpt_111111111111111111111111";
@@ -166,6 +167,16 @@ try {
   });
   assert.equal(workerJobPublicRecord(verifyingProgress).progress_percent, 99);
   assert.deepEqual(workerJobPublicRecord(verifyingProgress).remaining_parts, []);
+  const workerContexts = listWorkerContextCheckpoints({ workerId: "api.custom", root: "C:\\repo", scope: "workspace" });
+  assert.equal(workerContexts.length, MAX_WORKER_CONTEXT_CHECKPOINTS, "worker/project recovery context must retain exactly three newest checkpoints");
+  assert.deepEqual(
+    workerContexts.map((checkpoint) => checkpoint.summary),
+    ["Verification command failed.", "Implementation work is done; verification and delivery remain.", "Tests, commit, and push are complete."],
+    "the fourth and later progress report must evict the oldest worker/project context"
+  );
+  assert.equal(listWorkerContextCheckpoints({ workerId: "api.custom", root: "C:\\other-repo", scope: "workspace" }).length, 0, "worker context must not leak across projects");
+  assert.equal(listWorkerContextCheckpoints({ workerId: "api.other", root: "C:\\repo", scope: "workspace" }).length, 0, "worker context must not leak across workers");
+  assert.doesNotMatch(JSON.stringify(workerContexts), /conversation(?:Id|_id)|chatgpt\.com\/c\//i, "worker recovery context must not persist ChatGPT conversation identity");
   const completedCode = await finalizeWorkerJob({ jobId: codeId, workerId: "api.custom", outcome: "completed", summary: "Implementation, verification, commit, and push completed." });
   const publicCompleted = workerJobPublicRecord(completedCode);
   assert.equal(publicCompleted.status, "completed");

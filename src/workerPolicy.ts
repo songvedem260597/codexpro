@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { codexProHome } from "./profileStore.js";
+import { saveWorkerContextCheckpoint } from "./workerContext.js";
 
 export const WORKER_POLICY_VERSION = "worker-policy-v1";
 
@@ -429,7 +430,7 @@ export async function reportWorkerJobProgress(input: {
   completedParts?: string[];
   remainingParts?: string[];
 }): Promise<WorkerJobRecord> {
-  return await updateWorkerJob(input.jobId, (current) => {
+  const record = await updateWorkerJob(input.jobId, (current) => {
     if (!current) throw new Error("Worker job was not prepared.");
     if (input.workerId && workerOwnerKey(current.workerId) !== workerOwnerKey(input.workerId)) throw new Error("Worker job owner mismatch.");
     if (current.status !== "running") throw new Error(`Worker job is not running; current status is ${current.status}.`);
@@ -490,6 +491,29 @@ export async function reportWorkerJobProgress(input: {
       })]
     };
   });
+  const report = record.progressReports.at(-1);
+  if (report) {
+    await saveWorkerContextCheckpoint({
+      version: 1,
+      workerId: record.workerId,
+      root: record.root,
+      scope: record.scope,
+      taskId: record.jobId,
+      taskTitle: record.title,
+      taskKind: record.kind,
+      at: report.at,
+      sequence: report.sequence,
+      stage: report.stage,
+      progressPercent: report.progressPercent,
+      summary: report.summary,
+      reason: report.reason,
+      evidence: report.evidence,
+      blockedPart: report.blockedPart,
+      completedParts: report.completedParts,
+      remainingParts: report.remainingParts
+    });
+  }
+  return record;
 }
 
 export async function finalizeWorkerJob(input: {

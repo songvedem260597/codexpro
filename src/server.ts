@@ -26,6 +26,7 @@ import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowser
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, reportWorkerJobProgress, workerJobPublicRecord, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
+import { listWorkerContextCheckpoints } from "./workerContext.js";
 import { assertWorkspaceTaskCompletionReady, claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
@@ -402,6 +403,7 @@ const REPO_TASK_GATE_EXEMPT_TOOLS = new Set<string>([
   "workspace_coordination_status",
   "worker_job_status",
   "worker_job_history",
+  "worker_context_history",
   "report_worker_job_progress",
   "finalize_worker_job"
 ]);
@@ -643,6 +645,7 @@ const MINIMAL_TOOL_NAMES = [
   "workspace_coordination_status",
   "worker_job_status",
   "worker_job_history",
+  "worker_context_history",
   "report_worker_job_progress",
   "finalize_worker_job",
   "open_current_workspace",
@@ -680,6 +683,7 @@ const FULL_TOOL_NAMES = [
   "workspace_coordination_status",
   "worker_job_status",
   "worker_job_history",
+  "worker_context_history",
   "report_worker_job_progress",
   "finalize_worker_job",
   "codexpro_inventory",
@@ -2481,6 +2485,37 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       return textResult(`# Worker Job History\n\n${jobs.length} recent job(s).`, {
         count: jobs.length,
         jobs: jobs.map((record) => classifiedWorkerJobPublicRecord(record))
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "worker_context_history",
+    {
+      title: "Worker Context History",
+      description: "Read the three newest compact work-context checkpoints for one worker and project. These checkpoints are independent of ChatGPT conversation ids and are intended for lightweight task recovery.",
+      inputSchema: {
+        worker_id: z.string().min(1).max(160),
+        root: z.string().max(2048).optional(),
+        scope: z.enum(["workspace", "all_allowed"]).optional()
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const scope = args.scope === "all_allowed" ? "all_allowed" : "workspace";
+      const checkpoints = listWorkerContextCheckpoints({
+        workerId: args.worker_id,
+        root: args.root,
+        scope
+      });
+      return textResult(`# Worker Context History\n\n${checkpoints.length} checkpoint(s) for this worker/project.`, {
+        worker_id: args.worker_id,
+        root: args.root || "",
+        scope,
+        count: checkpoints.length,
+        checkpoints
       });
     }
   );
