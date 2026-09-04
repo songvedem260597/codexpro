@@ -25,6 +25,14 @@ assert.match(recovery, /continuation_reason: "recovery"/, "unrecoverable tabs mu
 assert.match(recovery, /discardOnly: true/, "old stuck tab must be discarded only after the continuation chat is created");
 assert.match(recovery, /requestTargetsRef\.current = \{ \.\.\.requestTargetsRef\.current, \[profile\.profile_id\]: conversationId \}/, "successful same-conversation recovery must keep the original conversation selected");
 
+const responseCache = between(managerMain, "function retainRecentManagerChatCacheEntries", "function readManagerChatCache");
+assert.match(responseCache, /MAX_CHAT_CACHE_ENTRIES_PER_PROFILE/, "persistent manager cache must be capped per profile");
+assert.match(responseCache, /deduped\.slice\(-MAX_CHAT_CACHE_ENTRIES_PER_PROFILE\)/, "persistent manager cache must retain only three recent conversations per profile");
+const cachedRead = between(managerMain, "function managerChatCacheResponse", "async function inspectThroughMcp");
+assert.match(cachedRead, /managerRecentChatCacheUsable/, "Manager must recognize a complete cached recent conversation when its Chrome tab is closed");
+assert.match(cachedRead, /cache_hit:\s*true/, "reopening a cached recent conversation must bypass the live ChatGPT response load");
+assert.match(cachedRead, /response_source:\s*"manager_recent_chat_cache"/, "cached response reads must expose their source explicitly");
+
 const rolloverPrompt = between(managerUi, "function buildConversationRolloverPrompt", "function ChatRequestComposer");
 assert.match(rolloverPrompt, /continuation_reason \|\| ""\) === "recovery"/, "handoff prompt must distinguish recovery from conversation-limit rollover");
 assert.match(rolloverPrompt, /recovery_reason/, "handoff prompt must include why the old tab could not be safely recovered");

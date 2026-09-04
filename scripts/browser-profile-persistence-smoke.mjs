@@ -41,7 +41,12 @@ if (mode === 'register' || mode === 'disable') {
         connector_server_fingerprint: 'fixture-fingerprint'
       },
       tabs: [],
-      recent_conversations: []
+      recent_conversations: [
+        { id: 'conversation-0001', title: 'Recent one', updated_at: 101 },
+        { id: 'conversation-0002', title: 'Recent two', updated_at: 102 },
+        { id: 'conversation-0003', title: 'Recent three', updated_at: 103 },
+        { id: 'conversation-0004', title: 'Recent four', updated_at: 104 }
+      ]
     })
   });
   if (!response.ok) throw new Error('register failed: ' + response.status + ' ' + await response.text());
@@ -80,6 +85,7 @@ try {
   assert.equal(registry.profiles.length, 1);
   assert.equal(registry.profiles[0].id, 'persist-smoke-profile');
   assert.equal(registry.profiles[0].extensionVersion, '0.5.105');
+  assert.deepEqual(registry.profiles[0].recentConversations.map(item => item.id), ['conversation-0001', 'conversation-0002', 'conversation-0003'], 'profile registry must persist exactly three recent conversations');
 
   const restored = JSON.parse(run('list', seed + 1));
   const profile = restored.profiles.find(item => item.profile_id === 'persist-smoke-profile');
@@ -87,6 +93,7 @@ try {
   assert.equal(profile.connected, false, 'restored profile is visible but disconnected until heartbeat returns');
   assert.equal(profile.active, false);
   assert.equal(profile.extension_version, '0.5.105');
+  assert.deepEqual(profile.recent_conversations.map(item => item.id), ['conversation-0001', 'conversation-0002', 'conversation-0003'], 'restored profile must expose cached recent conversations before the next heartbeat');
 
   run('disable', seed + 2);
   const disabledRegistry = JSON.parse(readFileSync(path.join(home, 'browser-profiles.json'), 'utf8'));

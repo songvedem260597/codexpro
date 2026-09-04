@@ -305,7 +305,7 @@ let managerChatLayoutLogWrite = Promise.resolve();
 const MAX_CHAT_RESPONSE_AUDIT_LOG_BYTES = 4 * 1024 * 1024;
 const MAX_CHAT_RESPONSE_AUDIT_LOG_ENTRY_BYTES = 48 * 1024;
 let managerChatResponseAuditLogWrite = Promise.resolve();
-const MAX_CHAT_CACHE_ENTRIES = 30;
+const MAX_CHAT_CACHE_ENTRIES_PER_PROFILE = 3;
 const MAX_CHAT_CACHE_MESSAGES = 12;
 const MAX_CHAT_CACHE_TEXT_CHARS = 40000;
 let managerChatCacheEntries = null;
@@ -857,8 +857,28 @@ function normalizeChatCacheEntry(value) {
   };
 }
 
+function retainRecentManagerChatCacheEntries(entries) {
+  const grouped = new Map();
+  for (const entry of entries.map(normalizeChatCacheEntry).filter(Boolean)) {
+    const current = grouped.get(entry.profileId) || [];
+    const deduped = current.filter((candidate) => candidate.conversationId !== entry.conversationId);
+    deduped.push(entry);
+    deduped.sort((left, right) => {
+      const leftAt = Date.parse(String(left.updatedAt || ""));
+      const rightAt = Date.parse(String(right.updatedAt || ""));
+      return (Number.isFinite(leftAt) ? leftAt : 0) - (Number.isFinite(rightAt) ? rightAt : 0);
+    });
+    grouped.set(entry.profileId, deduped.slice(-MAX_CHAT_CACHE_ENTRIES_PER_PROFILE));
+  }
+  return [...grouped.values()].flat().sort((left, right) => {
+    const leftAt = Date.parse(String(left.updatedAt || ""));
+    const rightAt = Date.parse(String(right.updatedAt || ""));
+    return (Number.isFinite(leftAt) ? leftAt : 0) - (Number.isFinite(rightAt) ? rightAt : 0);
+  });
+}
+
 function setManagerChatCacheMemory(entries) {
-  const normalized = entries.map(normalizeChatCacheEntry).filter(Boolean).slice(-MAX_CHAT_CACHE_ENTRIES);
+  const normalized = retainRecentManagerChatCacheEntries(entries);
   managerChatCacheEntries = normalized;
   managerChatCacheIndex = new Map(normalized.map((entry) => [chatCacheKey(entry.profileId, entry.conversationId), entry]));
   return normalized;
@@ -4209,6 +4229,50 @@ async function renameProfileChat(payload) {
   }, 30000);
 }
 
+function managerChatCacheResponse(entry) {
+  return {
+    profile_id: entry.profileId,
+    conversation_id: entry.conversationId,
+    url: `https://chatgpt.com/c/${entry.conversationId}`,
+    messages: (entry.messages || []).map((message) => ({
+      id: message.id,
+      role: message.role,
+      text: message.text,
+      truncated: Boolean(message.truncated),
+      provisional: Boolean(message.provisional),
+      end_turn: message.endTurn === true ? true : message.endTurn === false ? false : undefined
+    })),
+    text: entry.text,
+    truncated: Boolean(entry.truncated),
+    response_ready: entry.responseReady === true,
+    response_source: "manager_recent_chat_cache",
+    canonical_available: true,
+    canonical_busy: false,
+    dom_available: false,
+    network_state: String(entry.networkState || "completed"),
+    network_last_completed_at: String(entry.networkCompletedAt || ""),
+    message_count: Math.max(0, Number(entry.messageCount) || (entry.messages || []).length),
+    total_message_count: Math.max(0, Number(entry.totalMessageCount) || (entry.messages || []).length),
+    updated_at: String(entry.updatedAt || ""),
+    cached_response: true
+  };
+}
+
+function managerRecentChatCacheUsable(profile, conversationId, entry) {
+  if (!entry || entry.responseReady !== true) return false;
+  const recent = (profile?.recent_conversations || []).find((conversation) => String(conversation?.id || "") === conversationId);
+  if (!recent) return false;
+  const hasOpenTab = (profile?.conversation_tabs || []).some((tab) => String(tab?.url || "").includes(`/c/${conversationId}`));
+  if (hasOpenTab) return false;
+  const recentUpdatedAt = Number(recent.updated_at) || 0;
+  const cachedUpdatedAt = Date.parse(String(entry.updatedAt || ""));
+  if (recentUpdatedAt > 0 && Number.isFinite(cachedUpdatedAt)) {
+    const recentUpdatedAtMs = recentUpdatedAt > 1_000_000_000_000 ? recentUpdatedAt : recentUpdatedAt * 1000;
+    if (recentUpdatedAtMs > cachedUpdatedAt + 1000) return false;
+  }
+  return true;
+}
+
 async function getProfileResponse(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
@@ -4222,6 +4286,27 @@ async function getProfileResponse(payload) {
   const priority = payload?.priority === "interactive" ? "interactive" : "background";
   const responseQueueKey = `${profileId}:${conversationId}:${canonicalOnly ? "canonical" : readDom ? recoverStaleDom ? "dom-recovery" : "dom" : "network"}`;
   return responseQueue.run(responseQueueKey, async (queueContext) => {
+    const cachedEntry = getManagerChatCacheEntry({ profileId, conversationId });
+    const cachedProfile = latestBrowserProfileStream.profiles.find((profile) => String(profile?.profile_id || "") === profileId);
+    if (managerRecentChatCacheUsable(cachedProfile, conversationId, cachedEntry)) {
+      const result = managerChatCacheResponse(cachedEntry);
+      return {
+        ...result,
+        response_profile_id: profileId,
+        response_conversation_id: conversationId,
+        manager_phase_timings: {
+          queue_wait_ms: Math.max(0, Number(queueContext.queueWaitMs) || 0),
+          queue_active_at_enqueue: Math.max(0, Number(queueContext.activeAtEnqueue) || 0),
+          queue_queued_at_enqueue: Math.max(0, Number(queueContext.queuedAtEnqueue) || 0),
+          queue_coalesced: Math.max(0, Number(queueContext.coalesced) || 0),
+          queue_priority: queueContext.priority,
+          runtime_base_ms: 0,
+          local_mcp_ms: 0,
+          manager_total_ms: Math.max(0, Date.now() - managerStartedAt),
+          cache_hit: true
+        }
+      };
+    }
     const runtimeBaseStartedAt = Date.now();
     const base = await readyRuntimeBaseStatus();
     const runtimeBaseMs = Date.now() - runtimeBaseStartedAt;

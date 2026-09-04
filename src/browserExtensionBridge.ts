@@ -50,6 +50,24 @@ export interface BrowserProfilePersistenceRecord {
   lastSeen: number;
 }
 
+function normalizePersistedRecentConversations(value: unknown): Array<Record<string, unknown>> {
+  return (Array.isArray(value) ? value : [])
+    .filter((conversation) => conversation && typeof conversation === "object" && !Array.isArray(conversation))
+    .map((conversation: any) => {
+      const id = String(conversation.id || "").trim();
+      return {
+        id,
+        title: String(conversation.title || "Đoạn chat chưa có tiêu đề").trim().slice(0, 300),
+        url: `https://chatgpt.com/c/${id}`,
+        updated_at: Math.max(0, Number(conversation.updated_at) || 0),
+        long_task_watchdog_hung: conversation.long_task_watchdog_hung === true,
+        long_task_watchdog_attempt_key: String(conversation.long_task_watchdog_attempt_key || "").trim().slice(0, 300)
+      };
+    })
+    .filter((conversation: any) => /^[A-Za-z0-9-]{8,160}$/.test(String(conversation.id || "")))
+    .slice(0, 3);
+}
+
 export function browserProfileRetentionState(
   profile: { lastSeen?: number; restored?: boolean },
   now = Date.now()
@@ -84,7 +102,8 @@ export function browserProfilePersistenceSnapshot(
       connectorCheckedAt: String(profile.connectorCheckedAt || "").slice(0, 64),
       connectorServerFingerprint: String(profile.connectorServerFingerprint || "").slice(0, 128),
       workspaceRoot: String(profile.workspaceRoot || "").slice(0, 4_096),
-      lastSeen: Math.max(0, Number(profile.lastSeen) || 0)
+      lastSeen: Math.max(0, Number(profile.lastSeen) || 0),
+      recentConversations: normalizePersistedRecentConversations((profile as any).recentConversations)
     }))
     .filter((profile) => Boolean(profile.id))
     .slice(0, 100);
@@ -409,7 +428,7 @@ function loadBrowserProfileRegistry(state: BridgeState, now = Date.now()): void 
         ...saved,
         restored: true,
         tabs: [],
-        recentConversations: [],
+        recentConversations: normalizePersistedRecentConversations((saved as any).recentConversations),
         flightRecorderIncidents: [],
         queued: []
       };
@@ -870,7 +889,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
       .filter((tab: any) => tab && typeof tab === "object" && Number.isInteger(Number(tab.id)))
       .map((tab: any) => ({ ...(existingTabsById.get(Number(tab.id)) || {}), ...tab }));
   }
-  if (Array.isArray(body.recent_conversations)) profile.recentConversations = body.recent_conversations.slice(0, 3);
+  if (Array.isArray(body.recent_conversations) && body.recent_conversations.length) profile.recentConversations = normalizePersistedRecentConversations(body.recent_conversations);
   const observedCodexProToolActivity = profile.tabs.some((tab: any) =>
     Boolean(tab?.busy || tab?.settling) && /^CodexPro đang\b/i.test(String(tab?.activity_text ?? "").trim())
   );
