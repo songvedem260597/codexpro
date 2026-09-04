@@ -126,7 +126,7 @@ function retainRecent(checkpoints: WorkerContextCheckpoint[]): WorkerContextChec
   }
   return [...grouped.values()]
     .flat()
-    .sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+    .sort((left, right) => (Date.parse(left.at) - Date.parse(right.at)) || (left.sequence - right.sequence))
     .slice(-MAX_WORKER_CONTEXT_ENTRIES);
 }
 
@@ -167,6 +167,6 @@ export function listWorkerContextCheckpoints(input: {
   const key = groupKey(workerId, input.root, scope);
   return readStore()
     .filter((checkpoint) => groupKey(checkpoint.workerId, checkpoint.root, checkpoint.scope) === key)
-    .sort((left, right) => Date.parse(left.at) - Date.parse(right.at))
+    .sort((left, right) => (Date.parse(left.at) - Date.parse(right.at)) || (left.sequence - right.sequence))
     .slice(-MAX_WORKER_CONTEXT_CHECKPOINTS);
 }
