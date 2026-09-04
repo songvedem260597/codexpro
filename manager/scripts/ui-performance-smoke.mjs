@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { EMPTY_BROWSER_PROFILE_GRACE_MS, mergeBrowserProfilePayload, mergeRuntimeStatus, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "../src/ui-performance.js";
+import { EMPTY_BROWSER_PROFILE_GRACE_MS, mergeBrowserProfilePayload, mergeRuntimeStatus, normalizeTerminalMessageStreamProfiles, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "../src/ui-performance.js";
 
 const previous = [{
   profile_id: "profile-a",
@@ -70,6 +70,56 @@ const confirmedEmpty = stabilizeEmptyBrowserProfileSnapshot(previous, [], {
 assert.deepEqual(confirmedEmpty.profiles, [], "an all-empty snapshot that survives the grace period must clear disconnected workers");
 assert.equal(confirmedEmpty.preserved, false);
 
+const terminalTaskId = "cpt_111111111111111111111111";
+const terminalConversationId = "terminal-chat-1234";
+const terminalProfiles = [{
+  profile_id: "profile-terminal",
+  connected: true,
+  activity: "settling",
+  busy_request_count: 0,
+  busy_since: "2026-09-04T21:00:00.000Z",
+  current_task_id: terminalTaskId,
+  current_task_conversation_id: terminalConversationId,
+  conversation_tabs: [{
+    id: 88,
+    url: `https://chatgpt.com/c/${terminalConversationId}`,
+    busy: false,
+    settling: true,
+    message_stream_error: true,
+    activity_text: "Lỗi luồng phản hồi · đang chuyển sang chat mới",
+    network_state: "completed",
+    network_stream_in_progress: false
+  }]
+}];
+const terminalJobs = [{ job_id: terminalTaskId, worker_id: "profile-terminal", status: "completed", completion_confirmed: true }];
+const normalizedTerminalProfiles = normalizeTerminalMessageStreamProfiles(terminalProfiles, terminalJobs);
+assert.notEqual(normalizedTerminalProfiles, terminalProfiles, "terminal message-stream cleanup must publish a corrected profile snapshot");
+assert.equal(normalizedTerminalProfiles[0].activity, "idle", "a terminal task must not leave its profile in settling");
+assert.equal(normalizedTerminalProfiles[0].busy_since, "", "terminal settling cleanup must clear the stale busy timestamp");
+assert.equal(normalizedTerminalProfiles[0].conversation_tabs[0].settling, false, "a terminal message-stream banner must not keep the tab settling");
+assert.equal(normalizedTerminalProfiles[0].conversation_tabs[0].message_stream_error, false, "a terminal message-stream banner must stop participating in active recovery state");
+assert.equal(normalizedTerminalProfiles[0].conversation_tabs[0].terminal_message_stream_error, true, "the raw terminal message-stream condition must remain available for diagnostics");
+assert.equal(normalizedTerminalProfiles[0].conversation_tabs[0].terminal_message_stream_task_id, terminalTaskId);
+assert.equal(normalizedTerminalProfiles[0].conversation_tabs[0].terminal_message_stream_activity_text, "Lỗi luồng phản hồi · đang chuyển sang chat mới");
+
+const runningTerminalCandidate = normalizeTerminalMessageStreamProfiles(terminalProfiles, [{ ...terminalJobs[0], status: "running", completion_confirmed: false }]);
+assert.equal(runningTerminalCandidate, terminalProfiles, "an unfinished task must keep live message-stream recovery untouched");
+const activeGenerationCandidate = normalizeTerminalMessageStreamProfiles([{ ...terminalProfiles[0], conversation_tabs: [{ ...terminalProfiles[0].conversation_tabs[0], network_state: "generating", network_stream_in_progress: true }] }], terminalJobs);
+assert.equal(activeGenerationCandidate[0].conversation_tabs[0].settling, true, "terminal metadata must never mask a newer active generation");
+
+const historicalTaskId = "cpt_222222222222222222222222";
+const historicalTerminal = normalizeTerminalMessageStreamProfiles([{ ...terminalProfiles[0], current_task_id: "cpt_333333333333333333333333", current_task_conversation_id: "new-chat-5678", conversation_tabs: [{ ...terminalProfiles[0].conversation_tabs[0], url: "https://chatgpt.com/c/old-chat-1234", flight_recorder_latest_task_id: historicalTaskId }] }], [{ job_id: historicalTaskId, worker_id: "profile-terminal", status: "completed" }]);
+assert.equal(historicalTerminal[0].conversation_tabs[0].settling, false, "a stale old tab must use flight-recorder task ownership to clear terminal settling");
+
+const mergedTerminalStatus = mergeRuntimeStatus(null, {
+  browserProfiles: terminalProfiles,
+  workerJobs: terminalJobs,
+  workerSnapshotAvailable: true,
+  workerJobsAvailable: true
+});
+assert.equal(mergedTerminalStatus.browserProfiles[0].activity, "idle", "authoritative status refreshes must normalize terminal message-stream settling before render");
+assert.equal(mergedTerminalStatus.browserProfiles[0].conversation_tabs[0].terminal_message_stream_error, true);
+
 const projects = [{ root: "C:/repo", name: "repo" }];
 assert.equal(sameProjectList(projects, [{ root: "C:/repo", name: "repo" }]), true);
 assert.equal(sameProjectList(projects, [{ root: "C:/repo", name: "repo-2" }]), false);
@@ -123,6 +173,7 @@ assert.equal(authoritativeEmpty.workerSnapshotStaleSince, "");
 const managerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const rendererSource = fs.readFileSync(path.join(managerRoot, "src", "main.jsx"), "utf8");
 const mainProcessSource = fs.readFileSync(path.join(managerRoot, "electron", "main.mjs"), "utf8");
+assert.match(rendererSource, /onBrowserProfiles\?\.\(\(payload\) => \{[\s\S]*?normalizeTerminalMessageStreamProfiles\(incomingProfiles, current\.workerJobs\)/, "realtime profile events must normalize terminal message-stream settling before they can overwrite corrected status");
 assert.match(rendererSource, /const responseMemoryCache = useRef\(new Map\(\)\)/, "recent chat transcripts must stay in renderer memory for instant revisit");
 assert.match(rendererSource, /function prefetchProfileResponseCaches\(profile\)/, "recent chat transcript caches must be prefetched before selection");
 assert.match(rendererSource, /responseMemoryCache\.current\.has\(key\)[\s\S]{0,180}await getResponseCacheEntry/, "chat hydration must use the synchronous renderer-memory path before IPC");

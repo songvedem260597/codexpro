@@ -36,7 +36,7 @@ import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { chatHistoryRateLimitRecoveryCandidate } from "./chat-recovery-policy.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
-import { mergeRuntimeStatus, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "./ui-performance.js";
+import { mergeRuntimeStatus, normalizeTerminalMessageStreamProfiles, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "./ui-performance.js";
 import { ALL_ALLOWED_WORKSPACES, formatRepoActivity, ProjectDropdown } from "./project-dropdown.jsx";
 import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
 import { WorkerRunningDuration } from "./worker-running-duration.jsx";
@@ -1572,9 +1572,10 @@ function App() {
   useEffect(() => {
     void refresh(true);
     const unsubscribe = api.onBrowserProfiles?.((payload) => {
-      const profiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
+      const incomingProfiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
       setStatus((current) => {
         if (!current) return current;
+        const profiles = normalizeTerminalMessageStreamProfiles(incomingProfiles, current.workerJobs);
         const stabilized = stabilizeEmptyBrowserProfileSnapshot(current.browserProfiles, profiles, {
           emptySinceMs: emptyBrowserSnapshotSince.current,
           removedProfileIds: payload?.disabled_profile_ids
