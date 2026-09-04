@@ -349,9 +349,10 @@ const completedStreamAudit = buildChatResponseAuditRecord({
 });
 assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
 assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
-const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
+const [browserOps, worker, tabPolicyWorker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
+  readFile(join(root, "chrome-extension", "service-worker", "tab-policy.js"), "utf8"),
   readFile(join(root, "src", "server.ts"), "utf8"),
   readFile(join(root, "src", "http.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
@@ -379,10 +380,12 @@ assert.equal(connectorActionLabelMatches("", "codexpro allow all", true), true, 
 assert.equal(connectorActionLabelMatches("", "codexpro conversation", false), false, "non-interactive conversation text must not be mistaken for an installed connector row");
 
 const probeChatActivitySource = worker.slice(worker.indexOf("function probeChatActivityPage()"), worker.indexOf("async function chatDomActivityState"));
-const tabPolicySource = worker.slice(worker.indexOf("function isChatGptTabUrl"), worker.indexOf("async function probeChatGptTabHealth"));
-const planChatTabCleanup = Function("MAX_CHATGPT_TABS", "CHAT_TAB_HEALTH_FAILURES_TO_CLOSE", "conversationIdFromUrl", `${tabPolicySource}; return planChatTabCleanup;`)(6, 2, value => {
-  try { return new URL(String(value || "")).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || ""; } catch { return ""; }
-});
+const tabPolicy = Function("globalThis", `${tabPolicyWorker}; return globalThis.CodexProTabPolicy;`)({});
+const { planChatTabCleanup } = tabPolicy;
+assert.equal(tabPolicy.conversationIdFromUrl("https://chatgpt.com/c/recent-chat?foo=1"), "recent-chat", "tab policy helper must extract ChatGPT conversation ids");
+assert.equal(tabPolicy.isChatGptTabUrl("https://chatgpt.com/#settings/Plugins"), true, "tab policy helper must recognize ChatGPT tabs");
+assert.equal(tabPolicy.isChatGptTabUrl("https://example.com/"), false, "tab policy helper must reject non-ChatGPT tabs");
+assert.equal(tabPolicy.safeTabAuditUrl("https://chatgpt.com/c/recent-chat?secret=1#fragment"), "https://chatgpt.com/c/recent-chat", "tab audit URLs must omit query and fragment data");
 const tabPolicyPlan = planChatTabCleanup([
   { id: 1, url: "https://chatgpt.com/c/recent-chat", active: true, last_accessed: 900 },
   { id: 2, url: "https://chatgpt.com/c/busy-chat", busy: true, last_accessed: 100 },
@@ -392,7 +395,7 @@ const tabPolicyPlan = planChatTabCleanup([
   { id: 6, url: "https://chatgpt.com/c/old-chat", last_accessed: 400 },
   { id: 7, url: "https://chatgpt.com/c/recent-two", last_accessed: 500 },
   { id: 8, url: "https://example.com/", last_accessed: 1 }
-], { maxTabs: 5, recentConversationIds: ["recent-chat", "recent-two"] });
+], { maxTabs: 5, healthFailuresToClose: 2, recentConversationIds: ["recent-chat", "recent-two"] });
 assert.deepEqual(tabPolicyPlan.close_ids, [4, 5], "tab policy must close unreachable tabs first, then the oldest disposable ChatGPT tab until the cap is met");
 assert.equal(tabPolicyPlan.reasons[4], "codexpro_unreachable");
 assert.equal(tabPolicyPlan.reasons[5], "tab_limit");
