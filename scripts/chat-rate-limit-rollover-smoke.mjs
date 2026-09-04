@@ -65,7 +65,7 @@ assert.match(worker, /const activityAnchor=current\.busy[\s\S]*current\.busy_sin
 assert.match(worker, /function resetChatTabDocumentEpoch[\s\S]*realtimeNetworkStreamsByTab\.delete\(tabId\)[\s\S]*chatCanonicalActivityByTab\.delete\(tabId\)[\s\S]*changeInfo\?\.status==='loading'\)resetChatTabDocumentEpoch\(tabId\)/, "same-URL reloads must discard the previous document's realtime and canonical epochs");
 
 assert.match(manager, /chatHistoryRateLimitRecoveryCandidate[\s\S]*forceContinuation: true/, "Manager must automatically move a throttled running task to a continuation chat");
-assert.match(manager, /previousTaskId: recoveryTaskId[\s\S]*taskMode: recoveryTaskId \? "recovery" : "new"/, "recovery rollover must preserve the logical Task ID");
+assert.match(manager, /checkpointContinuation[\s\S]*api\.resumeProfileTask\(\{[\s\S]*taskId: activeTaskId[\s\S]*hangRecovery: true/, "recovery rollover must preserve the logical Task ID through checkpoint-first task resume");
 assert.match(managerMain, /const recoveryRequested = payload\?\.taskMode === "recovery"/, "backend must distinguish recovery from a new FIFO task");
 assert.match(managerMain, /repo_task_mode: recoveryAccepted \? "recovery"/, "backend result must report recovery ownership explicitly");
 assert.match(managerMain, /action: "rebind_profile_task"[\s\S]*task_id: taskId[\s\S]*conversation_id: recoveryConversationId/, "backend must atomically rebind the running task after the new conversation ACK");

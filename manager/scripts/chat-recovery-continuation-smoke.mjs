@@ -36,12 +36,22 @@ assert.match(cachedRead, /response_source:\s*"manager_recent_chat_cache"/, "cach
 const taskCheckpointPrompt = between(managerMain, "function workerJobResumeCheckpointText", "async function sendProfileRequestUnlocked");
 assert.match(taskCheckpointPrompt, /checkpoints = \[\]/, "task resume prompt must accept worker/project checkpoints independently of ChatGPT conversations");
 assert.match(taskCheckpointPrompt, /slice\(-3\)/, "task resume prompt must consume at most the three newest worker/project checkpoints");
+assert.match(taskCheckpointPrompt, /checkpoint\?\.taskId \|\| checkpoint\?\.task_id/, "task resume prompt must defensively reject checkpoints from a different Task ID");
+assert.match(taskCheckpointPrompt, /File quan trọng:/, "task resume prompt must include dedicated important-file checkpoint data");
+assert.match(taskCheckpointPrompt, /Kết quả test:/, "task resume prompt must include dedicated test-result checkpoint data");
 assert.match(taskCheckpointPrompt, /Không truy lại conversation cũ/, "task resume prompt must forbid recovering context by reopening an old conversation");
 const taskResume = between(managerMain, "async function resumeProfileTask", "async function getRepoTaskStatus");
 assert.match(taskResume, /"worker_context_history"/, "task resume must load worker/project context checkpoints from MCP");
 assert.match(taskResume, /worker_id:\s*profileId/, "task resume context must be isolated by worker");
+assert.match(taskResume, /task_id:\s*taskId/, "task resume context must be isolated by exact Task ID");
 assert.match(taskResume, /workerJobResumeCheckpointText\(job, workerContexts\)/, "task resume must inject worker/project checkpoints into the new recovery chat");
 assert.match(taskResume, /newChat:\s*true/, "task resume must create a new chat instead of reopening a remembered conversation id");
+assert.match(taskResume, /requireIdleProfile:\s*!hangRecovery/, "confirmed hang recovery must be allowed to create a new chat before discarding the stale busy tab");
+const canonicalRecovery = between(managerMain, "async function sendProfileRequestUnlocked", "async function sendProfileRequest(payload)");
+assert.match(canonicalRecovery, /recoveryCheckpointText = `\$\{workerJobResumeCheckpointText\(workerJob, recoveryContexts\)\}/, "every recovery-mode send must replace renderer transcript handoff with canonical worker/task checkpoints");
+assert.match(canonicalRecovery, /requestedRecoveryReason[\s\S]*?Lý do phục hồi hiện tại/, "canonical recovery may append only the dedicated recovery reason, not renderer transcript history");
+assert.match(canonicalRecovery, /task_id:\s*previousTaskId/, "recovery-mode checkpoint lookup must be scoped to the exact current Task ID");
+assert.match(canonicalRecovery, /recoveryCheckpointText[\s\S]*?\.join\("\\n"\)/, "recovery-mode prompt must use canonical checkpoint text rather than the renderer transcript payload");
 
 const rolloverPrompt = between(managerUi, "function buildConversationRolloverPrompt", "function ChatRequestComposer");
 assert.match(rolloverPrompt, /continuation_reason \|\| ""\) === "recovery"/, "handoff prompt must distinguish recovery from conversation-limit rollover");
@@ -50,7 +60,7 @@ assert.match(rolloverPrompt, /recovery_reason/, "handoff prompt must include why
 const rollover = between(managerUi, "async function rolloverFullConversation", "async function verifyRepoTaskUse");
 assert.match(rollover, /rolloverReason: continuationReason/, "continuation state must retain the rollover reason");
 assert.match(rollover, /requestTargetsRef\.current = \{ \.\.\.requestTargetsRef\.current, \[profileId\]: newConversationId \}/, "continuation must atomically select the new conversation");
-assert.match(rollover, /previousTaskId: recoveryTaskId[\s\S]*?taskMode: recoveryTaskId \? "recovery" : "new"/, "recovery continuation must preserve the running Task ID instead of enqueuing a new task");
+assert.match(rollover, /checkpointContinuation[\s\S]*?api\.resumeProfileTask\(\{[\s\S]*?taskId: activeTaskId[\s\S]*?hangRecovery: true/, "task continuation must preserve the running Task ID by delegating to checkpoint resume instead of enqueuing a new task");
 
 const openProfile = between(managerMain, "async function openProfileChat", "async function recoverProfileChatTab");
 assert.match(openProfile, /action: "activate_tab"[\s\S]*?conversation_id: conversationId \|\| targetConversationId \|\| undefined/, "open Chrome must pass the expected conversation id to the worker for verification");

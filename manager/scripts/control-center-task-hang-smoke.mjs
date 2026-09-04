@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { detectTaskHangCandidates, createTaskHangTracker } from "../electron/task-hang-tracker.mjs";
+import { TASK_NO_MEANINGFUL_PROGRESS_MS, detectTaskHangCandidates, createTaskHangTracker } from "../electron/task-hang-tracker.mjs";
 
 const taskId = "cpt_aaaaaaaaaaaaaaaaaaaaaaaa";
 const conversationId = "6a99b06d-8240-83ec-aac1-ba4d74f507a3";
@@ -40,7 +40,9 @@ function profile(overrides = {}, tabOverrides = {}) {
 const networkCandidate = detectTaskHangCandidates([profile()], baseNow)[0];
 assert.equal(networkCandidate.source, "network", "transport failures must be classified as network hangs");
 assert.equal(networkCandidate.task_id, taskId);
-assert.equal(networkCandidate.recoverable, true, "a task with stable task/conversation ids must be eligible for continuation");
+assert.equal(networkCandidate.recoverable, true, "a task with a stable Task ID must be eligible for checkpoint continuation");
+const noConversationCandidate = detectTaskHangCandidates([profile({ current_task_conversation_id: "" }, { url: "https://chatgpt.com/" })], baseNow)[0];
+assert.equal(noConversationCandidate.recoverable, true, "checkpoint task recovery must not require a ChatGPT conversation id");
 
 const openAiCandidate = detectTaskHangCandidates([profile({
   rate_limit_incident_count: 2,
@@ -77,6 +79,46 @@ assert.equal(detectTaskHangCandidates([profile({}, {
   network_status_code: 200
 })], baseNow).length, 0, "healthy generation must not create a hang incident");
 
+assert.equal(TASK_NO_MEANINGFUL_PROGRESS_MS, 10 * 60_000, "running tasks must be allowed ten minutes without meaningful progress before stall recovery");
+const staleProgressAt = baseNow - TASK_NO_MEANINGFUL_PROGRESS_MS - 1_000;
+const stalledJob = {
+  job_id: taskId,
+  worker_id: "profile-one",
+  status: "running",
+  started_at: new Date(staleProgressAt - 60_000).toISOString(),
+  updated_at: new Date(staleProgressAt).toISOString(),
+  last_progress_at: new Date(staleProgressAt).toISOString()
+};
+const stalledCandidate = detectTaskHangCandidates([profile({ busy_since: new Date(staleProgressAt).toISOString() }, {
+  network_state: "generating",
+  network_error: "",
+  connection_interrupted: false,
+  network_status_code: 200,
+  network_last_started_at: new Date(staleProgressAt).toISOString(),
+  network_last_completed_at: "",
+  network_stream_updated_at: new Date(staleProgressAt).toISOString()
+})], baseNow, [stalledJob])[0];
+assert.equal(stalledCandidate.source, "stalled", "a running task with no meaningful progress past the threshold must become a stalled incident");
+assert.equal(stalledCandidate.no_meaningful_progress, true);
+assert.equal(stalledCandidate.recoverable, true);
+const freshProgressJob = { ...stalledJob, updated_at: new Date(baseNow - 1_000).toISOString(), last_progress_at: new Date(baseNow - 1_000).toISOString() };
+assert.equal(detectTaskHangCandidates([profile({}, {
+  network_state: "generating",
+  network_error: "",
+  connection_interrupted: false,
+  network_status_code: 200,
+  network_last_started_at: new Date(baseNow - 1_000).toISOString(),
+  network_last_completed_at: "",
+  network_stream_updated_at: new Date(baseNow - 1_000).toISOString()
+})], baseNow, [freshProgressJob]).length, 0, "recent worker or stream progress must suppress false stall recovery");
+const noTabStalled = detectTaskHangCandidates([profile({
+  busy_since: new Date(staleProgressAt).toISOString(),
+  current_task_conversation_id: "",
+  conversation_tabs: []
+})], baseNow, [stalledJob])[0];
+assert.equal(noTabStalled?.source, "stalled", "checkpoint stall detection must survive a missing ChatGPT tab/conversation");
+assert.equal(noTabStalled?.tab_id, 0);
+
 const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-task-hang-"));
 let now = baseNow;
 const tracker = createTaskHangTracker({ home: tempHome, now: () => now });
@@ -109,6 +151,22 @@ try {
   const reloadedSnapshot = reloadedTracker.snapshot();
   assert.equal(reloadedSnapshot.summary.total_count, 2, "a fresh Manager tracker must reload persisted hang history");
   assert.equal(reloadedSnapshot.incidents[0].occurrence, 2, "persisted occurrence counters must survive Manager restart");
+
+  const stalledTracker = createTaskHangTracker({ home: path.join(tempHome, "stalled"), now: () => baseNow });
+  const stalledProfile = profile({ busy_since: new Date(staleProgressAt).toISOString() }, {
+    network_state: "generating",
+    network_error: "",
+    connection_interrupted: false,
+    network_status_code: 200,
+    network_last_started_at: new Date(staleProgressAt).toISOString(),
+    network_last_completed_at: "",
+    network_stream_updated_at: new Date(staleProgressAt).toISOString()
+  });
+  let stalledSnapshot = stalledTracker.reconcile([stalledProfile], [stalledJob]);
+  assert.equal(stalledSnapshot.incidents[0]?.source, "stalled");
+  stalledSnapshot = stalledTracker.reconcile([stalledProfile], [stalledJob]);
+  assert.equal(stalledSnapshot.incidents[0]?.source, "stalled", "reconciling an existing stalled incident must not downgrade it to network");
+  assert.equal(stalledSnapshot.summary.stalled_count, 1);
 } finally {
   fs.rmSync(tempHome, { recursive: true, force: true });
 }
@@ -124,11 +182,19 @@ assert.match(controlCenter, /Đóng tab \+ tiếp tục task/, "active hang rows
 assert.match(controlCenter, /onRecover\(profile, \{ conversationId: incident\.conversation_id, targetTab \}\)/, "same-tab recovery must target the exact incident conversation/tab");
 assert.match(controlCenter, /onContinueAfterHang\(incident\)/, "continuation action must be delegated to the existing recovery path");
 assert.match(controlStyles, /\.control-hang-row\.is-active\.is-openai/, "OpenAI hangs must have a distinct active incident state");
-assert.match(main, /async function continueTaskAfterHang\(incident\)[\s\S]*?forceContinuation: true[\s\S]*?taskId,[\s\S]*?conversationId,[\s\S]*?targetTab/, "close-and-continue must force a continuation while preserving the current task id and exact tab");
+assert.match(main, /taskHangIncidents[\s\S]*?no_meaningful_progress[\s\S]*?continueTaskFromCheckpoint\(profile, taskId,[\s\S]*?automatic: true/, "Auto Recovery must continue stale running tasks from checkpoints without reopening the old conversation");
+const checkpointRecoveryStart = main.indexOf("async function continueTaskFromCheckpoint(profile, taskId, options = {})");
+const hangContinuationStart = main.indexOf("async function continueTaskAfterHang(incident)");
+const checkpointRecovery = main.slice(checkpointRecoveryStart, hangContinuationStart);
+const hangContinuation = main.slice(hangContinuationStart, main.indexOf("async function stopControlTask", hangContinuationStart));
+assert.match(checkpointRecovery, /api\.resumeProfileTask\(\{[\s\S]*?profileId[\s\S]*?taskId: normalizedTaskId[\s\S]*?hangRecovery: true/, "checkpoint recovery must resume the exact Task ID in a new recovery chat");
+assert.match(checkpointRecovery, /recoverProfileChat\([\s\S]*?discardOnly: true/, "old stuck tab must be discarded only after checkpoint recovery creates the new chat");
+assert.match(hangContinuation, /continueTaskFromCheckpoint\(profile, taskId, \{/, "Control Center hang continuation must delegate to checkpoint recovery");
+assert.doesNotMatch(hangContinuation, /recoverProfileTab\(/, "Control Center hang continuation must not route through transcript/conversation recovery");
 assert.match(main, /onContinueAfterHang=\{\(incident\) => void continueTaskAfterHang\(incident\)\}/, "Control Center must receive the continuation handler");
 assert.match(electronMain, /createTaskHangTracker\(\{ home: codexProHome \}\)/, "Manager must persist task hang incidents under CodexPro home");
-assert.match(electronMain, /taskHangTracker\.reconcile\(taskBrowserProfiles\)/, "runtime status must reconcile hang state only from live browser profiles that already qualify as source-changing Tasks");
-assert.match(electronMain, /browserProfileSnapshot\.available && workerJobSnapshot\.available[\s\S]*?\? taskHangTracker\.reconcile\(taskBrowserProfiles\)[\s\S]*?: taskHangTracker\.snapshot\(\)/, "a temporary profile or worker-job snapshot outage must preserve active hang incidents instead of falsely resolving them");
+assert.match(electronMain, /taskHangTracker\.reconcile\(taskBrowserProfiles,\s*workerJobs\)/, "runtime status must reconcile hang state from source-changing Tasks with worker progress for stall detection");
+assert.match(electronMain, /browserProfileSnapshot\.available && workerJobSnapshot\.available[\s\S]*?\? taskHangTracker\.reconcile\(taskBrowserProfiles,\s*workerJobs\)[\s\S]*?: taskHangTracker\.snapshot\(\)/, "a temporary profile or worker-job snapshot outage must preserve active hang incidents instead of falsely resolving them");
 assert.match(electronMain, /taskHangIncidents: taskHangTracking\.incidents[\s\S]*?taskHangSummary: taskHangTracking\.summary/, "runtime status must expose hang incidents and aggregate statistics");
 
 console.log("✓ Control Center task hang management smoke test passed");

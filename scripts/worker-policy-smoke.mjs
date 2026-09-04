@@ -90,6 +90,8 @@ try {
     summary: "Implementation complete; tests remain.",
     reason: "Waiting for verification before finalizing.",
     evidence: "src/workerPolicy.ts updated",
+    importantFiles: ["src/workerPolicy.ts", "src/workerContext.ts"],
+    testResult: "pending",
     progressPercent: 40,
     completedParts: ["implementation"],
     remainingParts: ["tests", "commit", "push"]
@@ -104,6 +106,8 @@ try {
   assert.deepEqual(publicProgress.remaining_parts, ["tests", "commit", "push"]);
   assert.deepEqual(publicProgress.progress_reports[0].completed_parts, ["implementation"]);
   assert.deepEqual(publicProgress.progress_reports[0].remaining_parts, ["tests", "commit", "push"]);
+  assert.deepEqual(publicProgress.progress_reports[0].important_files, ["src/workerPolicy.ts", "src/workerContext.ts"]);
+  assert.equal(publicProgress.progress_reports[0].test_result, "pending");
   await assert.rejects(
     () => finalizeWorkerJob({ jobId: codeId, workerId: "api.custom", outcome: "completed" }),
     /unfinished parts remain: tests, commit, push/
@@ -146,10 +150,11 @@ try {
     workerId: "api.custom",
     stage: "all_parts_done",
     summary: "Implementation work is done; verification and delivery remain.",
-    progressPercent: 90,
+    progressPercent: 100,
     completedParts: ["implementation"],
     remainingParts: ["tests", "commit", "push"]
   });
+  assert.equal(workerJobPublicRecord(partsDoneProgress).progress_percent, 99, "running progress must not show 100% while remaining_parts is non-empty");
   assert.deepEqual(workerJobPublicRecord(partsDoneProgress).remaining_parts, ["tests", "commit", "push"], "all_parts_done must not erase unfinished verification/delivery steps");
   await assert.rejects(
     () => finalizeWorkerJob({ jobId: codeId, workerId: "api.custom", outcome: "completed" }),
@@ -161,19 +166,24 @@ try {
     stage: "verifying",
     summary: "Tests, commit, and push are complete.",
     evidence: "verification passed",
+    importantFiles: ["src/workerPolicy.ts", "src/workerContext.ts"],
+    testResult: "PASS worker-policy-smoke",
     progressPercent: 99,
     completedParts: ["implementation", "tests", "commit", "push"],
     remainingParts: []
   });
   assert.equal(workerJobPublicRecord(verifyingProgress).progress_percent, 99);
   assert.deepEqual(workerJobPublicRecord(verifyingProgress).remaining_parts, []);
-  const workerContexts = listWorkerContextCheckpoints({ workerId: "api.custom", root: "C:\\repo", scope: "workspace" });
-  assert.equal(workerContexts.length, MAX_WORKER_CONTEXT_CHECKPOINTS, "worker/project recovery context must retain exactly three newest checkpoints");
+  const workerContexts = listWorkerContextCheckpoints({ workerId: "api.custom", root: "C:\\repo", scope: "workspace", taskId: codeId });
+  assert.equal(workerContexts.length, MAX_WORKER_CONTEXT_CHECKPOINTS, "worker/project/task recovery context must retain exactly three newest checkpoints without mixing another task");
   assert.deepEqual(
     workerContexts.map((checkpoint) => checkpoint.summary),
     ["Verification command failed.", "Implementation work is done; verification and delivery remain.", "Tests, commit, and push are complete."],
     "the fourth and later progress report must evict the oldest worker/project context"
   );
+  assert.deepEqual(workerContexts.at(-1)?.importantFiles, ["src/workerPolicy.ts", "src/workerContext.ts"], "checkpoint must retain important files as a dedicated field");
+  assert.equal(workerContexts.at(-1)?.testResult, "PASS worker-policy-smoke", "checkpoint must retain test result as a dedicated field");
+  assert.equal(listWorkerContextCheckpoints({ workerId: "api.custom", root: "C:\\repo", scope: "workspace", taskId: "cpt_999999999999999999999999" }).length, 0, "task-scoped recovery must never mix checkpoints from another task in the same worker/project");
   assert.equal(listWorkerContextCheckpoints({ workerId: "api.custom", root: "C:\\other-repo", scope: "workspace" }).length, 0, "worker context must not leak across projects");
   assert.equal(listWorkerContextCheckpoints({ workerId: "api.other", root: "C:\\repo", scope: "workspace" }).length, 0, "worker context must not leak across workers");
   assert.doesNotMatch(JSON.stringify(workerContexts), /conversation(?:Id|_id)|chatgpt\.com\/c\//i, "worker recovery context must not persist ChatGPT conversation identity");

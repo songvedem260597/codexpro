@@ -30,7 +30,7 @@ assert.match(source, /const unfinishedTasks = taskWorkerJobs\.filter[\s\S]*?task
 assert.ok(source.indexOf("UPDATE CENTER") < source.indexOf("TASK CENTER"), "Update Center must be the first coordination section before Task Center");
 assert.match(main, /"worker_job_history"[\s\S]*?statuses: \["prepared", "running", "completed", "failed", "cancelled", "blocked"\]/, "Manager must load queued, unfinished, and terminal task history through MCP");
 assert.match(main, /const countedTaskIds = new Set\(workerJobs[\s\S]*?counts_as_task === true/, "runtime status must derive Task identity from proven source changes");
-assert.match(main, /taskHangTracker\.reconcile\(taskBrowserProfiles\)/, "task hang tracking must exclude analysis/build-only worker jobs that never changed source");
+assert.match(main, /taskHangTracker\.reconcile\(taskBrowserProfiles,\s*workerJobs\)/, "task hang tracking must exclude analysis/build-only worker jobs that never changed source while using worker-job progress for stall detection");
 assert.match(main, /taskUnfinalizedIncidents\(workerJobs\.filter\(\(job\) => job\?\.counts_as_task === true\)/, "unfinalized-task diagnostics must ignore non-task worker jobs");
 assert.match(main, /build\/test-only, commit-only hoặc push-only không được tính là Task/, "Manager dispatch prompt must explain that repository access kind is not the user-visible Task classification");
 assert.match(renderer, /const countsAsTask = job\?\.counts_as_task === true[\s\S]*?const previousCountsAsTask = previous\.countsAsTask \|\| previousJob\?\.counts_as_task === true[\s\S]*?previousCountsAsTask[\s\S]*?countsAsTask && !previous\.failed && failed/, "Windows task notifications must fire only for source-changing jobs");

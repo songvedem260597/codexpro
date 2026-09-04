@@ -29,6 +29,8 @@ export type WorkerJobProgressReport = {
   summary: string;
   reason?: string;
   evidence?: string;
+  importantFiles: string[];
+  testResult?: string;
   blockedPart?: string;
   completedParts: string[];
   remainingParts: string[];
@@ -165,13 +167,14 @@ function deriveProgressPercent(input: {
   remainingParts: string[];
   currentPercent?: number;
 }): number {
-  if (input.explicit != null && Number.isFinite(Number(input.explicit))) return normalizeProgressPercent(input.explicit);
+  const capUnfinished = (value: number) => input.remainingParts.length ? Math.min(99, value) : value;
+  if (input.explicit != null && Number.isFinite(Number(input.explicit))) return capUnfinished(normalizeProgressPercent(input.explicit));
   if (input.stage === "started") return 0;
-  if (input.stage === "all_parts_done") return 95;
-  if (input.stage === "verifying") return Math.max(95, normalizeProgressPercent(input.currentPercent));
+  if (input.stage === "all_parts_done") return capUnfinished(95);
+  if (input.stage === "verifying") return capUnfinished(Math.max(95, normalizeProgressPercent(input.currentPercent)));
   const total = input.completedParts.length + input.remainingParts.length;
   if (total > 0) return Math.min(95, Math.round((input.completedParts.length / total) * 100));
-  return normalizeProgressPercent(input.currentPercent);
+  return capUnfinished(normalizeProgressPercent(input.currentPercent));
 }
 
 function normalizeProgressReport(value: unknown): WorkerJobProgressReport | undefined {
@@ -189,6 +192,8 @@ function normalizeProgressReport(value: unknown): WorkerJobProgressReport | unde
     summary,
     reason: clean(source.reason, 2000) || undefined,
     evidence: clean(source.evidence, 2000) || undefined,
+    importantFiles: uniqueStrings(source.importantFiles, 30),
+    testResult: clean(source.testResult, 2000) || undefined,
     blockedPart: clean(source.blockedPart, 300) || undefined,
     completedParts: uniqueStrings(source.completedParts, 50),
     remainingParts: uniqueStrings(source.remainingParts, 50),
@@ -495,6 +500,8 @@ export async function reportWorkerJobProgress(input: {
   summary: string;
   reason?: string;
   evidence?: string;
+  importantFiles?: string[];
+  testResult?: string;
   progressPercent?: number;
   blockedPart?: string;
   completedParts?: string[];
@@ -535,6 +542,8 @@ export async function reportWorkerJobProgress(input: {
       summary,
       reason: clean(input.reason, 2000) || undefined,
       evidence: clean(input.evidence, 2000) || undefined,
+      importantFiles: uniqueStrings(input.importantFiles, 30),
+      testResult: clean(input.testResult, 2000) || undefined,
       blockedPart: clean(input.blockedPart, 300) || undefined,
       completedParts,
       remainingParts,
@@ -565,6 +574,8 @@ export async function reportWorkerJobProgress(input: {
         progress_percent: progressPercent,
         summary: summary.slice(0, 500),
         reason: report.reason?.slice(0, 500),
+        important_files: report.importantFiles,
+        test_result: report.testResult?.slice(0, 500),
         blocked_part: report.blockedPart,
         completed_parts: report.completedParts,
         remaining_parts: report.remainingParts,
@@ -590,6 +601,8 @@ export async function reportWorkerJobProgress(input: {
       summary: report.summary,
       reason: report.reason,
       evidence: report.evidence,
+      importantFiles: report.importantFiles,
+      testResult: report.testResult,
       blockedPart: report.blockedPart,
       completedParts: report.completedParts,
       remainingParts: report.remainingParts,
@@ -734,6 +747,8 @@ export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Reco
       summary: report.summary,
       reason: report.reason,
       evidence: report.evidence,
+      important_files: report.importantFiles,
+      test_result: report.testResult,
       blocked_part: report.blockedPart,
       completed_parts: report.completedParts,
       remaining_parts: report.remainingParts,

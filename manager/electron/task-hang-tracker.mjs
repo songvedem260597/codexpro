@@ -7,6 +7,7 @@ const MAX_INCIDENTS = 500;
 const SNAPSHOT_LIMIT = 160;
 const ACTIVE_PERSIST_INTERVAL_MS = 30_000;
 const RECENT_ERROR_WINDOW_MS = 10 * 60_000;
+export const TASK_NO_MEANINGFUL_PROGRESS_MS = 10 * 60_000;
 
 function asTime(value) {
   const parsed = Date.parse(String(value || ""));
@@ -48,15 +49,41 @@ function selectedTaskTab(profile) {
     || null;
 }
 
-function hangCandidateForProfile(profile, nowMs) {
+function jobForTask(jobs, profileId, taskId) {
+  return (Array.isArray(jobs) ? jobs : []).find((job) => {
+    const jobId = String(job?.job_id || job?.jobId || "").trim();
+    const workerId = String(job?.worker_id || job?.workerId || "").trim();
+    return jobId === taskId && (!workerId || workerId === profileId);
+  }) || null;
+}
+
+function latestMeaningfulProgressAt(profile, tab, job) {
+  return Math.max(
+    asTime(job?.last_progress_at || job?.lastProgressAt),
+    asTime(job?.updated_at || job?.updatedAt),
+    asTime(job?.started_at || job?.startedAt),
+    asTime(tab?.network_stream_updated_at),
+    asTime(tab?.network_last_started_at),
+    asTime(tab?.network_last_completed_at),
+    asTime(profile?.busy_since)
+  );
+}
+
+function hangCandidateForProfile(profile, nowMs, jobs = []) {
   const profileId = String(profile?.profile_id || "").trim();
   const taskId = String(profile?.current_task_id || "").trim();
   const taskTitle = String(profile?.current_task_title || profile?.active_chat_title || "Task CodexPro").trim();
   const tab = selectedTaskTab(profile);
-  if (!profileId || !tab?.id) return null;
+  if (!profileId || !taskId) return null;
   const activity = String(profile?.activity || "").toLowerCase();
-  const taskLive = Boolean(taskId) && (activity === "working" || activity === "settling" || Number(profile?.busy_request_count || 0) > 0 || tab?.busy || tab?.settling || tab?.long_task_watchdog_hung);
+  const taskLive = activity === "working" || activity === "settling" || Number(profile?.busy_request_count || 0) > 0 || tab?.busy || tab?.settling || tab?.long_task_watchdog_hung;
   if (!taskLive) return null;
+
+  const job = jobForTask(jobs, profileId, taskId);
+  const jobStatus = String(job?.status || "").toLowerCase();
+  const progressAnchorAt = latestMeaningfulProgressAt(profile, tab, job);
+  const noMeaningfulProgress = Boolean(jobStatus === "running" && progressAnchorAt > 0 && nowMs - progressAnchorAt >= TASK_NO_MEANINGFUL_PROGRESS_MS);
+  if (!tab?.id && !noMeaningfulProgress) return null;
 
   const networkState = String(tab?.network_state || "").toLowerCase();
   const networkError = String(tab?.network_error || "").trim();
@@ -78,30 +105,32 @@ function hangCandidateForProfile(profile, nowMs) {
   const statusCode = directStatus || (rateRelevant ? rateStatus || 429 : 0) || inferredStatus;
   const openAiError = messageStreamError || statusCode >= 400 || (rateRelevant && Number(tab?.rate_limit_incident_count || profile?.rate_limit_incident_count || 0) > 0);
   const networkTransportError = connectionInterrupted || deliveryTimedOut || /\b(?:net::|ERR_|fetch failed|network|connection|socket|timeout|timed out|offline)\b/i.test(networkError);
-  const hangSignal = networkFailed || (watchdogHung && (openAiError || networkTransportError || rateRelevant || flightRelevant));
+  const hangSignal = networkFailed || noMeaningfulProgress || (watchdogHung && (openAiError || networkTransportError || rateRelevant || flightRelevant));
   if (!hangSignal) return null;
 
-  const source = openAiError ? "openai" : "network";
+  const source = openAiError ? "openai" : noMeaningfulProgress ? "stalled" : "network";
   const conversationId = String(profile?.current_task_conversation_id || conversationIdFromUrl(tab?.url));
   const errorHintAt = Math.max(
     rateRelevant ? rateAt : 0,
     flightRelevant ? flightAt : 0,
     networkState === "failed" ? asTime(tab?.network_last_completed_at) : 0
   );
-  const startedHintMs = errorHintAt || nowMs;
+  const startedHintMs = noMeaningfulProgress ? Math.min(nowMs, progressAnchorAt + TASK_NO_MEANINGFUL_PROGRESS_MS) : errorHintAt || nowMs;
   const message = (
     openAiError
       ? (rateRelevant ? rateMessage : "") || (flightRelevant ? flightMessage : "") || networkError
       : networkError
-  ) || (messageStreamError ? "ChatGPT báo Error in message stream." : deliveryTimedOut ? "Gửi tin nhắn vượt thời gian chờ." : connectionInterrupted ? "Kết nối tới ChatGPT bị gián đoạn." : watchdogHung ? "Watchdog xác nhận task không còn tiến triển sau lỗi mạng." : "Task bị treo sau lỗi mạng.");
-  const causes = [openAiError ? "openai" : "", networkTransportError || !openAiError ? "network" : ""].filter(Boolean);
+  ) || (noMeaningfulProgress
+    ? `Task vẫn ở trạng thái running nhưng không có tiến triển có ý nghĩa trong ${Math.round(TASK_NO_MEANINGFUL_PROGRESS_MS / 60_000)} phút.`
+    : messageStreamError ? "ChatGPT báo Error in message stream." : deliveryTimedOut ? "Gửi tin nhắn vượt thời gian chờ." : connectionInterrupted ? "Kết nối tới ChatGPT bị gián đoạn." : watchdogHung ? "Watchdog xác nhận task không còn tiến triển sau lỗi mạng." : "Task bị treo sau lỗi mạng.");
+  const causes = [openAiError ? "openai" : "", noMeaningfulProgress ? "stalled" : "", networkTransportError ? "network" : ""].filter(Boolean);
   return {
-    key: `${profileId}:${taskId}:${conversationId || "no-conversation"}:${Number(tab.id)}`,
+    key: `${profileId}:${taskId}:${conversationId || "no-conversation"}:${Number(tab?.id) || 0}:${source}`,
     profile_id: profileId,
     task_id: taskId,
     task_title: taskTitle,
     conversation_id: conversationId,
-    tab_id: Number(tab.id),
+    tab_id: Number(tab?.id) || 0,
     tab_title: String(tab?.title || profile?.active_chat_title || "ChatGPT").slice(0, 300),
     source,
     causes: [...new Set(causes)],
@@ -109,13 +138,15 @@ function hangCandidateForProfile(profile, nowMs) {
     message: String(message).slice(0, 900),
     network_state: networkState,
     network_error: networkError.slice(0, 500),
+    progress_anchor_at: progressAnchorAt ? new Date(progressAnchorAt).toISOString() : "",
+    no_meaningful_progress: noMeaningfulProgress,
     started_hint_ms: Math.max(0, Math.min(nowMs, startedHintMs)),
-    recoverable: /^cpt_[a-f0-9]{24}$/.test(taskId) && Boolean(conversationId)
+    recoverable: /^cpt_[a-f0-9]{24}$/.test(taskId)
   };
 }
 
-export function detectTaskHangCandidates(profiles, nowMs = Date.now()) {
-  return (Array.isArray(profiles) ? profiles : []).map((profile) => hangCandidateForProfile(profile, nowMs)).filter(Boolean);
+export function detectTaskHangCandidates(profiles, nowMs = Date.now(), jobs = []) {
+  return (Array.isArray(profiles) ? profiles : []).map((profile) => hangCandidateForProfile(profile, nowMs, jobs)).filter(Boolean);
 }
 
 function safeIncident(value) {
@@ -131,12 +162,14 @@ function safeIncident(value) {
     conversation_id: String(value.conversation_id || "").slice(0, 180),
     tab_id: Math.max(0, Number(value.tab_id) || 0),
     tab_title: String(value.tab_title || "ChatGPT").slice(0, 300),
-    source: value.source === "openai" ? "openai" : "network",
-    causes: Array.isArray(value.causes) ? value.causes.map(String).filter((item) => ["openai", "network"].includes(item)).slice(0, 2) : [],
+    source: ["openai", "stalled"].includes(value.source) ? value.source : "network",
+    causes: Array.isArray(value.causes) ? value.causes.map(String).filter((item) => ["openai", "network", "stalled"].includes(item)).slice(0, 3) : [],
     status_code: Math.max(0, Number(value.status_code) || 0),
     message: String(value.message || "").slice(0, 900),
     network_state: String(value.network_state || "").slice(0, 40),
     network_error: String(value.network_error || "").slice(0, 500),
+    progress_anchor_at: String(value.progress_anchor_at || "").slice(0, 64),
+    no_meaningful_progress: value.no_meaningful_progress === true,
     started_at_ms: startedMs,
     started_at: String(value.started_at || new Date(startedMs).toISOString()).slice(0, 64),
     last_seen_ms: Math.max(startedMs, Number(value.last_seen_ms) || startedMs),
@@ -164,6 +197,7 @@ export function summarizeTaskHangIncidents(values, nowMs = Date.now()) {
       total_count: incidents.length,
       network_count: incidents.filter((incident) => incident.source === "network").length,
       openai_count: incidents.filter((incident) => incident.source === "openai").length,
+      stalled_count: incidents.filter((incident) => incident.source === "stalled").length,
       total_duration_ms: durations.reduce((total, value) => total + value, 0),
       longest_duration_ms: durations.reduce((longest, value) => Math.max(longest, value), 0),
       latest_at: visible[0]?.started_at || ""
@@ -203,10 +237,10 @@ export function createTaskHangTracker({ home, now = () => Date.now() } = {}) {
     }
   };
 
-  const reconcile = (profiles) => {
+  const reconcile = (profiles, jobs = []) => {
     load();
     const nowMs = now();
-    const candidates = detectTaskHangCandidates(profiles, nowMs);
+    const candidates = detectTaskHangCandidates(profiles, nowMs, jobs);
     const currentKeys = new Set(candidates.map((candidate) => candidate.key));
     let changed = false;
 
@@ -232,7 +266,9 @@ export function createTaskHangTracker({ home, now = () => Date.now() } = {}) {
         incidents = incidents.slice(-MAX_INCIDENTS);
         changed = true;
       } else {
-        const nextSource = active.source === "openai" || candidate.source === "openai" ? "openai" : "network";
+        const nextSource = active.source === "openai" || candidate.source === "openai"
+          ? "openai"
+          : active.source === "stalled" || candidate.source === "stalled" ? "stalled" : "network";
         const nextCauses = [...new Set([...(active.causes || []), ...(candidate.causes || [])])];
         const metadataChanged = active.source !== nextSource || active.status_code !== candidate.status_code || active.message !== candidate.message || active.network_state !== candidate.network_state || active.network_error !== candidate.network_error || active.recoverable !== candidate.recoverable || nextCauses.join("|") !== (active.causes || []).join("|");
         Object.assign(active, candidate, {

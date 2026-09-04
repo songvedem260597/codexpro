@@ -36,6 +36,8 @@ export type WorkerContextCheckpoint = {
   summary: string;
   reason?: string;
   evidence?: string;
+  importantFiles: string[];
+  testResult?: string;
   blockedPart?: string;
   completedParts: string[];
   remainingParts: string[];
@@ -118,6 +120,8 @@ function normalizeCheckpoint(value: unknown): WorkerContextCheckpoint | undefine
     summary,
     reason: clean(source.reason, 1200) || undefined,
     evidence: clean(source.evidence, 1200) || undefined,
+    importantFiles: uniqueStrings(source.importantFiles, 30),
+    testResult: clean(source.testResult, 1200) || undefined,
     blockedPart: clean(source.blockedPart, 300) || undefined,
     completedParts: uniqueStrings(source.completedParts),
     remainingParts: uniqueStrings(source.remainingParts),
@@ -185,13 +189,17 @@ export function listWorkerContextCheckpoints(input: {
   workerId: string;
   root?: string;
   scope?: WorkerContextScope;
+  taskId?: string;
 }): WorkerContextCheckpoint[] {
   const workerId = clean(input.workerId, 160);
   const scope: WorkerContextScope = input.scope === "all_allowed" ? "all_allowed" : "workspace";
+  const taskId = clean(input.taskId, 40);
   if (!workerId) return [];
+  if (taskId && !/^cpt_[a-f0-9]{24}$/.test(taskId)) return [];
   const key = groupKey(workerId, input.root, scope);
   return readStore()
     .filter((checkpoint) => groupKey(checkpoint.workerId, checkpoint.root, checkpoint.scope) === key)
+    .filter((checkpoint) => !taskId || checkpoint.taskId === taskId)
     .sort((left, right) => (Date.parse(left.at) - Date.parse(right.at)) || (left.sequence - right.sequence))
     .slice(-MAX_WORKER_CONTEXT_CHECKPOINTS);
 }

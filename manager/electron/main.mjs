@@ -2667,7 +2667,7 @@ async function collectRuntimeStatus(options = {}) {
   const workerStatus = await workerPluginRegistry.list({ browserProfiles });
   const taskBrowserProfiles = browserProfiles.filter((profile) => countedTaskIds.has(String(profile?.current_task_id || "")));
   const taskHangTracking = browserProfileSnapshot.available && workerJobSnapshot.available
-    ? taskHangTracker.reconcile(taskBrowserProfiles)
+    ? taskHangTracker.reconcile(taskBrowserProfiles, workerJobs)
     : taskHangTracker.snapshot();
   for (const incident of taskUnfinalizedIncidents(workerJobs.filter((job) => job?.counts_as_task === true), { profiles: taskBrowserProfiles, workers: workerStatus.workers })) {
     if (!diagnosticAllowed(incident.fingerprint, TASK_UNFINALIZED_REPEAT_MS)) continue;
@@ -3855,7 +3855,10 @@ function workerJobField(job, snake, camel = "") {
 }
 
 function workerJobResumeCheckpointText(job, checkpoints = []) {
-  const recent = (Array.isArray(checkpoints) ? checkpoints : []).slice(-3);
+  const taskId = String(workerJobField(job, "job_id", "jobId") || "").trim();
+  const recent = (Array.isArray(checkpoints) ? checkpoints : [])
+    .filter((checkpoint) => !taskId || String(checkpoint?.taskId || checkpoint?.task_id || "") === taskId)
+    .slice(-3);
   const contextLines = recent.flatMap((checkpoint, index) => {
     const completed = Array.isArray(checkpoint?.completedParts) ? checkpoint.completedParts : [];
     const remaining = Array.isArray(checkpoint?.remainingParts) ? checkpoint.remainingParts : [];
@@ -3863,11 +3866,15 @@ function workerJobResumeCheckpointText(job, checkpoints = []) {
     const progress = Math.max(0, Math.min(100, Number(checkpoint?.progressPercent) || 0));
     const reason = String(checkpoint?.reason || checkpoint?.blockedPart || "").trim();
     const evidence = String(checkpoint?.evidence || "").trim();
+    const importantFiles = Array.isArray(checkpoint?.importantFiles) ? checkpoint.importantFiles : Array.isArray(checkpoint?.important_files) ? checkpoint.important_files : [];
+    const testResult = String(checkpoint?.testResult || checkpoint?.test_result || "").trim();
     return [
       `Checkpoint ${index + 1}/${recent.length} · ${String(checkpoint?.taskTitle || job?.title || "Task CodexPro").trim()} · ${String(checkpoint?.stage || "unknown")} · ${Math.round(progress)}%.`,
       `Tóm tắt: ${String(checkpoint?.summary || "").trim() || "Không có tóm tắt."}`,
       completed.length ? `Đã xong: ${completed.join(" | ")}` : "",
       remaining.length ? `Còn lại: ${remaining.join(" | ")}` : "",
+      importantFiles.length ? `File quan trọng: ${importantFiles.join(" | ")}` : "",
+      testResult ? `Kết quả test: ${testResult}` : "",
       checklist.length ? `Checklist: ${checklist.map((item) => `${item.id}=${item.status}${item.evidence ? ` (${item.evidence})` : ""}`).join(" | ")}` : "",
       reason ? `Lỗi/chặn: ${reason}` : "",
       evidence ? `Bằng chứng: ${evidence}` : ""
@@ -3875,8 +3882,8 @@ function workerJobResumeCheckpointText(job, checkpoints = []) {
   });
   if (contextLines.length) {
     return [
-      `Tiếp tục task “${String(job?.title || "Task CodexPro").trim()}” bằng 3 checkpoint công việc gần nhất của worker trong project này.`,
-      "Ngữ cảnh phục hồi bên dưới độc lập với ChatGPT conversation/tab cũ:",
+      `Tiếp tục task “${String(job?.title || "Task CodexPro").trim()}” bằng tối đa 3 checkpoint gần nhất của chính task này trong worker + project hiện tại.`,
+      "Ngữ cảnh phục hồi bên dưới độc lập với ChatGPT conversation/tab cũ và không được trộn checkpoint của task khác:",
       ...contextLines,
       "Không truy lại conversation cũ. Đối chiếu source/trạng thái hiện tại, tiếp tục từ phần còn lại và verify đầy đủ trước khi kết thúc."
     ].join("\n");
@@ -3909,6 +3916,7 @@ async function sendProfileRequestUnlocked(payload) {
   const adjustmentRequested = payload?.taskMode === "adjustment";
   const recoveryRequested = payload?.taskMode === "recovery";
   const text = String(payload?.text || "").trim();
+  const requestedRecoveryReason = String(payload?.recoveryReason || "").trim().slice(0, 600);
   const requestedWorkflow = String(payload?.workflow || "").trim();
   const taskWorkflow = adjustmentRequested || recoveryRequested ? null : resolveTaskWorkflow(requestedWorkflow, text);
   const requestedScope = payload?.scope === "all_allowed" ? "all_allowed" : "workspace";
@@ -3924,6 +3932,7 @@ async function sendProfileRequestUnlocked(payload) {
   let adjustmentAccepted = false;
   let recoveryAccepted = false;
   let existingWorkerJobStatus = "";
+  let recoveryCheckpointText = text;
   const toolRetry = Boolean(payload?.toolRetry);
   const toolRolloverCount = Math.max(0, Math.min(1, Number(payload?.toolRolloverCount) || 0));
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
@@ -4066,6 +4075,20 @@ async function sendProfileRequestUnlocked(payload) {
         && ["prepared", "running"].includes(existingWorkerJobStatus)
       );
       if (!recoveryAccepted) throw new Error("RECOVERY_TASK_NOT_ACTIVE: Task cũ đã kết thúc hoặc không còn thuộc profile này; không tạo chat phục hồi để tránh chạy trùng.");
+      const recoveryScope = workerJob.scope === "all_allowed" ? "all_allowed" : "workspace";
+      let recoveryContexts = [];
+      try {
+        const contextResult = await localMcpToolInSession(session, "worker_context_history", {
+          worker_id: profileId,
+          root: String(workerJob.root || "").trim(),
+          scope: recoveryScope,
+          task_id: previousTaskId
+        }, 15000);
+        recoveryContexts = Array.isArray(contextResult?.checkpoints) ? contextResult.checkpoints.slice(-3) : [];
+      } catch {
+        recoveryContexts = [];
+      }
+      recoveryCheckpointText = `${workerJobResumeCheckpointText(workerJob, recoveryContexts)}${requestedRecoveryReason ? `\n\nLý do phục hồi hiện tại: ${requestedRecoveryReason}` : ""}`;
     } else {
       adjustmentAccepted = acceptsLogicalTaskAdjustment({
         profileId,
@@ -4152,7 +4175,7 @@ async function sendProfileRequestUnlocked(payload) {
   const taskStatusProtocolLines = [
     ...buildAutonomousTaskExecutionPolicy(taskId),
     "BẮT BUỘC báo tiến độ task qua MCP CodexPro bằng trạng thái có cấu trúc, không chỉ mô tả bằng câu trả lời văn bản.",
-    `Sau mỗi phần việc có ý nghĩa đã xong, gọi tool MCP CodexPro "codexpro" với action="report_worker_job_progress" và args có "task_id":"${taskId}", "stage":"partial", "progress_percent":<0-100>, "summary":"<đã xong gì>", "completed_parts":[...], "remaining_parts":[...], và "checklist":[...] cho task vừa/lớn. Các mảng phải phản ánh toàn bộ snapshot hiện tại, không chỉ phần vừa thay đổi.`,
+    `Sau mỗi phần việc có ý nghĩa đã xong, gọi tool MCP CodexPro "codexpro" với action="report_worker_job_progress" và args có "task_id":"${taskId}", "stage":"partial", "progress_percent":<0-100>, "summary":"<đã xong gì>", "completed_parts":[...], "remaining_parts":[...], và "checklist":[...] cho task vừa/lớn; kèm "important_files":[...] và "test_result":"..." khi có. Các mảng phải phản ánh toàn bộ snapshot hiện tại, không chỉ phần vừa thay đổi.`,
     `Khi đã xong toàn bộ phần triển khai nhưng còn build/test/verify/commit/push, báo stage="all_parts_done" hoặc stage="verifying" cho Task ID ${taskId}, remaining_parts phải liệt kê chính xác bước còn lại; chỉ để remaining_parts=[] sau khi thực sự không còn phần việc nào chưa xong. Không được gọi completed sớm.`,
     "Nếu bị chặn, gặp lỗi, hoặc nghi task đang treo nhưng model vẫn còn phản hồi được, BẮT BUỘC báo stage=\"blocked\", \"error\" hoặc \"stalled\" kèm blocked_part=\"<đang kẹt ở phần nào>\", reason rõ ràng, progress_percent, completed_parts, remaining_parts và evidence nếu có để Manager điều tra.",
     "Với Task có thay đổi source, chỉ được coi là hoàn thành khi test/check/verify/smoke liên quan đã PASS sau thay đổi source cuối cùng, toàn bộ thay đổi đã commit, và commit đã push/integrate thành công lên remote. Thiếu bất kỳ bước nào thì không được finalize completed.",
@@ -4171,7 +4194,7 @@ async function sendProfileRequestUnlocked(payload) {
         "Chỉ coi task hoàn tất khi phần việc còn lại đã trả phản hồi cuối.",
         ...taskStatusProtocolLines,
         "",
-        text
+        recoveryCheckpointText
       ].join("\n")
     : adjustmentAccepted
     ? [
@@ -4248,6 +4271,8 @@ async function sendProfileRequest(payload) {
 async function resumeProfileTask(payload) {
   const profileId = String(payload?.profileId || "").trim();
   const taskId = String(payload?.taskId || "").trim();
+  const hangRecovery = payload?.hangRecovery === true;
+  const recoveryReason = String(payload?.recoveryReason || "").trim().slice(0, 600);
   if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
   if (!/^cpt_[a-f0-9]{24}$/.test(taskId)) throw new Error("CodexPro task id không hợp lệ.");
   if (profileSendOperations.has(profileId)) throw new Error("Profile này đang gửi một yêu cầu khác. Chỉ có thể tiếp tục task khi worker đang rảnh.");
@@ -4257,7 +4282,7 @@ async function resumeProfileTask(payload) {
   const profiles = await listBrowserProfilesThroughMcp(base.config, base.token);
   const profile = (Array.isArray(profiles) ? profiles : []).find((item) => String(item?.profile_id || "") === profileId);
   if (!profile) throw new Error("Profile Chrome này không còn được CodexPro nhận diện.");
-  if (!browserProfileIdleForTaskResume(profile)) throw new Error("WORKER_NOT_IDLE: Chỉ có thể tiếp tục task khi worker đang ở trạng thái ĐANG RẢNH.");
+  if (!hangRecovery && !browserProfileIdleForTaskResume(profile)) throw new Error("WORKER_NOT_IDLE: Chỉ có thể tiếp tục task khi worker đang ở trạng thái ĐANG RẢNH.");
 
   const workerJobResult = await localMcpTool(base.config, base.token, "worker_job_status", { task_id: taskId }, 15000);
   const job = workerJobResult?.job;
@@ -4276,7 +4301,8 @@ async function resumeProfileTask(payload) {
     const contextResult = await localMcpTool(base.config, base.token, "worker_context_history", {
       worker_id: profileId,
       root,
-      scope
+      scope,
+      task_id: taskId
     }, 15000);
     workerContexts = Array.isArray(contextResult?.checkpoints) ? contextResult.checkpoints.slice(-3) : [];
   } catch {
@@ -4298,12 +4324,13 @@ async function resumeProfileTask(payload) {
     taskMode: "recovery",
     previousTaskId: taskId,
     text: workerJobResumeCheckpointText(job, workerContexts),
+    recoveryReason,
     scope,
     projectRoot: scope === "workspace" ? root : "",
     workspaceCandidates: [],
-    requireIdleProfile: true
+    requireIdleProfile: !hangRecovery
   });
-  return { ...result, resumed_task_id: taskId, resumed_from_status: previousStatus };
+  return { ...result, resumed_task_id: taskId, resumed_from_status: previousStatus, resumed_checkpoint_count: workerContexts.length, hang_recovery: hangRecovery };
 }
 
 async function getRepoTaskStatus(payload) {

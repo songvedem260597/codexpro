@@ -1030,6 +1030,32 @@ function App() {
   }, [managerSettings.autoRecovery, status?.browserProfiles, status?.workerJobs]);
 
   useEffect(() => {
+    if (!managerSettings.autoRecovery) return;
+    const incidents = Array.isArray(status?.taskHangIncidents) ? status.taskHangIncidents : [];
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    for (const incident of incidents) {
+      if (!incident?.active || !incident?.recoverable) continue;
+      if (incident?.no_meaningful_progress !== true && String(incident?.conversation_id || "")) continue;
+      const profileId = String(incident?.profile_id || "");
+      const taskId = String(incident?.task_id || "");
+      const profile = profiles.find((item) => String(item?.profile_id || "") === profileId);
+      if (!profile || String(profile?.current_task_id || "") !== taskId || !/^cpt_[a-f0-9]{24}$/.test(taskId)) continue;
+      const key = `checkpoint-hang:${profileId}:${taskId}:${String(incident?.id || incident?.started_at || "active")}`;
+      const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
+      if (Date.now() - previous < 120_000) continue;
+      operationsRecoveryTimes.current.set(key, Date.now());
+      const targetTab = (profile.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(incident?.tab_id));
+      void continueTaskFromCheckpoint(profile, taskId, {
+        conversationId: String(incident?.conversation_id || ""),
+        targetTab,
+        recoveryReason: String(incident?.message || "Task bị treo hoặc không có tiến triển; tiếp tục từ checkpoint gần nhất."),
+        automatic: true,
+        silent: true
+      });
+    }
+  }, [managerSettings.autoRecovery, status?.taskHangIncidents, status?.browserProfiles]);
+
+  useEffect(() => {
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
     const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
     for (const profile of profiles) {
@@ -2904,6 +2930,74 @@ function App() {
       if (!silent) setBusy("");
     }
   }
+  async function continueTaskFromCheckpoint(profile, taskId, options = {}) {
+    const profileId = String(profile?.profile_id || "").trim();
+    const normalizedTaskId = String(taskId || "").trim();
+    const conversationId = String(options?.conversationId || "").trim();
+    const targetTab = options?.targetTab || null;
+    const silent = options?.silent === true;
+    const automatic = options?.automatic === true;
+    const recoveryReason = String(options?.recoveryReason || "Task bị treo; tiếp tục từ checkpoint gần nhất.").slice(0, 600);
+    if (!profileId || !/^cpt_[a-f0-9]{24}$/.test(normalizedTaskId)) return null;
+    if (!silent) setBusy(`checkpoint-recovery:${profileId}`);
+    if (!silent) setError("");
+    try {
+      const resumed = await api.resumeProfileTask({ profileId, taskId: normalizedTaskId, hangRecovery: true, recoveryReason });
+      if (String(resumed?.repo_task_id || "") !== normalizedTaskId) throw new Error("Task ID đổi khi phục hồi từ checkpoint; đã dừng để tránh tạo task mới.");
+      const newConversationId = String(resumed?.conversation_id || "").trim();
+      if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("Chat phục hồi chưa trả conversation id hợp lệ.");
+      requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: newConversationId };
+      setRequestTargets((current) => ({ ...current, [profileId]: newConversationId }));
+      setChatProfileId(profileId);
+      setRequestSendErrors((current) => ({ ...current, [profileId]: "" }));
+      setRequestResponses((current) => {
+        const previous = current[profileId] || {};
+        return {
+          ...current,
+          [profileId]: {
+            ...previous,
+            visible: true,
+            loading: true,
+            error: "",
+            conversationId: newConversationId,
+            text: "",
+            messages: [],
+            busy: true,
+            submissionState: "submitted",
+            sendUncertain: false,
+            rolloverStatus: "done",
+            rolloverReason: "checkpoint_recovery",
+            rolloverFromConversationId: conversationId,
+            rolloverNotice: "Task treo đã được chuyển sang chat mới từ checkpoint gần nhất.",
+            activityStartedAt: String(resumed?.repo_task_dispatched_at || new Date().toISOString()),
+            repoTaskId: String(resumed?.repo_task_id || normalizedTaskId),
+            repoTaskDispatchedAt: String(resumed?.repo_task_dispatched_at || ""),
+            repoTaskScope: String(resumed?.repo_task_scope || previous?.repoTaskScope || ""),
+            logicalTaskStatus: String(resumed?.worker_job_status || previous?.logicalTaskStatus || "running"),
+            repoTaskStatus: "waiting",
+            repoTaskVerified: false
+          }
+        };
+      });
+      if (targetTab?.id) {
+        await api.recoverProfileChat({ profileId, conversationId, targetId: targetTab.id, silent: true, discardOnly: true }).catch((discardError) => {
+          logRendererDiagnostic(api, "warn", "profile", `Checkpoint continuation created but stale tab could not be closed: ${discardError?.message || String(discardError)}`, { action: "checkpoint-recovery-discard-old-tab-failed", profile_id: profileId, task_id: normalizedTaskId, conversation_id: conversationId, target_id: String(targetTab.id), error: discardError });
+        });
+      }
+      logRendererDiagnostic(api, "info", "profile", "Continued hung task from canonical checkpoint in a new chat", { action: "checkpoint-recovery-done", profile_id: profileId, task_id: normalizedTaskId, previous_conversation_id: conversationId, conversation_id: newConversationId, target_id: String(targetTab?.id || ""), checkpoint_count: Number(resumed?.resumed_checkpoint_count || 0), automatic });
+      if (!silent) notify("Đã tiếp tục task từ checkpoint gần nhất trong chat mới");
+      window.setTimeout(() => void refresh(false), 900);
+      return { mode: "checkpoint_continuation", conversationId: newConversationId, result: resumed };
+    } catch (err) {
+      const message = err?.message || String(err);
+      logRendererDiagnostic(api, "error", "profile", `Checkpoint recovery failed: ${message}`, { action: "checkpoint-recovery-failed", profile_id: profileId, task_id: normalizedTaskId, conversation_id: conversationId, target_id: String(targetTab?.id || ""), automatic, error: err });
+      if (!silent) setError(message);
+      return null;
+    } finally {
+      if (!silent) setBusy("");
+    }
+  }
+
   async function continueTaskAfterHang(incident) {
     const profileId = String(incident?.profile_id || "");
     const taskId = String(incident?.task_id || "");
@@ -2913,20 +3007,17 @@ function App() {
       setError("Không còn tìm thấy Chrome profile của task bị treo.");
       return null;
     }
-    if (!/^cpt_[a-f0-9]{24}$/.test(taskId) || !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) {
-      setError("Task bị treo chưa có đủ Task ID / conversation để tiếp tục an toàn.");
+    if (!/^cpt_[a-f0-9]{24}$/.test(taskId)) {
+      setError("Task bị treo chưa có Task ID hợp lệ để tiếp tục an toàn.");
       return null;
     }
     const targetTab = (profile.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(incident?.tab_id));
-    const sourceLabel = incident?.source === "openai" ? "OpenAI/ChatGPT" : "mạng";
+    const sourceLabel = incident?.source === "openai" ? "OpenAI/ChatGPT" : incident?.source === "stalled" ? "task không tiến triển" : "mạng";
     const statusLabel = Number(incident?.status_code || 0) ? ` HTTP ${Number(incident.status_code)}` : "";
-    return await recoverProfileTab(profile, {
-      forceContinuation: true,
-      hardFailure: true,
-      taskId,
+    return await continueTaskFromCheckpoint(profile, taskId, {
       conversationId,
       targetTab,
-      recoveryReason: `Control Center xác nhận lỗi ${sourceLabel}${statusLabel} làm task treo. Đóng tab lỗi và tiếp tục đúng Task ID hiện tại.`
+      recoveryReason: `Control Center xác nhận lỗi ${sourceLabel}${statusLabel} làm task treo. Tiếp tục đúng Task ID hiện tại từ checkpoint, không dùng conversation cũ.`
     });
   }
 
@@ -3291,6 +3382,10 @@ function App() {
     const profileId = profile.profile_id;
     const continuationReason = String(result?.continuation_reason || "limit");
     const recoveryContinuation = continuationReason === "recovery";
+    const activeTaskId = /^cpt_[a-f0-9]{24}$/.test(String(result?.repoTaskId || profile.current_task_id || ""))
+      ? String(result?.repoTaskId || profile.current_task_id)
+      : "";
+    const checkpointContinuation = Boolean(activeTaskId && (recoveryContinuation || continuationReason === "limit"));
     const key = `${profileId}:${conversationId}:${continuationReason}`;
     const previousAttempt = conversationRollovers.current.get(key);
     if (previousAttempt?.status === "creating" || previousAttempt?.status === "done") return previousAttempt?.conversationId || null;
@@ -3328,25 +3423,29 @@ function App() {
       const rolloverProjectRoot = result?.projectRoot || projectRootForProfile(profile);
       const rolloverWorkspaceExpanded = result?.repoTaskScope === "all_allowed" && result?.repoTaskRequest?.scope === "workspace" && rolloverProjectRoot !== ALL_ALLOWED_WORKSPACES;
       const rolloverAllAllowed = !rolloverWorkspaceExpanded && (result?.repo_task_scope === "all_allowed" || result?.repoTaskScope === "all_allowed" || rolloverProjectRoot === ALL_ALLOWED_WORKSPACES);
-      const recoveryTaskId = recoveryContinuation && /^cpt_[a-f0-9]{24}$/.test(String(result?.repoTaskId || profile.current_task_id || ""))
-        ? String(result?.repoTaskId || profile.current_task_id)
-        : "";
       const rolloverStartedAt = new Date().toISOString();
-      const created = await api.sendProfileRequest({
-        profileId,
-        conversationId: "",
-        newChat: true,
-        scope: rolloverAllAllowed ? "all_allowed" : "workspace",
-        projectRoot: rolloverAllAllowed ? "" : rolloverProjectRoot,
-        workspaceCandidates: rolloverAllAllowed ? projects.map((project) => project.root) : [],
-        text: handoffText,
-        attachments: Array.isArray(result?.rollover_attachments) ? result.rollover_attachments : [],
-        previousTaskId: recoveryTaskId,
-        taskMode: recoveryTaskId ? "recovery" : "new",
-        oneShotRecovery: recoveryContinuation
-      });
+      const created = checkpointContinuation
+        ? await api.resumeProfileTask({
+            profileId,
+            taskId: activeTaskId,
+            hangRecovery: true,
+            recoveryReason: String(result?.recovery_reason || result?.conversation_limit_message || "Task cần chuyển sang chat mới để tiếp tục an toàn.").slice(0, 600)
+          })
+        : await api.sendProfileRequest({
+            profileId,
+            conversationId: "",
+            newChat: true,
+            scope: rolloverAllAllowed ? "all_allowed" : "workspace",
+            projectRoot: rolloverAllAllowed ? "" : rolloverProjectRoot,
+            workspaceCandidates: rolloverAllAllowed ? projects.map((project) => project.root) : [],
+            text: handoffText,
+            attachments: Array.isArray(result?.rollover_attachments) ? result.rollover_attachments : [],
+            previousTaskId: "",
+            taskMode: "new",
+            oneShotRecovery: recoveryContinuation
+          });
       if (String(created?.submission_state || "") === "uncertain") throw new Error("Chat tiếp nối có trạng thái gửi không chắc chắn; đã dừng để tránh duplicate.");
-      if (recoveryTaskId && String(created?.repo_task_id || "") !== recoveryTaskId) throw new Error("Manager đã đổi Task ID khi chuyển chat; đã dừng để tránh tạo task FIFO mới.");
+      if (checkpointContinuation && String(created?.repo_task_id || "") !== activeTaskId) throw new Error("Manager đã đổi Task ID khi chuyển chat; đã dừng để tránh tạo task FIFO mới.");
       const newConversationId = String(created?.conversation_id || "").trim();
       if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT ch\u01b0a tr\u1ea3 conversation id cho chat ti\u1ebfp n\u1ed1i.");
 
@@ -3374,7 +3473,7 @@ function App() {
           rolloverFromConversationId: conversationId,
           activityStartedAt: rolloverStartedAt,
           rolloverNotice: doneNotice,
-          repoTaskId: String(created?.repo_task_id || recoveryTaskId),
+          repoTaskId: String(created?.repo_task_id || activeTaskId),
           repoTaskDispatchedAt: String(created?.repo_task_dispatched_at || ""),
           repoTaskScope: String(created?.repo_task_scope || result?.repoTaskScope || ""),
           logicalTaskStatus: String(created?.worker_job_status || result?.logicalTaskStatus || "running"),

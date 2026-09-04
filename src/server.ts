@@ -2549,11 +2549,12 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     "worker_context_history",
     {
       title: "Worker Context History",
-      description: "Read the three newest compact work-context checkpoints for one worker and project. These checkpoints are independent of ChatGPT conversation ids and are intended for lightweight task recovery.",
+      description: "Read up to the three newest compact work-context checkpoints for one worker and project, optionally restricted to one exact Task ID. These checkpoints are independent of ChatGPT conversation ids and are intended for lightweight task recovery without mixing another task's context.",
       inputSchema: {
         worker_id: z.string().min(1).max(160),
         root: z.string().max(2048).optional(),
-        scope: z.enum(["workspace", "all_allowed"]).optional()
+        scope: z.enum(["workspace", "all_allowed"]).optional(),
+        task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional()
       },
       annotations: READ_ONLY_ANNOTATIONS
     },
@@ -2562,12 +2563,14 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const checkpoints = listWorkerContextCheckpoints({
         workerId: args.worker_id,
         root: args.root,
-        scope
+        scope,
+        taskId: args.task_id
       });
-      return textResult(`# Worker Context History\n\n${checkpoints.length} checkpoint(s) for this worker/project.`, {
+      return textResult(`# Worker Context History\n\n${checkpoints.length} checkpoint(s) for this worker/project${args.task_id ? "/task" : ""}.`, {
         worker_id: args.worker_id,
         root: args.root || "",
         scope,
+        task_id: args.task_id || "",
         count: checkpoints.length,
         checkpoints
       });
@@ -2580,13 +2583,15 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     "report_worker_job_progress",
     {
       title: "Report Worker Job Progress",
-      description: "Persist a structured task checkpoint with progress, completed/remaining parts, durable checklist, blocker location, verification evidence, and stall/error context. Medium and large tasks should send the full checklist every time; large tasks cannot finalize without it.",
+      description: "Persist a structured task checkpoint with progress, completed/remaining parts, important files, test result, durable checklist, blocker location, verification evidence, and stall/error context. A running checkpoint cannot stay at 100% while unfinished parts remain. Medium and large tasks should send the full checklist every time; large tasks cannot finalize without it.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/),
         stage: z.enum(["started", "partial", "all_parts_done", "verifying", "blocked", "error", "stalled"]),
         summary: z.string().min(1).max(2000),
         reason: z.string().max(2000).optional(),
         evidence: z.string().max(2000).optional(),
+        important_files: z.array(z.string().min(1).max(300)).max(30).optional(),
+        test_result: z.string().max(2000).optional(),
         progress_percent: z.number().min(0).max(100).optional(),
         blocked_part: z.string().min(1).max(300).optional(),
         completed_parts: z.array(z.string().min(1).max(300)).max(50).optional(),
@@ -2616,6 +2621,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           summary: args.summary,
           reason: args.reason,
           evidence: args.evidence,
+          importantFiles: args.important_files,
+          testResult: args.test_result,
           progressPercent: args.progress_percent,
           blockedPart: args.blocked_part,
           completedParts: args.completed_parts,

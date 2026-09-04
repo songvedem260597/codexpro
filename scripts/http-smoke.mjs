@@ -212,6 +212,8 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
       task_id: generalBegan.structuredContent.task_id,
       stage: 'verifying',
       summary: 'General fixture implementation and final verification are complete.',
+      important_files: ['src/server.ts', 'src/workerContext.ts'],
+      test_result: 'PASS http smoke fixture',
       progress_percent: 99,
       completed_parts: ['implementation', 'verification'],
       remaining_parts: []
@@ -222,11 +224,24 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     const generalContext = await callTool(general, 'worker_context_history', {
       worker_id: generalWorkerStatus.structuredContent.job.worker_id,
       root: generalWorkerStatus.structuredContent.job.root || '',
-      scope: generalWorkerStatus.structuredContent.job.scope || 'workspace'
+      scope: generalWorkerStatus.structuredContent.job.scope || 'workspace',
+      task_id: generalBegan.structuredContent.task_id
     });
-    if (generalContext.structuredContent.count !== 1 || generalContext.structuredContent.checkpoints?.[0]?.summary !== 'General fixture implementation and final verification are complete.' || /conversation(?:Id|_id)|chatgpt\.com\/c\//i.test(JSON.stringify(generalContext.structuredContent.checkpoints))) {
-      throw new Error(`worker/project context history did not expose a compact conversation-independent checkpoint: ${JSON.stringify(generalContext.structuredContent)}`);
+    if (generalContext.structuredContent.count !== 1
+      || generalContext.structuredContent.task_id !== generalBegan.structuredContent.task_id
+      || generalContext.structuredContent.checkpoints?.[0]?.summary !== 'General fixture implementation and final verification are complete.'
+      || generalContext.structuredContent.checkpoints?.[0]?.testResult !== 'PASS http smoke fixture'
+      || JSON.stringify(generalContext.structuredContent.checkpoints?.[0]?.importantFiles || []) !== JSON.stringify(['src/server.ts', 'src/workerContext.ts'])
+      || /conversation(?:Id|_id)|chatgpt\.com\/c\//i.test(JSON.stringify(generalContext.structuredContent.checkpoints))) {
+      throw new Error(`worker/project/task context history did not expose a compact conversation-independent checkpoint: ${JSON.stringify(generalContext.structuredContent)}`);
     }
+    const unrelatedGeneralContext = await callTool(general, 'worker_context_history', {
+      worker_id: generalWorkerStatus.structuredContent.job.worker_id,
+      root: generalWorkerStatus.structuredContent.job.root || '',
+      scope: generalWorkerStatus.structuredContent.job.scope || 'workspace',
+      task_id: 'cpt_999999999999999999999999'
+    });
+    if (unrelatedGeneralContext.structuredContent.count !== 0) throw new Error(`worker context leaked across task ids: ${JSON.stringify(unrelatedGeneralContext.structuredContent)}`);
     const generalFinalized = await callTool(general, 'finalize_worker_job', { task_id: generalBegan.structuredContent.task_id, outcome: 'completed', summary: 'general fixture complete' });
     if (!generalFinalized.structuredContent.finalized || generalFinalized.structuredContent.job?.status !== 'completed') {
       throw new Error(`general task did not finalize through MCP policy: ${JSON.stringify(generalFinalized.structuredContent)}`);
