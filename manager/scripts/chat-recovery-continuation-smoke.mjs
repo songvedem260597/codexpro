@@ -57,6 +57,7 @@ const rolloverPrompt = between(managerUi, "function buildConversationRolloverPro
 assert.match(rolloverPrompt, /continuation_reason \|\| ""\) === "recovery"/, "handoff prompt must distinguish recovery from conversation-limit rollover");
 assert.match(rolloverPrompt, /recovery_reason/, "handoff prompt must include why the old tab could not be safely recovered");
 
+assert.equal((managerUi.match(/async function continueTaskFromCheckpoint\(/g) || []).length, 1, "renderer must keep exactly one canonical checkpoint-recovery implementation");
 const rollover = between(managerUi, "async function rolloverFullConversation", "async function verifyRepoTaskUse");
 assert.match(rollover, /rolloverReason: continuationReason/, "continuation state must retain the rollover reason");
 assert.match(rollover, /requestTargetsRef\.current = \{ \.\.\.requestTargetsRef\.current, \[profileId\]: newConversationId \}/, "continuation must atomically select the new conversation");
