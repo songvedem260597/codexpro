@@ -38,6 +38,7 @@
     "test:api-worker-job-modal": "node scripts/api-worker-job-modal-smoke.mjs && electron scripts/api-worker-job-modal-visual-smoke.cjs",
     "test:api-worker-streaming": "node scripts/api-worker-streaming-smoke.mjs",
     "test:dropdowns": "node scripts/app-dropdown-smoke.mjs",
+    "test:settings-controls": "node scripts/settings-controls-smoke.mjs && electron scripts/settings-controls-visual-smoke.cjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",
     "test:workers": "node ../scripts/worker-plugin-smoke.mjs",
     "test:return-shortcut": "node scripts/return-to-manager-shortcut-smoke.mjs && electron scripts/return-to-manager-shortcut-electron-smoke.cjs",
