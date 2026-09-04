@@ -333,7 +333,7 @@ function sendDebugEvidence(result = {}, error = null) {
   };
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.120";
+const WORKER_EXTENSION_VERSION = "0.5.121";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
