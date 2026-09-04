@@ -880,7 +880,7 @@ function ProfileTaskModal({ profile, jobs, resumeBusyTaskId, onClose, onResume }
     return Number.isNaN(value.getTime()) ? "Chưa có thời gian" : value.toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
   };
   return (
-    <div className="modal-backdrop profile-task-modal-backdrop" role="dialog" aria-modal="true" aria-label={`Danh sách task của ${profileLabel}`} onMouseDown={(event) => event.target === event.currentTarget && !resumeBusyTaskId && onClose()}>
+    <div className="modal-backdrop profile-task-modal-backdrop" role="dialog" aria-modal="true" aria-label={`Danh sách task của ${profileLabel}`} tabIndex={-1} autoFocus onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }} onMouseDown={(event) => event.target === event.currentTarget && !resumeBusyTaskId && onClose()}>
       <div className="modal profile-task-modal">
         <div className="modal-head profile-task-modal-head">
           <div>
