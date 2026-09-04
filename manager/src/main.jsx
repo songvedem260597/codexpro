@@ -4199,13 +4199,13 @@ function App() {
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
-              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} rảnh, ${profileSummary.hung} mất kết nối, ${profileSummary.missing} chưa cài`}>
-                <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
-                <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
-                <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
-                <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
-                {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
-                {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
+              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} tránh, kết nối ${status?.local?.ok && status?.tunnel?.ok ? "tốt" : "có lỗi"}, ${profileSummary.hung + profileSummary.missing} cảnh báo`}>
+                <ProfileSummaryItem state="working" count={profileSummary.working} label="Làm việc" />
+                <ProfileSummaryItem state="idle" count={profileSummary.idle} label="Tránh" />
+                <ProfileSummaryItem state="connection" count="Kết nối" label={status?.local?.ok && status?.tunnel?.ok ? "Tốt" : "Có lỗi"} />
+                <ProfileSummaryItem state="hung" count={profileSummary.hung + profileSummary.missing} label="Cảnh báo" />
+
+
               </div>
               <button
                 className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}

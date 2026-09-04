@@ -126,6 +126,9 @@ section { margin-bottom: 30px; }
   font-size: 11px;
   line-height: 1.1;
 }
+.header-server-actions .profile-summary-item.is-connection { color: #55e6a0; }
+.header-server-actions .profile-summary-item.is-connection > span:last-child { color: #55e6a0; }
+.header-server-actions .profile-summary-item.is-hung { color: #f4b53f; }
 .header-server-actions .button,
 .reload-all {
   min-width: 160px;
