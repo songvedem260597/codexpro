@@ -9,7 +9,16 @@ const MAX_WORKER_CONTEXT_ENTRIES = 300;
 
 export type WorkerContextScope = "workspace" | "all_allowed";
 export type WorkerContextKind = "general" | "code";
+export type WorkerContextTaskSize = "small" | "medium" | "large";
 export type WorkerContextStage = "started" | "partial" | "all_parts_done" | "verifying" | "blocked" | "error" | "stalled";
+export type WorkerContextChecklistStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export type WorkerContextChecklistItem = {
+  id: string;
+  title: string;
+  status: WorkerContextChecklistStatus;
+  evidence?: string;
+};
 
 export type WorkerContextCheckpoint = {
   version: 1;
@@ -19,6 +28,7 @@ export type WorkerContextCheckpoint = {
   taskId: string;
   taskTitle: string;
   taskKind?: WorkerContextKind;
+  taskSize?: WorkerContextTaskSize;
   at: string;
   sequence: number;
   stage: WorkerContextStage;
@@ -29,6 +39,7 @@ export type WorkerContextCheckpoint = {
   blockedPart?: string;
   completedParts: string[];
   remainingParts: string[];
+  checklist: WorkerContextChecklistItem[];
 };
 
 let writeTail: Promise<void> = Promise.resolve();
@@ -70,6 +81,18 @@ function normalizeStage(value: unknown): WorkerContextStage | undefined {
     : undefined;
 }
 
+function normalizeChecklist(value: unknown): WorkerContextChecklistItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const source = item && typeof item === "object" ? item as Partial<WorkerContextChecklistItem> : {};
+    const id = clean(source.id, 80);
+    const title = clean(source.title, 300);
+    const status = clean(source.status, 40) as WorkerContextChecklistStatus;
+    if (!id || !title || !["pending", "in_progress", "completed", "blocked"].includes(status)) return [];
+    return [{ id, title, status, evidence: clean(source.evidence, 1000) || undefined }];
+  }).slice(0, 50);
+}
+
 function normalizeCheckpoint(value: unknown): WorkerContextCheckpoint | undefined {
   const source = value && typeof value === "object" ? value as Partial<WorkerContextCheckpoint> : {};
   const workerId = clean(source.workerId, 160);
@@ -87,6 +110,7 @@ function normalizeCheckpoint(value: unknown): WorkerContextCheckpoint | undefine
     taskId,
     taskTitle: clean(source.taskTitle, 120),
     taskKind: source.taskKind === "general" || source.taskKind === "code" ? source.taskKind : undefined,
+    taskSize: ["small", "medium", "large"].includes(String(source.taskSize)) ? source.taskSize as WorkerContextTaskSize : undefined,
     at,
     sequence: Math.max(1, Math.floor(Number(source.sequence) || 1)),
     stage,
@@ -96,7 +120,8 @@ function normalizeCheckpoint(value: unknown): WorkerContextCheckpoint | undefine
     evidence: clean(source.evidence, 1200) || undefined,
     blockedPart: clean(source.blockedPart, 300) || undefined,
     completedParts: uniqueStrings(source.completedParts),
-    remainingParts: uniqueStrings(source.remainingParts)
+    remainingParts: uniqueStrings(source.remainingParts),
+    checklist: normalizeChecklist(source.checklist)
   };
 }
 

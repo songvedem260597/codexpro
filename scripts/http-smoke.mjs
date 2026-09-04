@@ -205,7 +205,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (generalWorkerStatus.structuredContent.job?.counts_as_task !== false || generalWorkerStatus.structuredContent.job?.source_change_count !== 0) {
       throw new Error(`general Q&A/research worker was incorrectly classified as a source-changing task: ${JSON.stringify(generalWorkerStatus.structuredContent)}`);
     }
-    if (!generalWorkerStatus.structuredContent.found || generalWorkerStatus.structuredContent.job?.policy_version !== 'worker-policy-v1' || generalWorkerStatus.structuredContent.job?.status !== 'running') {
+    if (!generalWorkerStatus.structuredContent.found || generalWorkerStatus.structuredContent.job?.policy_version !== 'worker-policy-v2' || generalWorkerStatus.structuredContent.job?.status !== 'running') {
       throw new Error(`general task did not persist MCP worker policy evidence: ${JSON.stringify(generalWorkerStatus.structuredContent)}`);
     }
     const generalProgress = await callTool(general, 'report_worker_job_progress', {
@@ -344,6 +344,12 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (!allAllowedStatus.structuredContent.verified || !allAllowedStatus.structuredContent.gate_active) {
       throw new Error(`all_allowed task proof did not accept its unbound prepared root: ${JSON.stringify(allAllowedStatus.structuredContent)}`);
     }
+    const allAllowedFinalized = await callTool(gated, 'finalize_worker_job', {
+      task_id: 'cpt_dddddddddddddddddddddddd',
+      outcome: 'completed',
+      summary: 'all-allowed workspace selection fixture complete'
+    });
+    if (allAllowedFinalized.structuredContent.job?.status !== 'completed') throw new Error('all_allowed fixture task did not finalize before the next FIFO task');
 
     const preparedA = await callTool(manager, 'prepare_repo_task', {
       profile_id: 'gate-smoke',
@@ -489,8 +495,26 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
       scope: 'workspace'
     });
     if (!preparedB.structuredContent.prepared) throw new Error('manager could not prepare repo task B');
-    await expectToolErrorCode(gated, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
-    await expectToolErrorCode(gatedSibling, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
+    if (!preparedB.structuredContent.fifo_queued || preparedB.structuredContent.queued_behind_task_id !== 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa') {
+      throw new Error(`task B was not queued behind active task A: ${JSON.stringify(preparedB.structuredContent)}`);
+    }
+    const activeReadAfterQueue = await callTool(gated, 'read', { path: 'gate.txt' });
+    if (!activeReadAfterQueue.structuredContent.text.includes('gate changed')) throw new Error('queuing task B invalidated active task A');
+    const siblingReadAfterQueue = await callTool(gatedSibling, 'read', { path: 'gate.txt' });
+    if (!siblingReadAfterQueue.structuredContent.text.includes('gate changed')) throw new Error('queuing task B invalidated sibling access for active task A');
+    await expectToolErrorCode(gated, 'begin_repo_task', {
+      task_id: 'cpt_bbbbbbbbbbbbbbbbbbbbbbbb',
+      task_title: 'Replace current repo task',
+      task_kind: 'code',
+      root: taskRoot,
+      scope: 'workspace'
+    }, 'WORKER_JOB_FIFO_WAIT');
+    const cancelledA = await callTool(gated, 'finalize_worker_job', {
+      task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa',
+      outcome: 'cancelled',
+      summary: 'fixture explicitly ends task A before starting the next FIFO task'
+    });
+    if (cancelledA.structuredContent.job?.status !== 'cancelled') throw new Error('task A did not reach a terminal state before task B');
     const beganB = await callTool(gated, 'begin_repo_task', {
       task_id: 'cpt_bbbbbbbbbbbbbbbbbbbbbbbb',
       task_title: 'Replace current repo task',
@@ -498,7 +522,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
       root: taskRoot,
       scope: 'workspace'
     });
-    if (!beganB.structuredContent.verified) throw new Error('new Manager task did not invalidate and replace the previous active task');
+    if (!beganB.structuredContent.verified) throw new Error('new Manager task did not start after the previous task reached a terminal state');
     const siblingReadB = await callTool(gatedSibling, 'read', { path: 'gate.txt' });
     if (!siblingReadB.structuredContent.text.includes('gate changed')) throw new Error('sibling MCP session did not adopt replacement profile task');
 

@@ -5,12 +5,21 @@ import { randomBytes } from "node:crypto";
 import { codexProHome } from "./profileStore.js";
 import { saveWorkerContextCheckpoint } from "./workerContext.js";
 
-export const WORKER_POLICY_VERSION = "worker-policy-v1";
+export const WORKER_POLICY_VERSION = "worker-policy-v2";
 
 export type WorkerJobKind = "general" | "code";
+export type WorkerJobTaskSize = "small" | "medium" | "large";
 export type WorkerJobScope = "workspace" | "all_allowed";
 export type WorkerJobStatus = "prepared" | "running" | "completed" | "failed" | "cancelled" | "blocked";
 export type WorkerJobProgressStage = "started" | "partial" | "all_parts_done" | "verifying" | "blocked" | "error" | "stalled";
+export type WorkerJobChecklistStatus = "pending" | "in_progress" | "completed" | "blocked";
+
+export type WorkerJobChecklistItem = {
+  id: string;
+  title: string;
+  status: WorkerJobChecklistStatus;
+  evidence?: string;
+};
 
 export type WorkerJobProgressReport = {
   at: string;
@@ -23,6 +32,7 @@ export type WorkerJobProgressReport = {
   blockedPart?: string;
   completedParts: string[];
   remainingParts: string[];
+  checklist: WorkerJobChecklistItem[];
 };
 
 export type WorkerJobRecord = {
@@ -35,8 +45,10 @@ export type WorkerJobRecord = {
   root: string;
   title: string;
   kind?: WorkerJobKind;
+  taskSize?: WorkerJobTaskSize;
   workspaceId?: string;
   preparedAt: string;
+  fifoQueuedAt?: string;
   startedAt?: string;
   finishedAt?: string;
   updatedAt: string;
@@ -54,6 +66,7 @@ export type WorkerJobRecord = {
   progressPercent: number;
   completedParts: string[];
   remainingParts: string[];
+  checklist: WorkerJobChecklistItem[];
   lastProgressStage?: WorkerJobProgressStage;
   lastProgressAt?: string;
   lastProgressSummary?: string;
@@ -110,6 +123,41 @@ function normalizeProgressPercent(value: unknown, fallback = 0): number {
   return Math.max(0, Math.min(100, Math.round(Number.isFinite(numeric) ? numeric : fallback)));
 }
 
+function normalizeTaskSize(value: unknown): WorkerJobTaskSize | undefined {
+  const taskSize = clean(value, 20);
+  return ["small", "medium", "large"].includes(taskSize) ? taskSize as WorkerJobTaskSize : undefined;
+}
+
+function normalizeChecklist(value: unknown, strict = false): WorkerJobChecklistItem[] {
+  if (!Array.isArray(value)) return [];
+  const checklist = value.flatMap((item) => {
+    const source = item && typeof item === "object" ? item as Partial<WorkerJobChecklistItem> : {};
+    const id = clean(source.id, 80);
+    const title = clean(source.title, 300);
+    const status = clean(source.status, 40) as WorkerJobChecklistStatus;
+    if (!id || !title || !["pending", "in_progress", "completed", "blocked"].includes(status)) return [];
+    return [{ id, title, status, evidence: clean(source.evidence, 1000) || undefined }];
+  }).slice(0, 50);
+  const ids = new Set<string>();
+  for (const item of checklist) {
+    if (ids.has(item.id)) {
+      if (strict) throw new Error(`Worker checklist item id is duplicated: ${item.id}.`);
+      continue;
+    }
+    ids.add(item.id);
+  }
+  if (checklist.filter((item) => item.status === "in_progress").length > 1) {
+    if (strict) throw new Error("Worker checklist may contain only one in_progress item.");
+    let keptActive = false;
+    for (const item of checklist) {
+      if (item.status !== "in_progress") continue;
+      if (!keptActive) keptActive = true;
+      else item.status = "pending";
+    }
+  }
+  return checklist.filter((item, index) => checklist.findIndex((candidate) => candidate.id === item.id) === index);
+}
+
 function deriveProgressPercent(input: {
   stage: WorkerJobProgressStage;
   explicit?: unknown;
@@ -143,7 +191,8 @@ function normalizeProgressReport(value: unknown): WorkerJobProgressReport | unde
     evidence: clean(source.evidence, 2000) || undefined,
     blockedPart: clean(source.blockedPart, 300) || undefined,
     completedParts: uniqueStrings(source.completedParts, 50),
-    remainingParts: uniqueStrings(source.remainingParts, 50)
+    remainingParts: uniqueStrings(source.remainingParts, 50),
+    checklist: normalizeChecklist(source.checklist)
   };
 }
 
@@ -166,8 +215,10 @@ function normalizeRecord(value: unknown): WorkerJobRecord | undefined {
     root: clean(source.root, 2048),
     title: clean(source.title, 120),
     kind: source.kind === "general" || source.kind === "code" ? source.kind : undefined,
+    taskSize: normalizeTaskSize(source.taskSize),
     workspaceId: clean(source.workspaceId, 160) || undefined,
     preparedAt: clean(source.preparedAt, 80) || new Date().toISOString(),
+    fifoQueuedAt: clean(source.fifoQueuedAt, 80) || undefined,
     startedAt: clean(source.startedAt, 80) || undefined,
     finishedAt: clean(source.finishedAt, 80) || undefined,
     updatedAt: clean(source.updatedAt, 80) || new Date().toISOString(),
@@ -188,6 +239,7 @@ function normalizeRecord(value: unknown): WorkerJobRecord | undefined {
     progressPercent: normalizeProgressPercent(source.progressPercent, status === "completed" ? 100 : 0),
     completedParts: uniqueStrings(source.completedParts, 50),
     remainingParts: uniqueStrings(source.remainingParts, 50),
+    checklist: normalizeChecklist(source.checklist),
     lastProgressStage: normalizeProgressStage(source.lastProgressStage),
     lastProgressAt: clean(source.lastProgressAt, 80) || undefined,
     lastProgressSummary: clean(source.lastProgressSummary, 2000) || undefined,
@@ -288,8 +340,10 @@ export async function prepareWorkerJob(input: {
     root: clean(input.root, 2048),
     title: current?.title || "",
     kind: current?.kind,
+    taskSize: current?.taskSize,
     workspaceId: current?.workspaceId,
     preparedAt: current?.preparedAt || preparedAt,
+    fifoQueuedAt: current?.fifoQueuedAt || preparedAt,
     updatedAt: preparedAt,
     agentsFiles: current?.agentsFiles || [],
     codexGraphActive: current?.codexGraphActive || false,
@@ -300,6 +354,7 @@ export async function prepareWorkerJob(input: {
     progressPercent: current?.progressPercent || 0,
     completedParts: current?.completedParts || [],
     remainingParts: current?.remainingParts || [],
+    checklist: current?.checklist || [],
     lastProgressStage: current?.lastProgressStage,
     lastProgressAt: current?.lastProgressAt,
     lastProgressSummary: current?.lastProgressSummary,
@@ -319,6 +374,7 @@ async function bootstrapWorkerJobRecord(input: {
   workerId: string;
   title: string;
   kind: WorkerJobKind;
+  taskSize?: WorkerJobTaskSize;
   root: string;
   workspaceId: string;
   scope: WorkerJobScope;
@@ -332,7 +388,11 @@ async function bootstrapWorkerJobRecord(input: {
 }): Promise<WorkerJobRecord> {
   return await updateWorkerJob(input.jobId, (current) => {
     if (current && workerOwnerKey(current.workerId) !== workerOwnerKey(input.workerId)) throw new Error("Worker job owner mismatch.");
-    const requiredObligations = input.kind === "code" ? ["global_rules", "agents_chain", "codexgraph"] : ["job_title"];
+    const taskSize = normalizeTaskSize(input.taskSize);
+    const requiredObligations = [
+      ...(input.kind === "code" ? ["global_rules", "agents_chain", "codexgraph"] : ["job_title"]),
+      ...(["medium", "large"].includes(String(taskSize)) ? ["task_checklist"] : [])
+    ];
     const completedObligations = input.kind === "code"
       ? [
           ...(input.rulesHash ? ["global_rules"] : []),
@@ -356,6 +416,7 @@ async function bootstrapWorkerJobRecord(input: {
         progressPercent: 0,
         completedParts: [],
         remainingParts: [],
+        checklist: [],
         completionConfirmed: false,
         events: []
       }),
@@ -365,6 +426,7 @@ async function bootstrapWorkerJobRecord(input: {
       root: input.root,
       title: clean(input.title, 120),
       kind: input.kind,
+      taskSize,
       workspaceId: input.workspaceId,
       startedAt: current?.startedAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -382,23 +444,25 @@ async function bootstrapWorkerJobRecord(input: {
   });
 }
 
-async function supersedeRunningWorkerJobs(workerId: string, nextJobId: string): Promise<void> {
+function workerJobFifoBlocker(workerId: string, nextJobId: string): WorkerJobRecord | undefined {
   const ownerKey = workerOwnerKey(workerId);
-  const supersededAt = new Date().toISOString();
-  const staleRunningJobs = listWorkerJobs({ statuses: ["running"], limit: 200 })
-    .filter((record) => record.jobId !== nextJobId && workerOwnerKey(record.workerId) === ownerKey);
-  for (const stale of staleRunningJobs) {
-    await updateWorkerJob(stale.jobId, (current) => {
-      if (!current || current.status !== "running" || workerOwnerKey(current.workerId) !== ownerKey) return current!;
-      return {
-        ...current,
-        status: "cancelled",
-        finishedAt: supersededAt,
-        summary: current.summary || `Task superseded by ${nextJobId}.`,
-        events: [...current.events, event("superseded", { superseded_by: nextJobId })]
-      };
-    });
-  }
+  const current = readWorkerJob(nextJobId);
+  const currentQueuedAt = Date.parse(current?.fifoQueuedAt || current?.preparedAt || "");
+  const precedesCurrent = (record: WorkerJobRecord) => {
+    if (record.status === "running") return true;
+    if (record.status !== "prepared" || !record.fifoQueuedAt || !Number.isFinite(currentQueuedAt)) return false;
+    const queuedAt = Date.parse(record.fifoQueuedAt);
+    if (!Number.isFinite(queuedAt)) return false;
+    return queuedAt < currentQueuedAt || (queuedAt === currentQueuedAt && record.jobId < nextJobId);
+  };
+  return listWorkerJobs({ statuses: ["prepared", "running"], limit: 200 })
+    .filter((record) => record.jobId !== nextJobId && workerOwnerKey(record.workerId) === ownerKey && precedesCurrent(record))
+    .sort((left, right) => {
+      if (left.status === "running" && right.status !== "running") return -1;
+      if (right.status === "running" && left.status !== "running") return 1;
+      return Date.parse(left.fifoQueuedAt || left.preparedAt) - Date.parse(right.fifoQueuedAt || right.preparedAt)
+        || left.jobId.localeCompare(right.jobId);
+    })[0];
 }
 
 export async function bootstrapWorkerJob(input: Parameters<typeof bootstrapWorkerJobRecord>[0]): Promise<WorkerJobRecord> {
@@ -406,7 +470,13 @@ export async function bootstrapWorkerJob(input: Parameters<typeof bootstrapWorke
   const previous = workerBootstrapTails.get(ownerKey) ?? Promise.resolve();
   let result!: WorkerJobRecord;
   const next = previous.catch(() => undefined).then(async () => {
-    await supersedeRunningWorkerJobs(input.workerId, input.jobId);
+    const blocker = workerJobFifoBlocker(input.workerId, input.jobId);
+    if (blocker) {
+      const error = new Error(`WORKER_JOB_FIFO_WAIT: Task ${input.jobId} remains prepared behind earlier ${blocker.status} task ${blocker.jobId}.`) as Error & { code?: string; details?: Record<string, unknown> };
+      error.code = "WORKER_JOB_FIFO_WAIT";
+      error.details = { task_id: input.jobId, queued_behind_task_id: blocker.jobId, blocker_status: blocker.status };
+      throw error;
+    }
     result = await bootstrapWorkerJobRecord(input);
   });
   workerBootstrapTails.set(ownerKey, next);
@@ -429,6 +499,7 @@ export async function reportWorkerJobProgress(input: {
   blockedPart?: string;
   completedParts?: string[];
   remainingParts?: string[];
+  checklist?: WorkerJobChecklistItem[];
 }): Promise<WorkerJobRecord> {
   const record = await updateWorkerJob(input.jobId, (current) => {
     if (!current) throw new Error("Worker job was not prepared.");
@@ -442,6 +513,12 @@ export async function reportWorkerJobProgress(input: {
     const sequence = Math.max(0, current.progressSequence || 0) + 1;
     const completedParts = Array.isArray(input.completedParts) ? uniqueStrings(input.completedParts, 50) : current.completedParts;
     const remainingParts = Array.isArray(input.remainingParts) ? uniqueStrings(input.remainingParts, 50) : current.remainingParts;
+    const checklist = Array.isArray(input.checklist) ? normalizeChecklist(input.checklist, true) : current.checklist;
+    const checklistRequired = current.taskSize === "medium" || current.taskSize === "large";
+    const checklistPlanned = !checklistRequired || checklist.length > 0;
+    const completedObligations = checklistPlanned
+      ? uniqueStrings([...current.completedObligations, ...(checklistRequired ? ["task_checklist"] : [])])
+      : current.completedObligations.filter((item) => item !== "task_checklist");
     const progressPercent = deriveProgressPercent({
       stage,
       explicit: input.progressPercent,
@@ -460,7 +537,8 @@ export async function reportWorkerJobProgress(input: {
       evidence: clean(input.evidence, 2000) || undefined,
       blockedPart: clean(input.blockedPart, 300) || undefined,
       completedParts,
-      remainingParts
+      remainingParts,
+      checklist
     };
     return {
       ...current,
@@ -469,6 +547,8 @@ export async function reportWorkerJobProgress(input: {
       progressPercent,
       completedParts,
       remainingParts,
+      checklist,
+      completedObligations,
       lastProgressStage: stage,
       lastProgressAt: at,
       lastProgressSummary: summary,
@@ -487,7 +567,8 @@ export async function reportWorkerJobProgress(input: {
         reason: report.reason?.slice(0, 500),
         blocked_part: report.blockedPart,
         completed_parts: report.completedParts,
-        remaining_parts: report.remainingParts
+        remaining_parts: report.remainingParts,
+        checklist
       })]
     };
   });
@@ -501,6 +582,7 @@ export async function reportWorkerJobProgress(input: {
       taskId: record.jobId,
       taskTitle: record.title,
       taskKind: record.kind,
+      taskSize: record.taskSize,
       at: report.at,
       sequence: report.sequence,
       stage: report.stage,
@@ -510,7 +592,8 @@ export async function reportWorkerJobProgress(input: {
       evidence: report.evidence,
       blockedPart: report.blockedPart,
       completedParts: report.completedParts,
-      remainingParts: report.remainingParts
+      remainingParts: report.remainingParts,
+      checklist: report.checklist
     });
   }
   return record;
@@ -534,6 +617,13 @@ export async function finalizeWorkerJob(input: {
     }
     if (input.outcome === "completed" && current.remainingParts.length) {
       throw new Error(`Worker job cannot complete; unfinished parts remain: ${current.remainingParts.join(", ")}. Report all_parts_done/verifying with an empty remaining_parts list first.`);
+    }
+    const unfinishedChecklist = current.checklist.filter((item) => item.status !== "completed");
+    if (input.outcome === "completed" && (current.taskSize === "medium" || current.taskSize === "large") && !current.checklist.length) {
+      throw new Error(`Worker job cannot complete; ${current.taskSize} tasks require a durable checklist.`);
+    }
+    if (input.outcome === "completed" && unfinishedChecklist.length) {
+      throw new Error(`Worker job cannot complete; checklist items remain unfinished: ${unfinishedChecklist.map((item) => item.id).join(", ")}.`);
     }
     const finishedAt = new Date().toISOString();
     const completionConfirmed = input.outcome === "completed";
@@ -568,6 +658,13 @@ export async function reconcileCompletedWorkerJob(input: {
     if (!current) throw new Error("Worker job was not prepared.");
     if (input.workerId && current.workerId !== input.workerId) throw new Error("Worker job owner mismatch.");
     if (current.status !== "running") return current;
+    if ((current.taskSize === "medium" || current.taskSize === "large") && !current.checklist.length) {
+      throw new Error(`Worker job cannot reconcile completion; ${current.taskSize} tasks require a durable checklist.`);
+    }
+    const unfinishedChecklist = current.checklist.filter((item) => item.status !== "completed");
+    if (unfinishedChecklist.length) {
+      throw new Error(`Worker job cannot reconcile completion; checklist items remain unfinished: ${unfinishedChecklist.map((item) => item.id).join(", ")}.`);
+    }
     const startedAtMs = Date.parse(current.startedAt || current.preparedAt);
     if (Number.isFinite(startedAtMs) && finishedAtMs < startedAtMs) throw new Error("Worker job completion evidence predates the task start.");
     return {
@@ -606,8 +703,10 @@ export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Reco
     root: record.root,
     title: record.title,
     kind: record.kind,
+    task_size: record.taskSize,
     workspace_id: record.workspaceId,
     prepared_at: record.preparedAt,
+    fifo_queued_at: record.fifoQueuedAt,
     started_at: record.startedAt,
     finished_at: record.finishedAt,
     updated_at: record.updatedAt,
@@ -625,6 +724,7 @@ export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Reco
     progress_percent: record.progressPercent,
     completed_parts: record.completedParts,
     remaining_parts: record.remainingParts,
+    checklist: record.checklist,
     progress_sequence: record.progressSequence,
     progress_reports: record.progressReports.map((report) => ({
       at: report.at,
@@ -636,7 +736,8 @@ export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Reco
       evidence: report.evidence,
       blocked_part: report.blockedPart,
       completed_parts: report.completedParts,
-      remaining_parts: report.remainingParts
+      remaining_parts: report.remainingParts,
+      checklist: report.checklist
     })),
     last_progress_stage: record.lastProgressStage,
     last_progress_at: record.lastProgressAt,

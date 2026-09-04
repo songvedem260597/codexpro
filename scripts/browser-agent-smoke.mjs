@@ -349,7 +349,7 @@ const completedStreamAudit = buildChatResponseAuditRecord({
 });
 assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
 assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
-const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
+const [browserOps, worker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "src", "server.ts"), "utf8"),
@@ -358,6 +358,7 @@ const [browserOps, worker, server, httpSource, bridge, managerMain, managerPrelo
   readFile(join(root, "manager", "electron", "main.mjs"), "utf8"),
   readFile(join(root, "manager", "electron", "preload.cjs"), "utf8"),
   readFile(join(root, "manager", "src", "main.jsx"), "utf8"),
+  readFile(join(root, "manager", "src", "features", "chat", "chat-request-composer.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "styles.css"), "utf8"),
   readFile(join(root, "manager", "src", "diagnostic-log-view.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "app-dropdown.jsx"), "utf8"),
@@ -716,7 +717,7 @@ assert.doesNotMatch(sendProfileRequestSource, /root:\\"\$\{initialWorkspaceRoot\
 assert.match(sendProfileRequestSource, /action: "send_chat_request"[\s\S]*?}, 235000\)/, "chat submission must preserve the action timeout after a reconnect wait");
 const managerSendUiSource = managerUi.slice(managerUi.indexOf("async function sendRequest(profile"), managerUi.indexOf("async function rolloverFullConversation"));
 assert.match(managerSendUiSource, /draftOverride !== null \? draftOverride : \(requestDraftsRef\.current\[profile\.profile_id\][\s\S]*?api\.sendProfileRequest/, "Manager send must read the composer snapshot without subscribing the full chat modal to every keystroke");
-assert.match(managerUi, /const submittedDraft = draft[\s\S]*?const submitted = await onSend\(submittedDraft\);[\s\S]*?if \(submitted && draftRef\.current === submittedDraft\) updateDraft\(""\)/, "the local composer must clear only the exact submitted draft after confirmation and preserve text typed for the next follow-up");
+assert.match(managerChatComposer, /const submittedDraft = draft[\s\S]*?const submitted = await onSend\(submittedDraft\);[\s\S]*?if \(submitted && draftRef\.current === submittedDraft\) updateDraft\(""\)/, "the extracted local composer must clear only the exact submitted draft after confirmation and preserve text typed for the next follow-up");
 assert.match(managerSendUiSource, /scope: allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "all_allowed sends must preserve scope and provide known workspace candidates to the backend");
 assert.match(managerSendUiSource, /restoreSubmittedInputs\(\)[\s\S]*?Trạng thái gửi chưa chắc chắn[\s\S]*?return false/, "an uncertain submission must preserve the local composer draft instead of silently clearing it");
 assert.match(managerSendUiSource, /rolloverTaskInProgress[\s\S]*?rolloverMessageLimit = conversationMessageLimit\(rolloverSource\)[\s\S]*?shouldRolloverConversation\(rolloverSource, rolloverMessageLimit\)[\s\S]*?continuation_reason: "message_limit"[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a conversation must stay on the current tab while its task is active, then roll the next request at its completed-task limit");
@@ -760,7 +761,7 @@ assert.match(managerMain, /codexpro:browser-profiles/);
 assert.match(managerPreload, /onBrowserProfiles/);
 assert.match(managerPreload, /recoverProfileChat/);
 assert.match(managerPreload, /invokeResult/);
-assert.match(managerUi, /SendDebugEvidence/);
+assert.match(managerChatComposer, /SendDebugEvidence/);
 assert.match(managerUi, /network_evidence/);
 assert.match(managerUi, /REALTIME_WATCHDOG_MS = 30000/);
 assert.match(managerUi, /PROJECT_REFRESH_MS = 5 \* 60 \* 1000/, "project discovery must not run every status watchdog tick");

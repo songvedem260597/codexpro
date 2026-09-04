@@ -29,7 +29,7 @@ const plugin = createApiWorkerPlugin({
         if (turn === 1) {
           return {
             text: "",
-            toolCalls: [{ id: `title-${runNumber}`, name: "begin_repo_task", arguments: { task_title: runNumber === 1 ? "Stream first API answer" : "Stream second API answer" } }]
+            toolCalls: [{ id: `title-${runNumber}`, name: "begin_repo_task", arguments: { task_title: runNumber === 1 ? "Stream first API answer" : "Stream second API answer", task_size: "small" } }]
           };
         }
         const parts = runNumber === 1 ? ["First ", "answer"] : ["Second ", "answer"];
@@ -54,7 +54,7 @@ const plugin = createApiWorkerPlugin({
     jobMcp: {
       async listTools() { return [{ name: "begin_repo_task", description: "title", inputSchema: { type: "object" } }]; },
       async callTool(name, args) {
-        if (name === "begin_repo_task") return { verified: true, task_title: args.task_title, task_kind: "general" };
+        if (name === "begin_repo_task") return { verified: true, task_title: args.task_title, task_kind: "general", task_size: args.task_size };
         if (name === "finalize_worker_job") return { finalized: true, job: { status: args.outcome } };
         throw new Error(`unexpected tool ${name}`);
       },

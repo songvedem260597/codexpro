@@ -459,6 +459,17 @@ function activeRepoTaskForServer(server: McpServer): ActiveRepoTask | undefined 
   return profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
 }
 
+function assertTaskChecklistReady(server: McpServer): void {
+  const active = activeRepoTaskForServer(server);
+  if (!active) return;
+  const job = readWorkerJob(active.taskId);
+  if (!job || !["medium", "large"].includes(String(job.taskSize)) || job.checklist.length) return;
+  throw new CodexProError(
+    "TASK_CHECKLIST_REQUIRED: Report a complete durable checklist with report_worker_job_progress before modifying source for a medium or large task.",
+    { code: "TASK_CHECKLIST_REQUIRED", details: { task_id: active.taskId, task_size: job.taskSize } }
+  );
+}
+
 function repoTaskWorktree(active: ActiveRepoTask): { root?: string; branch?: string } {
   if (active.worktreeRoot && fs.existsSync(active.worktreeRoot)) {
     return { root: active.worktreeRoot, branch: active.worktreeBranch };
@@ -853,7 +864,7 @@ function serverInstructions(config: CodexProConfig, requireRepoTask = false): st
     "",
     "Preferred workflow:",
     requireRepoTask
-      ? "1. Every profile-bound ChatGPT task must call begin_repo_task once with a clear, natural, easy-to-understand AI-generated task_title of 4-6 words and task_kind=general or code. Use general for answers/research that do not touch source; use code before any repository/workspace tool. If CodexPro Manager supplies an exact task id/root/scope, pass those exact values. For a direct ChatGPT request, omit task_id/root. A newly begun task invalidates the previous active task immediately."
+      ? "1. Every profile-bound ChatGPT task must call begin_repo_task once with a clear 4-6 word task_title, task_kind=general|code, and task_size=small|medium|large. Follow-up messages accepted as adjustments keep the existing Task ID and must not call begin_repo_task again. If Manager supplies an exact task id/root/scope, pass those exact values."
       : "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
     requireRepoTask
       ? `2. task_kind=general records the task title only and does not load global rules or CodexGraph. task_kind=code loads the latest mandatory global rules from ${path.join(codexProHome(), CODEXPRO_GLOBAL_RULES_FILE)}, activates CodexGraph, and binds both to the repository gate. If the rules change, the next gated tool fails closed until begin_repo_task runs again.`
@@ -866,6 +877,7 @@ function serverInstructions(config: CodexProConfig, requireRepoTask = false): st
     "6. Prioritize correctness over minimizing tool calls or context. For non-trivial edits, use structured search with intent=impact/references to inspect CodexGraph callers, state, framework links, and related tests before changing code.",
     "7. write/edit/apply_patch return automatic CodexGraph before/after impact evidence. Treat graph-integrity warnings or removed dependency edges as verification requirements, not harmless noise.",
     "8. CodexGraph augments but never replaces source inspection, typecheck, runtime tests, or broader review when code uses dynamic dispatch, reflection, string-based routing, or unresolved compiler diagnostics.",
+    "9. Investigate autonomously before edits. Do not ask the user merely because work is complex or technically ambiguous; use the safest narrow assumption unless product intent, destructive action, credentials, contradictory requirements, or out-of-scope authority truly requires input. Large tasks must report a durable checklist before source writes.",
     config.codexSessions !== "off"
       ? `9. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
       : "",
@@ -1334,6 +1346,7 @@ type RepoTaskProof = {
   taskId: string;
   taskTitle: string;
   taskKind: "general" | "code";
+  taskSize?: "small" | "medium" | "large";
   taskSource: "manager" | "chatgpt_direct";
   root: string;
   workspaceId: string;
@@ -1982,19 +1995,27 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         scope,
         preparedAt: Date.now()
       };
-      rememberExpectedRepoTask(args.profile_id, expected);
-      setBrowserExtensionProfilePendingTask(args.profile_id, expected.taskId, expected.root || "", expected.scope, expected.preparedAt);
       const workerJob = await prepareWorkerJob({
         jobId: expected.taskId,
         workerId: args.profile_id,
         root: expected.root,
         scope: expected.scope
       });
+      const normalizedOwner = (value: string) => value.trim().replace(/^browser:/, "");
+      const runningBlocker = listWorkerJobs({ statuses: ["running"], limit: 200 }).find((job) => (
+        job.jobId !== expected.taskId && normalizedOwner(job.workerId) === normalizedOwner(args.profile_id)
+      ));
+      if (!runningBlocker) {
+        rememberExpectedRepoTask(args.profile_id, expected);
+        setBrowserExtensionProfilePendingTask(args.profile_id, expected.taskId, expected.root || "", expected.scope, expected.preparedAt);
+      }
       recordBrowserProfileTaskEvent("repo_task_prepared", {
         profile_id: args.profile_id,
         task_id: expected.taskId,
         root: expected.root,
         scope: expected.scope,
+        fifo_queued: Boolean(runningBlocker),
+        queued_behind_task_id: runningBlocker?.jobId,
         prepared_at: new Date(expected.preparedAt).toISOString(),
         policy_version: workerJob.policyVersion
       });
@@ -2005,6 +2026,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         root: expected.root,
         root_unbound: scope === "all_allowed",
         scope: expected.scope,
+        fifo_queued: Boolean(runningBlocker),
+        queued_behind_task_id: runningBlocker?.jobId,
         prepared_at: new Date(expected.preparedAt).toISOString()
       });
     }
@@ -2016,7 +2039,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     "begin_repo_task",
     {
       title: "Register Profile Task",
-      description: "Mandatory lightweight first call for every profile-bound worker request. Always provide a clear, natural, easy-to-understand 4-6 word task_title. task_kind only controls MCP workspace access: general is for answers/research without source access; code loads global rules, activates CodexGraph, and unlocks repository tools. Manager counts the worker job as a Task only after an actual write/edit/apply_patch source change.",
+      description: "Mandatory lightweight first call for every profile-bound worker request. Always provide a clear 4-6 word task_title and classify task_size as small, medium, or large. task_kind only controls MCP workspace access. Medium and large tasks must persist a structured checklist before source writes and completion.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional().describe("Exact task id included by CodexPro Manager. Omit only for a request typed directly in ChatGPT."),
         task_title: z.string().trim().min(4).max(56)
@@ -2024,6 +2047,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           .refine((value) => !/^(?:làm sao|sửa đi|làm đi|fix đi|check lỗi|kiểm tra|tiếp tục)$/iu.test(value.trim()), "Task title must describe the actual work, not a vague request.")
           .describe("Required title chosen and returned by the AI: 4-6 short, clear, natural words describing the actual work."),
         task_kind: z.enum(["general", "code"]).describe("Workspace access mode, not the Manager Task classification. Use general when no source/workspace tool is needed. Use code before reading, changing, building, testing, committing, or pushing in a repository; Manager counts it as a Task only after an actual write/edit/apply_patch source change."),
+        task_size: z.enum(["small", "medium", "large"]).optional().describe("Task complexity selected by the worker. Medium and large tasks require a durable checklist before source writes; use large for multi-module, high-risk, architectural, migration, concurrency/recovery, or multi-phase work."),
         root: z.string().min(1).optional().describe("Initial workspace root included by CodexPro Manager. Omit for a direct ChatGPT request to use the profile's locked workspace."),
         scope: z.enum(["workspace", "all_allowed"]).optional().describe("Task scope. Omit or use workspace for a locked workspace; use all_allowed only when Manager explicitly enables all allowed roots.")
       },
@@ -2062,6 +2086,20 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           });
         }
       }
+      if (managerPrepared && taskId && !preparedOwner) {
+        const queuedJob = readWorkerJob(taskId);
+        if (queuedJob?.status === "prepared" && queuedJob.workerId) {
+          preparedOwner = {
+            profileId: queuedJob.workerId.replace(/^browser:/, ""),
+            expected: {
+              taskId: queuedJob.jobId,
+              root: queuedJob.scope === "workspace" ? queuedJob.root || undefined : undefined,
+              scope: queuedJob.scope,
+              preparedAt: Date.parse(queuedJob.fifoQueuedAt || queuedJob.preparedAt) || Date.now()
+            }
+          };
+        }
+      }
       if (preparedOwner && preparedOwner.profileId !== gateProfileId) {
         gateProfileId = preparedOwner.profileId;
         expected = preparedOwner.expected;
@@ -2074,6 +2112,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           task_owner_profile_id: gateProfileId,
           reason: "prepared_task_id_owner"
         });
+      } else if (preparedOwner) {
+        expected = preparedOwner.expected;
       }
       if (managerPrepared && !preparedOwner && !gateProfileId) {
         recordBrowserProfileTaskEvent("repo_task_owner_missing", {
@@ -2176,6 +2216,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         taskId,
         taskTitle: args.task_title.trim(),
         taskKind: args.task_kind,
+        taskSize: args.task_size,
         taskSource,
         root: resolvedRoot,
         workspaceId: workspace?.id || "",
@@ -2193,6 +2234,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         workerId: gateProfileId || `direct.${proof.taskId}`,
         title: proof.taskTitle,
         kind: proof.taskKind,
+        taskSize: proof.taskSize,
         root: proof.root,
         workspaceId: proof.workspaceId,
         scope: proof.scope,
@@ -2204,6 +2246,13 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         codexGraphSymbolCount: proof.codexGraph?.coverage.symbolCount,
         codexGraphRelationshipCount: proof.codexGraph?.coverage.relationshipCount
       });
+      if (managerPrepared && gateProfileId && expected && expectedRepoTask(gateProfileId)?.taskId !== proof.taskId) {
+        expected = rememberExpectedRepoTask(gateProfileId, {
+          taskId: proof.taskId,
+          root: expected.root,
+          scope: expected.scope
+        });
+      }
       if (gateProfileId) setBrowserExtensionProfileTask(gateProfileId, proof.taskId, proof.taskTitle);
       recordBrowserProfileTaskEvent("repo_task_started", {
         profile_id: gateProfileId,
@@ -2214,6 +2263,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         task_title_requested_by: "mcp_server",
         task_title_returned_by: "ai",
         task_kind: proof.taskKind,
+        task_size: proof.taskSize,
         task_source: taskSource,
         root: proof.root,
         global_rules_loaded: Boolean(globalRules),
@@ -2236,6 +2286,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           task_title_requested_by: "mcp_server",
           task_title_returned_by: "ai",
           task_kind: proof.taskKind,
+          task_size: proof.taskSize,
           task_source: proof.taskSource,
           profile_id: gateProfileId,
           session_profile_id: sessionProfileId,
@@ -2284,6 +2335,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         task_title_requested_by: "mcp_server",
         task_title_returned_by: "ai",
         task_kind: proof.taskKind,
+        task_size: proof.taskSize,
         task_source: proof.taskSource,
         profile_id: gateProfileId,
         session_profile_id: sessionProfileId,
@@ -2367,6 +2419,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           task_title_requested_by: "mcp_server",
           task_title_returned_by: "ai",
           task_kind: proof.taskKind,
+          task_size: proof.taskSize,
           task_source: proof.taskSource,
           root: proof.root,
           workspace_id: proof.workspaceId,
@@ -2395,6 +2448,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           task_title_requested_by: "mcp_server",
           task_title_returned_by: "ai",
           task_kind: durableProof.kind,
+          task_size: durableProof.taskSize,
           task_source: "manager",
           root: durableProof.root,
           workspace_id: durableProof.workspaceId,
@@ -2526,7 +2580,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     "report_worker_job_progress",
     {
       title: "Report Worker Job Progress",
-      description: "Persist a structured task checkpoint with progress percent, completed/remaining parts, blocker location, verification evidence, and stall/error context. Keep remaining_parts accurate at every stage; it must be empty before successful finalization.",
+      description: "Persist a structured task checkpoint with progress, completed/remaining parts, durable checklist, blocker location, verification evidence, and stall/error context. Medium and large tasks should send the full checklist every time; large tasks cannot finalize without it.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/),
         stage: z.enum(["started", "partial", "all_parts_done", "verifying", "blocked", "error", "stalled"]),
@@ -2536,7 +2590,13 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         progress_percent: z.number().min(0).max(100).optional(),
         blocked_part: z.string().min(1).max(300).optional(),
         completed_parts: z.array(z.string().min(1).max(300)).max(50).optional(),
-        remaining_parts: z.array(z.string().min(1).max(300)).max(50).optional()
+        remaining_parts: z.array(z.string().min(1).max(300)).max(50).optional(),
+        checklist: z.array(z.object({
+          id: z.string().min(1).max(80),
+          title: z.string().min(1).max(300),
+          status: z.enum(["pending", "in_progress", "completed", "blocked"]),
+          evidence: z.string().max(1000).optional()
+        })).max(50).optional()
       },
       annotations: HANDOFF_WRITE_ANNOTATIONS
     },
@@ -2559,7 +2619,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           progressPercent: args.progress_percent,
           blockedPart: args.blocked_part,
           completedParts: args.completed_parts,
-          remainingParts: args.remaining_parts
+          remainingParts: args.remaining_parts,
+          checklist: args.checklist
         });
         return textResult(`# Worker Job Progress\n\n${record.jobId}: ${record.lastProgressStage || "running"} · checkpoint ${record.progressSequence}`, {
           reported: true,
@@ -3087,6 +3148,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
     },
     async (args) => {
+      assertTaskChecklistReady(server);
       const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
@@ -3150,6 +3212,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
     },
     async (args) => {
+      assertTaskChecklistReady(server);
       const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
@@ -3209,6 +3272,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
     },
     async (args) => {
+      assertTaskChecklistReady(server);
       const workspace = workspaceForTool(server, workspaces, args.workspace_id);
       const patchText = String(args.patch ?? "");
       const codexGraphPaths = patchTouchedPaths(patchText);

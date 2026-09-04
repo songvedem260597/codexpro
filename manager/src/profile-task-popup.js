@@ -59,6 +59,10 @@ export function profileTaskJobsForWorker(jobs, profileId, currentTaskId = "") {
     .sort((left, right) => {
       const rankDiff = rank(left) - rank(right);
       if (rankDiff) return rankDiff;
+      if (normalizedStatus(left) === "prepared") {
+        return Date.parse(String(left?.fifo_queued_at || left?.prepared_at || left?.updated_at || ""))
+          - Date.parse(String(right?.fifo_queued_at || right?.prepared_at || right?.updated_at || ""));
+      }
       return Date.parse(String(right?.updated_at || right?.updatedAt || right?.finished_at || "")) - Date.parse(String(left?.updated_at || left?.updatedAt || left?.finished_at || ""));
     });
 }

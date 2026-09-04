@@ -231,6 +231,22 @@ try {
     scope: "workspace"
   });
   await prepareWorkerJob({ jobId: replacementId, workerId: "chrome.fixture-supersede", scope: "workspace", root: "C:\\repo" });
+  await assert.rejects(
+    () => bootstrapWorkerJob({
+      jobId: replacementId,
+      workerId: "chrome.fixture-supersede",
+      title: "Replacement browser task",
+      kind: "general",
+      root: "",
+      workspaceId: "",
+      scope: "workspace"
+    }),
+    new RegExp(`WORKER_JOB_FIFO_WAIT:.*${supersededId}`),
+    "a newer task must remain prepared instead of superseding the running task"
+  );
+  assert.equal(readWorkerJob(supersededId)?.status, "running", "FIFO protection must preserve the running task");
+  assert.equal(readWorkerJob(replacementId)?.status, "prepared", "the newer task must remain durable and resumable in the queue");
+  await finalizeWorkerJob({ jobId: supersededId, workerId: "browser:chrome.fixture-supersede", outcome: "completed" });
   const replacement = await bootstrapWorkerJob({
     jobId: replacementId,
     workerId: "chrome.fixture-supersede",
@@ -240,12 +256,103 @@ try {
     workspaceId: "",
     scope: "workspace"
   });
-  const superseded = readWorkerJob(supersededId);
-  assert.equal(superseded?.status, "cancelled", "starting a newer task on the same worker must close the previous running job");
-  assert.equal(superseded?.events.at(-1)?.type, "superseded");
-  assert.equal(superseded?.events.at(-1)?.details?.superseded_by, replacementId);
   assert.equal(replacement.status, "running");
   await finalizeWorkerJob({ jobId: replacementId, workerId: "chrome.fixture-supersede", outcome: "completed" });
+
+  const largeId = "cpt_666666666666666666666666";
+  await prepareWorkerJob({ jobId: largeId, workerId: "api.large", scope: "workspace", root: "C:\\repo" });
+  const large = await bootstrapWorkerJob({
+    jobId: largeId,
+    workerId: "api.large",
+    title: "Refactor complex worker lifecycle",
+    kind: "code",
+    taskSize: "large",
+    root: "C:\\repo",
+    workspaceId: "ws_large",
+    scope: "workspace",
+    rulesHash: "rules",
+    agentsHash: "agents",
+    codexGraphActive: true
+  });
+  assert.equal(workerJobPublicRecord(large).task_size, "large");
+  assert.deepEqual(workerJobPublicRecord(large).missing_obligations, ["task_checklist"], "large tasks must require a durable checklist");
+  await assert.rejects(
+    () => finalizeWorkerJob({ jobId: largeId, workerId: "api.large", outcome: "completed" }),
+    /task_checklist/
+  );
+  await assert.rejects(
+    () => reportWorkerJobProgress({
+      jobId: largeId,
+      workerId: "api.large",
+      stage: "started",
+      summary: "Invalid plan",
+      checklist: [
+        { id: "investigate", title: "Investigate", status: "in_progress" },
+        { id: "implement", title: "Implement", status: "in_progress" }
+      ]
+    }),
+    /only one in_progress/
+  );
+  const plannedLarge = await reportWorkerJobProgress({
+    jobId: largeId,
+    workerId: "api.large",
+    stage: "started",
+    summary: "Investigation plan persisted before source changes.",
+    progressPercent: 10,
+    completedParts: [],
+    remainingParts: ["investigate", "implement", "verify"],
+    checklist: [
+      { id: "investigate", title: "Investigate root cause", status: "in_progress" },
+      { id: "implement", title: "Implement scoped fix", status: "pending" },
+      { id: "verify", title: "Verify and deliver", status: "pending" }
+    ]
+  });
+  assert.deepEqual(workerJobPublicRecord(plannedLarge).missing_obligations, []);
+  assert.equal(workerJobPublicRecord(plannedLarge).checklist[0].status, "in_progress");
+  await assert.rejects(
+    () => finalizeWorkerJob({ jobId: largeId, workerId: "api.large", outcome: "completed" }),
+    /unfinished parts remain|checklist items remain unfinished/
+  );
+  await reportWorkerJobProgress({
+    jobId: largeId,
+    workerId: "api.large",
+    stage: "verifying",
+    summary: "All checklist items and delivery steps completed.",
+    progressPercent: 99,
+    completedParts: ["investigate", "implement", "verify"],
+    remainingParts: [],
+    checklist: [
+      { id: "investigate", title: "Investigate root cause", status: "completed", evidence: "call flow inspected" },
+      { id: "implement", title: "Implement scoped fix", status: "completed", evidence: "source updated" },
+      { id: "verify", title: "Verify and deliver", status: "completed", evidence: "tests passed" }
+    ]
+  });
+  const completedLarge = await finalizeWorkerJob({ jobId: largeId, workerId: "api.large", outcome: "completed", summary: "Large task completed." });
+  assert.equal(completedLarge.status, "completed");
+  assert.ok(completedLarge.checklist.every((item) => item.status === "completed"));
+
+  const mediumId = "cpt_777777777777777777777777";
+  await prepareWorkerJob({ jobId: mediumId, workerId: "api.medium", scope: "workspace", root: "C:\\repo" });
+  const medium = await bootstrapWorkerJob({
+    jobId: mediumId,
+    workerId: "api.medium",
+    title: "Implement medium workflow change",
+    kind: "general",
+    taskSize: "medium",
+    root: "",
+    workspaceId: "",
+    scope: "workspace"
+  });
+  assert.deepEqual(workerJobPublicRecord(medium).missing_obligations, ["task_checklist"], "medium tasks must also require a durable checklist");
+  await reportWorkerJobProgress({
+    jobId: mediumId,
+    workerId: "api.medium",
+    stage: "verifying",
+    summary: "Medium checklist complete.",
+    remainingParts: [],
+    checklist: [{ id: "work", title: "Implement and verify", status: "completed" }]
+  });
+  assert.equal((await finalizeWorkerJob({ jobId: mediumId, workerId: "api.medium", outcome: "completed" })).status, "completed");
 
   console.log("✓ Worker MCP policy persistence smoke test passed");
 } finally {

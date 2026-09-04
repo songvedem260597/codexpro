@@ -92,7 +92,7 @@ const server = http.createServer(async (req, res) => {
         message: {
           role: "assistant",
           content: "",
-          tool_calls: [{ id: "call-title", type: "function", function: { name: "begin_repo_task", arguments: JSON.stringify({ task_id: "ignored", task_title: "Đọc tài liệu dự án", task_kind: "code", root: "ignored" }) } }]
+          tool_calls: [{ id: "call-title", type: "function", function: { name: "begin_repo_task", arguments: JSON.stringify({ task_id: "ignored", task_title: "Đọc tài liệu dự án", task_kind: "code", task_size: "small", root: "ignored" }) } }]
         }
       }],
       usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 }
@@ -282,7 +282,7 @@ try {
           turn += 1;
           if (turn === 1) throw Object.assign(new Error("Provider HTTP 429: reset after 1ms"), { status: 429, retryAfterMs: 1 });
           if (turn <= 3) return { text: "Tôi chưa phát tool call.", toolCalls: [], usage: { total_tokens: 1 } };
-          if (turn === 4) return { text: '{"task_title":"Trả lời yêu cầu API","root":"C:\\\\fixture"}', toolCalls: [], usage: { total_tokens: 2 } };
+          if (turn === 4) return { text: '{"task_title":"Trả lời yêu cầu API","task_size":"small","root":"C:\\\\fixture"}', toolCalls: [], usage: { total_tokens: 2 } };
           return { text: "API worker hoàn tất.", toolCalls: [], usage: { total_tokens: 3 } };
         }
       };
@@ -365,7 +365,7 @@ try {
       manifest: { id: "malicious-fixture", name: "Malicious fixture", kind: "fixture", capabilities: { tool_calling: true } },
       async complete() {
         rejectedTurn += 1;
-        if (rejectedTurn === 1) return { text: "", toolCalls: [{ id: "title", name: "begin_repo_task", arguments: { task_title: "Chặn tool nội bộ" } }] };
+        if (rejectedTurn === 1) return { text: "", toolCalls: [{ id: "title", name: "begin_repo_task", arguments: { task_title: "Chặn tool nội bộ", task_size: "small" } }] };
         return { text: "", toolCalls: [{ id: "bad", name: "finalize_worker_job", arguments: { outcome: "completed" } }] };
       }
     },
@@ -393,7 +393,7 @@ try {
       manifest: { id: "cancel-provider", name: "Cancel fixture", kind: "fixture", capabilities: { tool_calling: true } },
       async complete({ signal }) {
         cancellationTurn += 1;
-        if (cancellationTurn === 1) return { text: "", toolCalls: [{ id: "cancel-title", name: "begin_repo_task", arguments: { task_title: "Hủy API worker" } }] };
+        if (cancellationTurn === 1) return { text: "", toolCalls: [{ id: "cancel-title", name: "begin_repo_task", arguments: { task_title: "Hủy API worker", task_size: "small" } }] };
         return await new Promise((resolve, reject) => {
           if (signal.aborted) return reject(signal.reason);
           signal.addEventListener("abort", () => reject(signal.reason), { once: true });

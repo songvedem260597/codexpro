@@ -23,6 +23,7 @@ import { create9RouterProvider, createOpenAICompatibleProvider, createOpenRouter
 import { createApiWorkerPlugin } from "./worker-plugins/api-worker-plugin.mjs";
 import { createChromeWorkerPlugin } from "./worker-plugins/chrome-worker-plugin.mjs";
 import { buildTaskWorkflowPrompt, resolveTaskWorkflow } from "./task-workflow-registry.mjs";
+import { buildAutonomousTaskExecutionPolicy } from "./task-execution-policy.mjs";
 import { createAppPluginRegistry } from "./app-plugins/app-plugin-registry.mjs";
 import { createManagedAppPluginInstaller } from "./app-plugins/managed-app-plugin-installer.mjs";
 import { buildGitDiagramArchitecture } from "./app-plugins/gitdiagram-analyzer.mjs";
@@ -2644,7 +2645,7 @@ async function collectRuntimeStatus(options = {}) {
         return { available: false, profiles: [] };
       }),
       localMcpTool(base.config, base.token, "worker_job_history", {
-        statuses: ["running", "completed", "failed", "cancelled", "blocked"],
+        statuses: ["prepared", "running", "completed", "failed", "cancelled", "blocked"],
         limit: 60
       }).then((result) => ({
         available: true,
@@ -3858,6 +3859,7 @@ function workerJobResumeCheckpointText(job, checkpoints = []) {
   const contextLines = recent.flatMap((checkpoint, index) => {
     const completed = Array.isArray(checkpoint?.completedParts) ? checkpoint.completedParts : [];
     const remaining = Array.isArray(checkpoint?.remainingParts) ? checkpoint.remainingParts : [];
+    const checklist = Array.isArray(checkpoint?.checklist) ? checkpoint.checklist : [];
     const progress = Math.max(0, Math.min(100, Number(checkpoint?.progressPercent) || 0));
     const reason = String(checkpoint?.reason || checkpoint?.blockedPart || "").trim();
     const evidence = String(checkpoint?.evidence || "").trim();
@@ -3866,6 +3868,7 @@ function workerJobResumeCheckpointText(job, checkpoints = []) {
       `Tóm tắt: ${String(checkpoint?.summary || "").trim() || "Không có tóm tắt."}`,
       completed.length ? `Đã xong: ${completed.join(" | ")}` : "",
       remaining.length ? `Còn lại: ${remaining.join(" | ")}` : "",
+      checklist.length ? `Checklist: ${checklist.map((item) => `${item.id}=${item.status}${item.evidence ? ` (${item.evidence})` : ""}`).join(" | ")}` : "",
       reason ? `Lỗi/chặn: ${reason}` : "",
       evidence ? `Bằng chứng: ${evidence}` : ""
     ].filter(Boolean);
@@ -3880,6 +3883,7 @@ function workerJobResumeCheckpointText(job, checkpoints = []) {
   }
   const completed = Array.isArray(workerJobField(job, "completed_parts", "completedParts")) ? workerJobField(job, "completed_parts", "completedParts") : [];
   const remaining = Array.isArray(workerJobField(job, "remaining_parts", "remainingParts")) ? workerJobField(job, "remaining_parts", "remainingParts") : [];
+  const checklist = Array.isArray(workerJobField(job, "checklist", "checklist")) ? workerJobField(job, "checklist", "checklist") : [];
   const progress = Math.max(0, Math.min(100, Number(workerJobField(job, "progress_percent", "progressPercent")) || 0));
   const reason = String(workerJobField(job, "blocked_reason", "blockedReason") || workerJobField(job, "last_progress_reason", "lastProgressReason") || job?.error || job?.summary || "").trim();
   const evidence = String(workerJobField(job, "completion_evidence", "completionEvidence") || workerJobField(job, "last_progress_evidence", "lastProgressEvidence") || "").trim();
@@ -3888,6 +3892,7 @@ function workerJobResumeCheckpointText(job, checkpoints = []) {
     `Trạng thái trước khi tiếp tục: ${String(job?.status || "unknown")}. Tiến độ đã ghi nhận: ${Math.round(progress)}%.`,
     completed.length ? `Phần đã xong: ${completed.join(" | ")}` : "Phần đã xong: chưa có checkpoint chi tiết.",
     remaining.length ? `Phần còn lại: ${remaining.join(" | ")}` : "Phần còn lại: hãy đối chiếu source/trạng thái hiện tại để xác định chính xác, không làm lại phần đã hoàn tất.",
+    checklist.length ? `Checklist bền vững: ${checklist.map((item) => `${item.id}=${item.status}${item.evidence ? ` (${item.evidence})` : ""}`).join(" | ")}` : "",
     reason ? `Lý do lỗi/chặn gần nhất: ${reason}` : "Không có lý do lỗi/chặn được lưu.",
     evidence ? `Bằng chứng gần nhất: ${evidence}` : "",
     "Không truy lại conversation cũ. Kiểm tra trạng thái hiện tại, giữ nguyên các phần đã hoàn tất, xử lý phần còn lại và verify đầy đủ trước khi kết thúc."
@@ -4111,9 +4116,10 @@ async function sendProfileRequestUnlocked(payload) {
         `Task ID bắt buộc: ${taskId}`,
         "BẮT BUỘC tự đặt task_title tự nhiên, dễ hiểu, dài 4-6 từ và mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
         "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
+        "BẮT BUỘC tự đánh giá task_size là small, medium hoặc large; task lớn/phức tạp phải tạo checklist bền vững trước khi sửa source.",
         "Lưu ý: task_kind chỉ điều khiển quyền MCP. Manager chỉ tính worker job là Task khi có thay đổi source thật do write/edit/apply_patch; hỏi đáp, phân tích/read-only, build/test-only, commit-only hoặc push-only không được tính là Task.",
-        `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"general","scope":"all_allowed"}.`,
-        `Nếu task_kind=code: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"code","root":"${selectedProject.root.replace(/\\/g, "\\\\")}","scope":"all_allowed"} trước mọi câu trả lời. Workspace CodexPro vẫn là workspace chính để sửa/build/test.`,
+        `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"general","task_size":"<small|medium|large>","scope":"all_allowed"}.`,
+        `Nếu task_kind=code: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"code","task_size":"<small|medium|large>","root":"${selectedProject.root.replace(/\\/g, "\\\\")}","scope":"all_allowed"} trước mọi câu trả lời. Workspace CodexPro vẫn là workspace chính để sửa/build/test.`,
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
         "Sau khi begin_repo_task với task_kind=code thành công, bạn ĐƯỢC PHÉP dùng open_workspace để chuyển sang bất kỳ repo/thư mục nào nằm trong các vùng đã cấp quyền ở trên nhằm ĐỌC và đối chiếu source tham chiếu (ví dụ DeepSeek Harness), rồi quay lại workspace CodexPro để sửa/build/test. Không được truy cập đường dẫn ngoài các vùng đó và không sửa source tham chiếu ngoài workspace chính trừ khi người dùng yêu cầu rõ."
       ]
@@ -4125,9 +4131,10 @@ async function sendProfileRequestUnlocked(payload) {
         `Task ID bắt buộc: ${taskId}`,
         "BẮT BUỘC tự đặt task_title tự nhiên, dễ hiểu, dài 4-6 từ và mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
         "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
+        "BẮT BUỘC tự đánh giá task_size là small, medium hoặc large; task lớn/phức tạp phải tạo checklist bền vững trước khi sửa source.",
         "Lưu ý: task_kind chỉ điều khiển quyền MCP. Manager chỉ tính worker job là Task khi có thay đổi source thật do write/edit/apply_patch; hỏi đáp, phân tích/read-only, build/test-only, commit-only hoặc push-only không được tính là Task.",
-        `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"general","scope":"all_allowed"}. Không truyền root vì task này không dùng workspace.`,
-        `Nếu task_kind=code: BẮT BUỘC tự chọn đúng repo/thư mục thực sự liên quan tới yêu cầu rồi gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"code","root":"<đường dẫn repo/thư mục thực sự cần thao tác>","scope":"all_allowed"}. Không được mặc định dùng workspace CodexPro hiện tại/default chỉ vì nó đang mở; nếu chưa biết repo cụ thể, chọn vùng được cấp quyền hẹp nhất phù hợp để tìm từ đó.`,
+        `Nếu task_kind=general: BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"general","task_size":"<small|medium|large>","scope":"all_allowed"}. Không truyền root vì task này không dùng workspace.`,
+        `Nếu task_kind=code: BẮT BUỘC tự chọn đúng repo/thư mục thực sự liên quan tới yêu cầu rồi gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"code","task_size":"<small|medium|large>","root":"<đường dẫn repo/thư mục thực sự cần thao tác>","scope":"all_allowed"}. Không được mặc định dùng workspace CodexPro hiện tại/default chỉ vì nó đang mở; nếu chưa biết repo cụ thể, chọn vùng được cấp quyền hẹp nhất phù hợp để tìm từ đó.`,
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
         "Sau khi begin_repo_task với task_kind=code thành công, bạn ĐƯỢC PHÉP dùng open_workspace để chuyển giữa các workspace nằm bên trong những vùng CodexPro đã được cấp quyền ở trên nhằm tìm đúng dự án hoặc file. Không được truy cập đường dẫn nằm ngoài các vùng đó."
       ]
@@ -4136,14 +4143,16 @@ async function sendProfileRequestUnlocked(payload) {
         `Task ID bắt buộc: ${taskId}`,
         "BẮT BUỘC tự đặt task_title tự nhiên, dễ hiểu, dài 4-6 từ và mô tả đúng việc đang làm; không dùng tên chung chung như Làm sao, Sửa đi, Làm đi, Check giúp.",
         "BẮT BUỘC tự phân loại task_kind: dùng general nếu chỉ hỏi đáp/nghiên cứu web/giải thích và không đụng source; dùng code nếu cần đọc, sửa, build hoặc test repo.",
+        "BẮT BUỘC tự đánh giá task_size là small, medium hoặc large; task lớn/phức tạp phải tạo checklist bền vững trước khi sửa source.",
         "Lưu ý: task_kind chỉ điều khiển quyền MCP. Manager chỉ tính worker job là Task khi có thay đổi source thật do write/edit/apply_patch; hỏi đáp, phân tích/read-only, build/test-only, commit-only hoặc push-only không được tính là Task.",
-        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"<general hoặc code>","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Phải thay cả hai placeholder bằng giá trị thật. task_kind=general chỉ ghi title, không đọc CODEXPRO.md và không chạy CodexGraph; task_kind=code mới nạp rule, chạy CodexGraph và mở tool workspace.`,
+        `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<tên task 4-6 từ do bạn tự đặt>","task_kind":"<general hoặc code>","task_size":"<small|medium|large>","root":"${selectedProject.root.replace(/\\/g, "\\\\")}"} trước mọi câu trả lời. Phải thay các placeholder bằng giá trị thật. task_kind=general chỉ ghi title, không đọc CODEXPRO.md và không chạy CodexGraph; task_kind=code mới nạp rule, chạy CodexGraph và mở tool workspace.`,
         "Nếu task_kind=code, BẮT BUỘC sử dụng MCP CodexPro để kiểm tra thật. Nếu task_kind=general, không được gọi tool workspace chỉ để tạo bằng chứng giả.",
         "Sau khi begin_repo_task với task_kind=code thành công, hãy đọc và thao tác đúng workspace đã khóa. Không chuyển sang workspace khác."
       ];
   const taskStatusProtocolLines = [
+    ...buildAutonomousTaskExecutionPolicy(taskId),
     "BẮT BUỘC báo tiến độ task qua MCP CodexPro bằng trạng thái có cấu trúc, không chỉ mô tả bằng câu trả lời văn bản.",
-    `Sau mỗi phần việc có ý nghĩa đã xong, gọi tool MCP CodexPro "codexpro" với action="report_worker_job_progress" và args có "task_id":"${taskId}", "stage":"partial", "progress_percent":<0-100>, "summary":"<đã xong gì>", "completed_parts":[...], "remaining_parts":[...]. completed_parts/remaining_parts phải phản ánh toàn bộ snapshot hiện tại, không chỉ phần vừa thay đổi.`,
+    `Sau mỗi phần việc có ý nghĩa đã xong, gọi tool MCP CodexPro "codexpro" với action="report_worker_job_progress" và args có "task_id":"${taskId}", "stage":"partial", "progress_percent":<0-100>, "summary":"<đã xong gì>", "completed_parts":[...], "remaining_parts":[...], và "checklist":[...] cho task vừa/lớn. Các mảng phải phản ánh toàn bộ snapshot hiện tại, không chỉ phần vừa thay đổi.`,
     `Khi đã xong toàn bộ phần triển khai nhưng còn build/test/verify/commit/push, báo stage="all_parts_done" hoặc stage="verifying" cho Task ID ${taskId}, remaining_parts phải liệt kê chính xác bước còn lại; chỉ để remaining_parts=[] sau khi thực sự không còn phần việc nào chưa xong. Không được gọi completed sớm.`,
     "Nếu bị chặn, gặp lỗi, hoặc nghi task đang treo nhưng model vẫn còn phản hồi được, BẮT BUỘC báo stage=\"blocked\", \"error\" hoặc \"stalled\" kèm blocked_part=\"<đang kẹt ở phần nào>\", reason rõ ràng, progress_percent, completed_parts, remaining_parts và evidence nếu có để Manager điều tra.",
     "Với Task có thay đổi source, chỉ được coi là hoàn thành khi test/check/verify/smoke liên quan đã PASS sau thay đổi source cuối cùng, toàn bộ thay đổi đã commit, và commit đã push/integrate thành công lên remote. Thiếu bất kỳ bước nào thì không được finalize completed.",
