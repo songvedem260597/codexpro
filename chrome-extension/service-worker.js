@@ -1018,6 +1018,9 @@ async function saveConversationTitleOverride(conversationId,title) {
 }
 
 function probeChatActivityPage() {
+  const limitPattern=/(?:you(?:'|’)?ve reached the maximum length for this conversation|maximum length for this conversation|đ(?:ã|a) (?:đạt|chạm|tới).*?(?:độ dài|do dai).*?(?:tối đa|toi da).*?(?:cuộc trò chuyện|đoạn chat))/i;
+  const startNewChatPattern=/(?:start new chat|bắt đầu (?:một )?(?:cuộc trò chuyện|đoạn chat) mới)/i;
+  let conversationLimitMessage='';
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const stopControl=Array.from(document.querySelectorAll('button,[role="button"]')).find(control=>{
     if(!visible(control))return false;
@@ -1044,6 +1047,18 @@ function probeChatActivityPage() {
     return Boolean((/^Generated image:/i.test(alt)||/\/backend-api\/estuary\/content(?:\?|$)/i.test(src)||generatedWrapper)&&(Number(image.naturalWidth)||Number(image.width)||src));
   });
   const imageResponseReady=Boolean(generatedImage&&!imageGenerationLoading);
+  for(const control of document.querySelectorAll('button,a,[role="button"]')){
+    if(!visible(control))continue;
+    const label=String(control.innerText||control.textContent||control.getAttribute?.('aria-label')||'').trim();
+    if(!startNewChatPattern.test(label))continue;
+    let node=control;
+    for(let depth=0;node&&depth<6;depth+=1,node=node.parentElement){
+      const text=String(node.innerText||node.textContent||'').replace(/\u200b/g,'').trim();
+      if(text.length<=1400&&limitPattern.test(text)){conversationLimitMessage=text.slice(0,500);break;}
+    }
+    if(conversationLimitMessage)break;
+  }
+  const conversationLimitReached=Boolean(conversationLimitMessage);
   const pageText=String(document.body?.innerText||document.body?.textContent||'').replace(/\u200b/g,' ');
   const connectionInterrupted=/(?:connection interrupted\.\s*waiting for the complete answer|k\u1ebft n\u1ed1i b\u1ecb gi\u00e1n \u0111o\u1ea1n\.\s*\u0111ang ch\u1edd c\u00e2u tr\u1ea3 l\u1eddi ho\u00e0n ch\u1ec9nh)/i.test(pageText);
   const messageDeliveryTimedOut=/message delivery timed out\.\s*please try again/i.test(pageText);
@@ -1054,7 +1069,7 @@ function probeChatActivityPage() {
   const responseReady=Boolean(imageResponseReady||assistantAfterLatestUser&&!busy);
   const activityText=imageGenerationLoading?'ChatGPT đang tạo ảnh':messageDeliveryTimedOut?'Phản hồi quá hạn · đang khôi phục nội dung':connectionInterrupted?'Kết nối phản hồi bị ngắt · đang khôi phục':toolCallActive?'CodexPro đang gọi tool':thinkingPlaceholder&&!imageResponseReady?'ChatGPT đang suy nghĩ':stopControl&&!imageResponseReady?'ChatGPT đang tiếp tục xử lý':'';
   const source=imageGenerationLoading?'dom_image_generation':imageResponseReady?'dom_image_ready':responseReady?'dom_response_ready':messageDeliveryTimedOut?'dom_message_delivery_timeout':connectionInterrupted?'dom_connection_interrupted':toolCallActive?'dom_tool':stopControl?'dom_stop':thinkingPlaceholder?'dom_thinking':'';
-  return {busy,response_ready:responseReady,source,activity_text:activityText,image_generation_in_progress:imageGenerationLoading,image_response_ready:imageResponseReady,connection_interrupted:recoveryRequired,message_delivery_timed_out:messageDeliveryTimedOut,observed_at:Date.now()};
+  return {busy,response_ready:responseReady,source,activity_text:activityText,image_generation_in_progress:imageGenerationLoading,image_response_ready:imageResponseReady,connection_interrupted:recoveryRequired,message_delivery_timed_out:messageDeliveryTimedOut,conversation_limit_reached:conversationLimitReached,conversation_limit_message:conversationLimitMessage,observed_at:Date.now()};
 }
 
 async function chatDomActivityState(tabId,conversationId,options={}) {
@@ -1077,7 +1092,7 @@ async function chatDomActivityState(tabId,conversationId,options={}) {
         'Chrome renderer không phản hồi khi kiểm tra trạng thái ChatGPT.'
       );
       const result=injected?.result&&typeof injected.result==='object'?injected.result:{};
-      return {available:true,busy:Boolean(result.busy),response_ready:Boolean(result.response_ready),source:String(result.source||''),activity_text:String(result.activity_text||'').trim().slice(0,220),image_generation_in_progress:Boolean(result.image_generation_in_progress),image_response_ready:Boolean(result.image_response_ready),connection_interrupted:Boolean(result.connection_interrupted),message_delivery_timed_out:Boolean(result.message_delivery_timed_out),observed_at:Number(result.observed_at)||Date.now()};
+      return {available:true,busy:Boolean(result.busy),response_ready:Boolean(result.response_ready),source:String(result.source||''),activity_text:String(result.activity_text||'').trim().slice(0,220),image_generation_in_progress:Boolean(result.image_generation_in_progress),image_response_ready:Boolean(result.image_response_ready),connection_interrupted:Boolean(result.connection_interrupted),message_delivery_timed_out:Boolean(result.message_delivery_timed_out),conversation_limit_reached:Boolean(result.conversation_limit_reached),conversation_limit_message:String(result.conversation_limit_message||'').trim().slice(0,500),observed_at:Number(result.observed_at)||Date.now()};
     }catch(error){return {available:false,busy:false,response_ready:false,source:'',activity_text:'',image_generation_in_progress:false,image_response_ready:false,error:String(error?.message||error).slice(0,300)};}
   })();
   chatDomActivityByTab.set(tabId,{at:Number(cached?.at)||0,value:cached?.value||null,promise});
@@ -1193,8 +1208,8 @@ async function tabList() {
       rate_limit_latest_retry_after:String(latestRateLimitIncident?.event?.retry_after||'').slice(0,300),
       rate_limit_latest_task_id:String(latestRateLimitIncident?.task_id||'').slice(0,160),
       rate_limit_latest_conversation_id:String(latestRateLimitIncident?.conversation_id||'').slice(0,180),
-      conversation_limit_reached:false,
-      conversation_limit_message:''
+      conversation_limit_reached:Boolean(domActivity.conversation_limit_reached),
+      conversation_limit_message:String(domActivity.conversation_limit_message||'').slice(0,500)
     };
   }));
   if(summaries.some(tab=>tab.settling))scheduleDomActivityRefresh();

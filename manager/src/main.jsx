@@ -451,7 +451,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.117";
+const WORKER_EXTENSION_VERSION = "0.5.118";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -1744,6 +1744,49 @@ function App() {
       });
     }
   }, [requestResponses, status?.browserProfiles, status?.workerJobs]);
+
+  useEffect(() => {
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    for (const profile of profiles) {
+      if (!profile?.connected) continue;
+      const selectedConversationId = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
+      const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+      const targetTab = tabs.find((tab) => {
+        if (!tab?.conversation_limit_reached) return false;
+        const conversationId = String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+        return Boolean(conversationId && (tab.active || conversationId === selectedConversationId));
+      });
+      if (!targetTab?.id) continue;
+      const conversationId = String(targetTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+      if (!conversationId) continue;
+      const key = `conversation-limit:${profile.profile_id}:${conversationId}`;
+      const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
+      if (Date.now() - previous < 120_000) continue;
+      operationsRecoveryTimes.current.set(key, Date.now());
+      void (async () => {
+        const snapshot = await recoveryContinuationSnapshot(profile, conversationId, targetTab);
+        const title = snapshot?.title || targetTab?.title || profile.active_chat_title || "";
+        const projectRoot = snapshot?.projectRoot || projectRootForProfile(profile);
+        logRendererDiagnostic(api, "warn", "chat", "ChatGPT reported terminal conversation length; creating continuation tab automatically", { action: "conversation-limit-auto-rollover-start", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(targetTab.id), conversation_limit_message: String(targetTab.conversation_limit_message || "").slice(0, 500) });
+        const newConversationId = await rolloverFullConversation(profile, conversationId, {
+          ...snapshot,
+          title,
+          projectRoot,
+          continuation_reason: "limit",
+          conversation_limit_reached: true,
+          conversation_limit_message: String(targetTab.conversation_limit_message || "ChatGPT báo đoạn chat đã đạt giới hạn độ dài."),
+          silent: true
+        });
+        if (!newConversationId) throw new Error("Không tạo được chat tiếp nối sau khi ChatGPT báo đạt giới hạn độ dài.");
+        logRendererDiagnostic(api, "info", "chat", "Automatically moved full conversation context to a focused continuation tab", { action: "conversation-limit-auto-rollover-done", profile_id: profile.profile_id, previous_conversation_id: conversationId, conversation_id: newConversationId, target_id: String(targetTab.id) });
+        if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Chat đã đầy", body: `“${title || "Đoạn chat"}” đã chuyển bối cảnh sang tab mới.` });
+      })().catch((err) => {
+        logRendererDiagnostic(api, "error", "chat", `Automatic full-conversation rollover failed: ${err?.message || String(err)}`, { action: "conversation-limit-auto-rollover-failed", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(targetTab.id), error: err });
+      }).finally(() => {
+        window.setTimeout(() => void refresh(false), 900);
+      });
+    }
+  }, [managerSettings.taskNotifications, requestTargets, status?.browserProfiles]);
 
   useEffect(() => {
     if (!managerSettings.autoUpdateWorkers || busy || !status?.local?.ok || status?.workerSnapshotStale) return;

@@ -247,6 +247,18 @@ const conversationLimit = await probeConversationLimitPage();
 assert.equal(conversationLimit.reached, true, "the exact ChatGPT maximum-length banner must be treated as a terminal conversation");
 assert.equal(conversationLimit.button_label, "Start new chat", "the detector must require the visible new-chat action in the same banner");
 
+const activityProbeSource = extractFunction("probeChatActivityPage");
+const probeChatActivityPage = Function("document", "getComputedStyle", `${activityProbeSource}; return probeChatActivityPage;`)(
+  {
+    body: limitPanel,
+    querySelectorAll: (selector) => selector === 'button,a,[role="button"]' || selector === 'button,[role="button"]' ? [startNewChatButton] : []
+  },
+  () => ({ display: "block", visibility: "visible" })
+);
+const fullConversationActivity = probeChatActivityPage();
+assert.equal(fullConversationActivity.conversation_limit_reached, true, "normal profile DOM polling must surface the terminal maximum-length banner before another send is attempted");
+assert.match(fullConversationActivity.conversation_limit_message, /maximum length for this conversation/i, "normal profile polling must preserve the terminal banner text for Manager diagnostics and rollover");
+
 const inspectAttemptSource = extractFunction("inspectChatSendAttemptPage");
 const replacedComposerPayload = `${"*:before{box-sizing:border-box;}".repeat(260)}\nHÃY NÂNG CẤP CHO NÚT CHAT HIỆU ỨNG NÀY`;
 const replacedComposer = {
