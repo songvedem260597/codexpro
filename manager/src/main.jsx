@@ -21,6 +21,7 @@ import { SettingsDropdown, SettingsToggle } from "./components/settings-controls
 import { ChatGalaxyButtonContent, Dot, WorkerIcon, WorkingBadge } from "./components/worker-ui.jsx";
 import { ApiWorkerCards } from "./features/api-workers/api-worker-cards.jsx";
 import { ApiWorkerJobModal } from "./features/api-workers/api-worker-job-modal.jsx";
+import { ChatDropdown, NEW_CHAT_TARGET } from "./features/chat/chat-dropdown.jsx";
 import { ChatRequestComposer } from "./features/chat/chat-request-composer.jsx";
 import { ProfileTaskModal } from "./features/tasks/profile-task-modal.jsx";
 import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
@@ -36,7 +37,6 @@ import { confirmChatResponseFinality } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
 import { mergeRuntimeStatus, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "./ui-performance.js";
 import { ApiWorkerSettings } from "./features/api-workers/api-worker-settings.jsx";
-import { AppDropdown } from "./app-dropdown.jsx";
 import { ALL_ALLOWED_WORKSPACES, formatRepoActivity, ProjectDropdown } from "./project-dropdown.jsx";
 import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
 import { WorkerRunningDuration } from "./worker-running-duration.jsx";
@@ -57,7 +57,6 @@ const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
 const RESPONSE_MANUAL_SCROLL_RESUME_MS = 5000;
 const REALTIME_WATCHDOG_MS = 30000;
 const PROJECT_REFRESH_MS = 5 * 60 * 1000;
-const NEW_CHAT_TARGET = "__codexpro_new_chat__";
 const ROLLOVER_CONTEXT_MAX_CHARS = 9000;
 const REPO_TASK_VERIFICATION_RETRY_MS = 1500;
 const LATEST_RESPONSE_RECOVERY_POLL_MS = 3000;
@@ -139,27 +138,6 @@ const DEFAULT_MANAGER_SETTINGS = {
   workerImageDataUrls: { idle: "", working: "", hung: "" }
 };
 
-
-function ChatDropdown({ value, conversations, disabled, onChange }) {
-  const selectedDraft = { id: NEW_CHAT_TARGET, title: "Chat mới", open: false, draft: true };
-  const available = value === NEW_CHAT_TARGET && !conversations.some((chat) => chat.id === value) ? [selectedDraft, ...conversations] : conversations;
-  const options = available.map((chat, index) => ({ value: chat.id, label: chat.title || "Đoạn chat chưa có tiêu đề", hint: chat.draft ? "Chưa tạo trên ChatGPT" : chat.open ? "Đang mở trong Chrome" : "Chat gần đây", searchText: `${chat.title || ""} ${chat.id || ""}`, chat, position: index + 1 }));
-  return (
-    <AppDropdown
-      className="is-chat"
-      value={value}
-      options={options}
-      disabled={disabled}
-      onChange={onChange}
-      ariaLabel="Chọn đoạn chat dự án"
-      placeholder="Chưa tải được các đoạn chat gần đây"
-      searchPlaceholder="Tìm tiêu đề hoặc ID đoạn chat…"
-      searchThreshold={6}
-      renderValue={(selected) => <span className="app-dropdown-value-copy"><strong>{selected?.label || "Chưa tải được các đoạn chat gần đây"}</strong>{selected && <small>{selected.hint}</small>}</span>}
-      renderOption={(option) => <><span className="app-dropdown-index">{option.position}</span><span className="app-dropdown-option-copy"><strong>{option.label}</strong><small>{option.hint}</small></span>{option.chat.active && <span className="app-dropdown-meta is-active">ACTIVE</span>}</>}
-    />
-  );
-}
 
 const GENERIC_TOOL_ACTIVITY_TEXT = "Codex Pro đang sử dụng công cụ";
 

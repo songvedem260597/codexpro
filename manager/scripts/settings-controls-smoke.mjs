@@ -16,7 +16,6 @@ assert.match(controls, /searchPlaceholder=\{`Tìm \$\{ariaLabel\.toLocaleLowerCa
 assert.match(controls, /className=\{`settings-toggle \$\{checked \? "is-on" : ""\}`\}/, "SettingsToggle must preserve on/off styling");
 assert.match(controls, /aria-pressed=\{checked\}/, "SettingsToggle must preserve pressed semantics");
 assert.match(controls, /onClick=\{\(\) => onChange\(!checked\)\}/, "SettingsToggle must keep boolean inversion behavior");
-assert.match(main, /function ChatDropdown\(/, "ChatDropdown must remain in main.jsx for this seam");
 assert.equal((main.match(/<SettingsDropdown\b/g) || []).length, 6, "settings page must keep all six dropdown usages");
 assert.equal((main.match(/<SettingsToggle\b/g) || []).length, 1, "settings page must keep the chat selector toggle");
 
