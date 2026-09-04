@@ -53,6 +53,7 @@ assert.match(canonicalRecovery, /recoveryCheckpointText = `\$\{workerJobResumeCh
 assert.match(canonicalRecovery, /const requestedRecoveryReason = String\(payload\?\.recoveryReason \|\| ""\)\.trim\(\)\.slice\(0, 600\)/, "recovery reason must use a dedicated bounded field instead of transcript text");
 assert.match(canonicalRecovery, /requestedRecoveryReason[\s\S]*?Lý do phục hồi hiện tại/, "canonical recovery may append only the dedicated recovery reason, not renderer transcript history");
 assert.match(canonicalRecovery, /task_id:\s*previousTaskId/, "recovery-mode checkpoint lookup must be scoped to the exact current Task ID");
+assert.match(canonicalRecovery, /recoveryContexts = Array\.isArray\(contextResult\?\.checkpoints\) \? contextResult\.checkpoints\.slice\(-3\) : \[\]/, "canonical recovery must cap restored task checkpoints at three before prompt construction");
 assert.match(canonicalRecovery, /recoveryCheckpointText[\s\S]*?\.join\("\\n"\)/, "recovery-mode prompt must use canonical checkpoint text rather than the renderer transcript payload");
 
 const rolloverPrompt = between(managerUi, "function buildConversationRolloverPrompt", "function ChatRequestComposer");
