@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const renderer = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+const apiWorkerCards = fs.readFileSync(new URL("../src/features/api-workers/api-worker-cards.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const managerMain = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
 const borderSync = fs.readFileSync(new URL("../src/worker-border-sync.js", import.meta.url), "utf8");
@@ -13,7 +14,7 @@ assert.match(managerMain, /patch,\s*"workingBorderStyle"[\s\S]*?next\.workingBor
 
 assert.ok((renderer.match(/working-border-\$\{managerSettings\.workingBorderStyle\}/g) || []).length >= 2, "worker list and preview must expose all normalized border styles without collapsing them into the old modes");
 assert.match(renderer, /value:\s*"shine"[\s\S]*?Ánh sáng xoay[\s\S]*?value:\s*"mint"[\s\S]*?Glow mint xanh[\s\S]*?value:\s*"beam"[\s\S]*?Tia chạy quanh viền/, "settings must keep both existing styles and add the mint border as a third option");
-assert.ok((renderer.match(/className="worker-active-border"/g) || []).length >= 3, "browser, API, and preview cards must render the beam layer");
+assert.ok((`${renderer}\n${apiWorkerCards}`.match(/className="worker-active-border"/g) || []).length >= 3, "browser, API, and preview cards must render the beam layer");
 
 assert.match(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working::before,[\s\S]*?transparent 0deg 225deg[\s\S]*?#f4a340 244deg[\s\S]*?#ff9f1c 346deg[\s\S]*?animation:\s*profile-border-shine\s+2\.75s\s+linear\s+infinite/, "the original orange rotating shine must remain unchanged as its own style");
 assert.doesNotMatch(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working\s*\{[^}]*border-color:\s*#334052/, "the original shine must not inherit the mint style's neutral static ring");

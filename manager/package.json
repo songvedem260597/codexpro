@@ -35,7 +35,7 @@
     "test:app-plugin-layout": "electron scripts/app-plugin-catalog-visual-smoke.cjs",
     "test:gitdiagram-visual": "electron scripts/gitdiagram-visual-smoke.cjs",
     "app-plugin:install": "node scripts/install-catalog-app-plugin.mjs",
-    "test:api-worker-job-modal": "node scripts/api-worker-job-modal-smoke.mjs",
+    "test:api-worker-job-modal": "node scripts/api-worker-job-modal-smoke.mjs && electron scripts/api-worker-job-modal-visual-smoke.cjs",
     "test:api-worker-streaming": "node scripts/api-worker-streaming-smoke.mjs",
     "test:dropdowns": "node scripts/app-dropdown-smoke.mjs",
     "test:chat-scroll": "electron scripts/chat-scroll-stability-smoke.cjs",

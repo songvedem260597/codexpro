@@ -10,8 +10,9 @@ assert.equal(formatWorkerRunningDuration("2026-08-31T15:17:45.000Z", now), "12:1
 assert.equal(formatWorkerRunningDuration("2026-08-31T13:17:45.000Z", now), "2:12:15");
 
 const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+const apiWorkerCardsSource = fs.readFileSync(new URL("../src/features/api-workers/api-worker-cards.jsx", import.meta.url), "utf8");
 assert.match(source, /<WorkerRunningDuration startedAt=\{profile\.busy_since \|\| liveTab\?\.network_last_started_at\}/, "Chrome worker duration must use the actual generation start time");
-assert.match(source, /<WorkerRunningDuration startedAt=\{worker\.started_at\}/, "API worker duration must use its job start time");
+assert.match(apiWorkerCardsSource, /<WorkerRunningDuration startedAt=\{worker\.started_at\}/, "API worker duration must use its job start time");
 assert.doesNotMatch(source, /<code>\{profile\.email \? profile\.label : profile\.profile_id\}<\/code>/, "Chrome profile UUID must not remain visible on the card");
 
 const component = fs.readFileSync(new URL("../src/worker-running-duration.jsx", import.meta.url), "utf8");

@@ -38,13 +38,15 @@ const legacyDropdowns = jsxFiles.flatMap((name) => {
 assert.deepEqual(legacyDropdowns, [], `legacy dropdowns remain: ${legacyDropdowns.join(", ")}`);
 
 const mainSource = fs.readFileSync(path.join(sourceRoot, "main.jsx"), "utf8");
+const apiWorkerJobModalSource = fs.readFileSync(path.join(sourceRoot, "features", "api-workers", "api-worker-job-modal.jsx"), "utf8");
 const projectDropdownSource = fs.readFileSync(path.join(sourceRoot, "project-dropdown.jsx"), "utf8");
 const workflowSource = fs.readFileSync(path.join(sourceRoot, "task-workflow-center.jsx"), "utf8");
 const pluginSource = fs.readFileSync(path.join(sourceRoot, "app-plugin-center.jsx"), "utf8");
 assert.match(projectDropdownSource, /export function ProjectDropdown[\s\S]*?className="project-dropdown-trigger"[\s\S]*?className="project-dropdown-search"/, "the repo picker must retain its dedicated searchable green UI");
 assert.doesNotMatch(projectDropdownSource, /<AppDropdown/, "the repo picker must not inherit the generic shared dropdown theme");
 assert.match(mainSource, /import \{ ALL_ALLOWED_WORKSPACES, formatRepoActivity, ProjectDropdown \} from "\.\/project-dropdown\.jsx";/, "main request surfaces must use the shared repo picker");
-assert.ok((mainSource.match(/<ProjectDropdown/g) || []).length >= 2, "API worker and Chrome request surfaces must both use the shared repo picker");
+assert.match(mainSource, /<ProjectDropdown/, "Chrome request surface must use the shared repo picker");
+assert.match(apiWorkerJobModalSource, /<ProjectDropdown/, "API worker request surface must use the shared repo picker");
 assert.match(workflowSource, /<ProjectDropdown[\s\S]{0,500}?ariaLabel="Chọn workspace"/, "workflow workspace selection must use the shared repo picker");
 assert.doesNotMatch(workflowSource, /<AppDropdown[\s\S]{0,400}?projects\.map\(\(project\)/, "workflow workspace selection must not fall back to generic AppDropdown");
 assert.match(pluginSource, /<ProjectDropdown[^>]*includeAllAllowed=\{false\}[^>]*ariaLabel="Chọn dự án áp dụng skill"/, "plugin task project selection must use the shared repo picker without widening its workspace scope");
