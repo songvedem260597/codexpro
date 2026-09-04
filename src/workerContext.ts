@@ -121,7 +121,7 @@ function retainRecent(checkpoints: WorkerContextCheckpoint[]): WorkerContextChec
     const current = grouped.get(key) || [];
     const deduped = current.filter((candidate) => !(candidate.taskId === normalized.taskId && candidate.sequence === normalized.sequence));
     deduped.push(normalized);
-    deduped.sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+    deduped.sort((left, right) => (Date.parse(left.at) - Date.parse(right.at)) || (left.sequence - right.sequence));
     grouped.set(key, deduped.slice(-MAX_WORKER_CONTEXT_CHECKPOINTS));
   }
   return [...grouped.values()]
