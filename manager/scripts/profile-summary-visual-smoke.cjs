@@ -1,10 +1,9 @@
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const { app, BrowserWindow } = require("electron");
 
 const managerRoot = path.resolve(__dirname, "..");
-const source = fs.readFileSync(path.join(managerRoot, "src", "main.jsx"), "utf8");
+const source = fs.readFileSync(path.join(managerRoot, "src", "components", "manager-overview-ui.jsx"), "utf8");
 const styles = fs.readFileSync(path.join(managerRoot, "src", "styles.css"), "utf8");
 
 for (const className of [
@@ -58,7 +57,8 @@ app.whenReady().then(async () => {
     if (normal.shell.scrollWidth > normal.shell.clientWidth + 2 || normal.shell.left < -2 || normal.shell.right > normal.viewportWidth + 2) {
       throw new Error(`Profile summary fixture overflowed: ${JSON.stringify(normal.shell)}`);
     }
-    const screenshotPath = path.join(os.tmpdir(), "codexpro-profile-summary-status.png");
+    const screenshotPath = path.join(managerRoot, "..", ".ai-bridge", "manager-overview-profile-summary.png");
+    fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
     const image = await win.webContents.capturePage();
     fs.writeFileSync(screenshotPath, image.toPNG());
 
