@@ -59,6 +59,7 @@ try {
   assert.equal(saved.repoSelections.profileA, ALL_ALLOWED_WORKSPACES);
   assert.equal(saved.repoSelections.profileB, path.resolve(repoRoot));
   assert.match(fs.readFileSync(path.join(home, "CODEXPRO.md"), "utf8"), /smoke-global-rule/);
+  assert.equal(fs.existsSync(path.join(home, "manager-settings.json")), true, "saving settings must create the persisted settings file");
   assert.doesNotMatch(fs.readFileSync(path.join(home, "manager-settings.json"), "utf8"), /globalRules/);
 
   const created = store.createWorkerImagePack("Smoke pack");
