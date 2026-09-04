@@ -4017,6 +4017,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           read_dom: args.read_dom,
           recover_stale_dom: args.recover_stale_dom,
           new_chat: args.new_chat,
+          focus_window: args.focus_window,
           allow_busy_followup: args.allow_busy_followup,
           one_shot_recovery: args.one_shot_recovery,
           title: args.title,

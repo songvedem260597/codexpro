@@ -3672,9 +3672,9 @@ async function recoverProfileChatTab(payload) {
     conversation_id: conversationId || undefined,
     target_id: targetId || undefined,
     new_chat: newChat,
-    focus_window: !silent
+    focus_window: true
   }, 60000);
-  const windowFocus = silent ? { ok: false, skipped: true, source: "auto-recovery" } : await focusChromeWindow(newChat ? "ChatGPT" : (title || "ChatGPT"));
+  const windowFocus = await focusChromeWindow(newChat ? "ChatGPT" : (title || "ChatGPT"));
   return { ...result, window_focus: windowFocus };
 }
 async function auditLongRunningProfileChat(payload) {

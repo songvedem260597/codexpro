@@ -20,6 +20,7 @@ assert.match(worker, /createArgs\?\.active===true[\s\S]*?chrome\.tabs\.update\(c
 assert.match(worker, /if\(action==='activate_tab'\)[\s\S]*?title:String\(activeTab\.title\|\|''\)/, "activate_tab must return the current tab title so Manager can native-focus the exact Chrome window");
 assert.match(managerMain, /async function recoverProfileChatTab[\s\S]*?focus_window: true[\s\S]*?const windowFocus = await focusChromeWindow/, "automatic and manual hang recovery must foreground-focus Chrome");
 assert.match(server, /focus_window: z\.boolean\(\)\.optional\(\)[\s\S]*?foreground-focus the recovered Chrome tab\/window/, "MCP input validation must document recovery foreground focus");
+assert.match(server, /new_chat: args\.new_chat,[\s\S]*?focus_window: args\.focus_window,[\s\S]*?allow_busy_followup: args\.allow_busy_followup/, "MCP browser bridge dispatch must forward recovery focus intent to the extension");
 assert.match(managerMain, /let keepChromeFocused = payload\?\.newChat === true[\s\S]*?chatgpt_tab_auto_opened[\s\S]*?if \(!keepChromeFocused && restoreManagerFocus/, "new-chat and auto-opened continuation tabs must keep Chrome in the foreground");
 assert.doesNotMatch(managerMain, /owner\.minimize\(\)/, "recovery must never hide the Manager window");
 assert.match(managerMain, /if \(!keepChromeFocused && restoreManagerFocus[\s\S]*?if \(owner\.isMinimized\(\)\) owner\.restore\(\);[\s\S]*?owner\.focus\(\);/, "send fallback may restore Manager only when no continuation tab needs Chrome focus");
