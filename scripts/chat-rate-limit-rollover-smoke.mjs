@@ -69,7 +69,7 @@ assert.match(manager, /previousTaskId: recoveryTaskId[\s\S]*taskMode: recoveryTa
 assert.match(managerMain, /const recoveryRequested = payload\?\.taskMode === "recovery"/, "backend must distinguish recovery from a new FIFO task");
 assert.match(managerMain, /repo_task_mode: recoveryAccepted \? "recovery"/, "backend result must report recovery ownership explicitly");
 assert.match(managerMain, /action: "rebind_profile_task"[\s\S]*task_id: taskId[\s\S]*conversation_id: recoveryConversationId/, "backend must atomically rebind the running task after the new conversation ACK");
-assert.match(managerMain, /const taskText = recoveryAccepted[\s\S]*"@CodexPro"[\s\S]*Không gọi begin_repo_task lần nữa/, "the continuation chat must activate CodexPro without beginning a second logical task");
+assert.match(managerMain, /const taskText = recoveryAccepted[\s\S]*"@CodexPro"[\s\S]*không gọi begin_repo_task lần nữa/i, "the continuation chat must activate CodexPro without beginning a second logical task");
 assert.match(bridge, /export function rebindBrowserExtensionProfileTaskConversation[\s\S]*profileTaskIds\.get\(id\) !== normalizedTaskId[\s\S]*profileTaskConversationIds\.set\(id, normalizedConversationId\)/, "bridge must reject stale task ownership before changing the persisted conversation binding");
 assert.match(server, /args\.action === "rebind_profile_task"[\s\S]*\["prepared", "running"\][\s\S]*rebindBrowserExtensionProfileTaskConversation/, "server must only rebind a durable active task owned by the selected profile");
 assert.ok(server.indexOf('if (args.action === "rebind_profile_task")') < server.indexOf('const useExtension = args.browser !== "dedicated"'), "server must handle recovery rebinding locally before dispatching extension commands");
