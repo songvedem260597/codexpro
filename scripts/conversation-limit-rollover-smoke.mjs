@@ -24,13 +24,9 @@ assert.match(
 );
 assert.match(
   worker,
-  /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\},'send_chat_request_new'\)/,
-  "the continuation must create the new ChatGPT tab active"
+  /newChat[\s\S]*?createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:false\},'send_chat_request_new'\)/,
+  "the continuation must create the new ChatGPT tab without stealing foreground focus"
 );
-assert.match(
-  worker,
-  /async function focusNewChatGptTab[\s\S]*?chrome\.tabs\.update\(tab\.id,\{active:true\}\)[\s\S]*?chrome\.windows\.update\(windowId,\{focused:true\}\)/,
-  "new ChatGPT tabs must be focused in their Chrome window"
-);
+assert.doesNotMatch(worker, /function focusNewChatGptTab|forceChatFocus/, "automatic continuation must preserve background tab creation");
 
 console.log("✓ proactive conversation-limit rollover smoke test passed");

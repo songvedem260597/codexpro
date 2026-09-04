@@ -337,7 +337,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.118";
+const WORKER_EXTENSION_VERSION = "0.5.119";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -3602,9 +3602,10 @@ async function recoverProfileChatTab(payload) {
     profile_id: profileId,
     conversation_id: conversationId || undefined,
     target_id: targetId || undefined,
-    new_chat: newChat
+    new_chat: newChat,
+    focus_window: !silent
   }, 60000);
-  const windowFocus = await focusChromeWindow(newChat ? "ChatGPT" : (title || "ChatGPT"));
+  const windowFocus = silent ? { ok: false, skipped: true, source: "auto-recovery" } : await focusChromeWindow(newChat ? "ChatGPT" : (title || "ChatGPT"));
   return { ...result, window_focus: windowFocus };
 }
 async function auditLongRunningProfileChat(payload) {
@@ -4079,17 +4080,6 @@ async function sendProfileRequestUnlocked(payload) {
     title: allowBusyFollowup ? "__codexpro_allow_busy_followup__" : undefined,
     one_shot_recovery: payload?.oneShotRecovery === true
   }, 235000);
-  let newChatWindowFocus = null;
-  if (newChat && /^\d+$/.test(String(result?.target_id ?? ""))) {
-    const newTabActivation = await localMcpToolInSession(session, "browser_control", {
-      action: "activate_tab",
-      profile_id: profileId,
-      target_id: String(result.target_id),
-      conversation_id: String(result?.conversation_id || "") || undefined
-    }, 30000);
-    newChatWindowFocus = await focusChromeWindow(String(newTabActivation?.title || "ChatGPT"));
-    if (!newChatWindowFocus?.ok) throw new Error("NEW_CHAT_FOCUS_FAILED: Đã tạo tab ChatGPT mới nhưng Windows chưa đưa tab Chrome đó ra foreground.");
-  }
   if (sendDebug) console.error('[manager-send] after send_chat_request tool');
   if (recoveryAccepted) {
     const recoveryConversationId = String(result?.conversation_id || "").trim();
@@ -4679,8 +4669,6 @@ diagnosticIpcHandle("codexpro:recover-profile-chat", {
   resultDetails: (result) => ({ replaced_tab_id: String(result?.replaced_tab_id || ""), new_tab_id: String(result?.tab_id || result?.new_tab_id || ""), window_focused: Boolean(result?.window_focused || result?.window_focus?.ok) })
 }, async (event, payload) => {
   const result = await recoverProfileChatTab(payload);
-  const owner = BrowserWindow.fromWebContents(event.sender);
-  if ((result?.window_focused || result?.window_focus?.ok) && owner && !owner.isDestroyed()) owner.minimize();
   return result;
 });
 diagnosticIpcHandle("codexpro:audit-long-running-profile-chat", {
@@ -4803,9 +4791,21 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
     if (generationState === "failed" || value?.network_error) return { level: "error", message: "ChatGPT nhận yêu cầu nhưng generation lỗi network" };
     return null;
   }
-}, (_event, payload) => {
+}, (event, payload) => {
   recordUserReportedError(payload, { request_channel: "chat_composer" });
-  return ipcResult(() => sendProfileRequest(payload));
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const restoreManagerFocus = Boolean(owner && !owner.isDestroyed() && owner.isFocused());
+  return ipcResult(async () => {
+    try {
+      return await sendProfileRequest(payload);
+    } finally {
+      if (restoreManagerFocus && owner && !owner.isDestroyed() && !owner.isFocused()) {
+        if (owner.isMinimized()) owner.restore();
+        owner.show();
+        owner.focus();
+      }
+    }
+  });
 });
 diagnosticIpcHandle("codexpro:resume-profile-task", {
   category: "task",
