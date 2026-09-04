@@ -47,6 +47,7 @@ assert.match(taskResume, /task_id:\s*taskId/, "task resume context must be isola
 assert.match(taskResume, /workerJobResumeCheckpointText\(job, workerContexts\)/, "task resume must inject worker/project checkpoints into the new recovery chat");
 assert.match(taskResume, /newChat:\s*true/, "task resume must create a new chat instead of reopening a remembered conversation id");
 assert.match(taskResume, /requireIdleProfile:\s*!hangRecovery/, "confirmed hang recovery must be allowed to create a new chat before discarding the stale busy tab");
+assert.match(taskResume, /text:\s*workerJobResumeCheckpointText\(job, workerContexts\)[\s\S]*?recoveryReason,/, "task resume must forward recovery reason separately from canonical checkpoint text");
 const canonicalRecovery = between(managerMain, "async function sendProfileRequestUnlocked", "async function sendProfileRequest(payload)");
 assert.match(canonicalRecovery, /recoveryCheckpointText = `\$\{workerJobResumeCheckpointText\(workerJob, recoveryContexts\)\}/, "every recovery-mode send must replace renderer transcript handoff with canonical worker/task checkpoints");
 assert.match(canonicalRecovery, /const requestedRecoveryReason = String\(payload\?\.recoveryReason \|\| ""\)\.trim\(\)\.slice\(0, 600\)/, "recovery reason must use a dedicated bounded field instead of transcript text");
