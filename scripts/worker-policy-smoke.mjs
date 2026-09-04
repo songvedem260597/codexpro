@@ -7,6 +7,8 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-worker-policy-"));
 process.env.CODEXPRO_HOME = home;
 const managerMain = fs.readFileSync(new URL("../manager/electron/main.mjs", import.meta.url), "utf8");
 assert.match(managerMain, /\.\.\.taskScopeLines,\s*\.\.\.taskStatusProtocolLines,/, "new tasks must receive the structured progress/finalization protocol, not only recovery and adjustment turns");
+const reconcileScript = fs.readFileSync(new URL("./reconcile-browser-worker-jobs.mjs", import.meta.url), "utf8");
+assert.match(reconcileScript, /candidate\.job\.kind === "code"[\s\S]*assertWorkspaceTaskCompletionReady/, "automatic reconciliation must not mark source-changing code tasks completed without workspace completion proof");
 
 const {
   WORKER_POLICY_VERSION,

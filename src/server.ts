@@ -26,7 +26,7 @@ import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowser
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, reportWorkerJobProgress, workerJobPublicRecord, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
-import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, type WorkspaceTaskContext } from "./workspaceCoordination.js";
+import { assertWorkspaceTaskCompletionReady, claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const CODEXPRO_GLOBAL_RULES_FILE = "CODEXPRO.md";
@@ -2546,7 +2546,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     "finalize_worker_job",
     {
       title: "Finalize Worker Job",
-      description: "Finalize a profile-bound worker job only after the MCP policy record proves all required bootstrap and completion obligations.",
+      description: "Finalize a profile-bound worker job only after all required obligations are satisfied. A source-changing task can complete only after a recognized test/check/verify/smoke command passes after the latest source change, those verified changes are committed, and the commit is successfully pushed/integrated.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/),
         outcome: z.enum(["completed", "failed", "cancelled"]),
@@ -2565,6 +2565,15 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         });
       }
       try {
+        const currentJob = readWorkerJob(args.task_id);
+        if (args.outcome === "completed" && currentJob?.kind === "code" && currentJob.root) {
+          assertWorkspaceTaskCompletionReady({
+            taskId: currentJob.jobId,
+            workerId: gateProfileId,
+            title: currentJob.title,
+            root: currentJob.root
+          });
+        }
         const record = await finalizeWorkerJob({
           jobId: args.task_id,
           workerId: gateProfileId,
@@ -2588,6 +2597,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           job: classifiedWorkerJobPublicRecord(record)
         });
       } catch (error) {
+        if (error instanceof CodexProError && String(error.code || "").startsWith("WORKSPACE_TASK_")) throw error;
         throw new CodexProError(`WORKER_JOB_FINALIZE_REJECTED: ${error instanceof Error ? error.message : String(error)}`, {
           code: "WORKER_JOB_FINALIZE_REJECTED",
           details: { task_id: args.task_id, profile_id: gateProfileId }

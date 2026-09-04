@@ -13,6 +13,7 @@ process.env.CODEXPRO_HOME = path.join(scratchRoot, "codexpro-home");
 
 const {
   acquireWorkspaceIntegrationLease,
+  assertWorkspaceTaskCompletionReady,
   claimWorkspacePaths,
   finalizeWorkspaceTask,
   preflightWorkspaceGitAdd,
@@ -29,6 +30,7 @@ const TASK_B = { taskId: "cpt_bbbbbbbbbbbbbbbbbbbbbbbb", workerId: "worker:b", t
 const TASK_C = { taskId: "cpt_cccccccccccccccccccccccc", workerId: "worker:c", title: "Conflict recovery task", root: repoRoot };
 const TASK_D = { taskId: "cpt_dddddddddddddddddddddddd", workerId: "worker:d", title: "Dirty isolation task", root: repoRoot };
 const TASK_E = { taskId: "cpt_eeeeeeeeeeeeeeeeeeeeeeee", workerId: "worker:e", title: "Reservation task", root: repoRoot };
+const TASK_F = { taskId: "cpt_ffffffffffffffffffffffff", workerId: "worker:f", title: "Completion gate task", root: repoRoot };
 const gitExecutable = process.platform === "win32" ? "git.exe" : "git";
 
 function git(args, cwd = repoRoot) {
@@ -84,7 +86,8 @@ try {
   fs.writeFileSync(path.join(repoRoot, "a.txt"), "a0\n", "utf8");
   fs.writeFileSync(path.join(repoRoot, "b.txt"), "b0\n", "utf8");
   fs.writeFileSync(path.join(repoRoot, "legacy.txt"), "legacy0\n", "utf8");
-  git(["add", ".gitignore", "a.txt", "b.txt", "legacy.txt"]);
+  fs.writeFileSync(path.join(repoRoot, "f.txt"), "f0\n", "utf8");
+  git(["add", ".gitignore", "a.txt", "b.txt", "legacy.txt", "f.txt"]);
   git(["commit", "-m", "initial"]);
   git(["branch", "-M", "main"]);
   const initialHead = git(["rev-parse", "HEAD"]);
@@ -190,6 +193,43 @@ try {
   await finalizeWorkspaceTask(TASK_B, "completed");
   assert.equal(fs.existsSync(aWorktreeRoot), false, "clean integrated task A worktree should be removed on completion");
   assert.equal(fs.existsSync(bWorktreeRoot), false, "clean integrated task B worktree should be removed on completion");
+
+  git(["fetch", "origin", "main"]);
+  git(["reset", "--hard", "origin/main"]);
+  const registeredF = await registerWorkspaceTask(TASK_F);
+  await claimWorkspacePaths(TASK_F, ["f.txt"]);
+  fs.writeFileSync(path.join(registeredF.worktreeRoot, "f.txt"), "f1 completion gate\n", "utf8");
+  await recordWorkspacePathsTouched(TASK_F, ["f.txt"]);
+  assert.throws(
+    () => assertWorkspaceTaskCompletionReady(TASK_F),
+    /WORKSPACE_TASK_TESTS_REQUIRED/,
+    "source-changing tasks must not complete before a recognized verification passes"
+  );
+  const completionGateSmokePath = path.join(registeredF.worktreeRoot, "completion-gate-smoke.mjs");
+  fs.writeFileSync(completionGateSmokePath, "console.log('completion gate smoke pass');\n", "utf8");
+  const verificationF = await runTask(TASK_F, registeredF, "node completion-gate-smoke.mjs");
+  fs.rmSync(completionGateSmokePath, { force: true });
+  assert.equal(verificationF.exitCode, 0, "completion gate verification should pass");
+  assert.equal(readWorkspaceCoordination(repoRoot).tasks[TASK_F.taskId].lastVerificationStatus, "passed");
+  assert.throws(
+    () => assertWorkspaceTaskCompletionReady(TASK_F),
+    /WORKSPACE_TASK_COMMIT_REQUIRED/,
+    "verified source changes must still be committed before completion"
+  );
+  assert.equal((await runTask(TASK_F, registeredF, "git add f.txt")).exitCode, 0);
+  assert.equal((await runTask(TASK_F, registeredF, 'git commit -m "completion gate fixture"')).exitCode, 0);
+  assert.throws(
+    () => assertWorkspaceTaskCompletionReady(TASK_F),
+    /WORKSPACE_TASK_PUSH_REQUIRED/,
+    "committed source changes must still be pushed before completion"
+  );
+  assert.equal((await runTask(TASK_F, registeredF, "git push origin main", 60_000)).exitCode, 0);
+  const readyF = assertWorkspaceTaskCompletionReady(TASK_F);
+  assert.equal(readyF.integrationStatus, "integrated");
+  assert.ok(readyF.integratedHead, "completion-ready task must retain integrated remote head proof");
+  const fWorktreeRoot = registeredF.worktreeRoot;
+  await finalizeWorkspaceTask(TASK_F, "completed");
+  assert.equal(fs.existsSync(fWorktreeRoot), false, "verified committed pushed task worktree should be removed on completion");
 
   git(["fetch", "origin", "main"]);
   git(["reset", "--hard", "origin/main"]);

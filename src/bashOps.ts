@@ -8,7 +8,7 @@ import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { redactSensitiveText } from "./redact.js";
 import { runGitProcess } from "./processOps.js";
-import { acquireWorkspaceIntegrationLease, preflightWorkspaceCommit, preflightWorkspaceGitAdd, preflightWorkspacePush, recordWorkspaceCommit, recordWorkspacePush, type WorkspaceTaskContext } from "./workspaceCoordination.js";
+import { acquireWorkspaceIntegrationLease, preflightWorkspaceCommit, preflightWorkspaceGitAdd, preflightWorkspacePush, recordWorkspaceCommit, recordWorkspacePush, recordWorkspaceVerification, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 export interface BashResult {
   command: string;
@@ -259,6 +259,26 @@ function parseSafeGitWrite(command: string): SafeGitWrite | undefined {
     }
   }
 
+  return undefined;
+}
+
+function verificationCommandLabel(command: string): string | undefined {
+  const tokens = simpleCommandTokens(command.trim());
+  if (!tokens?.length) return undefined;
+  const executable = path.basename(tokens[0]).toLowerCase().replace(/\.exe$/, "");
+  const rest = tokens.slice(1).map((value) => value.toLowerCase());
+  if (["npm", "pnpm", "yarn", "bun"].includes(executable)) {
+    const script = rest[0] === "run" ? rest[1] : rest[0];
+    if (script && /(?:^|[:_-])(test|check|verify|smoke|lint|typecheck)(?:$|[:_-])/.test(script)) return `${executable}:${script}`;
+  }
+  if (executable === "node" && (rest[0] === "--test" || rest.some((value) => /(?:test|check|verify|smoke)/.test(path.basename(value))))) return "node:verify";
+  if (["vitest", "jest", "mocha", "ava", "playwright", "cypress", "eslint", "tsc"].includes(executable)) return `js:${executable}`;
+  if (["npx", "pnpx"].includes(executable) && rest[0] && ["vitest", "jest", "mocha", "ava", "playwright", "cypress", "eslint", "tsc"].includes(rest[0])) return `js:${rest[0]}`;
+  if (["python", "python3", "py"].includes(executable) && (rest.includes("pytest") || rest.includes("unittest") || rest.some((value) => /(?:test|check|verify|smoke)/.test(path.basename(value))))) return "python:verify";
+  if (executable === "pytest") return "python:pytest";
+  if (executable === "go" && rest[0] === "test") return "go:test";
+  if (executable === "cargo" && ["test", "check"].includes(rest[0] || "")) return `cargo:${rest[0]}`;
+  if (executable === "dotnet" && rest[0] === "test") return "dotnet:test";
   return undefined;
 }
 
@@ -632,6 +652,7 @@ export async function runBash(
   const cwd = cwdResolved.absPath;
   await assertSensitiveGitProtection(command, cwd);
   const safeGitWrite = parseSafeGitWrite(command);
+  const verificationLabel = options.repoTask ? verificationCommandLabel(command) : undefined;
   let releaseIntegrationLease: (() => Promise<void>) | undefined;
   if (options.repoTask) {
     assertRepoTaskCommandPolicy(command, safeGitWrite);
@@ -739,6 +760,9 @@ export async function runBash(
       cleanup();
       let coordinationError: unknown;
       try {
+        if (verificationLabel && options.repoTask) {
+          await recordWorkspaceVerification(options.repoTask, verificationLabel, exitCode === 0 && !killedByTimeout);
+        }
         if (exitCode === 0 && safeGitWrite?.kind === "commit" && options.repoTask) {
           await recordWorkspaceCommit(options.repoTask);
         }

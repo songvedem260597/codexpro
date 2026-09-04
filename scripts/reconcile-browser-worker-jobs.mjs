@@ -13,6 +13,7 @@ const home = homeArgIndex >= 0 && process.argv[homeArgIndex + 1]
 process.env.CODEXPRO_HOME = home;
 
 const { readWorkerJob, reconcileCompletedWorkerJob } = await import("../dist/workerPolicy.js");
+const { assertWorkspaceTaskCompletionReady } = await import("../dist/workspaceCoordination.js");
 const auditFile = path.join(home, "manager-chat-response-audit.jsonl");
 const jobsDir = path.join(home, "worker-jobs");
 
@@ -67,6 +68,14 @@ if (apply && candidates.length) {
   backupDir = path.join(home, "worker-jobs-backup", stamp);
   await fsp.mkdir(backupDir, { recursive: true });
   for (const candidate of candidates) {
+    if (candidate.job.kind === "code" && candidate.job.root) {
+      assertWorkspaceTaskCompletionReady({
+        taskId: candidate.job.jobId,
+        workerId: candidate.job.workerId,
+        title: candidate.job.title,
+        root: candidate.job.root
+      });
+    }
     await fsp.copyFile(candidate.file, path.join(backupDir, path.basename(candidate.file)));
     await reconcileCompletedWorkerJob({
       jobId: candidate.job.jobId,
