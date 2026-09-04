@@ -988,7 +988,14 @@ function probeChatActivityPage() {
   const pageText=String(document.body?.innerText||document.body?.textContent||'').replace(/\u200b/g,' ');
   const connectionInterrupted=/(?:connection interrupted\.\s*waiting for the complete answer|k\u1ebft n\u1ed1i b\u1ecb gi\u00e1n \u0111o\u1ea1n\.\s*\u0111ang ch\u1edd c\u00e2u tr\u1ea3 l\u1eddi ho\u00e0n ch\u1ec9nh)/i.test(pageText);
   const messageDeliveryTimedOut=/message delivery timed out\.\s*please try again/i.test(pageText);
-  const messageStreamError=/\berror in message stream\b/i.test(pageText);
+  const messageStreamError=Array.from(latestTurn?.querySelectorAll?.('*')||[]).some(node=>{
+    const rect=node.getBoundingClientRect?.();
+    const style=getComputedStyle(node);
+    if(!rect||rect.width<=0||rect.height<=0||style.display==='none'||style.visibility==='hidden')return false;
+    if(node.closest?.('[data-message-author-role="assistant"],[data-message-author-role="user"]'))return false;
+    const text=String(node.innerText||node.textContent||'').replace(/\u200b/g,' ').trim();
+    return text.length>0&&text.length<=160&&/^error in message stream(?:\s*(?:retry|try again|thử lại))?$/i.test(text);
+  });
   const legacyInterrupted=connectionInterrupted||messageDeliveryTimedOut;
   const recoveryRequired=legacyInterrupted||messageStreamError;
   const toolCallVisible=Array.from(latestTurn?.querySelectorAll?.('button,[role="button"],summary')||[]).some(control=>visible(control)&&/^(?:called|calling) tool\b|^(?:đã|đang) gọi tool\b/i.test(String(control.getAttribute?.('aria-label')||control.innerText||control.textContent||'').trim()));
@@ -1744,7 +1751,14 @@ async function readChatResponsePage() {
   const pageText=String(document.body?.innerText||document.body?.textContent||'').replace(/\u200b/g,' ');
   const connectionInterrupted=/(?:connection interrupted\.\s*waiting for the complete answer|k\u1ebft n\u1ed1i b\u1ecb gi\u00e1n \u0111o\u1ea1n\.\s*\u0111ang ch\u1edd c\u00e2u tr\u1ea3 l\u1eddi ho\u00e0n ch\u1ec9nh)/i.test(pageText);
   const messageDeliveryTimedOut=/message delivery timed out\.\s*please try again/i.test(pageText);
-  const messageStreamError=/\berror in message stream\b/i.test(pageText);
+  const messageStreamError=Array.from(latestTurn?.querySelectorAll?.('*')||[]).some(node=>{
+    const rect=node.getBoundingClientRect?.();
+    const style=getComputedStyle(node);
+    if(!rect||rect.width<=0||rect.height<=0||style.display==='none'||style.visibility==='hidden')return false;
+    if(node.closest?.('[data-message-author-role="assistant"],[data-message-author-role="user"]'))return false;
+    const text=String(node.innerText||node.textContent||'').replace(/\u200b/g,' ').trim();
+    return text.length>0&&text.length<=160&&/^error in message stream(?:\s*(?:retry|try again|thử lại))?$/i.test(text);
+  });
   const legacyInterrupted=connectionInterrupted||messageDeliveryTimedOut;
   const recoveryRequired=legacyInterrupted||messageStreamError;
   const busy=Boolean(imageGenerationLoading||!imageResponseReady&&(stopControl||thinkingPlaceholder||recoveryRequired));

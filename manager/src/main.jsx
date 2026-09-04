@@ -986,6 +986,14 @@ function App() {
         const conversationId = String(messageStreamTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
         const taskId = String(profile?.current_task_id || "");
         if (!conversationId) continue;
+        const taskJob = /^cpt_[a-f0-9]{24}$/.test(taskId)
+          ? jobs.find((job) => String(job?.job_id || job?.jobId || "") === taskId && String(job?.worker_id || job?.workerId || "") === String(profile.profile_id || ""))
+          : null;
+        const taskTerminal = Boolean(taskJob && (["completed", "cancelled"].includes(String(taskJob?.status || "").toLowerCase()) || taskJob?.completion_confirmed === true || taskJob?.completionConfirmed === true));
+        if (taskTerminal) {
+          logRendererDiagnostic(api, "info", "chat", "Bỏ qua Error in message stream vì task hiện tại đã terminal", { action: "message-stream-error-terminal-task-skip", profile_id: profile.profile_id, task_id: taskId, conversation_id: conversationId, worker_job_status: String(taskJob?.status || "") });
+          continue;
+        }
         const key = `message-stream:${profile.profile_id}:${conversationId}:${taskId || "no-task"}`;
         const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
         if (Date.now() - previous < 120_000) continue;

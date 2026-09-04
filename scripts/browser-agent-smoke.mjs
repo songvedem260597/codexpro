@@ -403,16 +403,22 @@ assert.deepEqual(tabPolicyPlan.close_ids, [4, 5], "tab policy must close unreach
 assert.equal(tabPolicyPlan.reasons[4], "codexpro_unreachable");
 assert.equal(tabPolicyPlan.reasons[5], "tab_limit");
 assert.ok(!tabPolicyPlan.close_ids.includes(1) && !tabPolicyPlan.close_ids.includes(2) && !tabPolicyPlan.close_ids.includes(3), "tab policy must protect active, busy, and pinned tabs");
-const runChatActivityProbe = ({ assistantText, controls = [], turnControls = [], includeLatestUser = true }) => {
+const runChatActivityProbe = ({ assistantText, controls = [], turnControls = [], statusText = "", bodyText = assistantText, includeLatestUser = true }) => {
   const assistantNode = { innerText: assistantText, textContent: assistantText };
   const userNode = { innerText: "latest user", textContent: "latest user" };
+  const statusNode = {
+    innerText: statusText,
+    textContent: statusText,
+    getBoundingClientRect: () => ({ width: statusText ? 180 : 0, height: statusText ? 24 : 0 }),
+    closest: () => null
+  };
   const userTurn = {
     querySelector(selector) { return selector === '[data-message-author-role="user"]' ? userNode : null; },
     querySelectorAll: () => []
   };
   const assistantTurn = {
     querySelector(selector) { return selector === '[data-message-author-role="assistant"]' ? assistantNode : null; },
-    querySelectorAll: (selector) => selector === 'button,[role="button"],summary' ? turnControls : []
+    querySelectorAll: (selector) => selector === 'button,[role="button"],summary' ? turnControls : selector === '*' && statusText ? [statusNode] : []
   };
   const conversationTurns = includeLatestUser ? [userTurn, assistantTurn] : [assistantTurn];
   return Function("document", "getComputedStyle", `${probeChatActivitySource}; return probeChatActivityPage();`)(
@@ -423,7 +429,7 @@ const runChatActivityProbe = ({ assistantText, controls = [], turnControls = [],
         if (selector === '[data-testid^="conversation-turn-"]') return conversationTurns;
         return [];
       },
-      body: { innerText: assistantText, textContent: assistantText }
+      body: { innerText: bodyText, textContent: bodyText }
     },
     () => ({ display: "block", visibility: "visible" })
   );
@@ -461,11 +467,16 @@ assert.equal(domVietnameseInterrupted.connection_interrupted, true, "Vietnamese 
 assert.equal(domVietnameseInterrupted.source, "dom_connection_interrupted", "Vietnamese interrupted placeholder must use the Connection interrupted state");
 assert.equal(domVietnameseInterrupted.busy, true, "Vietnamese interrupted placeholder must keep the turn incomplete while recovery waits");
 assert.equal(domVietnameseInterrupted.response_ready, false, "Vietnamese interrupted placeholder must not be treated as a completed answer");
-const domMessageStreamError = runChatActivityProbe({ assistantText: "Error in message stream", controls: [] });
+const domMessageStreamError = runChatActivityProbe({ assistantText: "", statusText: "Error in message stream", bodyText: "Error in message stream", controls: [] });
+const domHistoricalMessageStreamText = runChatActivityProbe({ assistantText: "Đã hoàn tất phản hồi.", bodyText: "Lịch sử cũ có Error in message stream nhưng turn hiện tại đã xong.", controls: [] });
+const domQuotedMessageStreamText = runChatActivityProbe({ assistantText: "Error in message stream", bodyText: "Error in message stream", controls: [] });
 assert.equal(domMessageStreamError.message_stream_error, true, "Error in message stream must be exposed as its own recovery signal");
 assert.equal(domMessageStreamError.source, "dom_message_stream_error", "message-stream failures must remain distinguishable from Connection interrupted");
 assert.equal(domMessageStreamError.connection_interrupted, false, "message-stream failures must not use the old-chat interrupted path");
 assert.equal(domMessageStreamError.busy, true, "message-stream failures must remain incomplete until rollover starts");
+assert.equal(domHistoricalMessageStreamText.message_stream_error, false, "historical Error in message stream text must not keep a finished latest turn in recovery");
+assert.equal(domHistoricalMessageStreamText.response_ready, true, "historical message-stream text must not block latest-turn completion");
+assert.equal(domQuotedMessageStreamText.message_stream_error, false, "assistant prose that quotes Error in message stream must not be mistaken for a live system error");
 
 assert.match(server, /task_title:[\s\S]*?words >= 4 && words <= 6/, "begin_repo_task must require a clear 4-6 word AI-generated task title");
 assert.match(server, /task_kind: z\.enum\(\["general", "code"\]\)/, "every profile task must declare whether it needs coding context");
@@ -795,8 +806,11 @@ assert.match(managerUi, /openChatAwaitingAssistant[\s\S]*?pollLatestResponse[\s\
 assert.match(managerUi, /tab\.connection_interrupted[\s\S]*?connectionRecoveryReads[\s\S]*?loadResponse\(profile, conversationId, true, true, true\)/, "Manager must automatically recover the exact chat when ChatGPT reports an interrupted connection");
 assert.match(worker, /connection_interrupted:Boolean\(domActivity\.connection_interrupted\)/, "profile status must expose interrupted ChatGPT renderers to Manager");
 assert.match(worker, /message_stream_error:Boolean\(domActivity\.message_stream_error\)/, "profile status must expose Error in message stream separately");
+assert.equal(worker.split("const messageStreamError=Array.from(latestTurn?.querySelectorAll?.('*')||[])").length - 1, 2, "both DOM activity and response readers must scope message-stream detection to the latest turn");
+assert.doesNotMatch(worker, /const messageStreamError=\/\\berror in message stream\\b\/i\.test\(pageText\)/, "historical page text must never be authoritative message-stream error evidence");
 assert.match(bridge, /message_stream_error:\s*tab\.message_stream_error\s*===\s*true/, "the extension bridge must preserve message-stream errors for Manager recovery");
 assert.match(managerUi, /messageStreamTab[\s\S]*?taskId[\s\S]*?Error in message stream[\s\S]*?forceContinuation: true[\s\S]*?recoveryReason:[\s\S]*?chat mới/, "Error in message stream must skip Retry and continue the current Task ID in a new chat");
+assert.match(managerUi, /const taskTerminal = Boolean\([\s\S]*?\["completed", "cancelled"\][\s\S]*?message-stream-error-terminal-task-skip[\s\S]*?continue;/, "completed or cancelled worker jobs must not auto-rollover again on a stale message-stream signal");
 assert.match(worker, /recover_stale_dom===true&&!messageStreamError/, "message-stream failures must never reload the failed old chat");
 assert.match(worker, /const reloadAllowed=shouldReloadChatRecovery\([\s\S]*?if\(stale&&reloadAllowed\)[\s\S]*?auditedReloadTab\(tab,'chat_recovery','explicit_recovery_reload'\)/, "response reload must pass through the guarded recovery decision");
 assert.match(responsePolicyWorker, /if \(networkBusy\) return false/, "active generation or tool traffic must block an early response reload");
