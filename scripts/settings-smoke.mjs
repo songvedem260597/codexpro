@@ -244,9 +244,6 @@ raise SystemExit(proc.returncode or 0)
   return true;
 }
 
-const trace = (label) => { if (process.env.CODEXPRO_SETTINGS_SMOKE_TRACE === '1') console.error(`[settings-smoke] ${label}`); };
-trace('begin');
-
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-root-'));
 const realRoot = await fs.realpath(root);
 const reuseRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-reuse-'));
@@ -501,7 +498,6 @@ runFail([
   'abc'
 ], env, /Invalid port: abc/i);
 
-trace('runtime-none');
 const runtimePort = await getFreePort();
 const runtimePath = await runtimeStatusPath(runtimeRoot, home);
 run([
@@ -544,7 +540,6 @@ try {
   if (error?.code !== 'ENOENT') throw error;
 }
 
-trace('headless');
 const headlessRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-headless-'));
 const headlessPort = await getFreePort();
 const headlessRuntimePath = await runtimeStatusPath(headlessRoot, home);
@@ -601,7 +596,6 @@ if (runInteractiveQuit([
   }
 }
 
-trace('quick-tunnel');
 const cloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-'));
 const cloudflarePort = await getFreePort();
 const cloudflarePath = await runtimeStatusPath(cloudflareRoot, home);
@@ -675,7 +669,6 @@ if (process.platform === 'win32') {
   }
 }
 
-trace('quick-tunnel-proxy');
 const proxyCloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-proxy-'));
 const proxyCloudflarePort = await getFreePort();
 const proxyCloudflarePath = await runtimeStatusPath(proxyCloudflareRoot, home);
