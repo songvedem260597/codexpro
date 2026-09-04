@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+const apiWorkerCards = fs.readFileSync(new URL("../src/features/api-workers/api-worker-cards.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const electronSource = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
 const preloadSource = fs.readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
@@ -14,7 +15,7 @@ assert.match(styles, /\.profile-layout-preview\.is-card \.profile-worker \{[^}]*
 assert.match(source, /<h2>Worker đã kết nối<\/h2>/, "overview must use the unified connected worker heading");
 assert.doesNotMatch(source, /<h2>Profile đã kết nối<\/h2>/, "legacy Chrome-only heading must be removed");
 assert.match(source, /<ApiWorkerCards[\s\S]*?workers=\{\(status\?\.workers \|\| \[\]\)\.filter[\s\S]*?customImages=\{managerSettings\.workerImageDataUrls\}/, "saved API workers must render in the connected worker list with the configured GIF pack");
-assert.match(source, /function ApiWorkerCards[\s\S]*?<WorkerIcon state=\{workerState\} customImages=\{customImages\}/, "API worker cards must use the animated worker icon");
+assert.match(apiWorkerCards, /function ApiWorkerCards[\s\S]*?<WorkerIcon state=\{workerState\} customImages=\{customImages\}/, "API worker cards must use the animated worker icon");
 assert.match(source, /const apiWorkers = \(status\?\.workers \|\| \[\]\)\.filter[\s\S]*?working:[\s\S]*?apiWorkers\.filter[\s\S]*?idle:[\s\S]*?apiWorkers\.filter/, "overview summary must count connected API workers");
 assert.match(source, /function profileVisibleInWorkerList\(profile\)[\s\S]*?Boolean\(profile\?\.connected\)[\s\S]*?tab_count[\s\S]*?> 0 \|\| Boolean\(profile\?\.connector_installed\)/, "disconnected Chrome profiles must be hidden automatically from connected workers");
 assert.match(source, /const visibleBrowserProfiles = useMemo\([\s\S]*?filter\(profileVisibleInWorkerList\)/, "the renderer must derive one canonical visible Chrome profile list");

@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const renderer = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+const workerUi = fs.readFileSync(new URL("../src/components/worker-ui.jsx", import.meta.url), "utf8");
+const apiWorkerCards = fs.readFileSync(new URL("../src/features/api-workers/api-worker-cards.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
-assert.match(renderer, /function ChatGalaxyButtonContent\(\)[\s\S]*?chat-galaxy-spark[\s\S]*?chat-galaxy-static[\s\S]*?chat-galaxy-orbit[\s\S]*?chat-galaxy-label/, "Chat button must render the galaxy layers and readable label");
-assert.equal((renderer.match(/<ChatGalaxyButtonContent \/>/g) || []).length, 2, "browser and API worker Chat buttons must share the same galaxy effect");
+assert.match(workerUi, /function ChatGalaxyButtonContent\(\)[\s\S]*?chat-galaxy-spark[\s\S]*?chat-galaxy-static[\s\S]*?chat-galaxy-orbit[\s\S]*?chat-galaxy-label/, "Chat button must render the galaxy layers and readable label");
+assert.equal((`${renderer}\n${apiWorkerCards}`.match(/<ChatGalaxyButtonContent \/>/g) || []).length, 2, "browser and API worker Chat buttons must share the same galaxy effect");
 assert.match(renderer, /className="button primary profile-chat chat-galaxy-button"[\s\S]*?onClick=\{\(\) => openChat\(profile\)\}/, "browser worker Chat button must use the galaxy effect");
-assert.match(renderer, /className="button primary profile-chat chat-galaxy-button"[^>]*onClick=\{\(\) => onRun\(worker\)\}/, "API worker Chat button must use the galaxy effect");
+assert.match(apiWorkerCards, /className="button primary profile-chat chat-galaxy-button"[^>]*onClick=\{\(\) => onRun\(worker\)\}/, "API worker Chat button must use the galaxy effect");
 assert.match(renderer, /function TitleGalaxyAccent\(\)[\s\S]*?title-galaxy-accent">Multi<\/span>/, "Multi title accent must render the galaxy treatment directly on the text glyphs");
 assert.match(renderer, /<>CodexPro <TitleGalaxyAccent \/> Agent<\/>/, "overview title must render the galaxy treatment only on Multi");
 
