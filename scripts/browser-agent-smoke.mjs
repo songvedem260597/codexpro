@@ -349,11 +349,12 @@ const completedStreamAudit = buildChatResponseAuditRecord({
 });
 assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
 assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
-const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
+const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "tab-policy.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "network-policy.js"), "utf8"),
+  readFile(join(root, "chrome-extension", "service-worker", "response-policy.js"), "utf8"),
   readFile(join(root, "src", "server.ts"), "utf8"),
   readFile(join(root, "src", "http.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
@@ -609,10 +610,10 @@ assert.match(worker, /chatDomActivityState\(tab\.id,conversationId,\{maxAgeMs:75
 assert.match(worker, /num_turns=6/, "canonical transcript reads must request only the three most recent user/assistant exchanges");
 assert.doesNotMatch(worker, /num_turns=40/, "canonical transcript reads must not fetch the old 20-exchange window");
 assert.match(worker, /Array\.isArray\(payload\?\.messages\)/, "canonical transcript reads must parse the bounded messages payload directly");
-assert.match(worker, /function canonicalResponseSupersedesDom[\s\S]*?if\(domHasResponse&&!canonicalHasResponse\)return false/, "a lagging canonical snapshot must not erase a newer assistant response already rendered in the DOM");
+assert.match(responsePolicyWorker, /function canonicalResponseSupersedesDom[\s\S]*?domHasResponse && !canonicalHasResponse/, "a lagging canonical snapshot must not erase a newer assistant response already rendered in the DOM");
 assert.match(worker, /const canonicalGenerationMatches=canonicalMatchesCurrentGeneration[\s\S]*?const currentCanonical=canonical\.ok&&!canonicalGenerationMatches/, "response reads must gate canonical content by the current generation");
 assert.match(worker, /short_dom_response_unverified/, "an unverified one-character DOM placeholder must be diagnosed instead of finalized");
-assert.match(worker, /function withResponseAudit[\s\S]*?chatgpt_dom[\s\S]*?canonical_api[\s\S]*?network_stream/, "worker response reads must preserve separate ChatGPT DOM, canonical, and network fingerprints");
+assert.match(responsePolicyWorker, /function withResponseAudit[\s\S]*?chatgpt_dom[\s\S]*?canonical_api[\s\S]*?network_stream/, "worker response reads must preserve separate ChatGPT DOM, canonical, and network fingerprints");
 assert.doesNotMatch(worker, /canonical\.response_ready\|\|canonical\.busy\|\|canonicalText\.length>domTextBeforeMerge\.length/, "canonical busy state alone must never overwrite a newer DOM transcript");
 assert.match(worker, /browserElementActionPage/);
 assert.match(worker, /__codexproSemanticRegistry/);
@@ -798,7 +799,7 @@ assert.match(bridge, /message_stream_error:\s*tab\.message_stream_error\s*===\s*
 assert.match(managerUi, /messageStreamTab[\s\S]*?taskId[\s\S]*?Error in message stream[\s\S]*?forceContinuation: true[\s\S]*?recoveryReason:[\s\S]*?chat mới/, "Error in message stream must skip Retry and continue the current Task ID in a new chat");
 assert.match(worker, /recover_stale_dom===true&&!messageStreamError/, "message-stream failures must never reload the failed old chat");
 assert.match(worker, /const reloadAllowed=shouldReloadChatRecovery\([\s\S]*?if\(stale&&reloadAllowed\)[\s\S]*?auditedReloadTab\(tab,'chat_recovery','explicit_recovery_reload'\)/, "response reload must pass through the guarded recovery decision");
-assert.match(worker, /if\(networkBusy\)return false/, "active generation or tool traffic must block an early response reload");
+assert.match(responsePolicyWorker, /if \(networkBusy\) return false/, "active generation or tool traffic must block an early response reload");
 assert.match(longTaskAuditSource, /preflight[\s\S]*?active_without_reload[\s\S]*?auditedReloadTab/, "the 30-minute watchdog must probe a healthy active task before the guarded audited reload branch");
 assert.match(worker, /waitForLongTaskRenderer[\s\S]*?network_state==='failed'[\s\S]*?connection_interrupted/, "a living DOM with an interrupted or failed transport must not count as recovered");
 assert.match(worker, /rendererHealthy=Boolean\(\(activity\.available\|\|canonical\.ok\|\|networkState\.busy\)&&!hardFailure\)/, "live generation network traffic must prevent a destructive reload even when DOM and canonical probes are temporarily unavailable");
@@ -883,7 +884,7 @@ assert.match(managerUi, /canonicalBusy \|\| networkStreamInProgress \|\| \(!netw
 assert.match(managerUi, /network_stream_activity_text/, "Manager must render live network tool activity without exposing raw tool payloads");
 
 const manifest = JSON.parse(manifestText);
-const canonicalReaderSource = worker.slice(worker.indexOf("function readCanonicalConversationPage"), worker.indexOf("function canonicalResponseSupersedesDom"));
+const canonicalReaderSource = worker.slice(worker.indexOf("function readCanonicalConversationPage"), worker.indexOf("function canonicalRateLimitBackoffMs"));
 assert.match(canonicalReaderSource, /message\.role==='user'\|\|message\.end_turn===true/, "canonical transcript reads must exclude internal assistant progress fragments");
 assert.doesNotMatch(canonicalReaderSource, /status==='finished_successfully'/, "finished_successfully progress nodes must not be mistaken for an end-turn response");
 const responseReaderSource = worker.slice(worker.indexOf("if(action==='get_chat_response')"), worker.indexOf("if(action==='open_tab')"));

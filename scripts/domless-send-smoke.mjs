@@ -4,9 +4,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
-const [worker, networkPolicyWorker, bridge, managerMain] = await Promise.all([
+const [worker, networkPolicyWorker, responsePolicyWorker, bridge, managerMain] = await Promise.all([
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "network-policy.js"), "utf8"),
+  readFile(join(root, "chrome-extension", "service-worker", "response-policy.js"), "utf8"),
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
   readFile(join(root, "manager", "electron", "main.mjs"), "utf8")
 ]);
@@ -70,6 +71,15 @@ const {
   isCompletedAttachmentUpload,
   shouldUseTrustedClickFallback
 } = networkPolicy;
+const responsePolicy = Function("globalThis", `${responsePolicyWorker}; return globalThis.CodexProResponsePolicy;`)({});
+const {
+  canonicalResponseSupersedesDom,
+  shouldReloadChatRecovery,
+  mergeChatRecoveryResponse,
+  responseAuditTextSummary,
+  responseAuditSnapshot,
+  withResponseAudit
+} = responsePolicy;
 const rendererProbeSource = extractFunction("probeChatRendererForSend");
 assert.match(rendererProbeSource, /Runtime\.evaluate/, "renderer send preflight must use a pure CDP evaluation instead of queueing mutable page work");
 assert.doesNotMatch(rendererProbeSource, /scripting\.executeScript|tabs\.sendMessage/, "renderer send preflight must not enqueue DOM mutations that can resume after the profile wakes");
@@ -209,8 +219,8 @@ assert.equal(isChatGenerationRequest({
   url: "https://example.com/backend-api/conversation"
 }), false);
 
-const canonicalPrioritySource = extractFunction("canonicalResponseSupersedesDom");
-const canonicalResponseSupersedesDom = Function(`${canonicalPrioritySource}; return canonicalResponseSupersedesDom;`)();
+
+
 assert.equal(canonicalResponseSupersedesDom({
   ok: true,
   response_ready: true,
@@ -230,8 +240,8 @@ assert.equal(canonicalResponseSupersedesDom({
   text: "Phản hồi"
 }), true, "a fuller completed canonical response may repair a shorter UI snapshot");
 
-const reloadDecisionSource = extractFunction("shouldReloadChatRecovery");
-const shouldReloadChatRecovery = Function(`${reloadDecisionSource}; return shouldReloadChatRecovery;`)();
+
+
 assert.equal(shouldReloadChatRecovery({ connectionInterrupted: true, networkBusy: true }), false, "an interrupted placeholder must not reload while ChatGPT is still streaming");
 assert.equal(shouldReloadChatRecovery({ messageDeliveryTimedOut: true, networkBusy: true }), false, "a delivery-timeout banner must wait for active network/tool work to settle");
 assert.equal(shouldReloadChatRecovery({ domBusy: true, networkBusy: false }), false, "DOM busy/thinking alone must never authorize a blind reload");
@@ -298,8 +308,8 @@ const editedReplacedComposer = inspectChatSendAttemptPage("attempt-react-replace
 assert.equal(editedReplacedComposer.draft_owned, false, "a changed replacement draft must never inherit attempt ownership");
 assert.equal(replacedComposer.dataset.codexproDraftAttempt, undefined, "a changed draft must remain untouched so CodexPro cannot click-send user edits");
 
-const mergeRecoverySource = extractFunction("mergeChatRecoveryResponse");
-const mergeChatRecoveryResponse = Function(`${mergeRecoverySource}; return mergeChatRecoveryResponse;`)();
+
+
 const recoveredCheckpoint = mergeChatRecoveryResponse({
   text: "Phản hồi đã thấy trước reload",
   messages: [
