@@ -41,7 +41,7 @@ function selectedTaskTab(profile) {
   const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
   const currentConversationId = String(profile?.current_task_conversation_id || "");
   return tabs.find((tab) => currentConversationId && conversationIdFromUrl(tab?.url) === currentConversationId)
-    || tabs.find((tab) => tab?.long_task_watchdog_hung || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error)
+    || tabs.find((tab) => tab?.long_task_watchdog_hung || tab?.message_stream_error || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error)
     || tabs.find((tab) => tab?.busy || tab?.settling)
     || tabs.find((tab) => tab?.active)
     || tabs[0]
@@ -60,10 +60,11 @@ function hangCandidateForProfile(profile, nowMs) {
 
   const networkState = String(tab?.network_state || "").toLowerCase();
   const networkError = String(tab?.network_error || "").trim();
+  const messageStreamError = tab?.message_stream_error === true;
   const connectionInterrupted = tab?.connection_interrupted === true;
   const deliveryTimedOut = tab?.message_delivery_timed_out === true;
   const watchdogHung = tab?.long_task_watchdog_hung === true;
-  const networkFailed = networkState === "failed" || Boolean(networkError) || connectionInterrupted || deliveryTimedOut;
+  const networkFailed = networkState === "failed" || Boolean(networkError) || messageStreamError || connectionInterrupted || deliveryTimedOut;
 
   const rateAt = asTime(tab?.rate_limit_latest_at || profile?.rate_limit_latest_at);
   const flightAt = asTime(tab?.flight_recorder_latest_at || profile?.flight_recorder_latest_at);
@@ -75,7 +76,7 @@ function hangCandidateForProfile(profile, nowMs) {
   const rateStatus = Math.max(0, Number(tab?.rate_limit_latest_status_code || profile?.rate_limit_latest_status_code) || 0);
   const inferredStatus = httpStatusFromText(`${networkError} ${rateRelevant ? rateMessage : ""} ${flightRelevant ? flightMessage : ""}`);
   const statusCode = directStatus || (rateRelevant ? rateStatus || 429 : 0) || inferredStatus;
-  const openAiError = statusCode >= 400 || (rateRelevant && Number(tab?.rate_limit_incident_count || profile?.rate_limit_incident_count || 0) > 0);
+  const openAiError = messageStreamError || statusCode >= 400 || (rateRelevant && Number(tab?.rate_limit_incident_count || profile?.rate_limit_incident_count || 0) > 0);
   const networkTransportError = connectionInterrupted || deliveryTimedOut || /\b(?:net::|ERR_|fetch failed|network|connection|socket|timeout|timed out|offline)\b/i.test(networkError);
   const hangSignal = networkFailed || (watchdogHung && (openAiError || networkTransportError || rateRelevant || flightRelevant));
   if (!hangSignal) return null;
@@ -92,7 +93,7 @@ function hangCandidateForProfile(profile, nowMs) {
     openAiError
       ? (rateRelevant ? rateMessage : "") || (flightRelevant ? flightMessage : "") || networkError
       : networkError
-  ) || (deliveryTimedOut ? "Gửi tin nhắn vượt thời gian chờ." : connectionInterrupted ? "Kết nối tới ChatGPT bị gián đoạn." : watchdogHung ? "Watchdog xác nhận task không còn tiến triển sau lỗi mạng." : "Task bị treo sau lỗi mạng.");
+  ) || (messageStreamError ? "ChatGPT báo Error in message stream." : deliveryTimedOut ? "Gửi tin nhắn vượt thời gian chờ." : connectionInterrupted ? "Kết nối tới ChatGPT bị gián đoạn." : watchdogHung ? "Watchdog xác nhận task không còn tiến triển sau lỗi mạng." : "Task bị treo sau lỗi mạng.");
   const causes = [openAiError ? "openai" : "", networkTransportError || !openAiError ? "network" : ""].filter(Boolean);
   return {
     key: `${profileId}:${taskId}:${conversationId || "no-conversation"}:${Number(tab.id)}`,

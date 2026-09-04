@@ -180,6 +180,7 @@ export interface ExtensionProfileSummary {
     network_stream_activity_text: string;
     connection_interrupted: boolean;
     message_delivery_timed_out: boolean;
+    message_stream_error: boolean;
     conversation_limit_reached: boolean;
     conversation_limit_message: string;
     renderer_unresponsive: boolean;
@@ -1278,6 +1279,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
           network_stream_activity_text: String(tab.network_stream_activity_text ?? '').trim().slice(0, 220),
           connection_interrupted: tab.connection_interrupted === true,
           message_delivery_timed_out: tab.message_delivery_timed_out === true,
+          message_stream_error: tab.message_stream_error === true,
           conversation_limit_reached: tab.conversation_limit_reached === true,
           conversation_limit_message: String(tab.conversation_limit_message ?? "").trim().slice(0, 500),
           renderer_unresponsive: tab.renderer_unresponsive === true,

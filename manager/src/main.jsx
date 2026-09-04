@@ -373,7 +373,7 @@ function SendDebugEvidence({ evidence }) {
   );
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.119";
+const WORKER_EXTENSION_VERSION = "0.5.120";
 
 function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);
@@ -1227,7 +1227,7 @@ function App() {
       const countsAsTask = job?.counts_as_task === true;
       const title = String(profile?.current_task_title || tab?.title || profile?.active_chat_title || "Task CodexPro");
       const working = Boolean(tab?.busy || tab?.settling || profile?.activity === "working" || Number(profile?.busy_request_count || 0) > 0);
-      const failed = Boolean(tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error);
+      const failed = Boolean(tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.message_stream_error || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error);
       const previous = operationsNotificationState.current.get(profile.profile_id);
       if (managerSettings.taskNotifications !== false && previous) {
         const previousJob = previous.taskId ? jobs.find((job) => String(job?.job_id || job?.jobId || "") === previous.taskId) : null;
@@ -1439,8 +1439,40 @@ function App() {
     const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
     for (const profile of profiles) {
       if (!profile?.connected) continue;
-      if (longRunningChatWatchdogCandidate(profile, jobs)) continue;
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+      const messageStreamTab = tabs.find((tab) => !tab?.long_task_watchdog_hung && tab?.message_stream_error);
+      if (messageStreamTab?.id) {
+        const conversationId = String(messageStreamTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+        const taskId = String(profile?.current_task_id || "");
+        if (!conversationId) continue;
+        const key = `message-stream:${profile.profile_id}:${conversationId}:${taskId || "no-task"}`;
+        const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
+        if (Date.now() - previous < 120_000) continue;
+        operationsRecoveryTimes.current.set(key, Date.now());
+        logRendererDiagnostic(api, "error", "chat", "ChatGPT báo Error in message stream; chuyển task hiện tại sang chat mới", {
+          action: "message-stream-error-rollover",
+          profile_id: profile.profile_id,
+          task_id: taskId,
+          conversation_id: conversationId,
+          target_id: String(messageStreamTab.id),
+          incident_fingerprint: `message-stream-error:${profile.profile_id}:${conversationId}`,
+          retry_old_chat: false
+        });
+        void recoverProfileTab(profile, {
+          targetTab: messageStreamTab,
+          conversationId,
+          taskId,
+          forceContinuation: true,
+          silent: true,
+          automatic: true,
+          hardFailure: true,
+          recoveryReason: "ChatGPT báo Error in message stream. Bỏ qua Retry ở chat cũ và tiếp tục đúng Task ID hiện tại trong chat mới."
+        }).then((continuation) => {
+          if (continuation && managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã chuyển chat", body: `“${profile.current_task_title || "Task hiện tại"}” gặp Error in message stream và đã tiếp tục trong chat mới.` });
+        });
+        continue;
+      }
+      if (longRunningChatWatchdogCandidate(profile, jobs)) continue;
       const targetTab = tabs.find((tab) => !tab?.long_task_watchdog_hung && (tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error));
       if (!targetTab?.id) continue;
       const conversationId = String(targetTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";

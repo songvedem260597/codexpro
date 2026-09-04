@@ -60,6 +60,15 @@ const openAiCandidate = detectTaskHangCandidates([profile({
 })], baseNow)[0];
 assert.equal(openAiCandidate.source, "openai", "HTTP 429 must be tracked as an OpenAI hang cause");
 assert.equal(openAiCandidate.status_code, 429);
+const messageStreamCandidate = detectTaskHangCandidates([profile({}, {
+  network_state: "completed",
+  network_error: "",
+  connection_interrupted: false,
+  message_stream_error: true,
+  network_status_code: 200
+})], baseNow)[0];
+assert.equal(messageStreamCandidate.source, "openai", "Error in message stream must be tracked as an OpenAI hang cause");
+assert.match(messageStreamCandidate.message, /Error in message stream/, "message-stream incidents must preserve the ChatGPT failure reason");
 
 assert.equal(detectTaskHangCandidates([profile({}, {
   network_state: "generating",

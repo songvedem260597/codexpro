@@ -337,7 +337,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.119";
+const WORKER_EXTENSION_VERSION = "0.5.120";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -1241,7 +1241,7 @@ function activeBrowserTaskSummaries() {
 
 function profileDiagnosticSnapshot(profile) {
   const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-  const incidentTab = tabs.find((tab) => tab?.renderer_unresponsive || tab?.connection_interrupted || tab?.message_delivery_timed_out || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error) || null;
+  const incidentTab = tabs.find((tab) => tab?.renderer_unresponsive || tab?.message_stream_error || tab?.connection_interrupted || tab?.message_delivery_timed_out || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error) || null;
   const incidentConversationId = String(incidentTab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
   return {
     connected: Boolean(profile?.connected),
@@ -1252,6 +1252,7 @@ function profileDiagnosticSnapshot(profile) {
     connector_message: String(profile?.connector_message || "").slice(0, 500),
     connector_checked_at: String(profile?.connector_checked_at || "").slice(0, 64),
     renderer_unresponsive: Boolean(profile?.renderer_unresponsive || tabs.some((tab) => tab?.renderer_unresponsive)),
+    message_stream_error: tabs.some((tab) => tab?.message_stream_error),
     connection_interrupted: tabs.some((tab) => tab?.connection_interrupted),
     message_delivery_timed_out: tabs.some((tab) => tab?.message_delivery_timed_out),
     network_failed: tabs.some((tab) => String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error),
@@ -1311,6 +1312,15 @@ function recordBrowserProfileTransitions(profiles, checkedAt) {
         diagnostic("error", "browser", "profile", "Chrome renderer không phản hồi", details);
       } else if (previous.renderer_unresponsive && !current.renderer_unresponsive) {
         diagnostic("info", "browser", "profile", "Chrome renderer đã phản hồi lại", details);
+      }
+      if (!previous.message_stream_error && current.message_stream_error) {
+        diagnostic("error", "browser", "chat", "ChatGPT báo Error in message stream", {
+          ...details,
+          action: "chat-message-stream-error",
+          incident_fingerprint: `chat-message-stream-error:${profileId}:${current.incident_conversation_id || "unknown"}`
+        });
+      } else if (previous.message_stream_error && !current.message_stream_error) {
+        diagnostic("info", "browser", "chat", "ChatGPT đã hết trạng thái Error in message stream", details);
       }
       if (!previous.connection_interrupted && current.connection_interrupted) {
         diagnostic("warn", "browser", "chat", "ChatGPT báo Connection interrupted", {
@@ -4881,10 +4891,13 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
   const owner = BrowserWindow.fromWebContents(event.sender);
   const restoreManagerFocus = Boolean(owner && !owner.isDestroyed() && owner.isFocused());
   return ipcResult(async () => {
+    let keepChromeFocused = payload?.newChat === true;
     try {
-      return await sendProfileRequest(payload);
+      const result = await sendProfileRequest(payload);
+      keepChromeFocused = keepChromeFocused || Boolean(result?.chatgpt_tab_auto_opened || result?.new_chat);
+      return result;
     } finally {
-      if (restoreManagerFocus && owner && !owner.isDestroyed() && !owner.isFocused()) {
+      if (!keepChromeFocused && restoreManagerFocus && owner && !owner.isDestroyed() && !owner.isFocused()) {
         if (owner.isMinimized()) owner.restore();
         owner.show();
         owner.focus();

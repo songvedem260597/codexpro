@@ -10,7 +10,7 @@ export function longRunningChatWatchdogCandidate(profile, jobs = [], nowMs = Dat
   const tab = tabs.find((item) => item?.busy || item?.settling || String(item?.network_state || "") === "generating")
     || tabs.find((item) => item?.active)
     || tabs[0];
-  if (tab?.long_task_watchdog_hung) return null;
+  if (tab?.long_task_watchdog_hung || tab?.message_stream_error) return null;
   const conversationId = conversationIdFromUrl(tab?.url);
   if (!conversationId || !Number.isInteger(Number(tab?.id))) return null;
 

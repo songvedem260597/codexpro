@@ -7,7 +7,7 @@ function chromeActivity(profile) {
   if (working) return "working";
   if (profile.activity === "settling" || tabs.some((tab) => tab?.settling)) return "settling";
   const failed = profile.renderer_unresponsive
-    || tabs.some((tab) => tab?.renderer_unresponsive || tab?.connection_interrupted || tab?.message_delivery_timed_out);
+    || tabs.some((tab) => tab?.renderer_unresponsive || tab?.message_stream_error || tab?.connection_interrupted || tab?.message_delivery_timed_out);
   return failed ? "failed" : "idle";
 }
 

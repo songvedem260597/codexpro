@@ -559,6 +559,7 @@ assert.match(responseSource, /thinkingPlaceholder/, "DOM fallback must classify 
 assert.match(responseSource, /generation_in_progress/, "DOM fallback must expose active generation rather than treating it as a completed answer");
 assert.match(responseSource, /connection interrupted\\\.\\s\*waiting for the complete answer/i, "DOM fallback must detect ChatGPT's interrupted connection placeholder");
 assert.match(responseSource, /k\\u1ebft n\\u1ed1i b\\u1ecb gi\\u00e1n \\u0111o\\u1ea1n/, "DOM fallback must detect the Vietnamese Connection interrupted placeholder");
-assert.match(responseSource, /incomplete_reason:imageGenerationLoading\?'image_generation_in_progress':messageDeliveryTimedOut\?'message_delivery_timeout':connectionInterrupted\?'connection_interrupted'/, "image generation and recoverable ChatGPT errors must remain incomplete until the exact chat is recovered");
+assert.match(responseSource, /error in message stream/, "DOM fallback must detect ChatGPT message-stream failures");
+assert.match(responseSource, /incomplete_reason:imageGenerationLoading\?'image_generation_in_progress':messageStreamError\?'message_stream_error':messageDeliveryTimedOut\?'message_delivery_timeout':connectionInterrupted\?'connection_interrupted'/, "recoverable ChatGPT errors must remain incomplete until the correct recovery path runs");
 
 console.log("✓ ChatGPT trusted-Enter primary send smoke test passed");

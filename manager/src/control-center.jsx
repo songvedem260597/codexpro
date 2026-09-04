@@ -65,6 +65,7 @@ export function profileHealth(profile) {
   if (profile?.connector_profile_bound === false) { score -= 20; issues.push("MCP chưa bind profile"); }
   if (profile?.connector_update_required) { score -= 10; issues.push("worker cũ"); }
   if (tab?.renderer_unresponsive) { score -= 30; issues.push("renderer treo"); }
+  if (tab?.message_stream_error) { score -= 24; issues.push("lỗi luồng tin nhắn"); }
   if (tab?.message_delivery_timed_out) { score -= 18; issues.push("gửi tin timeout"); }
   if (tab?.connection_interrupted) { score -= 15; issues.push("mất kết nối"); }
   if (String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error) { score -= 18; issues.push("network lỗi"); }
