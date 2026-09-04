@@ -2,13 +2,12 @@
 import fs from "node:fs";
 
 const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+const composer = fs.readFileSync(new URL("../src/features/chat/chat-request-composer.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const electronMain = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
-const composerStart = source.indexOf("function ChatRequestComposer(");
-const appStart = source.indexOf("function App()", composerStart);
-assert.ok(composerStart >= 0 && appStart > composerStart, "ChatRequestComposer must stay isolated above App");
-
-const composer = source.slice(composerStart, appStart);
+assert.match(source, /import \{ ChatRequestComposer \} from "\.\/features\/chat\/chat-request-composer\.jsx";/, "Manager must render the extracted chat composer module");
+assert.doesNotMatch(source, /function ChatRequestComposer\(/, "ChatRequestComposer implementation must stay out of main.jsx");
+assert.match(composer, /export function ChatRequestComposer\(/, "chat composer must be exported from its feature module");
 assert.match(composer, /const \[draft, setDraft\] = useState\(/, "composer draft must be local state");
 assert.match(composer, /const draftRef = useRef\(String\(initialDraft \|\| ""\)\)/, "composer must track the live draft independently while a previous send waits for ACK");
 assert.match(composer, /const submittedDraft = draft[\s\S]*?onSend\(submittedDraft\)[\s\S]*?draftRef\.current === submittedDraft/, "a completed send may clear only the exact draft it submitted, never text typed for the next follow-up");

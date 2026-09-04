@@ -11,7 +11,7 @@
     "build": "vite build",
     "test:markdown": "node scripts/markdown-response-smoke.mjs",
     "test:diagnostic": "node scripts/user-reported-error-smoke.mjs && node scripts/diagnostic-log-smoke.mjs && node scripts/runtime-health-diagnostic-smoke.mjs && node scripts/task-unfinalized-diagnostic-smoke.mjs && node scripts/tunnel-offline-diagnostic-smoke.mjs",
-    "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs",
+    "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs && electron scripts/chat-request-composer-visual-smoke.cjs",
     "test:chat-response-finality": "node scripts/chat-response-finality-smoke.mjs",
     "test:runtime-restart": "node scripts/runtime-restart-send-race-smoke.mjs",
     "test:process-runner": "node scripts/process-runner-smoke.mjs",
