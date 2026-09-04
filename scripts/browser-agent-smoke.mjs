@@ -386,6 +386,7 @@ assert.equal(tabPolicy.conversationIdFromUrl("https://chatgpt.com/c/recent-chat?
 assert.equal(tabPolicy.isChatGptTabUrl("https://chatgpt.com/#settings/Plugins"), true, "tab policy helper must recognize ChatGPT tabs");
 assert.equal(tabPolicy.isChatGptTabUrl("https://example.com/"), false, "tab policy helper must reject non-ChatGPT tabs");
 assert.equal(tabPolicy.safeTabAuditUrl("https://chatgpt.com/c/recent-chat?secret=1#fragment"), "https://chatgpt.com/c/recent-chat", "tab audit URLs must omit query and fragment data");
+assert.deepEqual(tabPolicy.tabAuditTabRecord({ id: 42, windowId: 7, url: "https://chatgpt.com/c/recent-chat?secret=1", active: true, status: "complete" }), { tab_id: 42, window_id: 7, url: "https://chatgpt.com/c/recent-chat", conversation_id: "recent-chat", active: true, status: "complete" }, "tab audit records must stay sanitized while retaining tab metadata");
 const tabPolicyPlan = planChatTabCleanup([
   { id: 1, url: "https://chatgpt.com/c/recent-chat", active: true, last_accessed: 900 },
   { id: 2, url: "https://chatgpt.com/c/busy-chat", busy: true, last_accessed: 100 },
