@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { ALL_ALLOWED_WORKSPACES, createManagerSettingsStore } from "../electron/manager-settings-store.mjs";
 
-// Keep persistence coverage isolated from the real CodexPro home and user settings.
+// Keep persistence coverage isolated from the real CodexPro home and user settings; never point this smoke at codexProHome.
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-manager-settings-store-"));
 
 try {
