@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createRoot } from "react-dom/client";
 import managerPackage from "../package.json";
 import "./styles.css";
-import "./overview-refresh.css";
 import "@fontsource/be-vietnam-pro/400.css";
 import "@fontsource/be-vietnam-pro/500.css";
 import "@fontsource/be-vietnam-pro/600.css";
@@ -4276,12 +4275,12 @@ function App() {
           <div><strong>CodexPro</strong><span>Manager</span></div>
         </div>
         <nav>
-          <button type="button" title="Tổng quan" aria-label="Tổng quan" className={activePage === "overview" ? "active" : ""} onClick={() => setActivePage("overview")}><Icon>⌁</Icon>Tổng quan</button>
-          <button type="button" title="Điều phối" aria-label="Điều phối" className={activePage === "control" ? "active" : ""} onClick={() => setActivePage("control")}><Icon>◫</Icon>Điều phối</button>
-          <button type="button" title="Quy trình" aria-label="Quy trình" className={activePage === "workflows" ? "active" : ""} onClick={() => setActivePage("workflows")}><Icon>✓</Icon>Quy trình</button>
-          <button type="button" title="Plugin" aria-label="Plugin" className={activePage === "plugins" ? "active" : ""} onClick={() => setActivePage("plugins")}><Icon>◇</Icon>Plugin</button>
-          <button type="button" title="Nhật ký" aria-label="Nhật ký" className={activePage === "logs" ? "active" : ""} onClick={() => setActivePage("logs")}><Icon>≡</Icon>Nhật ký</button>
-          <button type="button" title="Cài đặt" aria-label="Cài đặt" className={activePage === "settings" ? "active" : ""} onClick={() => setActivePage("settings")}><Icon>⚙</Icon>Cài đặt</button>
+          <button type="button" className={activePage === "overview" ? "active" : ""} onClick={() => setActivePage("overview")}><Icon>⌁</Icon>Tổng quan</button>
+          <button type="button" className={activePage === "control" ? "active" : ""} onClick={() => setActivePage("control")}><Icon>◫</Icon>Điều phối</button>
+          <button type="button" className={activePage === "workflows" ? "active" : ""} onClick={() => setActivePage("workflows")}><Icon>✓</Icon>Quy trình</button>
+          <button type="button" className={activePage === "plugins" ? "active" : ""} onClick={() => setActivePage("plugins")}><Icon>◇</Icon>Plugin</button>
+          <button type="button" className={activePage === "logs" ? "active" : ""} onClick={() => setActivePage("logs")}><Icon>≡</Icon>Nhật ký</button>
+          <button type="button" className={activePage === "settings" ? "active" : ""} onClick={() => setActivePage("settings")}><Icon>⚙</Icon>Cài đặt</button>
         </nav>
         <div className="sidebar-foot">
           <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
@@ -4298,13 +4297,13 @@ function App() {
           </div>
           {activePage === "overview" && (
             <div className="header-server-actions">
-              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} tránh, kết nối ${status?.local?.ok && status?.tunnel?.ok ? "tốt" : "có lỗi"}, ${profileSummary.hung + profileSummary.missing} cảnh báo`}>
-                <ProfileSummaryItem state="working" count={profileSummary.working} label="Làm việc" />
-                <ProfileSummaryItem state="idle" count={profileSummary.idle} label="Tránh" />
-                <ProfileSummaryItem state="connection" count="Kết nối" label={status?.local?.ok && status?.tunnel?.ok ? "Tốt" : "Có lỗi"} />
-                <ProfileSummaryItem state="hung" count={profileSummary.hung + profileSummary.missing} label="Cảnh báo" />
-
-
+              <div className="profile-count" aria-label={`${profileSummary.working} làm việc, ${profileSummary.idle} rảnh, ${profileSummary.hung} mất kết nối, ${profileSummary.missing} chưa cài`}>
+                <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
+                <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
+                <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
+                <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
+                {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
+                {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
               </div>
               <button
                 className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}

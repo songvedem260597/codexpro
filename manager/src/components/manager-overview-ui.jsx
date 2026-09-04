@@ -40,14 +40,6 @@ function ProfileSummaryIcon({ state, missing }) {
       </svg>
     );
   }
-  if (state === "connection") {
-    return (
-      <svg className="profile-summary-svg" viewBox="0 0 24 24" aria-hidden="true">
-        <path className="summary-connection-wave" d="M4 9.5a12 12 0 0 1 16 0M7 13a7.5 7.5 0 0 1 10 0M10 16.5a3 3 0 0 1 4 0" />
-        <circle className="summary-connection-dot" cx="12" cy="19" r="1" />
-      </svg>
-    );
-  }
   return (
     <svg className="profile-summary-svg" viewBox="0 0 24 24" aria-hidden="true">
       <path className="summary-hung-triangle" d="M12 3 2.8 20h18.4L12 3Z" />
