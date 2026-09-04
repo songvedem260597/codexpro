@@ -456,6 +456,15 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (postMutationJob?.counts_as_task !== true || postMutationJob?.source_change_count !== 1 || !postMutationJob?.source_changed_paths?.includes?.('gate.txt')) {
       throw new Error(`real source edit did not promote the worker job to Task: ${JSON.stringify(postMutationStatus.structuredContent)}`);
     }
+    await expectToolErrorCode(gated, 'finalize_worker_job', {
+      task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa',
+      outcome: 'completed',
+      summary: 'must not complete before verification, commit, and push'
+    }, 'WORKSPACE_TASK_TESTS_REQUIRED');
+    const postRejectedFinalize = await callTool(gated, 'worker_job_status', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa' });
+    if (postRejectedFinalize.structuredContent.job?.status !== 'running') {
+      throw new Error(`rejected early finalize must leave the task running: ${JSON.stringify(postRejectedFinalize.structuredContent)}`);
+    }
     const classifiedHistory = await callTool(gated, 'worker_job_history', { statuses: ['running'], limit: 20 });
     const classifiedHistoryJob = classifiedHistory.structuredContent.jobs?.find?.((job) => job?.job_id === 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa');
     if (classifiedHistoryJob?.counts_as_task !== true || classifiedHistoryJob?.source_change_count !== 1) {

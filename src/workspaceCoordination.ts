@@ -28,8 +28,13 @@ export type WorkspaceTaskRecord = {
   baseRemoteHead: string;
   initialDirtyPaths: string[];
   touchedPaths: string[];
+  lastSourceChangeAt?: string;
   claimedPaths: string[];
   commitShas: string[];
+  lastVerificationStatus?: "passed" | "failed";
+  lastVerificationLabel?: string;
+  lastVerificationAt?: string;
+  lastCommitAt?: string;
   worktreeRoot?: string;
   worktreeBranch?: string;
   integrationStatus?: "idle" | "queued" | "integrating" | "integrated" | "conflict" | "failed";
@@ -229,8 +234,13 @@ function normalizeTask(value: unknown): WorkspaceTaskRecord | undefined {
     baseRemoteHead: String(source.baseRemoteHead || "").trim().slice(0, 80),
     initialDirtyPaths: uniquePaths(Array.isArray(source.initialDirtyPaths) ? source.initialDirtyPaths.map(String) : []),
     touchedPaths: uniquePaths(Array.isArray(source.touchedPaths) ? source.touchedPaths.map(String) : []),
+    ...(source.lastSourceChangeAt ? { lastSourceChangeAt: String(source.lastSourceChangeAt) } : {}),
     claimedPaths: uniquePaths(Array.isArray(source.claimedPaths) ? source.claimedPaths.map(String) : []),
     commitShas: [...new Set(Array.isArray(source.commitShas) ? source.commitShas.map((value) => String(value).trim()).filter(Boolean) : [])].slice(-200),
+    ...(source.lastVerificationStatus === "passed" || source.lastVerificationStatus === "failed" ? { lastVerificationStatus: source.lastVerificationStatus } : {}),
+    ...(source.lastVerificationLabel ? { lastVerificationLabel: String(source.lastVerificationLabel).slice(0, 200) } : {}),
+    ...(source.lastVerificationAt ? { lastVerificationAt: String(source.lastVerificationAt) } : {}),
+    ...(source.lastCommitAt ? { lastCommitAt: String(source.lastCommitAt) } : {}),
     ...(source.worktreeRoot ? { worktreeRoot: String(source.worktreeRoot) } : {}),
     ...(source.worktreeBranch ? { worktreeBranch: String(source.worktreeBranch) } : {}),
     ...(source.integrationStatus ? { integrationStatus: source.integrationStatus } : {}),
@@ -546,6 +556,31 @@ export async function recordWorkspacePathsTouched(context: WorkspaceTaskContext,
       if (claim) claim.updatedAt = now;
     }
     task.touchedPaths = uniquePaths([...task.touchedPaths, ...normalizedPaths]);
+    task.lastSourceChangeAt = now;
+    task.lastVerificationStatus = undefined;
+    task.lastVerificationLabel = undefined;
+    task.lastVerificationAt = undefined;
+    task.lastCommitAt = undefined;
+    task.integrationStatus = "idle";
+    task.integrationBranch = undefined;
+    task.integrationRequestedAt = undefined;
+    task.integrationStartedAt = undefined;
+    task.integrationFinishedAt = undefined;
+    task.integratedHead = undefined;
+    task.remoteHeadBeforeIntegration = undefined;
+    task.updatedAt = now;
+    return task;
+  });
+}
+
+export async function recordWorkspaceVerification(context: WorkspaceTaskContext, label: string, passed: boolean): Promise<WorkspaceTaskRecord> {
+  const root = canonicalRoot(context.root);
+  return await withState(root, async (state) => {
+    const task = requireTask(state, context.taskId);
+    const now = nowIso();
+    task.lastVerificationStatus = passed ? "passed" : "failed";
+    task.lastVerificationLabel = String(label || "verification").trim().slice(0, 200) || "verification";
+    task.lastVerificationAt = now;
     task.updatedAt = now;
     return task;
   });
@@ -683,6 +718,7 @@ export async function recordWorkspaceCommit(context: WorkspaceTaskContext): Prom
       });
     }
     task.commitShas = [...new Set([...task.commitShas, head])].slice(-200);
+    task.lastCommitAt = nowIso();
     if (!task.worktreeRoot) {
       task.baseHead = head;
       task.baseBranch = await currentBranch(gitRoot);
@@ -884,6 +920,61 @@ export async function recordWorkspacePush(context: WorkspaceTaskContext, branch:
     task.updatedAt = nowIso();
     return head;
   });
+}
+
+function atOrAfter(left: string | undefined, right: string | undefined): boolean {
+  const leftMs = Date.parse(String(left || ""));
+  const rightMs = Date.parse(String(right || ""));
+  return Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs >= rightMs;
+}
+
+export function assertWorkspaceTaskCompletionReady(context: WorkspaceTaskContext): WorkspaceTaskRecord {
+  const root = canonicalRoot(context.root);
+  const task = readState(root).tasks[context.taskId];
+  if (!task) {
+    throw new CodexProError(`WORKSPACE_TASK_NOT_FOUND: ${context.taskId} is not registered.`, {
+      code: "WORKSPACE_TASK_NOT_FOUND",
+      details: { task_id: context.taskId }
+    });
+  }
+  if (!task.touchedPaths.length) return task;
+  if (!task.lastSourceChangeAt || task.lastVerificationStatus !== "passed" || !atOrAfter(task.lastVerificationAt, task.lastSourceChangeAt)) {
+    throw new CodexProError(`WORKSPACE_TASK_TESTS_REQUIRED: task ${task.taskId} changed source and must pass a recognized test/check/verify/smoke command after the latest source change before completion.`, {
+      code: "WORKSPACE_TASK_TESTS_REQUIRED",
+      details: {
+        task_id: task.taskId,
+        last_source_change_at: task.lastSourceChangeAt || null,
+        last_verification_status: task.lastVerificationStatus || null,
+        last_verification_label: task.lastVerificationLabel || null,
+        last_verification_at: task.lastVerificationAt || null
+      }
+    });
+  }
+  if (!task.commitShas.length || !task.lastCommitAt || !atOrAfter(task.lastCommitAt, task.lastVerificationAt)) {
+    throw new CodexProError(`WORKSPACE_TASK_COMMIT_REQUIRED: task ${task.taskId} must commit its verified source changes after tests pass before completion.`, {
+      code: "WORKSPACE_TASK_COMMIT_REQUIRED",
+      details: {
+        task_id: task.taskId,
+        commit_shas: task.commitShas,
+        last_verification_at: task.lastVerificationAt || null,
+        last_commit_at: task.lastCommitAt || null
+      }
+    });
+  }
+  if (task.integrationStatus !== "integrated" || !task.integratedHead || !task.integrationFinishedAt || !atOrAfter(task.integrationFinishedAt, task.lastCommitAt)) {
+    throw new CodexProError(`WORKSPACE_TASK_PUSH_REQUIRED: task ${task.taskId} must successfully push/integrate the committed changes before completion.`, {
+      code: "WORKSPACE_TASK_PUSH_REQUIRED",
+      details: {
+        task_id: task.taskId,
+        integration_status: task.integrationStatus || "idle",
+        integrated_head: task.integratedHead || null,
+        integration_branch: task.integrationBranch || null,
+        integration_finished_at: task.integrationFinishedAt || null,
+        last_commit_at: task.lastCommitAt || null
+      }
+    });
+  }
+  return task;
 }
 
 export async function finalizeWorkspaceTask(context: WorkspaceTaskContext, status: WorkspaceTaskStatus): Promise<void> {
