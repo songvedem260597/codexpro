@@ -61,6 +61,8 @@ function extractFunction(name) {
 
 const networkPolicy = Function("globalThis", `${networkPolicyWorker}; return globalThis.CodexProNetworkPolicy;`)({});
 const {
+  isChatGenerationRequest,
+  safeChatRequestEndpoint,
   isChatSubmitLifecycleEvidence,
   isChatSubmissionAckEvidence,
   isAttachmentUploadEndpoint,
@@ -122,9 +124,6 @@ assert.match(worker, /slice\(-\(reason==='rate_limit'\?20:120\)\)/, "high-freque
 assert.match(bridge, /chatgpt-rate-limit\.jsonl[\s\S]*?normalizeBrowserRateLimitIncident[\s\S]*?recordBrowserRateLimitIncident/, "the bridge must normalize old-worker console/log 429 fallbacks and persist them to the dedicated JSONL investigation log");
 assert.match(managerMain, /ChatGPT trả về HTTP 429 Too Many Requests[\s\S]*?chatgpt-rate-limit/, "Manager diagnostics must surface each new rate-limit incident with correlation metadata");
 
-const generationSource = extractFunction("isChatGenerationRequest");
-const isChatGenerationRequest = Function(`${generationSource}; return isChatGenerationRequest;`)();
-
 const conversationStateMismatchSource = extractFunction("conversationScopedStateMismatch");
 const conversationScopedStateMismatch = Function(`${conversationStateMismatchSource}; return conversationScopedStateMismatch;`)();
 assert.equal(conversationScopedStateMismatch("old-conversation", ""), true, "a tab that navigates from /c/... back to the ChatGPT root must discard conversation-scoped state");
@@ -170,6 +169,9 @@ assert.equal(navigationCanonicalState.has(77), false, "root navigation must drop
 assert.equal(navigationDomState.has(77), false, "root navigation must drop cached DOM activity from the previous conversation");
 assert.equal(navigationPersisted, 1, "discarded network state must be persisted immediately");
 assert.equal(navigationPushes, 1, "navigation reconciliation must push an idle profile snapshot immediately");
+
+assert.equal(safeChatRequestEndpoint("https://chatgpt.com/backend-api/f/conversation?secret=redacted"), "/backend-api/f/conversation", "network policy endpoint helper must strip query data");
+assert.equal(safeChatRequestEndpoint("https://example.com/backend-api/f/conversation"), "", "network policy endpoint helper must reject non-ChatGPT hosts");
 
 assert.equal(isChatGenerationRequest({
   tabId: 9,

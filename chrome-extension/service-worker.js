@@ -7,6 +7,8 @@ const {
   planChatTabCleanup
 } = globalThis.CodexProTabPolicy;
 const {
+  isChatGenerationRequest,
+  safeChatRequestEndpoint,
   isChatSubmitLifecycleEvidence,
   isChatSubmissionAckEvidence,
   isAttachmentUploadEndpoint,
@@ -333,25 +335,6 @@ async function createChatGptTab(createArgs={},source='createChatGptTab') {
     }
     return created;
   });
-}
-
-function isChatGenerationRequest(details) {
-  if(details.tabId < 0 || details.method !== 'POST')return false;
-  try{
-    const url=new URL(details.url);
-    const path=url.pathname.replace(/\/+$/,'');
-    if(url.hostname!=='chatgpt.com'&&!url.hostname.endsWith('.chatgpt.com'))return false;
-    return /\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|steer_turn)$/.test(path)
-      || /\/backend-api\/(?:f\/)?(?:codex\/)?responses$/.test(path);
-  }catch{return false;}
-}
-
-function safeChatRequestEndpoint(value) {
-  try{
-    const url=new URL(String(value||''));
-    if(url.hostname!=='chatgpt.com'&&!url.hostname.endsWith('.chatgpt.com'))return '';
-    return url.pathname.replace(/\/+$/,'')||'/';
-  }catch{return '';}
 }
 
 function attributedChatRequestDetails(details) {

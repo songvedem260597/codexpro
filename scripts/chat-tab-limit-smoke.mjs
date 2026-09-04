@@ -112,9 +112,9 @@ assert.match(worker, /async function stopFlightRecorderForTab\(tabId\)[\s\S]*?fl
 
 const helperSource = worker.slice(
   worker.indexOf("async function serializeChatGptTabCreation"),
-  worker.indexOf("function isChatGenerationRequest")
+  worker.indexOf("function attributedChatRequestDetails")
 );
-assert.ok(helperSource.includes("async function createChatGptTab"), "capped tab creator source must be present");
+assert.ok(helperSource.includes("async function createChatGptTab"), "capped tab creator source must stay present after request classifiers move to network policy");
 
 function makeHarness(initialTabs) {
   let tabs = initialTabs.map(tab => ({ ...tab }));

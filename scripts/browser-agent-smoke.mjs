@@ -349,10 +349,11 @@ const completedStreamAudit = buildChatResponseAuditRecord({
 });
 assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
 assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
-const [browserOps, worker, tabPolicyWorker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
+const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "tab-policy.js"), "utf8"),
+  readFile(join(root, "chrome-extension", "service-worker", "network-policy.js"), "utf8"),
   readFile(join(root, "src", "server.ts"), "utf8"),
   readFile(join(root, "src", "http.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
@@ -602,7 +603,7 @@ assert.match(server, /"audit_long_running_chat"/, "browser_control schema must e
 assert.match(server, /task_id: args\.task_id[\s\S]*?started_at: args\.started_at[\s\S]*?attempt_key: args\.attempt_key/, "browser_control must forward the persistent one-shot audit identity to the extension");
 assert.match(worker, /async function replaceUnresponsiveChatTab[\s\S]*?auditedCreateTab\(createArgs,'chat_tab_create'\)[\s\S]*?waitForTab[\s\S]*?auditedRemoveTab\(replacedTabId,'replaceUnresponsiveChatTab','remove_old_tab'\)/, "renderer recovery must load a replacement before closing the exact stuck tab");
 assert.match(worker, /dom_replaced=true[\s\S]*?recovery_tab_id/, "stale-response reload recovery must escalate to replacing a renderer that stays unresponsive");
-assert.match(worker, /conversation\|steer_turn/, "ChatGPT steer_turn must be tracked as a generation request");
+assert.match(networkPolicyWorker, /conversation\|steer_turn/, "ChatGPT steer_turn must be tracked as a generation request");
 assert.match(worker, /const staleActivity=Boolean\(injected\.result\.busy\)/, "canonical completion must recover a tab whose DOM is still stuck busy");
 assert.match(worker, /chatDomActivityState\(tab\.id,conversationId,\{maxAgeMs:750\}\)/, "worker send must reuse only a sub-second DOM activity probe before submitting");
 assert.match(worker, /num_turns=6/, "canonical transcript reads must request only the three most recent user/assistant exchanges");
