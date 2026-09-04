@@ -13,6 +13,7 @@ import {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const managerRoot = path.resolve(here, "..");
 const mainSource = fs.readFileSync(path.join(managerRoot, "src", "main.jsx"), "utf8");
+const modalSource = fs.readFileSync(path.join(managerRoot, "src", "features", "tasks", "profile-task-modal.jsx"), "utf8");
 const electronSource = fs.readFileSync(path.join(managerRoot, "electron", "main.mjs"), "utf8");
 const preloadSource = fs.readFileSync(path.join(managerRoot, "electron", "preload.cjs"), "utf8");
 const styles = fs.readFileSync(path.join(managerRoot, "src", "styles.css"), "utf8");
@@ -49,8 +50,8 @@ const taskButtonIndex = mainSource.indexOf('className="button secondary profile-
 const normalButtonsIndex = mainSource.indexOf('className="profile-action-buttons"', taskButtonIndex);
 assert.ok(taskButtonIndex >= 0 && normalButtonsIndex > taskButtonIndex, "Task button must be above Chat / Mở Chrome buttons");
 assert.match(mainSource, /<ProfileTaskModal[\s\S]*resumeBusyTaskId=\{resumeBusyTaskId\}/, "profile task popup must be rendered from App");
-assert.match(mainSource, /profileTaskCanResume\(job, workerIdle\)/, "popup must gate resume by worker idle state");
-assert.match(mainSource, /profile-task-modal-backdrop[\s\S]*?tabIndex=\{-1\}[\s\S]*?autoFocus[\s\S]*?event\.key === "Escape"[\s\S]*?onClose\(\)/, "profile task popup must close when Escape is pressed");
+assert.match(modalSource, /profileTaskCanResume\(job, workerIdle\)/, "popup must gate resume by worker idle state");
+assert.match(modalSource, /profile-task-modal-backdrop[\s\S]*?tabIndex=\{-1\}[\s\S]*?autoFocus[\s\S]*?event\.key === "Escape"[\s\S]*?onClose\(\)/, "profile task popup must close when Escape is pressed");
 assert.match(mainSource, /api\.resumeProfileTask\(\{ profileId: profile\.profile_id, taskId \}\)/, "popup must call the dedicated resume IPC");
 assert.match(preloadSource, /resumeProfileTask: \(payload\) => invokeResult\("codexpro:resume-profile-task", payload\)/, "preload must expose resumeProfileTask");
 assert.match(electronSource, /WORKER_NOT_IDLE: Chỉ có thể tiếp tục task khi worker đang ở trạng thái ĐANG RẢNH/, "backend must re-check worker idle state");
