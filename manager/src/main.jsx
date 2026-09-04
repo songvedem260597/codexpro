@@ -21,6 +21,7 @@ import { SettingsDropdown, SettingsToggle } from "./components/settings-controls
 import { ChatGalaxyButtonContent, Dot, WorkerIcon, WorkingBadge } from "./components/worker-ui.jsx";
 import { ApiWorkerCards } from "./features/api-workers/api-worker-cards.jsx";
 import { ApiWorkerJobModal } from "./features/api-workers/api-worker-job-modal.jsx";
+import { AttachmentPreviewModal } from "./features/chat/attachment-preview-modal.jsx";
 import { ChatDropdown, NEW_CHAT_TARGET } from "./features/chat/chat-dropdown.jsx";
 import { ChatRequestComposer } from "./features/chat/chat-request-composer.jsx";
 import { ProfileTaskModal } from "./features/tasks/profile-task-modal.jsx";
@@ -43,7 +44,6 @@ import { WorkerRunningDuration } from "./worker-running-duration.jsx";
 import { playTaskCompletionSound } from "./task-completion-sound.js";
 import { pruneTimestampMap, trimMapEntries, trimSetEntries } from "./performance-retention.js";
 import { synchronizeWorkerBorderAnimations } from "./worker-border-sync.js";
-import { formatFileSize } from "./file-size.js";
 
 const loadResponseMarkdownModule = () => import("./response-markdown.jsx");
 const ResponseText = React.lazy(() => loadResponseMarkdownModule().then((module) => ({ default: module.ResponseText })));
@@ -5031,30 +5031,7 @@ function App() {
         />
       )}
 
-      {attachmentPreview && (
-        <div className="modal-backdrop attachment-lightbox-backdrop" tabIndex={-1} autoFocus onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setAttachmentPreview(null); } }} onMouseDown={(event) => event.target === event.currentTarget && setAttachmentPreview(null)}>
-          <div className="attachment-lightbox" role="dialog" aria-modal="true" aria-label={`Xem trước ${attachmentPreview.name || "file"}`}>
-            <div className="attachment-lightbox-head">
-              <div>
-                <strong title={attachmentPreview.name || ""}>{attachmentPreview.name || "File đính kèm"}</strong>
-                <span>{[attachmentPreview.mimeType, formatFileSize(Number(attachmentPreview.size) || 0)].filter(Boolean).join(" · ")}{attachmentPreview.truncated ? " · chỉ hiển thị phần đầu" : ""}</span>
-              </div>
-              <button type="button" aria-label="Đóng xem trước" onClick={() => setAttachmentPreview(null)}>×</button>
-            </div>
-            <div className={`attachment-lightbox-body is-${attachmentPreview.loading ? "loading" : attachmentPreview.kind || "unsupported"}`}>
-              {attachmentPreview.loading ? (
-                <div className="attachment-preview-state"><span className="typing-dots"><i /><i /><i /></span><span>Đang mở file…</span></div>
-              ) : attachmentPreview.kind === "image" ? (
-                <img src={attachmentPreview.dataUrl} alt={attachmentPreview.name || "Ảnh đính kèm"} />
-              ) : attachmentPreview.kind === "text" ? (
-                <pre>{attachmentPreview.text || "(File không có nội dung văn bản.)"}</pre>
-              ) : (
-                <div className="attachment-preview-state is-error"><strong>Không thể xem trước file này</strong><span>{attachmentPreview.error || "CodexPro hiện hỗ trợ lightbox cho ảnh và file văn bản."}</span></div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      <AttachmentPreviewModal preview={attachmentPreview} onClose={() => setAttachmentPreview(null)} />
 
       {workerUpdateConfirmOpen && (
         <div className="modal-backdrop worker-update-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setWorkerUpdateConfirmOpen(false)}>
