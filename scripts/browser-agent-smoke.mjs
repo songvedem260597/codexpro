@@ -802,6 +802,7 @@ assert.match(worker, /messageDeliveryTimedOut\?'message_delivery_timeout'/, "del
 assert.doesNotMatch(worker, /text:'tiếp tục'/, "recovery must merge later UI/canonical content rather than sending a synthetic continuation message");
 assert.doesNotMatch(worker, /claimTimedOutContinuation/, "timeout recovery must not retain the obsolete automatic continuation path");
 assert.match(bridge, /message_delivery_timed_out:\s*tab\.message_delivery_timed_out\s*===\s*true/, "the extension bridge must preserve delivery-timeout diagnostics");
+assert.match(bridge, /conversation_limit_reached:\s*tab\.conversation_limit_reached\s*===\s*true[\s\S]*?conversation_limit_message:\s*String\(tab\.conversation_limit_message/, "the extension bridge must preserve terminal conversation-length evidence for Manager rollover");
 assert.match(worker, /args\.read_dom===false&&args\.canonical_only!==true[\s\S]*?args\.canonical_only===true[\s\S]*?canonical_available:true/, "worker must expose authenticated canonical response reads without querying transcript DOM");
 assert.match(managerMain, /read_dom: payload\?\.canonicalOnly === true \|\| payload\?\.readDom !== false,[\s\S]*?canonical_only: payload\?\.canonicalOnly === true/, "Manager canonical recovery must remain compatible with a server process that has not restarted yet");
 assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?network_last_completed_at/, "Chat reopening must compare the persisted response against the latest network completion before re-reading transcript content");
