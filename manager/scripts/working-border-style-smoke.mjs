@@ -12,6 +12,9 @@ assert.match(managerMain, /workingBorderStyle:\s*"shine"/, "the existing rotatin
 assert.match(managerMain, /MANAGER_WORKING_BORDER_STYLES\s*=\s*new Set\(\["shine",\s*"beam",\s*"mint"\]\)/, "Manager settings must accept shine, beam, and the added mint border");
 assert.match(managerMain, /parsed\?\.workingBorderStyle[\s\S]*?defaults\.workingBorderStyle/, "stored border style must be normalized safely");
 assert.match(managerMain, /patch,\s*"workingBorderStyle"[\s\S]*?next\.workingBorderStyle/, "the selected border style must persist");
+assert.match(renderer, /import \{ SettingsView \} from "\.\/features\/settings\/settings-view\.jsx";/, "Manager must keep Settings UI behind the extracted SettingsView seam");
+assert.match(renderer, /<SettingsView[\s\S]*?active=\{activePage === "settings"\}/, "App must mount the extracted SettingsView only for the Settings page");
+assert.doesNotMatch(renderer, /<div className="settings-view" hidden=\{activePage !== "settings"\}/, "the large Settings JSX must not drift back into main.jsx");
 
 assert.ok((`${renderer}\n${settingsView}`.match(/working-border-\$\{managerSettings\.workingBorderStyle\}/g) || []).length >= 2, "worker list and preview must expose all normalized border styles without collapsing them into the old modes");
 assert.match(settingsView, /value:\s*"shine"[\s\S]*?Ánh sáng xoay[\s\S]*?value:\s*"mint"[\s\S]*?Glow mint xanh[\s\S]*?value:\s*"beam"[\s\S]*?Tia chạy quanh viền/, "settings must keep both existing styles and add the mint border as a third option");
