@@ -3467,6 +3467,45 @@ async function openProfileChat(payload) {
   if (conversationId && !/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) throw new Error("Đoạn chat đích không hợp lệ.");
   if (targetId && !/^\d+$/.test(targetId)) throw new Error("Tab Chrome đích không hợp lệ.");
 
+  const cachedActiveTabFocusEligible = Boolean(
+    selectionReason === "focus_only_active_tab"
+    && targetId
+    && activeTargetId === targetId
+    && title
+    && (!activeConversationId || !conversationId || activeConversationId === conversationId)
+    && (!activeConversationId || !targetConversationId || activeConversationId === targetConversationId)
+  );
+  if (cachedActiveTabFocusEligible) {
+    const windowFocus = await timedOpenPhase("cached_active_window_focus_ms", () => focusChromeWindow(title));
+    if (windowFocus?.ok) {
+      return {
+        ok: true,
+        profile_id: profileId,
+        conversation_id: conversationId || targetConversationId,
+        target_id: Number(targetId),
+        target_conversation_id: targetConversationId,
+        target_title: title,
+        selection_reason: selectionReason,
+        active_target_id: activeTargetId,
+        active_conversation_id: activeConversationId,
+        tab_created: false,
+        stale_target_recovered: false,
+        stale_recovery_reason: "",
+        created_tab: null,
+        navigation: null,
+        activation: { ok: true, target_id: Number(targetId), window_focused: true, native_focus_only: true },
+        activation_acknowledgement_delayed: false,
+        window_focus: windowFocus,
+        runtime_connection_source: "native-active-tab",
+        open_phase_timings: {
+          ...openPhaseTimings,
+          mcp_session: {},
+          total_ms: Date.now() - openStartedAt
+        }
+      };
+    }
+  }
+
   let resolvedTargetId = targetId;
   let createdTab = null;
   let staleTargetRecovered = false;

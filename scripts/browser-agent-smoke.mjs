@@ -627,6 +627,7 @@ assert.doesNotMatch(extensionBatch, /await execute\(/, "extension batch must not
 assert.doesNotMatch(worker, /if\(action==='press'\)\{\s*const target=\{tabId:tab\.id\};await chrome\.debugger\.attach/, "press must not attach/detach a fresh debugger session per action");
 
 const openProfileChat = managerMain.slice(managerMain.indexOf("async function openProfileChat"), managerMain.indexOf("async function reloadChromeProfiles"));
+assert.match(openProfileChat, /const cachedActiveTabFocusEligible = Boolean\([\s\S]*?selectionReason === "focus_only_active_tab"[\s\S]*?activeTargetId === targetId[\s\S]*?cached_active_window_focus_ms[\s\S]*?runtime_connection_source: "native-active-tab"/, "Mở Chrome must native-focus a known active tab without waiting for a congested MCP session");
 assert.match(openProfileChat, /if \(!resolvedTargetId\)[\s\S]*?action: "open_tab"[\s\S]*?url: conversationId \? `https:\/\/chatgpt\.com\/c\/\$\{conversationId\}` : "https:\/\/chatgpt\.com\/"/, "Manager must create a ChatGPT tab in the selected online profile when none is open");
 assert.match(openProfileChat, /action: "activate_tab"[\s\S]*?}, 32000\)/, "Manager must wait longer than the 25-second extension bridge command timeout");
 assert.match(openProfileChat, /catch \(error\) \{[\s\S]*?else \{\s*activationError = error;\s*\}[\s\S]*?focusChromeWindow\(title/, "a delayed non-stale activate acknowledgement must still verify whether Chrome actually opened");
