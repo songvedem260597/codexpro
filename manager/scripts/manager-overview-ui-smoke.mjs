@@ -5,6 +5,7 @@ const main = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8"
 const overviewUi = fs.readFileSync(new URL("../src/components/manager-overview-ui.jsx", import.meta.url), "utf8");
 
 assert.match(main, /import \{ Icon, ProfileSummaryItem, StatusCard, TitleGalaxyAccent \} from "\.\/components\/manager-overview-ui\.jsx";/, "main.jsx must consume the extracted overview UI module");
+assert.match(overviewUi, /import \{ Dot \} from "\.\/worker-ui\.jsx";/, "overview status cards must keep using the shared worker status indicator module");
 for (const component of ["StatusCard", "Icon", "ProfileSummaryItem", "TitleGalaxyAccent"]) {
   assert.doesNotMatch(main, new RegExp(`function ${component}\\(`), `${component} implementation must stay out of main.jsx`);
   assert.match(overviewUi, new RegExp(`export function ${component}\\(`), `${component} must be exported from the overview UI module`);
