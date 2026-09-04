@@ -1398,8 +1398,33 @@ function cachedBrowserProfileForSend(profileId) {
 function startBrowserProfileEventStream(win) {
   browserProfileStreamControllers.get(win)?.abort();
   const controller = new AbortController();
+  const pendingStreamUpdates = new Map();
+  let streamFlushTimer = null;
+  const flushStreamUpdates = () => {
+    streamFlushTimer = null;
+    if (controller.signal.aborted || win.isDestroyed() || win.webContents.isDestroyed()) {
+      pendingStreamUpdates.clear();
+      return;
+    }
+    const updates = [...pendingStreamUpdates.values()];
+    pendingStreamUpdates.clear();
+    if (updates.length) win.webContents.send("codexpro:browser-stream", { type: "browser-stream", updates });
+  };
+  const queueStreamUpdates = (updates) => {
+    for (const update of Array.isArray(updates) ? updates : []) {
+      const key = `${String(update?.profile_id || "")}:${String(update?.tab_id || "")}`;
+      pendingStreamUpdates.set(key, update);
+    }
+    if (!streamFlushTimer && pendingStreamUpdates.size) streamFlushTimer = setTimeout(flushStreamUpdates, 50);
+  };
+  const stopStream = () => {
+    controller.abort();
+    if (streamFlushTimer) clearTimeout(streamFlushTimer);
+    streamFlushTimer = null;
+    pendingStreamUpdates.clear();
+  };
   browserProfileStreamControllers.set(win, controller);
-  win.once("closed", () => controller.abort());
+  win.once("closed", stopStream);
   void (async () => {
     while (!controller.signal.aborted && !win.isDestroyed()) {
       try {
@@ -1430,7 +1455,7 @@ function startBrowserProfileEventStream(win) {
             if (!data) continue;
             const payload = JSON.parse(data);
             if (payload?.type === "browser-stream" && Array.isArray(payload?.updates)) {
-              if (!win.isDestroyed()) win.webContents.send("codexpro:browser-stream", payload);
+              queueStreamUpdates(payload.updates);
               continue;
             }
             if (Array.isArray(payload?.profiles)) {

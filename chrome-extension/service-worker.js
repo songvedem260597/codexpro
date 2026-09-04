@@ -68,7 +68,10 @@ const chatDomActivityByTab = new Map();
 const chatTabHealthByTab = new Map();
 const realtimeNetworkStreamsByTab = new Map();
 const pendingRealtimeStreamTabs = new Set();
+const REALTIME_STREAM_PUSH_INTERVAL_MS = 80;
+const REALTIME_STREAM_PUSH_TIMEOUT_MS = 5_000;
 let realtimeStreamFlushTimer = null;
+let realtimeStreamPushInFlight = false;
 let lastChatTabCleanupAt = 0;
 let chatTabCreationTail = Promise.resolve();
 let chatNetworkStateLoaded = false;
@@ -762,24 +765,36 @@ async function realtimeStreamProfileId() {
   return profileId;
 }
 
-function scheduleRealtimeStreamPush(tabId) {
+function scheduleRealtimeStreamPush(tabId, delayMs=REALTIME_STREAM_PUSH_INTERVAL_MS) {
   if(Number.isInteger(tabId))pendingRealtimeStreamTabs.add(tabId);
-  if(realtimeStreamFlushTimer)return;
+  if(realtimeStreamFlushTimer||realtimeStreamPushInFlight)return;
   realtimeStreamFlushTimer=setTimeout(()=>{
     realtimeStreamFlushTimer=null;
+    if(realtimeStreamPushInFlight)return;
+    realtimeStreamPushInFlight=true;
     void (async()=>{
       const tabIds=[...pendingRealtimeStreamTabs];
       pendingRealtimeStreamTabs.clear();
-      if(!tabIds.length)return;
       try{
+        if(!tabIds.length)return;
         const profileId=await realtimeStreamProfileId();
         if(!profileId)return;
         const streams=tabIds.map(id=>realtimeNetworkStreamsByTab.get(id)).filter(Boolean);
         if(!streams.length)return;
-        await fetch(`${BRIDGE}/stream`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile_id:profileId,streams})});
+        const requestController=new AbortController();
+        const requestTimeout=setTimeout(()=>requestController.abort(),REALTIME_STREAM_PUSH_TIMEOUT_MS);
+        try{
+          await fetch(`${BRIDGE}/stream`,{method:'POST',headers:HEADERS,body:JSON.stringify({profile_id:profileId,streams}),signal:requestController.signal});
+        }finally{
+          clearTimeout(requestTimeout);
+        }
       }catch{}
+      finally{
+        realtimeStreamPushInFlight=false;
+        if(pendingRealtimeStreamTabs.size)scheduleRealtimeStreamPush(undefined,0);
+      }
     })();
-  },40);
+  },Math.max(0,Number(delayMs)||0));
 }
 
 function applyRealtimeNetworkStreamEvent(tabId,event,tab={}) {

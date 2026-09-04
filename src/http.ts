@@ -22,7 +22,7 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
-import { ensureBrowserExtensionBridge, getBrowserExtensionProfilePendingTask, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles, subscribeBrowserExtensionStreams } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionProfilePendingTask, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles, subscribeBrowserExtensionStreams, type BrowserExtensionStreamUpdate } from "./browserExtensionBridge.js";
 
 const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
 const RUNTIME_STARTED_AT = new Date().toISOString();
@@ -1714,6 +1714,31 @@ async function main(): Promise<void> {
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
     res.flushHeaders?.();
+    const pendingStreamUpdates = new Map<string, BrowserExtensionStreamUpdate>();
+    let streamFlushTimer: NodeJS.Timeout | undefined;
+    let streamBackpressured = false;
+    let streamClosed = false;
+    const flushStreamUpdates = () => {
+      streamFlushTimer = undefined;
+      if (streamClosed || res.writableEnded || streamBackpressured || !pendingStreamUpdates.size) return;
+      const updates = [...pendingStreamUpdates.values()];
+      pendingStreamUpdates.clear();
+      streamBackpressured = !res.write(`event: browser-stream\ndata: ${JSON.stringify({ type: "browser-stream", updates })}\n\n`);
+    };
+    const onStreamDrain = () => {
+      streamBackpressured = false;
+      flushStreamUpdates();
+    };
+    res.on("drain", onStreamDrain);
+    const queueStreamUpdates = (updates: BrowserExtensionStreamUpdate[]) => {
+      for (const update of updates) {
+        const key = `${String(update?.profile_id || "")}:${String(update?.tab_id || "")}`;
+        pendingStreamUpdates.set(key, update);
+      }
+      if (streamBackpressured || streamFlushTimer || !pendingStreamUpdates.size) return;
+      streamFlushTimer = setTimeout(flushStreamUpdates, 50);
+      streamFlushTimer.unref?.();
+    };
     const send = (profiles = listBrowserExtensionProfiles()) => {
       if (res.writableEnded) return;
       const disabled_profile_ids = listDisabledBrowserExtensionProfileIds();
@@ -1723,13 +1748,18 @@ async function main(): Promise<void> {
     const unsubscribe = subscribeBrowserExtensionProfiles(send);
     const unsubscribeStreams = subscribeBrowserExtensionStreams((updates) => {
       if (res.writableEnded || !updates.length) return;
-      res.write(`event: browser-stream\ndata: ${JSON.stringify({ type: "browser-stream", updates })}\n\n`);
+      queueStreamUpdates(updates);
     });
     const heartbeat = setInterval(() => {
       if (!res.writableEnded) res.write(`: heartbeat ${Date.now()}\n\n`);
     }, 15_000);
     heartbeat.unref();
     req.on("close", () => {
+      streamClosed = true;
+      if (streamFlushTimer) clearTimeout(streamFlushTimer);
+      streamFlushTimer = undefined;
+      pendingStreamUpdates.clear();
+      res.off("drain", onStreamDrain);
       clearInterval(heartbeat);
       unsubscribe();
       unsubscribeStreams();

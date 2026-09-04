@@ -702,6 +702,8 @@ function App() {
   const responseCacheSaveSignatures = useRef(new Map());
   const networkStreamReads = useRef(new Map());
   const networkStreamPushTimes = useRef(new Map());
+  const pendingBrowserStreamUpdates = useRef(new Map());
+  const browserStreamFrame = useRef(0);
   const networkCompletionReads = useRef(new Map());
   const connectionRecoveryReads = useRef(new Map());
   const repoTaskVerificationReads = useRef(new Map());
@@ -1839,27 +1841,36 @@ function App() {
         const profileId = String(update?.profile_id || "");
         const conversationId = String(update?.conversation_id || "");
         if (!profileId || !conversationId) continue;
-        const selectedTarget = String(requestTargetsRef.current[profileId] || "");
-        if (selectedTarget && selectedTarget !== conversationId) continue;
-        const streamKey = `${profileId}:${conversationId}`;
-        networkStreamPushTimes.current.set(streamKey, Date.now());
+        pendingBrowserStreamUpdates.current.set(`${profileId}:${conversationId}`, update);
+      }
+      if (browserStreamFrame.current || !pendingBrowserStreamUpdates.current.size) return;
+      browserStreamFrame.current = window.requestAnimationFrame(() => {
+        browserStreamFrame.current = 0;
+        const updates = [...pendingBrowserStreamUpdates.current.values()];
+        pendingBrowserStreamUpdates.current.clear();
         setRequestResponses((current) => {
-          const previous = current[profileId] || {};
-          if (previous.conversationId && previous.conversationId !== conversationId) return current;
-          const recordId = Math.max(0, Number(update?.record_id) || 0);
-          const revision = Math.max(0, Number(update?.revision) || 0);
-          const previousRecordId = Math.max(0, Number(previous.networkStreamPushRecordId) || 0);
-          const previousRevision = Math.max(0, Number(previous.networkStreamPushRevision) || 0);
-          if (previousRecordId === recordId && revision <= previousRevision) return current;
-          const streamUpdatedAt = String(update?.updated_at || "");
-          if (!isNetworkStreamCurrentGeneration({ networkStartedAt: previous.networkStartedAt, streamUpdatedAt })) return current;
-          const streamText = String(update?.text || "");
-          const messages = streamText
-            ? mergeNetworkStreamTranscript(previous.messages || [], { conversationId, text: streamText, truncated: false })
-            : previous.messages || [];
-          return {
-            ...current,
-            [profileId]: {
+          let next = current;
+          for (const update of updates) {
+            const profileId = String(update?.profile_id || "");
+            const conversationId = String(update?.conversation_id || "");
+            const selectedTarget = String(requestTargetsRef.current[profileId] || "");
+            if (!profileId || !conversationId || (selectedTarget && selectedTarget !== conversationId)) continue;
+            const previous = next[profileId] || {};
+            if (previous.conversationId && previous.conversationId !== conversationId) continue;
+            const recordId = Math.max(0, Number(update?.record_id) || 0);
+            const revision = Math.max(0, Number(update?.revision) || 0);
+            const previousRecordId = Math.max(0, Number(previous.networkStreamPushRecordId) || 0);
+            const previousRevision = Math.max(0, Number(previous.networkStreamPushRevision) || 0);
+            if (previousRecordId === recordId && revision <= previousRevision) continue;
+            const streamUpdatedAt = String(update?.updated_at || "");
+            if (!isNetworkStreamCurrentGeneration({ networkStartedAt: previous.networkStartedAt, streamUpdatedAt })) continue;
+            const streamText = String(update?.text || "");
+            const messages = streamText
+              ? mergeNetworkStreamTranscript(previous.messages || [], { conversationId, text: streamText, truncated: false })
+              : previous.messages || [];
+            networkStreamPushTimes.current.set(`${profileId}:${conversationId}`, Date.now());
+            if (next === current) next = { ...current };
+            next[profileId] = {
               ...previous,
               visible: true,
               conversationId,
@@ -1879,10 +1890,11 @@ function App() {
               incompleteReason: update?.in_progress === true ? "network_stream_in_progress" : "",
               contentNeedsRefresh: false,
               updatedAt: streamUpdatedAt || previous.updatedAt
-            }
-          };
+            };
+          }
+          return next;
         });
-      }
+      });
     });
     const unsubscribeWorkers = api.onWorkerUpdate?.((payload) => {
       const workerId = String(payload?.worker_id || "");
@@ -1902,6 +1914,9 @@ function App() {
       unsubscribe?.();
       unsubscribeBrowserStream?.();
       unsubscribeWorkers?.();
+      if (browserStreamFrame.current) window.cancelAnimationFrame(browserStreamFrame.current);
+      browserStreamFrame.current = 0;
+      pendingBrowserStreamUpdates.current.clear();
       window.clearInterval(statusTimer);
       window.clearInterval(projectsTimer);
       if (emptyBrowserSnapshotTimer.current) window.clearTimeout(emptyBrowserSnapshotTimer.current);
