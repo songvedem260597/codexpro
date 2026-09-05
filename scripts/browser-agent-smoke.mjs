@@ -349,7 +349,7 @@ const completedStreamAudit = buildChatResponseAuditRecord({
 });
 assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
 assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
-const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, browserControlWorker, server, httpSource, bridge, profileState, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
+const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, browserControlWorker, server, workerJobToolsSource, httpSource, bridge, profileState, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "tab-policy.js"), "utf8"),
@@ -357,6 +357,7 @@ const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyW
   readFile(join(root, "chrome-extension", "service-worker", "response-policy.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "browser-control.js"), "utf8"),
   readFile(join(root, "src", "server.ts"), "utf8"),
+  readFile(join(root, "src", "workerJobTools.ts"), "utf8"),
   readFile(join(root, "src", "http.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionProfileState.ts"), "utf8"),
@@ -487,6 +488,11 @@ assert.match(server, /proof\.taskKind === "general"[\s\S]*?global_rules_loaded: 
 assert.match(server, /task_title_source: "ai"/, "repo task results must identify the AI task-title source");
 assert.match(server, /title: "Register Profile Task"[\s\S]*?Registering the CodexPro task[\s\S]*?CodexPro task registered/, "the universal task-title call must not be mislabeled as a repo lock");
 assert.match(server, /task_id:[\s\S]*?optional\(\)[\s\S]*?task_title:[\s\S]*?task_kind:[\s\S]*?root:[\s\S]*?optional\(\)/, "direct profile ChatGPT tasks must begin with an AI title, task kind, and a server-generated id");
+assert.match(server, /createWorkerJobToolDefinitions[\s\S]*?registerCodexTool\(config, server, tool\.name, tool\.options, tool\.handler\)/, "worker lifecycle tools must stay behind the extracted workerJobTools registrar");
+assert.doesNotMatch(server, /server,\s*"worker_job_status"/, "worker job tool definitions must not drift back into createCodexProServer");
+for (const workerToolName of ["worker_job_status", "worker_job_history", "worker_context_history", "report_worker_job_progress", "finalize_worker_job"]) {
+  assert.match(workerJobToolsSource, new RegExp(`name: \\"${workerToolName}\\"`), `${workerToolName} must be owned by workerJobTools`);
+}
 assert.match(bridge, /browser-profile-tasks\.json/, "profile task titles must survive a runtime restart");
 assert.match(bridge, /function inferProfileTaskConversationId\(profileId: string\)[\s\S]*?codexActivity[\s\S]*?network_stream_in_progress[\s\S]*?startedAt/, "begin_repo_task must bind the AI task to the most relevant working ChatGPT conversation");
 assert.match(bridge, /task_conversation_id: entry\.taskConversationId[\s\S]*?current_task_conversation_id: profileTaskConversationIds\.get\(profile\.id\)/, "task conversation bindings must persist and be exposed to Manager after restart");
