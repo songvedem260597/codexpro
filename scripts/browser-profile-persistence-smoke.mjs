@@ -17,7 +17,6 @@ const childPath = path.join(home, 'bridge-child.mjs');
 const bridgeUrl = pathToFileURL(path.resolve('dist/browserExtensionBridge.js')).href;
 writeFileSync(childPath, `
 import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds, setBrowserExtensionProfileTask } from ${JSON.stringify(bridgeUrl)};
-import { runBrowserExtensionCommand } from ${JSON.stringify(bridgeUrl)};
 const mode = process.argv[2];
 const port = Number(process.env.CODEXPRO_BROWSER_EXTENSION_BRIDGE_PORT);
 ensureBrowserExtensionBridge();
@@ -56,6 +55,10 @@ if (mode === 'register' || mode === 'disable') {
 } else if (mode === 'bind-task') {
   setBrowserExtensionProfileTask('persist-smoke-profile', 'cpt_999999999999999999999999', 'Persist active profile task');
   console.log(JSON.stringify({ bound: true }));
+} else if (mode === 'list') {
+  console.log(JSON.stringify({ profiles: listBrowserExtensionProfiles(), disabled_profile_ids: listDisabledBrowserExtensionProfileIds() }));
+} else if (mode === 'forget') {
+  console.log(JSON.stringify({ forgotten: forgetBrowserExtensionProfile('persist-smoke-profile') }));
 } else if (mode === 'untrusted-register') {
   const response = await fetch('http://127.0.0.1:' + port + '/register', {
     method: 'POST',
@@ -68,6 +71,7 @@ if (mode === 'register' || mode === 'disable') {
   });
   console.log(JSON.stringify({ status: response.status, body: await response.text() }));
 } else if (mode === 'disable-security') {
+  const { runBrowserExtensionCommand } = await import(${JSON.stringify(bridgeUrl)});
   const headers = {
     'content-type': 'application/json',
     'origin': 'chrome-extension://gndipignbnipohooclcbhjliikamjlpl',
@@ -102,10 +106,6 @@ if (mode === 'register' || mode === 'disable') {
     new Promise((resolve) => setTimeout(() => resolve('pending'), 150))
   ]);
   console.log(JSON.stringify({ register_status: register.status, activate_status: activate.status, command_outcome: commandOutcome }));
-} else if (mode === 'list') {
-  console.log(JSON.stringify({ profiles: listBrowserExtensionProfiles(), disabled_profile_ids: listDisabledBrowserExtensionProfileIds() }));
-} else if (mode === 'forget') {
-  console.log(JSON.stringify({ forgotten: forgetBrowserExtensionProfile('persist-smoke-profile') }));
 } else {
   throw new Error('unknown mode');
 }
@@ -200,6 +200,7 @@ try {
   const forgottenSnapshot = JSON.parse(run('list', seed + 8));
   assert.deepEqual(forgottenSnapshot.profiles, [], 'a forgotten profile must stay absent after bridge restart');
   assert.deepEqual(forgottenSnapshot.disabled_profile_ids, [], 'forgetting must remove stale disabled metadata too');
+  console.log('✓ Browser profile registry survives runtime restart and reconnect state is safe');
 
   run('register', seed + 9);
   const untrusted = JSON.parse(run('untrusted-register', seed + 10));
@@ -209,8 +210,6 @@ try {
   assert.equal(disabledSecurity.activate_status, 409, 'a disabled profile must not become ACTIVE again');
   assert.match(disabledSecurity.command_outcome, /^rejected:/, 'commands targeting a disabled profile must fail immediately instead of timing out');
   assert.match(disabledSecurity.command_outcome, /disabled|đã tắt|bị tắt/i);
-
-  console.log('✓ Browser profile registry survives runtime restart and reconnect state is safe');
 } finally {
   rmSync(home, { recursive: true, force: true });
 }
