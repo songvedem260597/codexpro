@@ -378,7 +378,7 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (!preparedA.structuredContent.prepared) throw new Error('manager could not prepare repo task A');
     await expectToolErrorCode(gatedSibling, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
     for (const action of actionNames) {
-      if (['begin_repo_task', 'repo_task_status', 'workspace_coordination_status', 'worker_job_status', 'worker_job_history', 'worker_context_history', 'report_worker_job_progress', 'finalize_worker_job'].includes(action)) continue;
+      if (['begin_repo_task', 'resume_repo_task', 'repo_task_status', 'workspace_coordination_status', 'worker_job_status', 'worker_job_history', 'worker_context_history', 'report_worker_job_progress', 'finalize_worker_job'].includes(action)) continue;
       await expectToolErrorCode(gated, 'codexpro', { action, args: {} }, 'BEGIN_REPO_TASK_REQUIRED');
     }
     await expectToolErrorCode(gated, 'edit', { path: 'gate.txt', old_text: 'gate initial', new_text: 'gate changed' }, 'BEGIN_REPO_TASK_REQUIRED');
@@ -1489,7 +1489,7 @@ try {
   for (const expected of ['read', 'tree', 'search', 'load_skill']) {
     if (!names.includes(expected)) throw new Error(`connection-test missing ${expected}; got ${names.join(', ')}`);
   }
-  for (const hidden of ['codexpro', 'codexpro_self_test', 'write', 'edit', 'apply_patch', 'bash', 'export_pro_context', 'handoff_to_agent', 'handoff_to_codex']) {
+  for (const hidden of ['codexpro', 'codexpro_self_test', 'resume_repo_task', 'write', 'edit', 'apply_patch', 'bash', 'export_pro_context', 'handoff_to_agent', 'handoff_to_codex']) {
     if (names.includes(hidden)) throw new Error(`connection-test exposed ${hidden}; got ${names.join(', ')}`);
   }
   for (const tool of tools) {

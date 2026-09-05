@@ -22,12 +22,12 @@ import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges }
 import { projectCompactGraph } from "./analysis/projection.js";
 import { createRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import { runBrowserControl } from "./browserOps.js";
-import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileTaskBinding, getBrowserExtensionProfileWorkspaceBinding, listBrowserExtensionProfiles, rebindBrowserExtensionProfileTaskConversation, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
+import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileTaskBinding, getBrowserExtensionProfileWorkspaceBinding, getBrowserExtensionTaskOwners, listBrowserExtensionProfiles, rebindBrowserExtensionProfileTaskConversation, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
-import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
+import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, resumeWorkerJob, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
 import { classifiedWorkerJobPublicRecord, createWorkerJobToolDefinitions } from "./workerJobTools.js";
-import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, type WorkspaceTaskContext } from "./workspaceCoordination.js";
+import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, verifyWorkspaceTaskResume, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const CODEXPRO_GLOBAL_RULES_FILE = "CODEXPRO.md";
@@ -337,6 +337,22 @@ type ActiveRepoTask = {
 const activeRepoTaskByServer = new WeakMap<object, ActiveRepoTask>();
 const activeRepoTaskByProfile = new Map<string, ActiveRepoTask>();
 const repoTaskWorkspaceSelectorByServer = new WeakMap<object, (root: string) => Workspace>();
+const repoTaskRuntimeResumeKey = `runtime-${process.pid}-${randomBytes(8).toString("hex")}`;
+const repoTaskResumeTails = new Map<string, Promise<{
+  taskId: string;
+  profileId: string;
+  root: string;
+  workspaceId: string;
+  scope: "workspace" | "all_allowed";
+  taskTitle: string;
+  globalRulesSha256: string;
+  worktreeRoot: string;
+  worktreeBranch?: string;
+  workerJob: WorkerJobRecord;
+  deduplicated: boolean;
+  rulesChanged: boolean;
+  ownerBindingRecovered: boolean;
+}>>();
 type ExpectedRepoTask = {
   taskId: string;
   root?: string;
@@ -399,6 +415,7 @@ function sameRepoTask(left: ActiveRepoTask | undefined, right: ExpectedRepoTask 
 const REPO_TASK_GATE_EXEMPT_TOOLS = new Set<string>([
   SUPERTOOL_NAME,
   "begin_repo_task",
+  "resume_repo_task",
   "repo_task_status",
   "workspace_coordination_status",
   "worker_job_status",
@@ -471,18 +488,26 @@ function assertTaskChecklistReady(server: McpServer): void {
 }
 
 function repoTaskWorktree(active: ActiveRepoTask): { root?: string; branch?: string } {
-  if (active.worktreeRoot && fs.existsSync(active.worktreeRoot)) {
+  if (active.worktreeRoot) {
+    if (!fs.existsSync(active.worktreeRoot)) {
+      throw new CodexProError(`WORKSPACE_TASK_WORKTREE_MISSING: recorded worktree no longer exists: ${active.worktreeRoot}.`, {
+        code: "WORKSPACE_TASK_WORKTREE_MISSING",
+        details: { task_id: active.taskId, worktree_root: active.worktreeRoot, workspace_root: active.root }
+      });
+    }
     return { root: active.worktreeRoot, branch: active.worktreeBranch };
   }
-  try {
-    const record = readWorkspaceCoordination(active.root).tasks[active.taskId];
-    if (record?.worktreeRoot && fs.existsSync(record.worktreeRoot)) {
-      active.worktreeRoot = record.worktreeRoot;
-      active.worktreeBranch = record.worktreeBranch;
-      return { root: record.worktreeRoot, branch: record.worktreeBranch };
+  const record = readWorkspaceCoordination(active.root).tasks[active.taskId];
+  if (record?.worktreeRoot) {
+    if (!fs.existsSync(record.worktreeRoot)) {
+      throw new CodexProError(`WORKSPACE_TASK_WORKTREE_MISSING: recorded worktree no longer exists: ${record.worktreeRoot}.`, {
+        code: "WORKSPACE_TASK_WORKTREE_MISSING",
+        details: { task_id: active.taskId, worktree_root: record.worktreeRoot, workspace_root: active.root }
+      });
     }
-  } catch {
-    // Coordination state is best-effort here; normal workspace access remains available as a fallback.
+    active.worktreeRoot = record.worktreeRoot;
+    active.worktreeBranch = record.worktreeBranch;
+    return { root: record.worktreeRoot, branch: record.worktreeBranch };
   }
   return {};
 }
@@ -652,6 +677,7 @@ const MINIMAL_TOOL_NAMES = [
   "codexpro_self_test",
   "prepare_repo_task",
   "begin_repo_task",
+  "resume_repo_task",
   "repo_task_status",
   "workspace_coordination_status",
   "worker_job_status",
@@ -690,6 +716,7 @@ const FULL_TOOL_NAMES = [
   "codexpro_self_test",
   "prepare_repo_task",
   "begin_repo_task",
+  "resume_repo_task",
   "repo_task_status",
   "workspace_coordination_status",
   "worker_job_status",
@@ -729,6 +756,7 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   SUPERTOOL_NAME,
   "codexpro_self_test",
   "prepare_repo_task",
+  "resume_repo_task",
   "report_worker_job_progress",
   "finalize_worker_job",
   "write",
@@ -2339,6 +2367,294 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         codexgraph: codexGraph,
         policy_version: durableJob.policyVersion,
         worker_job: classifiedWorkerJobPublicRecord(durableJob)
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "resume_repo_task",
+    {
+      title: "Resume Repo Task",
+      description: "Restore the in-memory gate for the exact already-running CodexPro task after an MCP/runtime restart without preparing a new task, opening a chat, or replaying prior actions.",
+      inputSchema: {
+        task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/),
+        profile_id: z.string().regex(WORKER_PROFILE_ID_PATTERN).optional()
+      },
+      annotations: { ...HANDOFF_WRITE_ANNOTATIONS, idempotentHint: true }
+    },
+    async (args) => {
+      const taskId = String(args.task_id || "").trim();
+      const sessionProfileId = repoTaskGateProfileByServer.get(server as object) || "";
+      const requestedProfileId = String(args.profile_id || "").trim();
+      if (sessionProfileId && requestedProfileId && sessionProfileId !== requestedProfileId) {
+        throw new CodexProError("REPO_TASK_RESUME_PROFILE_MISMATCH: bound MCP profile does not match the requested task owner.", {
+          code: "REPO_TASK_RESUME_PROFILE_MISMATCH",
+          details: { task_id: taskId, session_profile_id: sessionProfileId, requested_profile_id: requestedProfileId }
+        });
+      }
+      const profileId = sessionProfileId || requestedProfileId;
+      if (!profileId) {
+        throw new CodexProError("REPO_TASK_RESUME_PROFILE_REQUIRED: profile_id is required when the MCP session is not profile-bound.", {
+          code: "REPO_TASK_RESUME_PROFILE_REQUIRED",
+          details: { task_id: taskId }
+        });
+      }
+
+      const durableBefore = readWorkerJob(taskId);
+      if (!durableBefore || durableBefore.status !== "running" || durableBefore.kind !== "code") {
+        throw new CodexProError(`REPO_TASK_RESUME_NOT_RUNNING: ${taskId} is not an active running code task.`, {
+          code: "REPO_TASK_RESUME_NOT_RUNNING",
+          details: { task_id: taskId, status: durableBefore?.status || "missing", kind: durableBefore?.kind || null }
+        });
+      }
+      const normalizeWorkerOwner = (value: string) => String(value || "").trim().replace(/^browser:/, "");
+      if (normalizeWorkerOwner(durableBefore.workerId) !== normalizeWorkerOwner(profileId)) {
+        throw new CodexProError("REPO_TASK_RESUME_OWNER_MISMATCH: durable worker ownership does not match this profile.", {
+          code: "REPO_TASK_RESUME_OWNER_MISMATCH",
+          details: { task_id: taskId, durable_worker_id: durableBefore.workerId, profile_id: profileId }
+        });
+      }
+      const persistedOwners = getBrowserExtensionTaskOwners(taskId);
+      if (persistedOwners.length > 1) {
+        throw new CodexProError("REPO_TASK_RESUME_OWNER_AMBIGUOUS: task is persisted against more than one browser profile.", {
+          code: "REPO_TASK_RESUME_OWNER_AMBIGUOUS",
+          details: { task_id: taskId, profile_ids: persistedOwners.map((item) => item.profile_id) }
+        });
+      }
+      if (persistedOwners[0] && persistedOwners[0].profile_id !== profileId) {
+        throw new CodexProError("REPO_TASK_RESUME_OWNER_MISMATCH: persisted browser ownership belongs to another profile.", {
+          code: "REPO_TASK_RESUME_OWNER_MISMATCH",
+          details: { task_id: taskId, persisted_profile_id: persistedOwners[0].profile_id, profile_id: profileId }
+        });
+      }
+      const profileBinding = getBrowserExtensionProfileTaskBinding(profileId);
+      if (profileBinding?.taskId && profileBinding.taskId !== taskId) {
+        throw new CodexProError("REPO_TASK_RESUME_PROFILE_BUSY: profile is already bound to a different task.", {
+          code: "REPO_TASK_RESUME_PROFILE_BUSY",
+          details: { task_id: taskId, profile_id: profileId, bound_task_id: profileBinding.taskId }
+        });
+      }
+      if (!sessionProfileId && !persistedOwners.length) {
+        const liveProfile = listBrowserExtensionProfiles().find((item) => item.profile_id === profileId && item.connected);
+        if (!liveProfile) {
+          throw new CodexProError("REPO_TASK_RESUME_OWNER_UNVERIFIED: Manager cannot restore a lost profile mapping without a live matching browser profile.", {
+            code: "REPO_TASK_RESUME_OWNER_UNVERIFIED",
+            details: { task_id: taskId, profile_id: profileId }
+          });
+        }
+      }
+
+      const durableScope = durableBefore.scope === "all_allowed" ? "all_allowed" : "workspace";
+      const existingActive = activeRepoTaskByProfile.get(profileId);
+      const existingExpected = expectedRepoTask(profileId);
+      const latestRules = readGlobalRulesSnapshotSync();
+      if (existingActive
+        && existingExpected
+        && existingActive.taskId === taskId
+        && existingExpected.taskId === taskId
+        && existingActive.scope === durableScope
+        && existingExpected.scope === durableScope
+        && sameResolvedRoot(existingActive.root, durableBefore.root)
+        && existingActive.globalRulesSha256 === latestRules.sha256) {
+        const worktree = repoTaskWorktree(existingActive);
+        activeRepoTaskByServer.set(server as object, existingActive);
+        return textResult(`# Repo Task Gate Ready\n\nTask: ${taskId}\nProfile: ${profileId}\n\nThe existing task gate is already valid; no task action was replayed.`, {
+          resumed: true,
+          gate_active: true,
+          gate_already_active: true,
+          task_id: taskId,
+          task_title: durableBefore.title,
+          task_kind: durableBefore.kind,
+          task_size: durableBefore.taskSize,
+          profile_id: profileId,
+          root: durableBefore.root,
+          workspace_id: durableBefore.workspaceId,
+          worktree_root: worktree.root,
+          worktree_branch: worktree.branch,
+          scope: durableScope,
+          started_at: durableBefore.startedAt,
+          progress_percent: durableBefore.progressPercent,
+          checklist: durableBefore.checklist,
+          completed_parts: durableBefore.completedParts,
+          remaining_parts: durableBefore.remainingParts,
+          progress_sequence: durableBefore.progressSequence,
+          rules_changed: false,
+          owner_binding_recovered: false,
+          resume_deduplicated: true,
+          replayed_actions: false,
+          opened_new_chat: false,
+          policy_version: durableBefore.policyVersion,
+          worker_job: classifiedWorkerJobPublicRecord(durableBefore)
+        });
+      }
+
+      const resumeTailKey = `${profileId}:${taskId}`;
+      let resumePromise = repoTaskResumeTails.get(resumeTailKey);
+      let joinedConcurrentResume = Boolean(resumePromise);
+      if (!resumePromise) {
+        resumePromise = (async () => {
+          const durableJob = readWorkerJob(taskId);
+          if (!durableJob || durableJob.status !== "running" || durableJob.kind !== "code") {
+            throw new CodexProError(`REPO_TASK_RESUME_NOT_RUNNING: ${taskId} stopped before recovery completed.`, {
+              code: "REPO_TASK_RESUME_NOT_RUNNING",
+              details: { task_id: taskId, status: durableJob?.status || "missing" }
+            });
+          }
+          const root = String(durableJob.root || "").trim();
+          if (!root) throw new CodexProError("REPO_TASK_RESUME_ROOT_MISSING: durable task no longer contains its repository root.", { code: "REPO_TASK_RESUME_ROOT_MISSING", details: { task_id: taskId } });
+          const scope = durableJob.scope === "all_allowed" ? "all_allowed" : "workspace";
+          const workspace = workspaces.openWorkspace(root);
+          if (durableJob.workspaceId && durableJob.workspaceId !== workspace.id) {
+            throw new CodexProError("REPO_TASK_RESUME_WORKSPACE_MISMATCH: repository identity changed since the task began.", {
+              code: "REPO_TASK_RESUME_WORKSPACE_MISMATCH",
+              details: { task_id: taskId, saved_workspace_id: durableJob.workspaceId, current_workspace_id: workspace.id, root: workspace.root }
+            });
+          }
+          const coordinationTask = await verifyWorkspaceTaskResume({
+            taskId,
+            workerId: profileId,
+            title: durableJob.title,
+            root: workspace.root
+          });
+          const globalRules = await readGlobalRulesSnapshot();
+          const codexGraph = await requireCodexGraphForWorkspace(config, guard, workspace);
+          const codexContext = await readCodexContext(config, guard, workspace, {
+            targetPath: ".",
+            includeAiBridge: false,
+            includeGit: false,
+            includeDiff: false
+          });
+          const agentsSha256 = createHash("sha256").update(codexContext.text).digest("hex");
+          const resumedJob = await resumeWorkerJob({
+            jobId: taskId,
+            workerId: profileId,
+            root: workspace.root,
+            workspaceId: workspace.id,
+            scope,
+            resumeKey: `${repoTaskRuntimeResumeKey}:${profileId}:${taskId}`,
+            rulesHash: globalRules.sha256,
+            rulesPath: globalRules.path,
+            agentsFiles: codexContext.agentsFiles,
+            agentsHash: agentsSha256,
+            codexGraphActive: true,
+            codexGraphSymbolCount: codexGraph.coverage.symbolCount,
+            codexGraphRelationshipCount: codexGraph.coverage.relationshipCount
+          });
+          const proof: RepoTaskProof = {
+            taskId,
+            taskTitle: durableJob.title,
+            taskKind: "code",
+            taskSize: durableJob.taskSize || "small",
+            taskSource: "manager",
+            root: workspace.root,
+            workspaceId: workspace.id,
+            startedAt: durableJob.startedAt || durableJob.preparedAt,
+            scope,
+            globalRulesPath: globalRules.path,
+            globalRulesSha256: globalRules.sha256,
+            globalRulesLoadedAt: new Date().toISOString(),
+            agentsFiles: codexContext.agentsFiles,
+            agentsSha256,
+            codexGraph
+          };
+          rememberRepoTaskProof(proof);
+          rememberExpectedRepoTask(profileId, { taskId, root: workspace.root, scope });
+          const activeTask: ActiveRepoTask = {
+            taskId,
+            taskTitle: durableJob.title,
+            root: workspace.root,
+            workspaceId: workspace.id,
+            scope,
+            globalRulesSha256: globalRules.sha256,
+            worktreeRoot: coordinationTask.worktreeRoot,
+            worktreeBranch: coordinationTask.worktreeBranch
+          };
+          activeRepoTaskByProfile.set(profileId, activeTask);
+          const ownerBindingRecovered = !profileBinding || persistedOwners.length === 0;
+          setBrowserExtensionProfileTask(profileId, taskId, durableJob.title);
+          if (!resumedJob.deduplicated) {
+            recordBrowserProfileTaskEvent("repo_task_resumed", {
+              profile_id: profileId,
+              task_id: taskId,
+              root: workspace.root,
+              workspace_id: workspace.id,
+              worktree_root: coordinationTask.worktreeRoot,
+              rules_changed: resumedJob.rulesChanged,
+              owner_binding_recovered: ownerBindingRecovered,
+              resume_key: repoTaskRuntimeResumeKey
+            });
+          }
+          return {
+            taskId,
+            profileId,
+            root: workspace.root,
+            workspaceId: workspace.id,
+            scope,
+            taskTitle: durableJob.title,
+            globalRulesSha256: globalRules.sha256,
+            worktreeRoot: String(coordinationTask.worktreeRoot || ""),
+            worktreeBranch: coordinationTask.worktreeBranch,
+            workerJob: resumedJob.record,
+            deduplicated: resumedJob.deduplicated,
+            rulesChanged: resumedJob.rulesChanged,
+            ownerBindingRecovered
+          };
+        })();
+        repoTaskResumeTails.set(resumeTailKey, resumePromise);
+        resumePromise.finally(() => {
+          if (repoTaskResumeTails.get(resumeTailKey) === resumePromise) repoTaskResumeTails.delete(resumeTailKey);
+        }).catch(() => undefined);
+      }
+
+      const recovered = await resumePromise;
+      const workspace = workspaces.openWorkspace(recovered.root);
+      if (workspace.id !== recovered.workspaceId) {
+        throw new CodexProError("REPO_TASK_RESUME_WORKSPACE_MISMATCH: MCP session reopened a different workspace identity.", {
+          code: "REPO_TASK_RESUME_WORKSPACE_MISMATCH",
+          details: { task_id: taskId, expected_workspace_id: recovered.workspaceId, current_workspace_id: workspace.id }
+        });
+      }
+      const activeTask: ActiveRepoTask = {
+        taskId: recovered.taskId,
+        taskTitle: recovered.taskTitle,
+        root: recovered.root,
+        workspaceId: recovered.workspaceId,
+        scope: recovered.scope,
+        globalRulesSha256: recovered.globalRulesSha256,
+        worktreeRoot: recovered.worktreeRoot,
+        worktreeBranch: recovered.worktreeBranch
+      };
+      activeRepoTaskByProfile.set(profileId, activeTask);
+      activeRepoTaskByServer.set(server as object, activeTask);
+      return textResult(`# Repo Task Resumed\n\nTask: ${taskId}\nProfile: ${profileId}\nWorktree: ${recovered.worktreeRoot}\n\nThe existing task gate was restored without replaying prior task actions.`, {
+        resumed: true,
+        gate_active: true,
+        task_id: taskId,
+        task_title: recovered.taskTitle,
+        task_kind: "code",
+        task_size: recovered.workerJob.taskSize,
+        profile_id: profileId,
+        session_profile_id: sessionProfileId,
+        root: recovered.root,
+        workspace_id: recovered.workspaceId,
+        worktree_root: recovered.worktreeRoot,
+        worktree_branch: recovered.worktreeBranch,
+        scope: recovered.scope,
+        started_at: recovered.workerJob.startedAt,
+        progress_percent: recovered.workerJob.progressPercent,
+        checklist: recovered.workerJob.checklist,
+        completed_parts: recovered.workerJob.completedParts,
+        remaining_parts: recovered.workerJob.remainingParts,
+        progress_sequence: recovered.workerJob.progressSequence,
+        rules_changed: recovered.rulesChanged,
+        owner_binding_recovered: recovered.ownerBindingRecovered,
+        resume_deduplicated: recovered.deduplicated || joinedConcurrentResume,
+        replayed_actions: false,
+        opened_new_chat: false,
+        policy_version: recovered.workerJob.policyVersion,
+        worker_job: classifiedWorkerJobPublicRecord(recovered.workerJob)
       });
     }
   );

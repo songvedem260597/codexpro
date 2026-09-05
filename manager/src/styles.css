@@ -323,6 +323,10 @@ section { margin-bottom: 38px; }
 .profile-task-summary > span { flex: 0 0 auto; color: #7588bd; font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .profile-task-summary > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
 .profile-list.is-card-layout .profile-task-summary { justify-content: center; max-width: 100%; }
+.profile-task-recovery { margin-top: 7px; font-size: 12px; font-weight: 600; color: #aebcff; }
+.profile-task-recovery.is-reconnecting, .profile-task-recovery.is-recovering { color: #f2bd70; }
+.profile-task-recovery.is-blocked { color: #ff9c9c; }
+.profile-task-recovery.is-ready { color: #70d99a; }
 .profile-live-activity { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-width: 0; margin-top: 7px; color: #aebcff; font-size: 12px; text-align: center; }
 .profile-live-activity > .typing-dots { flex: 0 0 auto; transform: translateY(2px); }
 .profile-live-activity > .profile-live-activity-text { flex: 0 1 auto; max-width: calc(100% - 34px); --thinking-shimmer-text: #aebcff; --thinking-shimmer-contrast: #ffffffbf; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--thinking-shimmer-text); background-color: var(--thinking-shimmer-text); background-image: -webkit-gradient(linear, 100% 0, 0 0, from(var(--thinking-shimmer-text)), color-stop(.4, var(--thinking-shimmer-contrast)), color-stop(.6, var(--thinking-shimmer-contrast)), to(var(--thinking-shimmer-text))); background-position: -100% 0; background-repeat: no-repeat; background-size: 50% 200%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; animation: profile-thinking-shimmer 1.4s ease 0s infinite; }

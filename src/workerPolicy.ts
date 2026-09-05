@@ -493,6 +493,70 @@ export async function bootstrapWorkerJob(input: Parameters<typeof bootstrapWorke
   }
 }
 
+export async function resumeWorkerJob(input: {
+  jobId: string;
+  workerId: string;
+  root: string;
+  workspaceId: string;
+  scope: WorkerJobScope;
+  resumeKey: string;
+  rulesHash?: string;
+  rulesPath?: string;
+  agentsFiles?: string[];
+  agentsHash?: string;
+  codexGraphActive?: boolean;
+  codexGraphSymbolCount?: number;
+  codexGraphRelationshipCount?: number;
+}): Promise<{ record: WorkerJobRecord; deduplicated: boolean; rulesChanged: boolean }> {
+  let deduplicated = false;
+  let rulesChanged = false;
+  const record = await updateWorkerJob(input.jobId, (current) => {
+    if (!current) throw new Error("Worker job was not prepared.");
+    if (current.status !== "running") throw new Error(`WORKER_JOB_RESUME_NOT_RUNNING: task status is ${current.status}.`);
+    if (workerOwnerKey(current.workerId) !== workerOwnerKey(input.workerId)) throw new Error("WORKER_JOB_RESUME_OWNER_MISMATCH: worker job owner mismatch.");
+    if (current.kind !== "code") throw new Error(`WORKER_JOB_RESUME_KIND_MISMATCH: task kind is ${current.kind || "unknown"}.`);
+    if (current.scope !== input.scope) throw new Error("WORKER_JOB_RESUME_SCOPE_MISMATCH: task scope changed.");
+    const currentRoot = path.resolve(current.root || "");
+    const requestedRoot = path.resolve(input.root || "");
+    const sameRoot = process.platform === "win32"
+      ? currentRoot.toLowerCase() === requestedRoot.toLowerCase()
+      : currentRoot === requestedRoot;
+    if (!sameRoot) throw new Error("WORKER_JOB_RESUME_ROOT_MISMATCH: task root changed.");
+    if (current.workspaceId && current.workspaceId !== input.workspaceId) throw new Error("WORKER_JOB_RESUME_WORKSPACE_MISMATCH: task workspace identity changed.");
+
+    const resumeKey = clean(input.resumeKey, 160);
+    if (!resumeKey) throw new Error("WORKER_JOB_RESUME_KEY_REQUIRED: resume key is required.");
+    deduplicated = current.events.some((item) => item.type === "resumed" && clean(item.details?.resume_key, 160) === resumeKey);
+    rulesChanged = Boolean(current.rulesHash && input.rulesHash && current.rulesHash !== input.rulesHash);
+    const nextEvents = deduplicated
+      ? current.events
+      : [...current.events, event("resumed", {
+          resume_key: resumeKey,
+          worker_id: input.workerId,
+          root: input.root,
+          workspace_id: input.workspaceId,
+          rules_changed: rulesChanged
+        })];
+
+    return {
+      ...current,
+      workerId: input.workerId,
+      root: input.root,
+      workspaceId: input.workspaceId,
+      scope: input.scope,
+      rulesHash: input.rulesHash,
+      rulesPath: input.rulesPath,
+      agentsFiles: uniqueStrings(input.agentsFiles),
+      agentsHash: input.agentsHash,
+      codexGraphActive: input.codexGraphActive === true,
+      codexGraphSymbolCount: input.codexGraphSymbolCount,
+      codexGraphRelationshipCount: input.codexGraphRelationshipCount,
+      events: nextEvents
+    };
+  });
+  return { record, deduplicated, rulesChanged };
+}
+
 export async function reportWorkerJobProgress(input: {
   jobId: string;
   workerId?: string;

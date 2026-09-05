@@ -14,6 +14,7 @@ import { createInterruptionAlertTracker } from "./interruption-alert.mjs";
 import { taskUnfinalizedIncidents, TASK_UNFINALIZED_REPEAT_MS } from "./task-unfinalized-diagnostic.mjs";
 import { classifyUserReportedError } from "./user-reported-error.mjs";
 import { createRuntimeRestartGuard } from "./runtime-restart-guard.mjs";
+import { reconcileRunningTaskGates } from "./task-gate-recovery.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
 import { WorkerPluginRegistry } from "./worker-core/plugin-registry.mjs";
 import { createApiWorkerStore } from "./worker-core/api-worker-store.mjs";
@@ -2128,7 +2129,55 @@ async function collectRuntimeStatus(options = {}) {
     : [{ available: false, profiles: [] }, { available: false, jobs: [] }];
   const workerJobs = workerJobSnapshot.jobs;
   if (workerJobSnapshot.available) latestWorkerJobs = workerJobs;
-  const browserProfilesRaw = normalizeTerminalMessageStreamProfiles(browserProfileSnapshot.profiles, workerJobs);
+  const runtimeKey = String(base.local?.data?.runtimeStartedAt || base.local?.data?.runtime_started_at || base.local?.data?.pid || `${base.config.port}:${base.local?.data?.runtimeBuildId || "runtime"}`);
+  const taskGateRecoveryByProfile = browserProfileSnapshot.available && workerJobSnapshot.available
+    ? await reconcileRunningTaskGates({
+        runtimeKey,
+        profiles: browserProfileSnapshot.profiles,
+        jobs: workerJobs,
+        resumeTask: async ({ taskId, profileId }) => await localMcpTool(base.config, base.token, "resume_repo_task", {
+          task_id: taskId,
+          profile_id: profileId
+        }, 120_000),
+        maxAttempts: 3,
+        onState: (recovery) => {
+          const state = String(recovery?.state || "");
+          if (!state || state === "ready") return;
+          const level = state === "blocked" ? "error" : state === "reconnecting" ? "warn" : "info";
+          if (!diagnosticAllowed(`task-gate-recovery:${state}:${recovery?.profile_id || ""}:${recovery?.task_id || ""}`, 10_000)) return;
+          diagnostic(level, "manager", "task", String(recovery?.message || "Đang khôi phục task"), {
+            action: "task-gate-recovery",
+            state,
+            profile_id: recovery?.profile_id,
+            task_id: recovery?.task_id,
+            attempt: recovery?.attempt,
+            transient: recovery?.transient,
+            error: recovery?.error
+          });
+        }
+      })
+    : new Map();
+  const browserProfilesRaw = normalizeTerminalMessageStreamProfiles(browserProfileSnapshot.profiles, workerJobs).map((profile) => {
+    const recovery = taskGateRecoveryByProfile.get(String(profile?.profile_id || ""));
+    if (!recovery) return profile;
+    const taskId = String(recovery?.task_id || "");
+    const job = taskId ? workerJobs.find((item) => String(item?.job_id || item?.jobId || "") === taskId) : null;
+    const recoveredBinding = recovery?.state === "ready" && taskId && !String(profile?.current_task_id || "");
+    return {
+      ...profile,
+      ...(recoveredBinding ? {
+        current_task_id: taskId,
+        current_task_title: String(job?.title || profile?.current_task_title || ""),
+        current_workspace_root: String(job?.root || profile?.current_workspace_root || "")
+      } : {}),
+      task_recovery_state: String(recovery?.state || ""),
+      task_recovery_message: String(recovery?.message || ""),
+      task_recovery_task_id: taskId,
+      task_recovery_attempt: Number(recovery?.attempt || 0),
+      task_recovery_rules_changed: recovery?.rules_changed === true,
+      task_recovery_owner_binding_recovered: recovery?.owner_binding_recovered === true
+    };
+  });
   const countedTaskIds = new Set(workerJobs
     .filter((job) => job?.counts_as_task === true)
     .map((job) => String(job?.job_id || ""))

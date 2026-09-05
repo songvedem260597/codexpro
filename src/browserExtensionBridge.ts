@@ -1415,6 +1415,29 @@ export function getBrowserExtensionProfileTaskBinding(profileId: string): { task
   };
 }
 
+export function getBrowserExtensionTaskOwners(taskId: string): Array<{
+  profile_id: string;
+  task_id: string;
+  task_title: string;
+  conversation_id: string;
+  updated_at: string;
+}> {
+  const normalizedTaskId = String(taskId || "").trim();
+  if (!/^cpt_[a-f0-9]{24}$/.test(normalizedTaskId)) return [];
+  const owners = [];
+  for (const [profileId, boundTaskId] of profileTaskIds) {
+    if (boundTaskId !== normalizedTaskId) continue;
+    owners.push({
+      profile_id: profileId,
+      task_id: boundTaskId,
+      task_title: profileTaskTitles.get(profileId) || "",
+      conversation_id: profileTaskConversationIds.get(profileId) || "",
+      updated_at: profileTaskUpdatedAt.get(profileId) || new Date(0).toISOString()
+    });
+  }
+  return owners.sort((left, right) => left.profile_id.localeCompare(right.profile_id));
+}
+
 export function setBrowserExtensionProfilePendingTask(
   profileId: string,
   taskId: string,

@@ -4468,6 +4468,8 @@ function App() {
               const noBrowserTabs = noChatGpt && Number(profile.tab_count || 0) === 0;
               const chatGptTabCount = Math.max(0, Number(profile.chatgpt_tab_count) || 0);
               const workerState = hung ? "hung" : working || settling ? "working" : "idle";
+              const taskRecoveryState = String(profile.task_recovery_state || "").trim();
+              const taskRecoveryMessage = String(profile.task_recovery_message || "").trim();
               const profileBorderState = profileCardBorderState({
                 connected: profile.connected,
                 working,
@@ -4517,6 +4519,11 @@ function App() {
                       <div className="profile-task-summary" title={profileTaskLabel}>
                         <span>{profileTaskSummary.label}</span>
                         <strong>{profileTaskLabel}</strong>
+                      </div>
+                    )}
+                    {taskRecoveryMessage && (
+                      <div className={`profile-task-recovery is-${taskRecoveryState || "info"}`} role="status" aria-live="polite">
+                        {taskRecoveryMessage}
                       </div>
                     )}
                     {(working || settling) && <div className="profile-live-activity" role="status" aria-live="polite"><span className="profile-live-activity-text">{liveActivityText || (settling ? "ChatGPT đang hoàn tất tác vụ" : "ChatGPT đang xử lý")}</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></div>}

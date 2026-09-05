@@ -438,7 +438,73 @@ function sameFsPath(left: string, right: string): boolean {
 
 function taskGitRoot(context: WorkspaceTaskContext, task?: WorkspaceTaskRecord): string {
   const candidate = context.worktreeRoot || task?.worktreeRoot;
-  return candidate && fs.existsSync(candidate) ? canonicalRoot(candidate) : canonicalRoot(context.root);
+  if (candidate) {
+    if (!fs.existsSync(candidate)) {
+      throw new CodexProError(`WORKSPACE_TASK_WORKTREE_MISSING: recorded worktree no longer exists: ${candidate}.`, {
+        code: "WORKSPACE_TASK_WORKTREE_MISSING",
+        details: { task_id: context.taskId, worktree_root: candidate, workspace_root: context.root }
+      });
+    }
+    return canonicalRoot(candidate);
+  }
+  return canonicalRoot(context.root);
+}
+
+export async function verifyWorkspaceTaskResume(context: WorkspaceTaskContext): Promise<WorkspaceTaskRecord> {
+  const root = canonicalRoot(context.root);
+  const state = readState(root);
+  const task = state.tasks[context.taskId];
+  if (!task || task.status !== "running") {
+    throw new CodexProError(`WORKSPACE_TASK_NOT_ACTIVE: ${context.taskId} has no running workspace coordination record.`, {
+      code: "WORKSPACE_TASK_NOT_ACTIVE",
+      details: { task_id: context.taskId, workspace_root: root, status: task?.status || "missing" }
+    });
+  }
+  const normalizeOwner = (value: string) => String(value || "").trim().replace(/^browser:/, "");
+  if (context.workerId && normalizeOwner(task.workerId) !== normalizeOwner(context.workerId)) {
+    throw new CodexProError("WORKSPACE_TASK_OWNER_MISMATCH: workspace task belongs to another worker.", {
+      code: "WORKSPACE_TASK_OWNER_MISMATCH",
+      details: { task_id: context.taskId, expected_worker_id: task.workerId, received_worker_id: context.workerId }
+    });
+  }
+  const recordedWorktree = String(task.worktreeRoot || "").trim();
+  if (!recordedWorktree || !fs.existsSync(recordedWorktree)) {
+    throw new CodexProError(`WORKSPACE_TASK_WORKTREE_MISSING: recorded worktree is missing for ${context.taskId}.`, {
+      code: "WORKSPACE_TASK_WORKTREE_MISSING",
+      details: { task_id: context.taskId, worktree_root: recordedWorktree || null, workspace_root: root }
+    });
+  }
+  const expectedWorktree = worktreeDir(root, context.taskId);
+  if (!sameFsPath(recordedWorktree, expectedWorktree)) {
+    throw new CodexProError("WORKSPACE_TASK_WORKTREE_MISMATCH: recorded worktree path does not match the task worktree identity.", {
+      code: "WORKSPACE_TASK_WORKTREE_MISMATCH",
+      details: { task_id: context.taskId, worktree_root: recordedWorktree, expected_worktree_root: expectedWorktree }
+    });
+  }
+  const top = await gitText(recordedWorktree, ["rev-parse", "--show-toplevel"]);
+  if (!top || !sameFsPath(top, recordedWorktree)) {
+    throw new CodexProError("WORKSPACE_TASK_WORKTREE_INVALID: recorded worktree is not the original Git worktree.", {
+      code: "WORKSPACE_TASK_WORKTREE_INVALID",
+      details: { task_id: context.taskId, worktree_root: recordedWorktree, git_toplevel: top || null }
+    });
+  }
+  const branch = await currentBranch(recordedWorktree);
+  if (task.worktreeBranch && branch !== task.worktreeBranch) {
+    throw new CodexProError("WORKSPACE_TASK_BRANCH_MISMATCH: task worktree branch changed.", {
+      code: "WORKSPACE_TASK_BRANCH_MISMATCH",
+      details: { task_id: context.taskId, expected_branch: task.worktreeBranch, current_branch: branch }
+    });
+  }
+  const resolveGitDir = (cwd: string, value: string) => canonicalRoot(path.isAbsolute(value) ? value : path.resolve(cwd, value));
+  const primaryCommonDirRaw = await gitText(root, ["rev-parse", "--git-common-dir"]);
+  const worktreeCommonDirRaw = await gitText(recordedWorktree, ["rev-parse", "--git-common-dir"]);
+  if (!primaryCommonDirRaw || !worktreeCommonDirRaw || !sameFsPath(resolveGitDir(root, primaryCommonDirRaw), resolveGitDir(recordedWorktree, worktreeCommonDirRaw))) {
+    throw new CodexProError("WORKSPACE_TASK_REPOSITORY_MISMATCH: task worktree is no longer attached to the original repository.", {
+      code: "WORKSPACE_TASK_REPOSITORY_MISMATCH",
+      details: { task_id: context.taskId, workspace_root: root, worktree_root: recordedWorktree }
+    });
+  }
+  return { ...task, worktreeRoot: canonicalRoot(recordedWorktree) };
 }
 
 export async function registerWorkspaceTask(context: WorkspaceTaskContext): Promise<WorkspaceTaskRecord> {
