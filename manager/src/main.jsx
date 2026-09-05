@@ -36,6 +36,7 @@ import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./ch
 import { conversationCompletedTaskCount, conversationMessageLimit, conversationTotalMessageCount, logicalTaskTracking, recordCompletedLogicalTask, shouldQualifyFastMessageLimit, shouldRolloverConversation } from "./conversation-message-limit.js";
 import { activeLogicalTaskAdjustment } from "../electron/logical-chat-task.mjs";
 import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
+import { VISUAL_WATCHDOG_INTERVAL_MS, visualWatchdogCandidate } from "./visual-watchdog.js";
 import { chatHistoryRateLimitRecoveryCandidate } from "./chat-recovery-policy.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
@@ -460,6 +461,8 @@ function App() {
   const operationsRecoveryTimes = useRef(new Map());
   const operationsNotificationState = useRef(new Map());
   const operationsLongTaskAudits = useRef(new Set());
+  const operationsVisualWatchdogChecks = useRef(new Set());
+  const operationsVisualWatchdogNextAt = useRef(new Map());
   const operationsAutoUpdateAt = useRef(0);
 
   useLayoutEffect(() => {
@@ -483,7 +486,8 @@ function App() {
         networkCompletionReads.current,
         connectionRecoveryReads.current,
         repoTaskVerificationReads.current,
-        operationsRecoveryTimes.current
+        operationsRecoveryTimes.current,
+        operationsVisualWatchdogNextAt.current
       ];
       for (const map of timedMaps) pruneTimestampMap(map, { maxEntries: 96, maxAgeMs: 60 * 60_000 });
       for (const map of [
@@ -499,6 +503,7 @@ function App() {
         operationsNotificationState.current
       ]) trimMapEntries(map, 96);
       trimSetEntries(operationsLongTaskAudits.current, 128);
+      trimSetEntries(operationsVisualWatchdogChecks.current, 128);
     };
     sweepRetentionCaches();
     const timer = window.setInterval(sweepRetentionCaches, 60_000);
@@ -976,6 +981,76 @@ function App() {
       });
     }
   }, [managerSettings.taskNotifications, status?.browserProfiles, status?.workerJobs]);
+  useEffect(() => {
+    if (!managerSettings.autoRecovery) return;
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
+    const now = Date.now();
+    for (const profile of profiles) {
+      const candidate = visualWatchdogCandidate(profile, jobs, now);
+      if (!candidate) continue;
+      const key = `${candidate.profileId}:${candidate.taskId}`;
+      const nextAt = Number(operationsVisualWatchdogNextAt.current.get(key) || 0);
+      if (operationsVisualWatchdogChecks.current.has(key) || now < nextAt) continue;
+      operationsVisualWatchdogChecks.current.add(key);
+      operationsVisualWatchdogNextAt.current.set(key, now + VISUAL_WATCHDOG_INTERVAL_MS);
+      logRendererDiagnostic(api, "info", "chat", "Visual Watchdog bắt đầu kiểm tra ảnh task", {
+        action: "visual-watchdog-start",
+        profile_id: candidate.profileId,
+        task_id: candidate.taskId,
+        conversation_id: candidate.conversationId,
+        target_id: candidate.targetId,
+        interval_ms: VISUAL_WATCHDOG_INTERVAL_MS
+      });
+      void api.checkVisualWatchdog({
+        profileId: candidate.profileId,
+        taskId: candidate.taskId,
+        conversationId: candidate.conversationId,
+        targetId: candidate.targetId,
+        title: candidate.title,
+        autoRecover: true
+      }).then((result) => {
+        const parsedNextAt = Date.parse(String(result?.next_check_at || ""));
+        operationsVisualWatchdogNextAt.current.set(key, Number.isFinite(parsedNextAt) ? parsedNextAt : Date.now() + VISUAL_WATCHDOG_INTERVAL_MS);
+        const state = String(result?.state || "UNCERTAIN").toUpperCase();
+        const recovered = result?.recovery?.recovered === true;
+        logRendererDiagnostic(api, state === "STUCK" ? "error" : "info", "chat", recovered ? "Visual Watchdog đã chuyển task sang chat mới" : `Visual Watchdog kết luận ${state}`, {
+          action: recovered ? "visual-watchdog-recovered" : "visual-watchdog-result",
+          profile_id: candidate.profileId,
+          task_id: candidate.taskId,
+          conversation_id: candidate.conversationId,
+          target_id: candidate.targetId,
+          state,
+          confidence: Number(result?.confidence || 0),
+          reason: String(result?.reason || ""),
+          compared_two_images: Boolean(result?.compared_two_images),
+          watchdog_target_id: Number(result?.watchdog_target_id) || 0,
+          watchdog_conversation_id: String(result?.watchdog_conversation_id || ""),
+          recovery: result?.recovery || null
+        });
+        if (recovered && managerSettings.taskNotifications !== false) {
+          void api.showNotification?.({
+            title: "CodexPro · Watchdog đã chuyển tab",
+            body: `“${candidate.title}” được xác nhận treo và đã tiếp tục trong chat mới với cùng Task ID.`
+          });
+        }
+      }).catch((err) => {
+        operationsVisualWatchdogNextAt.current.set(key, Date.now() + 60_000);
+        logRendererDiagnostic(api, "error", "chat", `Visual Watchdog kiểm tra/phục hồi thất bại: ${err?.message || String(err)}`, {
+          action: "visual-watchdog-failed",
+          profile_id: candidate.profileId,
+          task_id: candidate.taskId,
+          conversation_id: candidate.conversationId,
+          target_id: candidate.targetId,
+          error: err
+        });
+      }).finally(() => {
+        operationsVisualWatchdogChecks.current.delete(key);
+        window.setTimeout(() => void refresh(false), 900);
+      });
+    }
+  }, [managerSettings.autoRecovery, managerSettings.taskNotifications, status?.browserProfiles, status?.workerJobs]);
+
 
   useEffect(() => {
     if (!managerSettings.autoRecovery) return;

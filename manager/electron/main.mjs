@@ -31,6 +31,7 @@ import { createPluginSkillBundle } from "./app-plugins/plugin-skill-bundle.mjs";
 import { registerReturnToManagerShortcut, RETURN_TO_MANAGER_ACCELERATOR } from "./return-to-manager-shortcut.mjs";
 import { acceptsLogicalTaskAdjustment } from "./logical-chat-task.mjs";
 import { createTaskHangTracker } from "./task-hang-tracker.mjs";
+import { createVisualWatchdogService } from "./visual-watchdog.mjs";
 import { ALL_ALLOWED_WORKSPACES, createManagerSettingsStore } from "./manager-settings-store.mjs";
 import {
   captureClipboardImage,
@@ -127,6 +128,15 @@ const codexProHome = process.env.CODEXPRO_HOME
   : path.join(os.homedir(), ".codexpro");
 const appPluginRegistry = createAppPluginRegistry({ home: codexProHome });
 const taskHangTracker = createTaskHangTracker({ home: codexProHome });
+const visualWatchdogService = createVisualWatchdogService({
+  readyRuntimeStatus,
+  readToken,
+  openSession: openLocalMcpSession,
+  closeSession: closeLocalMcpSession,
+  callTool: localMcpToolInSession,
+  sendChat: localMcpChatSendWithRendererRecovery,
+  resumeTask: resumeProfileTask
+});
 const managedAppPluginInstaller = createManagedAppPluginInstaller({
   home: codexProHome,
   registry: appPluginRegistry,
@@ -4248,6 +4258,27 @@ diagnosticIpcHandle("codexpro:test-api-worker", {
   if (!config) throw new Error("API worker configuration was not found.");
   return await createProviderForApiWorker(config).probe();
 });
+diagnosticIpcHandle("codexpro:check-visual-watchdog", {
+  category: "watchdog",
+  action: "visual-watchdog-check",
+  slowMs: 15_000,
+  failureMessage: "Visual Watchdog kiểm tra tab thất bại",
+  details: (payload) => ({
+    profile_id: String(payload?.profileId || ""),
+    task_id: String(payload?.taskId || ""),
+    conversation_id: String(payload?.conversationId || ""),
+    target_id: Number(payload?.targetId) || 0
+  }),
+  resultDetails: (result) => ({
+    state: String(result?.state || ""),
+    confidence: Number(result?.confidence || 0),
+    skipped: Boolean(result?.skipped),
+    compared_two_images: Boolean(result?.compared_two_images),
+    watchdog_target_id: Number(result?.watchdog_target_id) || 0,
+    watchdog_conversation_id: String(result?.watchdog_conversation_id || "")
+  })
+}, (_event, payload) => visualWatchdogService.check(payload || {}));
+
 diagnosticIpcHandle("codexpro:control", {
   category: "status",
   action: "control-server",
