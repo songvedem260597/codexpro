@@ -349,7 +349,7 @@ const completedStreamAudit = buildChatResponseAuditRecord({
 });
 assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
 assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
-const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, browserControlWorker, server, workerJobToolsSource, httpSource, bridge, profileState, managerMain, managerPreload, managerUi, managerWorkerUpdateDialog, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
+const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, browserControlWorker, server, workerJobToolsSource, httpSource, bridge, profileState, managerMain, managerChatCache, managerChatDiagnostics, managerPreload, managerUi, managerWorkerUpdateDialog, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "tab-policy.js"), "utf8"),
@@ -362,6 +362,8 @@ const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyW
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionProfileState.ts"), "utf8"),
   readFile(join(root, "manager", "electron", "main.mjs"), "utf8"),
+  readFile(join(root, "manager", "electron", "manager-chat-cache.mjs"), "utf8"),
+  readFile(join(root, "manager", "electron", "manager-chat-diagnostics.mjs"), "utf8"),
   readFile(join(root, "manager", "electron", "preload.cjs"), "utf8"),
   readFile(join(root, "manager", "src", "main.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "features", "profiles", "worker-update-confirm-modal.jsx"), "utf8"),
@@ -523,7 +525,8 @@ assert.match(managerMain, /uncaughtExceptionMonitor[\s\S]*?render-process-gone[\
 assert.match(managerMain, /routinePollingAction[\s\S]*?browser_control:list_profiles[\s\S]*?browser_control:get_chat_response[\s\S]*?durationMs >= 2_000/, "routine MCP polling must only be persisted when it becomes slow");
 assert.match(managerMain, /MANAGER_RUN_ID[\s\S]*?manager_run_id:[\s\S]*?manager_version:[\s\S]*?process_id:/, "every Manager diagnostic must carry run, version, and process correlation context");
 assert.match(managerMain, /function recordBrowserProfileTransitions[\s\S]*?profile-state-transition[\s\S]*?mất heartbeat[\s\S]*?renderer không phản hồi[\s\S]*?Connection interrupted[\s\S]*?Message delivery timed out[\s\S]*?generation chuyển sang trạng thái lỗi[\s\S]*?chưa có task title/, "profile diagnostics must persist heartbeat, renderer, delivery, network, and missing-task-title state transitions");
-assert.match(managerMain, /function recordChatResponseAuditDiagnostic[\s\S]*?chat-response-audit-mismatch[\s\S]*?expected_assistant[\s\S]*?manager_state_assistant[\s\S]*?manager_ui_assistant/, "response diagnostics must compare ChatGPT source, Manager state, and rendered UI fingerprints");
+assert.match(managerMain, /createManagerChatDiagnostics\(\{ home: codexProHome, diagnostic \}\)/, "Manager must wire the extracted chat diagnostics service into the main process");
+assert.match(managerChatDiagnostics, /function recordChatResponseAuditDiagnostic[\s\S]*?chat-response-audit-mismatch[\s\S]*?expected_assistant[\s\S]*?manager_state_assistant[\s\S]*?manager_ui_assistant/, "response diagnostics must compare ChatGPT source, Manager state, and rendered UI fingerprints");
 assert.match(managerMain, /action: "send-profile-request"[\s\S]*?repo_task_id[\s\S]*?submission_state[\s\S]*?generation_state[\s\S]*?manager_preflight_ms/, "send diagnostics must correlate task, submission, network, and Manager timing evidence");
 assert.match(managerMain, /action: "get-profile-response"[\s\S]*?network_state[\s\S]*?response_ready[\s\S]*?dom_error[\s\S]*?canonical_available/, "response diagnostics must retain network, readiness, DOM, and canonical evidence");
 assert.match(managerMain, /action: "get-repo-task-status"[\s\S]*?task_title[\s\S]*?task_kind[\s\S]*?verified/, "task verification diagnostics must retain the required title and classification");
@@ -755,7 +758,8 @@ assert.match(managerSendUiSource, /conversation-message-limit-rollover[\s\S]*?me
 assert.match(managerSendUiSource, /requestedTab\?\.long_task_watchdog_hung \|\| requestedConversation\?\.long_task_watchdog_hung[\s\S]*?conversationId = forcedNewChat \? NEW_CHAT_TARGET[\s\S]*?long-task-watchdog-force-new-chat/, "new work must never be sent back into a conversation marked hung by the one-shot watchdog, even after its tab was closed");
 assert.match(managerUi, /const nextTotalMessageCount = contentAvailable[\s\S]*?result\.total_message_count[\s\S]*?totalMessageCount: nextTotalMessageCount/, "Manager response state must retain ChatGPT's complete user-plus-assistant message count");
 assert.match(managerUi, /const cacheEntry = \{[\s\S]*?totalMessageCount: Number\(response\?\.totalMessageCount\)[\s\S]*?saveChatResponseCache\(cacheEntry\)/, "the complete conversation count must survive Manager cache hydration");
-assert.match(managerMain, /function normalizeChatCacheEntry[\s\S]*?totalMessageCount: Math\.max\(0, Math\.floor\(Number\(value\?\.totalMessageCount\)/, "the Electron cache must normalize the persisted complete conversation count");
+assert.match(managerMain, /createManagerChatCache\(\{ home: codexProHome \}\)/, "Manager must wire the extracted chat cache service into the main process");
+assert.match(managerChatCache, /function normalizeChatCacheEntry[\s\S]*?totalMessageCount: Math\.max\(0, Math\.floor\(Number\(value\?\.totalMessageCount\)/, "the Electron cache must normalize the persisted complete conversation count");
 assert.match(managerSendUiSource, /CONVERSATION_LIMIT_REACHED:[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a terminal full-conversation banner must roll the pending user request and attachments into a new chat");
 assert.match(worker, /function probeChatActivityPage\(\)[\s\S]*?maximum length for this conversation[\s\S]*?start new chat[\s\S]*?conversation_limit_reached:conversationLimitReached[\s\S]*?conversation_limit_message:conversationLimitMessage/, "normal profile polling must detect ChatGPT's terminal conversation-length banner, not only send preflight");
 assert.match(worker, /conversation_limit_reached:Boolean\(domActivity\.conversation_limit_reached\)[\s\S]*?conversation_limit_message:String\(domActivity\.conversation_limit_message/, "profile tab summaries must expose terminal conversation-length evidence to Manager");
@@ -859,9 +863,11 @@ assert.match(managerUi, /networkStreamCompleted = Boolean\([\s\S]*?result\.netwo
 assert.match(managerPreload, /getChatResponseCache[\s\S]*?saveChatResponseCache/, "Manager preload must expose persistent chat-response cache access");
 assert.match(managerPreload, /logChatLayout[\s\S]*?codexpro:log-chat-layout/, "Manager preload must expose fire-and-forget chat layout tracing");
 assert.match(managerPreload, /logChatResponseAudit[\s\S]*?codexpro:log-chat-response-audit/, "Manager preload must expose response comparison tracing");
-assert.match(managerMain, /manager-chat-layout\.jsonl[\s\S]*?appendManagerChatLayoutLog[\s\S]*?codexpro:log-chat-layout/, "Manager must persist bounded chat layout traces");
-assert.match(managerMain, /manager-chat-response-audit\.jsonl[\s\S]*?appendManagerChatResponseAuditLog[\s\S]*?codexpro:log-chat-response-audit/, "Manager must persist bounded ChatGPT-to-Manager response comparison logs");
-assert.match(managerMain, /manager-chat-cache\.json[\s\S]*?MAX_CHAT_CACHE_ENTRIES_PER_PROFILE = 3/, "Manager must persist a bounded per-profile local response cache instead of rebuilding every transcript on open");
+assert.match(managerChatDiagnostics, /manager-chat-layout\.jsonl[\s\S]*?appendManagerChatLayoutLog/, "Manager chat diagnostics must persist bounded chat layout traces");
+assert.match(managerMain, /codexpro:log-chat-layout[\s\S]*?appendManagerChatLayoutLog/, "Manager must route chat layout traces through the extracted diagnostics service");
+assert.match(managerChatDiagnostics, /manager-chat-response-audit\.jsonl[\s\S]*?appendManagerChatResponseAuditLog/, "Manager chat diagnostics must persist bounded ChatGPT-to-Manager response comparison logs");
+assert.match(managerMain, /codexpro:log-chat-response-audit[\s\S]*?appendManagerChatResponseAuditLog/, "Manager must route response audit traces through the extracted diagnostics service");
+assert.match(managerChatCache, /MAX_CHAT_CACHE_ENTRIES_PER_PROFILE = 3[\s\S]*?manager-chat-cache\.json/, "Manager must persist a bounded per-profile local response cache instead of rebuilding every transcript on open");
 assert.match(managerUi, /currentResponse\?\.repoTaskId && canVerifyRepoTaskUse\(/, "CodexPro verification must wait for a canonical-ready settled response");
 assert.match(managerMain, /const previousTaskId = String\(payload\?\.previousTaskId[\s\S]*?let taskId = previousTaskId \|\| `cpt_/, "task-title retry, chat rollover, and active-task adjustments must preserve the original prepared task id");
 assert.match(managerMain, /repo_task_id_reused: taskIdReused[\s\S]*?repo_task_dispatched_at: taskDispatchedAt/, "Manager send results must expose task-id reuse and the attempt dispatch boundary");
