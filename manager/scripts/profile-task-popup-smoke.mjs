@@ -32,8 +32,9 @@ const jobs = [
   { job_id: "cpt_000000000000000000000001", worker_id: "profile-a", status: "completed", progress_percent: 100, updated_at: "2026-09-04T01:00:00Z" },
   { job_id: "cpt_000000000000000000000002", worker_id: "profile-a", status: "failed", progress_percent: 45, updated_at: "2026-09-04T02:00:00Z" },
   { job_id: "cpt_000000000000000000000003", worker_id: "profile-a", status: "running", progress_percent: 70, updated_at: "2026-09-04T03:00:00Z" },
-  { job_id: "cpt_000000000000000000000005", worker_id: "profile-a", status: "prepared", progress_percent: 0, fifo_queued_at: "2026-09-04T04:00:00Z" },
-  { job_id: "cpt_000000000000000000000006", worker_id: "profile-a", status: "prepared", progress_percent: 0, fifo_queued_at: "2026-09-04T05:00:00Z" },
+  { job_id: "cpt_000000000000000000000005", worker_id: "profile-a", status: "prepared", title: "Queued task A", progress_percent: 0, fifo_queued_at: "2026-09-04T04:00:00Z" },
+  { job_id: "cpt_000000000000000000000006", worker_id: "profile-a", status: "prepared", title: "Queued task B", progress_percent: 0, fifo_queued_at: "2026-09-04T05:00:00Z" },
+  { job_id: "cpt_000000000000000000000009", worker_id: "profile-a", status: "prepared", progress_percent: 0, fifo_queued_at: "2026-09-04T05:30:00Z", events: [{ type: "prepared" }] },
   { job_id: "cpt_000000000000000000000004", worker_id: "profile-b", status: "failed", progress_percent: 20, updated_at: "2026-09-04T04:00:00Z" },
   { job_id: "cpt_000000000000000000000007", worker_id: "profile-a", status: "running", completion_confirmed: true, progress_percent: 100, updated_at: "2026-09-04T06:00:00Z" },
   { job_id: "cpt_000000000000000000000008", worker_id: "profile-a", status: "blocked", progress_percent: 55, updated_at: "2026-09-04T07:00:00Z" }
@@ -45,8 +46,11 @@ assert.deepEqual(sorted.map((job) => job.job_id), [
   "cpt_000000000000000000000005",
   "cpt_000000000000000000000006",
   "cpt_000000000000000000000008"
-], "popup should keep only failed/unfinished tasks for the selected worker while queued tasks stay FIFO");
+], "popup should keep only real failed/unfinished tasks for the selected worker while queued tasks stay FIFO");
 assert.equal(sorted.some((job) => job.status === "completed" || job.completion_confirmed === true), false, "completed tasks must be hidden from the popup");
+const placeholderPreparedJob = jobs.find((job) => job.job_id === "cpt_000000000000000000000009");
+assert.equal(sorted.includes(placeholderPreparedJob), false, "uninitialized prepared placeholders must be hidden from the popup");
+assert.equal(profileTaskCanResume(placeholderPreparedJob, true), false, "uninitialized prepared placeholders must never expose resume");
 assert.equal(profileTaskCanResume(jobs[1], true), true, "failed task should resume while idle");
 assert.equal(profileTaskCanResume(jobs[1], false), false, "failed task should not resume while worker is busy");
 assert.equal(profileTaskCanResume(jobs[0], true), false, "completed task must never resume");

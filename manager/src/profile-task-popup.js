@@ -4,6 +4,13 @@ function normalizedStatus(job) {
   return String(job?.status || "").trim().toLowerCase();
 }
 
+function preparedTaskIsInitialized(job) {
+  if (normalizedStatus(job) !== "prepared") return true;
+  if (String(job?.title || "").trim()) return true;
+  return Array.isArray(job?.events)
+    && job.events.some((entry) => String(entry?.type || "").trim().toLowerCase() === "bootstrapped");
+}
+
 export function profileWorkerIsIdleForTaskResume(profile) {
   if (!profile?.connected || String(profile.activity || "") !== "idle") return false;
   const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
@@ -11,7 +18,7 @@ export function profileWorkerIsIdleForTaskResume(profile) {
 }
 
 export function profileTaskCanResume(job, workerIdle) {
-  if (!workerIdle || job?.completion_confirmed === true) return false;
+  if (!workerIdle || job?.completion_confirmed === true || !preparedTaskIsInitialized(job)) return false;
   return RESUMABLE_TASK_STATUSES.has(normalizedStatus(job));
 }
 
@@ -59,6 +66,7 @@ export function profileTaskJobsForWorker(jobs, profileId, currentTaskId = "") {
       String(job?.worker_id || job?.workerId || "") === workerId
       && job?.completion_confirmed !== true
       && RESUMABLE_TASK_STATUSES.has(normalizedStatus(job))
+      && preparedTaskIsInitialized(job)
     ))
     .sort((left, right) => {
       const rankDiff = rank(left) - rank(right);
