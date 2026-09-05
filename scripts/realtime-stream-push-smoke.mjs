@@ -104,4 +104,55 @@ assert.equal(tabs[0].network_stream_record_id, 2);
 assert.equal(tabs[0].network_stream_revision, 1);
 assert.equal(tabs[0].network_stream_text, "Lượt mới");
 
+const stalePreviousRecord = mergeBrowserExtensionStreamBatch(profileId, tabs, [{
+  tab_id: tabId,
+  conversation_id: conversationId,
+  record_id: 1,
+  revision: 99,
+  text: "STALE previous turn",
+  event_count: 99,
+  updated_at: "2026-09-02T07:31:00.010Z",
+  in_progress: false,
+  error: "",
+  activity_text: ""
+}]);
+assert.equal(stalePreviousRecord.changed, false, "an older stream record must not overwrite the active newer record");
+assert.equal(tabs[0].network_stream_record_id, 2);
+assert.equal(tabs[0].network_stream_text, "Lượt mới");
+assert.equal(tabs[0].busy, true, "a delayed settled event from an old record must not clear the current busy state");
+
+const nextConversationId = "conversation-stream-5678";
+tabs[0].url = `https://chatgpt.com/c/${nextConversationId}`;
+const staleOldConversation = mergeBrowserExtensionStreamBatch(profileId, tabs, [{
+  tab_id: tabId,
+  conversation_id: conversationId,
+  record_id: 3,
+  revision: 1,
+  text: "STALE old conversation",
+  event_count: 1,
+  updated_at: "2026-09-02T07:32:00.000Z",
+  in_progress: false,
+  error: "",
+  activity_text: ""
+}]);
+assert.equal(staleOldConversation.changed, false, "a stream from the previous conversation must not leak into a navigated tab");
+assert.equal(tabs[0].network_stream_text, "Lượt mới");
+
+const reloadedConversation = mergeBrowserExtensionStreamBatch(profileId, tabs, [{
+  tab_id: tabId,
+  conversation_id: nextConversationId,
+  record_id: 1,
+  revision: 1,
+  text: "Sau reload",
+  event_count: 1,
+  updated_at: "2026-09-02T07:32:00.010Z",
+  in_progress: true,
+  error: "",
+  activity_text: ""
+}]);
+assert.equal(reloadedConversation.changed, true, "a new conversation must be allowed to restart its document-local record counter");
+assert.equal(tabs[0].network_stream_conversation_id, nextConversationId);
+assert.equal(tabs[0].network_stream_record_id, 1);
+assert.equal(tabs[0].network_stream_text, "Sau reload");
+
 console.log("✓ Realtime stream push merge smoke test passed");
