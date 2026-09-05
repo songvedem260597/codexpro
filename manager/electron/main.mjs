@@ -35,6 +35,7 @@ import { createTaskHangTracker } from "./task-hang-tracker.mjs";
 import { createVisualWatchdogService } from "./visual-watchdog.mjs";
 import { ALL_ALLOWED_WORKSPACES, createManagerSettingsStore } from "./manager-settings-store.mjs";
 import { createManagerChatCache } from "./manager-chat-cache.mjs";
+import { createManagerChatDiagnostics } from "./manager-chat-diagnostics.mjs";
 import {
   captureClipboardImage,
   chooseRequestFiles,
@@ -314,6 +315,7 @@ const {
   resetManagerSettings
 } = createManagerSettingsStore({ home: codexProHome, mimeTypeForFile });
 const { read: readManagerChatCache, get: getManagerChatCacheEntry, save: saveManagerChatCacheEntry } = createManagerChatCache({ home: codexProHome });
+const { appendManagerChatLayoutLog, appendManagerChatResponseAuditLog, recordChatResponseAuditDiagnostic } = createManagerChatDiagnostics({ home: codexProHome, diagnostic });
 const apiWorkerStore = createApiWorkerStore({ home: codexProHome, safeStorage });
 workerPluginRegistry.register(createApiWorkerPlugin({
   listConfigurations: () => apiWorkerStore.list(),
@@ -333,16 +335,6 @@ workerPluginRegistry.register(createApiWorkerPlugin({
   }
 }));
 
-const managerChatLayoutLogFile = path.join(codexProHome, "manager-chat-layout.jsonl");
-const managerChatLayoutPreviousLogFile = path.join(codexProHome, "manager-chat-layout.previous.jsonl");
-const managerChatResponseAuditLogFile = path.join(codexProHome, "manager-chat-response-audit.jsonl");
-const managerChatResponseAuditPreviousLogFile = path.join(codexProHome, "manager-chat-response-audit.previous.jsonl");
-const MAX_CHAT_LAYOUT_LOG_BYTES = 2 * 1024 * 1024;
-const MAX_CHAT_LAYOUT_LOG_ENTRY_BYTES = 32 * 1024;
-let managerChatLayoutLogWrite = Promise.resolve();
-const MAX_CHAT_RESPONSE_AUDIT_LOG_BYTES = 4 * 1024 * 1024;
-const MAX_CHAT_RESPONSE_AUDIT_LOG_ENTRY_BYTES = 48 * 1024;
-let managerChatResponseAuditLogWrite = Promise.resolve();
 
 function createProviderForApiWorker(config, overrides = {}) {
   const options = {
@@ -433,124 +425,7 @@ function versionAtLeast(version, target = WORKER_EXTENSION_VERSION) {
   return true;
 }
 
-function appendManagerChatLayoutLog(payload) {
-  let line = "";
-  try {
-    line = JSON.stringify({ loggedAt: new Date().toISOString(), ...(payload && typeof payload === "object" ? payload : {}) });
-  } catch {
-    return;
-  }
-  if (Buffer.byteLength(line, "utf8") > MAX_CHAT_LAYOUT_LOG_ENTRY_BYTES) return;
-  managerChatLayoutLogWrite = managerChatLayoutLogWrite.then(async () => {
-    await fs.promises.mkdir(codexProHome, { recursive: true });
-    try {
-      const stat = await fs.promises.stat(managerChatLayoutLogFile);
-      if (stat.size >= MAX_CHAT_LAYOUT_LOG_BYTES) {
-        await fs.promises.rm(managerChatLayoutPreviousLogFile, { force: true });
-        await fs.promises.rename(managerChatLayoutLogFile, managerChatLayoutPreviousLogFile);
-      }
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-    await fs.promises.appendFile(managerChatLayoutLogFile, line + "\n", "utf8");
-  }).catch((error) => {
-    console.error("[manager-chat-layout]", error?.message || error);
-    diagnostic("error", "manager", "logging", `Không ghi được chat layout log: ${error?.message || String(error)}`, { action: "write-chat-layout-log", error });
-  });
-}
 
-function appendManagerChatResponseAuditLog(payload) {
-  let line = "";
-  try {
-    line = JSON.stringify({ loggedAt: new Date().toISOString(), ...(payload && typeof payload === "object" ? payload : {}) });
-  } catch {
-    return;
-  }
-  if (Buffer.byteLength(line, "utf8") > MAX_CHAT_RESPONSE_AUDIT_LOG_ENTRY_BYTES) return;
-  managerChatResponseAuditLogWrite = managerChatResponseAuditLogWrite.then(async () => {
-    await fs.promises.mkdir(codexProHome, { recursive: true });
-    try {
-      const stat = await fs.promises.stat(managerChatResponseAuditLogFile);
-      if (stat.size >= MAX_CHAT_RESPONSE_AUDIT_LOG_BYTES) {
-        await fs.promises.rm(managerChatResponseAuditPreviousLogFile, { force: true });
-        await fs.promises.rename(managerChatResponseAuditLogFile, managerChatResponseAuditPreviousLogFile);
-      }
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-    }
-    await fs.promises.appendFile(managerChatResponseAuditLogFile, line + "\n", "utf8");
-  }).catch((error) => {
-    console.error("[manager-chat-response-audit]", error?.message || error);
-    diagnostic("error", "manager", "logging", `Không ghi được response audit log: ${error?.message || String(error)}`, { action: "write-chat-response-audit-log", error });
-  });
-}
-
-const responseAuditDiagnosticState = new Map();
-
-function responseAuditFingerprintSummary(value) {
-  if (!value || typeof value !== "object") return null;
-  return {
-    fingerprint: String(value.fingerprint || ""),
-    length: Number(value.length) || 0
-  };
-}
-
-function recordChatResponseAuditDiagnostic(payload) {
-  const record = payload && typeof payload === "object" ? payload : {};
-  const comparison = String(record.comparison || "");
-  const profileId = String(record.profileId || "");
-  const conversationId = String(record.conversationId || "");
-  if (!profileId || !conversationId || !comparison) return;
-  const key = `${profileId}:${conversationId}`;
-  const previous = responseAuditDiagnosticState.get(key);
-  responseAuditDiagnosticState.set(key, comparison);
-  if (previous === comparison) return;
-  if (comparison === "match") {
-    if (previous && previous !== "match") {
-      diagnostic("info", "renderer", "chat-audit", "Nội dung Manager đã khớp lại với nguồn ChatGPT", {
-        action: "chat-response-audit-recovered",
-        profile_id: profileId,
-        conversation_id: conversationId,
-        request_id: String(record.requestId || ""),
-        previous_comparison: previous,
-        fetch_mode: String(record.fetchMode || ""),
-        selected_source: String(record.selectedSource || ""),
-        comparison_basis: String(record.comparisonBasis || "")
-      });
-    }
-    return;
-  }
-  const terminal = ["completed", "failed", "cancelled"].includes(String(record.networkState || "").toLowerCase());
-  const actionable = [
-    "missing_in_manager_state",
-    "manager_state_mismatch",
-    "missing_in_manager_ui",
-    "manager_ui_mismatch"
-  ].includes(comparison) || (terminal && ["source_unavailable", "source_missing_latest_assistant"].includes(comparison));
-  if (!actionable) return;
-  const basis = record?.sources?.chatgptDom?.available
-    ? record.sources.chatgptDom
-    : record?.sources?.canonical?.available
-      ? record.sources.canonical
-      : record?.sources?.networkStream || {};
-  diagnostic(comparison.includes("missing_in_manager") || comparison.includes("mismatch") ? "error" : "warn", "renderer", "chat-audit", `Sai lệch phản hồi ChatGPT: ${comparison}`, {
-    action: "chat-response-audit-mismatch",
-    profile_id: profileId,
-    conversation_id: conversationId,
-    request_id: String(record.requestId || ""),
-    comparison,
-    fetch_mode: String(record.fetchMode || ""),
-    network_state: String(record.networkState || ""),
-    selected_source: String(record.selectedSource || ""),
-    comparison_basis: String(record.comparisonBasis || ""),
-    source_message_count: Number(basis?.messageCount) || 0,
-    manager_state_message_count: Number(record?.managerState?.messageCount) || 0,
-    manager_ui_message_count: Number(record?.managerUi?.messageCount) || 0,
-    expected_assistant: responseAuditFingerprintSummary(basis?.assistantAfterLatestUser || basis?.latestAssistant),
-    manager_state_assistant: responseAuditFingerprintSummary(record?.managerState?.assistantAfterLatestUser || record?.managerState?.latestAssistant),
-    manager_ui_assistant: responseAuditFingerprintSummary(record?.managerUi?.assistantAfterLatestUser || record?.managerUi?.latestAssistant)
-  });
-}
 
 
 
