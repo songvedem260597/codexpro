@@ -349,7 +349,7 @@ const completedStreamAudit = buildChatResponseAuditRecord({
 });
 assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
 assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
-const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, browserControlWorker, server, workerJobToolsSource, httpSource, bridge, profileState, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
+const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, browserControlWorker, server, workerJobToolsSource, httpSource, bridge, profileState, managerMain, managerPreload, managerUi, managerWorkerUpdateDialog, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "tab-policy.js"), "utf8"),
@@ -364,6 +364,7 @@ const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyW
   readFile(join(root, "manager", "electron", "main.mjs"), "utf8"),
   readFile(join(root, "manager", "electron", "preload.cjs"), "utf8"),
   readFile(join(root, "manager", "src", "main.jsx"), "utf8"),
+  readFile(join(root, "manager", "src", "features", "profiles", "worker-update-confirm-modal.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "features", "chat", "chat-request-composer.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "styles.css"), "utf8"),
   readFile(join(root, "manager", "src", "diagnostic-log-view.jsx"), "utf8"),
@@ -982,7 +983,7 @@ assert.match(managerMain, /CodexPro connector bị hạ xuống chưa xác minh[
 assert.match(managerMain, /codexpro:check-profile[\s\S]*?result\?\.installed \?\? result\?\.connector_installed[\s\S]*?connector_check_diagnostic/, "automatic connector checks must log the actual installed result and selector evidence");
 assert.match(managerUi, /connectorUpdateRequired \? "Cập nhật CodexPro" : "Thêm CodexPro"/, "old profile connectors must offer an update action instead of pretending CodexPro is missing");
 assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");
-assert.match(managerUi, /className="worker-update-dialog"[\s\S]*?Cập nhật CodexPro Worker[\s\S]*?Cập nhật worker/, "Manager must render the custom worker update confirmation dialog");
+assert.match(managerWorkerUpdateDialog, /className="worker-update-dialog"[\s\S]*?Cập nhật CodexPro Worker[\s\S]*?Cập nhật worker/, "Manager must render the custom worker update confirmation dialog");
 assert.match(managerUi, /Đã update thành công.*result\.version/, "Manager must only announce update success after the backend confirms the target version");
 assert.ok(manifest.permissions.includes("debugger"));
 
