@@ -21,6 +21,17 @@ export function runningTaskRecoveryCandidates(profiles, jobs) {
     const profileId = clean(profile?.profile_id, 180);
     if (!profileId) continue;
     const matches = runningCodeJobs.filter((job) => normalizedWorkerId(job?.worker_id || job?.workerId) === normalizedWorkerId(profileId));
+    if (matches.length > 1) {
+      candidates.push({
+        profileId,
+        taskId: "",
+        job: null,
+        profile,
+        state: "blocked",
+        message: "Không thể tiếp tục: worker có nhiều task running cùng lúc, không thể chọn owner an toàn."
+      });
+      continue;
+    }
     if (!profile?.connected) {
       if (matches.length === 1) {
         candidates.push({
@@ -32,17 +43,6 @@ export function runningTaskRecoveryCandidates(profiles, jobs) {
           message: "Đang kết nối lại"
         });
       }
-      continue;
-    }
-    if (matches.length > 1) {
-      candidates.push({
-        profileId,
-        taskId: "",
-        job: null,
-        profile,
-        state: "blocked",
-        message: "Không thể tiếp tục: worker có nhiều task running cùng lúc, không thể chọn owner an toàn."
-      });
       continue;
     }
     if (matches.length !== 1) continue;
