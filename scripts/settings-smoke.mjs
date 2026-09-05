@@ -17,10 +17,10 @@ const profileStoreSource = await fs.readFile(path.resolve('scripts/workspace-pro
 if (!launcherSource.includes("from './workspace-profile-store.mjs'")) {
   throw new Error('codexpro launcher must use the extracted workspace profile store');
 }
-if (/function (?:loadWorkspaceProfile|saveWorkspaceProfile|saveRuntimeConnection|clearRuntimeConnection)\b/.test(launcherSource)) {
+if (/function (?:loadWorkspaceProfile|listWorkspaceProfiles|deleteWorkspaceProfile|saveWorkspaceProfile|saveRuntimeConnection|clearRuntimeConnection|sanitizedProfile|reusableProfilePayload)\b/.test(launcherSource)) {
   throw new Error('workspace profile/runtime persistence must not drift back into codexpro.mjs');
 }
-for (const helper of ['loadWorkspaceProfile', 'saveWorkspaceProfile', 'saveRuntimeConnection', 'clearRuntimeConnection']) {
+for (const helper of ['loadWorkspaceProfile', 'listWorkspaceProfiles', 'deleteWorkspaceProfile', 'saveWorkspaceProfile', 'saveRuntimeConnection', 'clearRuntimeConnection', 'sanitizedProfile', 'reusableProfilePayload']) {
   if (!profileStoreSource.includes(`export function ${helper}`)) throw new Error(`${helper} must stay in workspace-profile-store.mjs`);
 }
 
