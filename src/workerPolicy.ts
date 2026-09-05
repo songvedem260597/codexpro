@@ -6,6 +6,7 @@ import { codexProHome } from "./profileStore.js";
 import { saveWorkerContextCheckpoint } from "./workerContext.js";
 
 export const WORKER_POLICY_VERSION = "worker-policy-v2";
+export const WORKER_PREPARED_PLACEHOLDER_TTL_MS = 15 * 60 * 1000;
 
 export type WorkerJobKind = "general" | "code";
 export type WorkerJobTaskSize = "small" | "medium" | "large";
@@ -328,12 +329,85 @@ function event(type: string, details?: Record<string, unknown>): WorkerJobRecord
   return { at: new Date().toISOString(), type: clean(type, 100), ...(details ? { details } : {}) };
 }
 
+export function workerJobIsUninitializedPreparedPlaceholder(record: WorkerJobRecord | undefined): boolean {
+  if (!record || record.status !== "prepared") return false;
+  if (record.title || record.kind || record.workspaceId || record.startedAt) return false;
+  if (record.rulesHash || record.agentsHash || record.codexGraphActive) return false;
+  if (record.requiredObligations.length || record.completedObligations.length) return false;
+  if (record.progressSequence || record.progressReports.length || record.progressPercent) return false;
+  if (record.completedParts.length || record.remainingParts.length || record.checklist.length) return false;
+  return !record.events.some((entry) => {
+    const type = clean(entry?.type, 100).toLowerCase();
+    return type && type !== "prepared";
+  });
+}
+
+function workerJobPreparedPlaceholderAgeMs(record: WorkerJobRecord, nowMs = Date.now()): number {
+  const preparedAtMs = Date.parse(record.fifoQueuedAt || record.preparedAt || "");
+  return Number.isFinite(preparedAtMs) ? Math.max(0, nowMs - preparedAtMs) : 0;
+}
+
+function workerJobIsStalePreparedPlaceholder(
+  record: WorkerJobRecord | undefined,
+  nowMs = Date.now(),
+  ttlMs = WORKER_PREPARED_PLACEHOLDER_TTL_MS
+): boolean {
+  return Boolean(
+    workerJobIsUninitializedPreparedPlaceholder(record)
+    && record
+    && workerJobPreparedPlaceholderAgeMs(record, nowMs) >= Math.max(1, ttlMs)
+  );
+}
+
+async function discardWorkerJobIfStalePreparedPlaceholder(jobId: string, nowMs: number, ttlMs: number): Promise<boolean> {
+  let discarded = false;
+  const previous = writeTails.get(jobId) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(async () => {
+    const current = readWorkerJob(jobId);
+    if (!workerJobIsStalePreparedPlaceholder(current, nowMs, ttlMs)) return;
+    await fsp.rm(jobPath(jobId), { force: true });
+    discarded = true;
+  });
+  writeTails.set(jobId, next);
+  try {
+    await next;
+    return discarded;
+  } finally {
+    if (writeTails.get(jobId) === next) writeTails.delete(jobId);
+  }
+}
+
+export async function discardStalePreparedWorkerJobs(input: {
+  workerId: string;
+  excludeJobId?: string;
+  nowMs?: number;
+  ttlMs?: number;
+}): Promise<string[]> {
+  const ownerKey = workerOwnerKey(input.workerId);
+  if (!ownerKey) return [];
+  const excludeJobId = clean(input.excludeJobId, 40);
+  const nowMs = Number.isFinite(input.nowMs) ? Number(input.nowMs) : Date.now();
+  const ttlMs = Number.isFinite(input.ttlMs) ? Math.max(1, Number(input.ttlMs)) : WORKER_PREPARED_PLACEHOLDER_TTL_MS;
+  const candidates = listWorkerJobs({ statuses: ["prepared"], limit: 200 })
+    .filter((record) => (
+      record.jobId !== excludeJobId
+      && workerOwnerKey(record.workerId) === ownerKey
+      && workerJobIsStalePreparedPlaceholder(record, nowMs, ttlMs)
+    ));
+  const discarded: string[] = [];
+  for (const candidate of candidates) {
+    if (await discardWorkerJobIfStalePreparedPlaceholder(candidate.jobId, nowMs, ttlMs)) discarded.push(candidate.jobId);
+  }
+  return discarded;
+}
+
 export async function prepareWorkerJob(input: {
   jobId: string;
   workerId: string;
   root?: string;
   scope: WorkerJobScope;
 }): Promise<WorkerJobRecord> {
+  await discardStalePreparedWorkerJobs({ workerId: input.workerId, excludeJobId: input.jobId });
   const preparedAt = new Date().toISOString();
   return await updateWorkerJob(input.jobId, (current) => ({
     version: 1,
@@ -449,6 +523,29 @@ async function bootstrapWorkerJobRecord(input: {
   });
 }
 
+async function noteWorkerJobBootstrapRequest(input: Parameters<typeof bootstrapWorkerJobRecord>[0]): Promise<WorkerJobRecord | undefined> {
+  if (!readWorkerJob(input.jobId)) return undefined;
+  return await updateWorkerJob(input.jobId, (current) => {
+    if (!current) throw new Error("Worker job disappeared before bootstrap metadata could be saved.");
+    if (workerOwnerKey(current.workerId) !== workerOwnerKey(input.workerId)) throw new Error("Worker job owner mismatch.");
+    if (current.status !== "prepared") return current;
+    const taskSize = normalizeTaskSize(input.taskSize);
+    const alreadyNoted = current.events.some((entry) => entry.type === "bootstrap_requested");
+    return {
+      ...current,
+      title: clean(input.title, 120),
+      kind: input.kind,
+      taskSize,
+      workspaceId: clean(input.workspaceId, 160) || current.workspaceId,
+      events: alreadyNoted ? current.events : [...current.events, event("bootstrap_requested", {
+        kind: input.kind,
+        task_size: taskSize,
+        workspace_id: input.workspaceId
+      })]
+    };
+  });
+}
+
 function workerJobFifoBlocker(workerId: string, nextJobId: string): WorkerJobRecord | undefined {
   const ownerKey = workerOwnerKey(workerId);
   const current = readWorkerJob(nextJobId);
@@ -461,7 +558,12 @@ function workerJobFifoBlocker(workerId: string, nextJobId: string): WorkerJobRec
     return queuedAt < currentQueuedAt || (queuedAt === currentQueuedAt && record.jobId < nextJobId);
   };
   return listWorkerJobs({ statuses: ["prepared", "running"], limit: 200 })
-    .filter((record) => record.jobId !== nextJobId && workerOwnerKey(record.workerId) === ownerKey && precedesCurrent(record))
+    .filter((record) => (
+      record.jobId !== nextJobId
+      && workerOwnerKey(record.workerId) === ownerKey
+      && !workerJobIsStalePreparedPlaceholder(record)
+      && precedesCurrent(record)
+    ))
     .sort((left, right) => {
       if (left.status === "running" && right.status !== "running") return -1;
       if (right.status === "running" && left.status !== "running") return 1;
@@ -475,6 +577,8 @@ export async function bootstrapWorkerJob(input: Parameters<typeof bootstrapWorke
   const previous = workerBootstrapTails.get(ownerKey) ?? Promise.resolve();
   let result!: WorkerJobRecord;
   const next = previous.catch(() => undefined).then(async () => {
+    await discardStalePreparedWorkerJobs({ workerId: input.workerId, excludeJobId: input.jobId });
+    await noteWorkerJobBootstrapRequest(input);
     const blocker = workerJobFifoBlocker(input.workerId, input.jobId);
     if (blocker) {
       const error = new Error(`WORKER_JOB_FIFO_WAIT: Task ${input.jobId} remains prepared behind earlier ${blocker.status} task ${blocker.jobId}.`) as Error & { code?: string; details?: Record<string, unknown> };

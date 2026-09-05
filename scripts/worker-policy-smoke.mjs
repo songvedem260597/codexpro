@@ -12,6 +12,7 @@ assert.match(reconcileScript, /candidate\.job\.kind === "code"[\s\S]*assertWorks
 
 const {
   WORKER_POLICY_VERSION,
+  WORKER_PREPARED_PLACEHOLDER_TTL_MS,
   bootstrapWorkerJob,
   finalizeWorkerJob,
   listWorkerJobs,
@@ -22,6 +23,16 @@ const {
   workerJobPublicRecord
 } = await import("../dist/workerPolicy.js");
 const { listWorkerContextCheckpoints, MAX_WORKER_CONTEXT_CHECKPOINTS } = await import("../dist/workerContext.js");
+
+function backdateWorkerJob(jobId, ageMs) {
+  const file = path.join(home, "worker-jobs", `${jobId}.json`);
+  const record = JSON.parse(fs.readFileSync(file, "utf8"));
+  const staleAt = new Date(Date.now() - ageMs).toISOString();
+  record.preparedAt = staleAt;
+  record.fifoQueuedAt = staleAt;
+  record.updatedAt = staleAt;
+  fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+}
 
 try {
   const generalId = "cpt_111111111111111111111111";
@@ -228,8 +239,59 @@ try {
   assert.equal(reconciled.finishedAt, evidenceFinishedAt);
   assert.equal(reconciled.events.at(-1)?.type, "reconciled_completed");
 
+  const stalePlaceholderId = "cpt_aaaaaaaaaaaaaaaaaaaaaaaa";
+  const staleReplacementId = "cpt_bbbbbbbbbbbbbbbbbbbbbbbb";
+  await prepareWorkerJob({ jobId: stalePlaceholderId, workerId: "browser:chrome.fixture-stale", scope: "all_allowed" });
+  assert.equal(readWorkerJob(stalePlaceholderId)?.title, "", "a freshly prepared Manager placeholder starts without a task title");
+  backdateWorkerJob(stalePlaceholderId, WORKER_PREPARED_PLACEHOLDER_TTL_MS + 1000);
+  await prepareWorkerJob({ jobId: staleReplacementId, workerId: "chrome.fixture-stale", scope: "all_allowed" });
+  assert.equal(readWorkerJob(stalePlaceholderId), undefined, "an abandoned uninitialized prepared placeholder must be discarded before it can block a newer task");
+  const staleReplacement = await bootstrapWorkerJob({
+    jobId: staleReplacementId,
+    workerId: "chrome.fixture-stale",
+    title: "Start replacement browser task",
+    kind: "general",
+    root: "",
+    workspaceId: "",
+    scope: "all_allowed"
+  });
+  assert.equal(staleReplacement.status, "running", "the next task must start after the stale placeholder is discarded");
+  await finalizeWorkerJob({ jobId: staleReplacementId, workerId: "chrome.fixture-stale", outcome: "completed" });
+
+  const freshPlaceholderId = "cpt_dddddddddddddddddddddddd";
+  const freshFollowerId = "cpt_eeeeeeeeeeeeeeeeeeeeeeee";
+  await prepareWorkerJob({ jobId: freshPlaceholderId, workerId: "chrome.fixture-fresh", scope: "all_allowed" });
+  await prepareWorkerJob({ jobId: freshFollowerId, workerId: "chrome.fixture-fresh", scope: "all_allowed" });
+  assert.ok(readWorkerJob(freshPlaceholderId), "a fresh uninitialized placeholder must keep its short dispatch grace period");
+  await assert.rejects(
+    () => bootstrapWorkerJob({
+      jobId: freshFollowerId,
+      workerId: "chrome.fixture-fresh",
+      title: "Wait behind fresh placeholder",
+      kind: "general",
+      root: "",
+      workspaceId: "",
+      scope: "all_allowed"
+    }),
+    new RegExp(`WORKER_JOB_FIFO_WAIT:.*${freshPlaceholderId}`),
+    "a fresh placeholder must still preserve FIFO while the original ChatGPT dispatch can start"
+  );
+  await finalizeWorkerJob({ jobId: freshPlaceholderId, workerId: "chrome.fixture-fresh", outcome: "cancelled" });
+  const freshFollower = await bootstrapWorkerJob({
+    jobId: freshFollowerId,
+    workerId: "chrome.fixture-fresh",
+    title: "Wait behind fresh placeholder",
+    kind: "general",
+    root: "",
+    workspaceId: "",
+    scope: "all_allowed"
+  });
+  assert.equal(freshFollower.status, "running");
+  await finalizeWorkerJob({ jobId: freshFollowerId, workerId: "chrome.fixture-fresh", outcome: "completed" });
+
   const supersededId = "cpt_444444444444444444444444";
   const replacementId = "cpt_555555555555555555555555";
+  const laterQueuedId = "cpt_cccccccccccccccccccccccc";
   await prepareWorkerJob({ jobId: supersededId, workerId: "browser:chrome.fixture-supersede", scope: "workspace", root: "C:\\repo" });
   await bootstrapWorkerJob({
     jobId: supersededId,
@@ -256,6 +318,11 @@ try {
   );
   assert.equal(readWorkerJob(supersededId)?.status, "running", "FIFO protection must preserve the running task");
   assert.equal(readWorkerJob(replacementId)?.status, "prepared", "the newer task must remain durable and resumable in the queue");
+  assert.equal(readWorkerJob(replacementId)?.title, "Replacement browser task", "a FIFO-blocked task must persist its bootstrap title instead of remaining an empty placeholder");
+  assert.equal(readWorkerJob(replacementId)?.events.some((entry) => entry.type === "bootstrap_requested"), true, "a FIFO-blocked task must persist bootstrap-attempt evidence");
+  backdateWorkerJob(replacementId, WORKER_PREPARED_PLACEHOLDER_TTL_MS + 1000);
+  await prepareWorkerJob({ jobId: laterQueuedId, workerId: "chrome.fixture-supersede", scope: "workspace", root: "C:\\repo" });
+  assert.equal(readWorkerJob(replacementId)?.title, "Replacement browser task", "an initialized FIFO task must survive stale-placeholder cleanup even when it has waited longer than the placeholder TTL");
   await finalizeWorkerJob({ jobId: supersededId, workerId: "browser:chrome.fixture-supersede", outcome: "completed" });
   const replacement = await bootstrapWorkerJob({
     jobId: replacementId,
@@ -268,6 +335,17 @@ try {
   });
   assert.equal(replacement.status, "running");
   await finalizeWorkerJob({ jobId: replacementId, workerId: "chrome.fixture-supersede", outcome: "completed" });
+  const laterQueued = await bootstrapWorkerJob({
+    jobId: laterQueuedId,
+    workerId: "chrome.fixture-supersede",
+    title: "Run later queued task",
+    kind: "general",
+    root: "",
+    workspaceId: "",
+    scope: "workspace"
+  });
+  assert.equal(laterQueued.status, "running", "the later FIFO task must still run after the protected queued task completes");
+  await finalizeWorkerJob({ jobId: laterQueuedId, workerId: "chrome.fixture-supersede", outcome: "completed" });
 
   const largeId = "cpt_666666666666666666666666";
   await prepareWorkerJob({ jobId: largeId, workerId: "api.large", scope: "workspace", root: "C:\\repo" });
