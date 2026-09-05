@@ -45,3 +45,12 @@ export function profileChromeActionState({ profile, busy, rendererUnresponsive }
     title: open ? "Đưa profile Chrome đang mở lên trước" : "Mở một tab ChatGPT mới trong đúng Chrome profile"
   };
 }
+
+export function profileTaskSummaryState({ profile, cachedTitle, working, settling }) {
+  const currentTitle = String(profile?.current_task_title || "").trim();
+  const active = Boolean(working || settling);
+  return {
+    label: active ? "Task hiện tại" : "Task gần nhất",
+    title: currentTitle || (!active ? String(cachedTitle || "").trim() : "")
+  };
+}

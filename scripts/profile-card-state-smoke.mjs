@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "../manager/src/profile-card-state.js";
+import { existsSync, readFileSync } from "node:fs";
+import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState, profileTaskSummaryState } from "../manager/src/profile-card-state.js";
 
 assert.equal(profileCardBorderState({ connected: true, working: true, settling: false, rendererUnresponsive: false, networkState: "failed", rendererError: "", connectionInterrupted: false }), "working", "live tool activity must override a stale failed network generation");
 assert.equal(profileCardBorderState({ connected: true, working: false, settling: false, rendererUnresponsive: false, networkState: "failed", rendererError: "", connectionInterrupted: false }), "idle", "a connected idle profile must not stay red because of an old failed request");
@@ -42,5 +43,54 @@ assert.deepEqual(profileChromeActionState({ profile: newChatProfile, busy: "", r
   label: "Khôi phục tab",
   title: "Đóng tab renderer bị treo và tạo một chat ChatGPT mới"
 }, "a hung profile must offer a fresh chat instead of reopening the broken conversation");
+
+assert.deepEqual(profileTaskSummaryState({
+  profile: { current_task_title: "Sửa tên task hiện tại" },
+  cachedTitle: "Cài bản Frontline v2.2 mới",
+  working: true,
+  settling: false
+}), {
+  label: "Task hiện tại",
+  title: "Sửa tên task hiện tại"
+}, "an authoritative current task title must win over the cached previous title");
+assert.deepEqual(profileTaskSummaryState({
+  profile: { current_task_title: "" },
+  cachedTitle: "Cài bản Frontline v2.2 mới",
+  working: true,
+  settling: false
+}), {
+  label: "Task hiện tại",
+  title: ""
+}, "a working profile without an authoritative task title must not promote a stale cached title to current task");
+assert.deepEqual(profileTaskSummaryState({
+  profile: { current_task_title: "" },
+  cachedTitle: "Cài bản Frontline v2.2 mới",
+  working: false,
+  settling: true
+}), {
+  label: "Task hiện tại",
+  title: ""
+}, "a settling profile must not promote a stale cached title to current task");
+assert.deepEqual(profileTaskSummaryState({
+  profile: { current_task_title: "" },
+  cachedTitle: "Cài bản Frontline v2.2 mới",
+  working: false,
+  settling: false
+}), {
+  label: "Task gần nhất",
+  title: "Cài bản Frontline v2.2 mới"
+}, "an idle profile may still show the cached title as the most recent task");
+
+const extractedBrowserProfilesUrl = new URL("../manager/src/features/profiles/browser-profiles-section.jsx", import.meta.url);
+const profileCardUiUrl = existsSync(extractedBrowserProfilesUrl)
+  ? extractedBrowserProfilesUrl
+  : new URL("../manager/src/main.jsx", import.meta.url);
+const profileCardUiSource = readFileSync(profileCardUiUrl, "utf8");
+assert.match(profileCardUiSource, /profileTaskSummaryState/, "profile card UI must use the guarded task summary helper");
+assert.doesNotMatch(
+  profileCardUiSource,
+  /current_task_title\s*\|\|\s*(?:profileTaskLabels|taskLabels)\[/,
+  "profile card UI must not fall back from an empty live task title directly to a cached previous title"
+);
 
 console.log("✓ Profile card state smoke test passed");

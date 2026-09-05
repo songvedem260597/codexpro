@@ -39,7 +39,7 @@ import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { VISUAL_WATCHDOG_INTERVAL_MS, visualWatchdogCandidate } from "./visual-watchdog.js";
 import { chatHistoryRateLimitRecoveryCandidate } from "./chat-recovery-policy.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
-import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState } from "./profile-card-state.js";
+import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState, profileTaskSummaryState } from "./profile-card-state.js";
 import { mergeRuntimeStatus, normalizeTerminalMessageStreamProfiles, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "./ui-performance.js";
 import { ALL_ALLOWED_WORKSPACES, formatRepoActivity, ProjectDropdown } from "./project-dropdown.jsx";
 import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
@@ -4481,7 +4481,8 @@ function App() {
               const workspaceRoot = String(profile.current_workspace_root || "").trim();
               const profileProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const profileRepoLabel = String(profile.current_workspace_repo || profileProject?.githubRepo || profileProject?.name || "").trim();
-              const profileTaskLabel = String(profile.current_task_title || profileTaskLabels[profile.profile_id] || "").trim();
+              const profileTaskSummary = profileTaskSummaryState({ profile, cachedTitle: profileTaskLabels[profile.profile_id], working, settling });
+              const profileTaskLabel = profileTaskSummary.title;
               const profileJobCount = profileTaskJobsForWorker(status?.workerJobs, profile.profile_id, profile.current_task_id).length;
               const profileRepository = profileRepoLabel ? {
                 label: profileRepoLabel,
@@ -4514,7 +4515,7 @@ function App() {
                     </div>
                     {profileTaskLabel && (
                       <div className="profile-task-summary" title={profileTaskLabel}>
-                        <span>{working || settling ? "Task hi\u1ec7n t\u1ea1i" : "Task g\u1ea7n nh\u1ea5t"}</span>
+                        <span>{profileTaskSummary.label}</span>
                         <strong>{profileTaskLabel}</strong>
                       </div>
                     )}
