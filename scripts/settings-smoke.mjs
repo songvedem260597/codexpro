@@ -14,13 +14,15 @@ import {
 
 const launcherSource = await fs.readFile(path.resolve('scripts/codexpro.mjs'), 'utf8');
 const profileStoreSource = await fs.readFile(path.resolve('scripts/workspace-profile-store.mjs'), 'utf8');
+const profileStoreHelpers = ['codexProHome', 'readJsonFile', 'loadWorkspaceProfile', 'listWorkspaceProfiles', 'deleteWorkspaceProfile', 'saveWorkspaceProfile', 'saveRuntimeConnection', 'clearRuntimeConnection', 'sanitizedProfile', 'reusableProfilePayload'];
+const profileStoreHelperPattern = new RegExp(`function (?:${profileStoreHelpers.join('|')})\\b`);
 if (!launcherSource.includes("from './workspace-profile-store.mjs'")) {
   throw new Error('codexpro launcher must use the extracted workspace profile store');
 }
-if (/function (?:codexProHome|readJsonFile|loadWorkspaceProfile|listWorkspaceProfiles|deleteWorkspaceProfile|saveWorkspaceProfile|saveRuntimeConnection|clearRuntimeConnection|sanitizedProfile|reusableProfilePayload)\b/.test(launcherSource)) {
+if (profileStoreHelperPattern.test(launcherSource)) {
   throw new Error('workspace profile/runtime persistence must not drift back into codexpro.mjs');
 }
-for (const helper of ['codexProHome', 'readJsonFile', 'loadWorkspaceProfile', 'listWorkspaceProfiles', 'deleteWorkspaceProfile', 'saveWorkspaceProfile', 'saveRuntimeConnection', 'clearRuntimeConnection', 'sanitizedProfile', 'reusableProfilePayload']) {
+for (const helper of profileStoreHelpers) {
   if (!profileStoreSource.includes(`export function ${helper}`)) throw new Error(`${helper} must stay in workspace-profile-store.mjs`);
 }
 
