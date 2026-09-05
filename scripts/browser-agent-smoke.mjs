@@ -349,7 +349,7 @@ const completedStreamAudit = buildChatResponseAuditRecord({
 });
 assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
 assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
-const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, server, httpSource, bridge, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
+const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, server, httpSource, bridge, profileState, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "tab-policy.js"), "utf8"),
@@ -358,6 +358,7 @@ const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyW
   readFile(join(root, "src", "server.ts"), "utf8"),
   readFile(join(root, "src", "http.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
+  readFile(join(root, "src", "browserExtensionProfileState.ts"), "utf8"),
   readFile(join(root, "manager", "electron", "main.mjs"), "utf8"),
   readFile(join(root, "manager", "electron", "preload.cjs"), "utf8"),
   readFile(join(root, "manager", "src", "main.jsx"), "utf8"),
@@ -490,7 +491,8 @@ assert.match(bridge, /function inferProfileTaskConversationId\(profileId: string
 assert.match(bridge, /task_conversation_id: entry\.taskConversationId[\s\S]*?current_task_conversation_id: profileTaskConversationIds\.get\(profile\.id\)/, "task conversation bindings must persist and be exposed to Manager after restart");
 assert.match(bridge, /profileTaskConversationCandidateLog[\s\S]*?task_conversation_binding_source:[\s\S]*?task_conversation_candidates:/, "task registration diagnostics must preserve candidate-tab evidence for wrong-tab investigations");
 assert.match(bridge, /profile-task-events\.jsonl/, "missing task titles must leave persistent profile/session diagnostics");
-assert.match(bridge, /const PROFILE_RETENTION_MS = 24 \* 60 \* 60_000/, "browser diagnostic retention window must remain 24 hours");
+assert.match(profileState, /export const PROFILE_RETENTION_MS = 24 \* 60 \* 60_000/, "browser diagnostic retention window must remain 24 hours");
+assert.match(bridge, /from "\.\/browserExtensionProfileState\.js"/, "browser profile retention and stream state must stay in the dedicated pure-state module");
 assert.match(bridge, /function rotateDiagnosticLogIfNeeded[\s\S]*?const cutoff = Date\.now\(\) - PROFILE_RETENTION_MS[\s\S]*?mtimeMs < cutoff/, "browser diagnostic logs must prune files older than the shared retention window");
 assert.equal((bridge.match(/rotateDiagnosticLogIfNeeded\(logPath,/g) || []).length, 3, "profile, flight-recorder, and rate-limit logs must share retention-aware rotation");
 assert.match(bridge, /connector_profile_bound:[\s\S]*?connector_update_required:/, "Manager profile summaries must expose connector/profile identity state");
