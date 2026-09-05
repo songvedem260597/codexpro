@@ -52,7 +52,7 @@ export function ProfileTaskModal({ profile, jobs, resumeBusyTaskId, onClose, onR
           <strong>{workerIdle ? "Worker đang rảnh" : "Worker đang bận"}</strong>
           <small>{workerIdle ? "Có thể tiếp tục task thất bại hoặc chưa hoàn thành." : "Nút Tiếp tục sẽ tự bật khi worker trở về trạng thái rảnh."}</small>
         </div>
-        {!profileJobs.length ? <div className="empty profile-task-empty">Worker này chưa có task được lưu.</div> : (
+        {!profileJobs.length ? <div className="empty profile-task-empty">Không có task thất bại hoặc chưa hoàn thành.</div> : (
           <div className="profile-task-list">
             {profileJobs.map((job) => {
               const taskId = String(job?.job_id || job?.jobId || "");

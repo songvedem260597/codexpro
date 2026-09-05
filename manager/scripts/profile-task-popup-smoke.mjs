@@ -34,7 +34,9 @@ const jobs = [
   { job_id: "cpt_000000000000000000000003", worker_id: "profile-a", status: "running", progress_percent: 70, updated_at: "2026-09-04T03:00:00Z" },
   { job_id: "cpt_000000000000000000000005", worker_id: "profile-a", status: "prepared", progress_percent: 0, fifo_queued_at: "2026-09-04T04:00:00Z" },
   { job_id: "cpt_000000000000000000000006", worker_id: "profile-a", status: "prepared", progress_percent: 0, fifo_queued_at: "2026-09-04T05:00:00Z" },
-  { job_id: "cpt_000000000000000000000004", worker_id: "profile-b", status: "failed", progress_percent: 20, updated_at: "2026-09-04T04:00:00Z" }
+  { job_id: "cpt_000000000000000000000004", worker_id: "profile-b", status: "failed", progress_percent: 20, updated_at: "2026-09-04T04:00:00Z" },
+  { job_id: "cpt_000000000000000000000007", worker_id: "profile-a", status: "running", completion_confirmed: true, progress_percent: 100, updated_at: "2026-09-04T06:00:00Z" },
+  { job_id: "cpt_000000000000000000000008", worker_id: "profile-a", status: "blocked", progress_percent: 55, updated_at: "2026-09-04T07:00:00Z" }
 ];
 const sorted = profileTaskJobsForWorker(jobs, "profile-a", "cpt_000000000000000000000002");
 assert.deepEqual(sorted.map((job) => job.job_id), [
@@ -42,8 +44,9 @@ assert.deepEqual(sorted.map((job) => job.job_id), [
   "cpt_000000000000000000000003",
   "cpt_000000000000000000000005",
   "cpt_000000000000000000000006",
-  "cpt_000000000000000000000001"
-], "current task should stay on top, queued tasks must stay FIFO, and jobs must be filtered by worker");
+  "cpt_000000000000000000000008"
+], "popup should keep only failed/unfinished tasks for the selected worker while queued tasks stay FIFO");
+assert.equal(sorted.some((job) => job.status === "completed" || job.completion_confirmed === true), false, "completed tasks must be hidden from the popup");
 assert.equal(profileTaskCanResume(jobs[1], true), true, "failed task should resume while idle");
 assert.equal(profileTaskCanResume(jobs[1], false), false, "failed task should not resume while worker is busy");
 assert.equal(profileTaskCanResume(jobs[0], true), false, "completed task must never resume");
@@ -56,6 +59,8 @@ assert.ok(taskButtonIndex >= 0 && normalButtonsIndex > taskButtonIndex, "Task bu
 assert.match(mainSource, /<ProfileTaskModal[\s\S]*resumeBusyTaskId=\{resumeBusyTaskId\}/, "profile task popup must be rendered from App");
 assert.match(modalSource, /profileTaskCanResume\(job, workerIdle\)/, "popup must gate resume by worker idle state");
 assert.match(modalSource, /useEffect\(\(\) => \{[\s\S]*?event\.key !== "Escape"[\s\S]*?window\.addEventListener\("keydown", handleEscape\)[\s\S]*?window\.removeEventListener\("keydown", handleEscape\)/, "profile task popup must close on Escape regardless of nested focus and clean up its global listener");
+assert.match(mainSource, /profileJobCount = profileTaskJobsForWorker\(status\?\.workerJobs, profile\.profile_id, profile\.current_task_id\)\.length/, "Task badge must count only failed/unfinished jobs shown by the popup");
+assert.match(modalSource, /Không có task thất bại hoặc chưa hoàn thành\./, "empty state must describe the filtered task list");
 assert.match(electronSource, /const WORKER_JOB_HISTORY_LIMIT = 200;[\s\S]*?"worker_job_history"[\s\S]*?limit: WORKER_JOB_HISTORY_LIMIT/, "profile task popup must retain the full worker history window supported by the runtime so completed tasks do not disappear behind other profiles");
 assert.match(mainSource, /api\.resumeProfileTask\(\{ profileId: profile\.profile_id, taskId \}\)/, "popup must call the dedicated resume IPC");
 assert.match(preloadSource, /resumeProfileTask: \(payload\) => invokeResult\("codexpro:resume-profile-task", payload\)/, "preload must expose resumeProfileTask");

@@ -55,7 +55,11 @@ export function profileTaskJobsForWorker(jobs, profileId, currentTaskId = "") {
     return 6;
   };
   return (Array.isArray(jobs) ? jobs : [])
-    .filter((job) => String(job?.worker_id || job?.workerId || "") === workerId)
+    .filter((job) => (
+      String(job?.worker_id || job?.workerId || "") === workerId
+      && job?.completion_confirmed !== true
+      && RESUMABLE_TASK_STATUSES.has(normalizedStatus(job))
+    ))
     .sort((left, right) => {
       const rankDiff = rank(left) - rank(right);
       if (rankDiff) return rankDiff;

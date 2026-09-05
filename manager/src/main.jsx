@@ -25,6 +25,7 @@ import { AttachmentPreviewModal } from "./features/chat/attachment-preview-modal
 import { ChatDropdown, NEW_CHAT_TARGET } from "./features/chat/chat-dropdown.jsx";
 import { ChatRequestComposer } from "./features/chat/chat-request-composer.jsx";
 import { ProfileTaskModal } from "./features/tasks/profile-task-modal.jsx";
+import { profileTaskJobsForWorker } from "./profile-task-popup.js";
 import { WorkerUpdateConfirmModal } from "./features/profiles/worker-update-confirm-modal.jsx";
 import { InspectionModal } from "./features/projects/inspection-modal.jsx";
 import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
@@ -4406,7 +4407,7 @@ function App() {
               const profileProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
               const profileRepoLabel = String(profile.current_workspace_repo || profileProject?.githubRepo || profileProject?.name || "").trim();
               const profileTaskLabel = String(profile.current_task_title || profileTaskLabels[profile.profile_id] || "").trim();
-              const profileJobCount = (Array.isArray(status?.workerJobs) ? status.workerJobs : []).filter((job) => String(job?.worker_id || job?.workerId || "") === String(profile.profile_id || "")).length;
+              const profileJobCount = profileTaskJobsForWorker(status?.workerJobs, profile.profile_id, profile.current_task_id).length;
               const profileRepository = profileRepoLabel ? {
                 label: profileRepoLabel,
                 title: profileProject?.remoteUrl || workspaceRoot || profileRepoLabel
