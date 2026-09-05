@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import {
   profileTaskCanResume,
   profileTaskJobsForWorker,
@@ -18,6 +18,17 @@ function formatTaskTime(job) {
 }
 
 export function ProfileTaskModal({ profile, jobs, resumeBusyTaskId, onClose, onResume }) {
+  useEffect(() => {
+    const handleEscape = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [onClose]);
+
   if (!profile) return null;
   const workerIdle = profileWorkerIsIdleForTaskResume(profile);
   const currentTaskId = String(profile.current_task_id || "");
@@ -26,7 +37,7 @@ export function ProfileTaskModal({ profile, jobs, resumeBusyTaskId, onClose, onR
   const profileLabel = profile.email || profile.label || `Chrome ${String(profile.profile_id || "").slice(0, 8)}`;
 
   return (
-    <div className="modal-backdrop profile-task-modal-backdrop" role="dialog" aria-modal="true" aria-label={`Danh sách task của ${profileLabel}`} tabIndex={-1} autoFocus onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }} onMouseDown={(event) => event.target === event.currentTarget && !resumeBusyTaskId && onClose()}>
+    <div className="modal-backdrop profile-task-modal-backdrop" role="dialog" aria-modal="true" aria-label={`Danh sách task của ${profileLabel}`} onMouseDown={(event) => event.target === event.currentTarget && !resumeBusyTaskId && onClose()}>
       <div className="modal profile-task-modal">
         <div className="modal-head profile-task-modal-head">
           <div>

@@ -55,7 +55,8 @@ const normalButtonsIndex = mainSource.indexOf('className="profile-action-buttons
 assert.ok(taskButtonIndex >= 0 && normalButtonsIndex > taskButtonIndex, "Task button must be above Chat / Mở Chrome buttons");
 assert.match(mainSource, /<ProfileTaskModal[\s\S]*resumeBusyTaskId=\{resumeBusyTaskId\}/, "profile task popup must be rendered from App");
 assert.match(modalSource, /profileTaskCanResume\(job, workerIdle\)/, "popup must gate resume by worker idle state");
-assert.match(modalSource, /profile-task-modal-backdrop[\s\S]*?tabIndex=\{-1\}[\s\S]*?autoFocus[\s\S]*?event\.key === "Escape"[\s\S]*?onClose\(\)/, "profile task popup must close when Escape is pressed");
+assert.match(modalSource, /useEffect\(\(\) => \{[\s\S]*?event\.key !== "Escape"[\s\S]*?window\.addEventListener\("keydown", handleEscape\)[\s\S]*?window\.removeEventListener\("keydown", handleEscape\)/, "profile task popup must close on Escape regardless of nested focus and clean up its global listener");
+assert.match(electronSource, /const WORKER_JOB_HISTORY_LIMIT = 200;[\s\S]*?"worker_job_history"[\s\S]*?limit: WORKER_JOB_HISTORY_LIMIT/, "profile task popup must retain the full worker history window supported by the runtime so completed tasks do not disappear behind other profiles");
 assert.match(mainSource, /api\.resumeProfileTask\(\{ profileId: profile\.profile_id, taskId \}\)/, "popup must call the dedicated resume IPC");
 assert.match(preloadSource, /resumeProfileTask: \(payload\) => invokeResult\("codexpro:resume-profile-task", payload\)/, "preload must expose resumeProfileTask");
 assert.match(electronSource, /WORKER_NOT_IDLE: Chỉ có thể tiếp tục task khi worker đang ở trạng thái ĐANG RẢNH/, "backend must re-check worker idle state");

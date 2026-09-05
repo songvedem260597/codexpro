@@ -121,6 +121,7 @@ workerPluginRegistry.register(createChromeWorkerPlugin({
 const here = path.dirname(fileURLToPath(import.meta.url));
 const MANAGER_VERSION = app.getVersion();
 const MANAGER_RUN_ID = `mgr_${Date.now().toString(36)}_${randomBytes(4).toString("hex")}`;
+const WORKER_JOB_HISTORY_LIMIT = 200;
 const codexProHome = process.env.CODEXPRO_HOME
   ? path.resolve(process.env.CODEXPRO_HOME)
   : path.join(os.homedir(), ".codexpro");
@@ -2108,7 +2109,7 @@ async function collectRuntimeStatus(options = {}) {
       }),
       localMcpTool(base.config, base.token, "worker_job_history", {
         statuses: ["prepared", "running", "completed", "failed", "cancelled", "blocked"],
-        limit: 60
+        limit: WORKER_JOB_HISTORY_LIMIT
       }).then((result) => ({
         available: true,
         jobs: Array.isArray(result?.jobs) ? result.jobs : []
@@ -4094,7 +4095,7 @@ function ensureFreshRuntimeAfterManagerStart() {
       }),
       localMcpTool(base.config, base.token, "worker_job_history", {
         statuses: ["prepared", "running", "completed", "failed", "cancelled", "blocked"],
-        limit: 60
+        limit: WORKER_JOB_HISTORY_LIMIT
       }).then((result) => Array.isArray(result?.jobs) ? result.jobs : []).catch(() => [])
     ]);
     if (!profiles) {

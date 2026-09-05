@@ -29,6 +29,7 @@ assert.match(source, /const completedTasks = taskWorkerJobs\.filter[\s\S]*?taskM
 assert.match(source, /const unfinishedTasks = taskWorkerJobs\.filter[\s\S]*?taskMatchesName\(job, normalizedTaskSearch\)/, "unfinished task history must filter by task title");
 assert.ok(source.indexOf("UPDATE CENTER") < source.indexOf("TASK CENTER"), "Update Center must be the first coordination section before Task Center");
 assert.match(main, /"worker_job_history"[\s\S]*?statuses: \["prepared", "running", "completed", "failed", "cancelled", "blocked"\]/, "Manager must load queued, unfinished, and terminal task history through MCP");
+assert.equal((main.match(/limit: WORKER_JOB_HISTORY_LIMIT/g) || []).length, 2, "all Manager worker-history refresh paths must use the full durable history window");
 assert.match(main, /const countedTaskIds = new Set\(workerJobs[\s\S]*?counts_as_task === true/, "runtime status must derive Task identity from proven source changes");
 assert.match(main, /taskHangTracker\.reconcile\(taskBrowserProfiles,\s*workerJobs\)/, "task hang tracking must exclude analysis/build-only worker jobs that never changed source while using worker-job progress for stall detection");
 assert.match(main, /taskUnfinalizedIncidents\(workerJobs\.filter\(\(job\) => job\?\.counts_as_task === true\)/, "unfinalized-task diagnostics must ignore non-task worker jobs");
