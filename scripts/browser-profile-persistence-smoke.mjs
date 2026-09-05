@@ -16,75 +16,92 @@ const home = mkdtempSync(path.join(tmpdir(), 'codexpro-profile-persist-'));
 const childPath = path.join(home, 'bridge-child.mjs');
 const bridgeUrl = pathToFileURL(path.resolve('dist/browserExtensionBridge.js')).href;
 writeFileSync(childPath, `
-import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds, runBrowserExtensionCommand, setBrowserExtensionProfileTask } from ${JSON.stringify(bridgeUrl)};
+import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds, setBrowserExtensionProfileTask } from ${JSON.stringify(bridgeUrl)};
+import { runBrowserExtensionCommand } from ${JSON.stringify(bridgeUrl)};
 const mode = process.argv[2];
 const port = Number(process.env.CODEXPRO_BROWSER_EXTENSION_BRIDGE_PORT);
-const trustedOrigin = 'chrome-extension://gndipignbnipohooclcbhjliikamjlpl';
-const bridgeHeaders = (origin = trustedOrigin) => ({
-  'content-type': 'application/json',
-  'origin': origin,
-  'x-codexpro-extension': 'profile-bridge-v1'
-});
-const profilePayload = (enabled) => ({
-  profile: {
-    id: 'persist-smoke-profile',
-    email: 'persist@example.test',
-    label: 'Persist Smoke',
-    version: '0.5.105',
-    enabled,
-    worker_enabled_updated_at: Date.now(),
-    connector_server_fingerprint: 'fixture-fingerprint'
-  },
-  tabs: [],
-  recent_conversations: [
-    { id: 'conversation-0001', title: 'Recent one', updated_at: 101 },
-    { id: 'conversation-0002', title: 'Recent two', updated_at: 102 },
-    { id: 'conversation-0003', title: 'Recent three', updated_at: 103 },
-    { id: 'conversation-0004', title: 'Recent four', updated_at: 104 }
-  ]
-});
 ensureBrowserExtensionBridge();
 await new Promise(resolve => setTimeout(resolve, 80));
 if (mode === 'register' || mode === 'disable') {
   const enabled = mode === 'register';
   const response = await fetch('http://127.0.0.1:' + port + '/register', {
     method: 'POST',
-    headers: bridgeHeaders(),
-    body: JSON.stringify(profilePayload(enabled))
+    headers: {
+      'content-type': 'application/json',
+      'origin': 'chrome-extension://gndipignbnipohooclcbhjliikamjlpl',
+      'x-codexpro-extension': 'profile-bridge-v1'
+    },
+    body: JSON.stringify({
+      profile: {
+        id: 'persist-smoke-profile',
+        email: 'persist@example.test',
+        label: 'Persist Smoke',
+        version: '0.5.105',
+        enabled,
+        worker_enabled_updated_at: Date.now(),
+        connector_server_fingerprint: 'fixture-fingerprint'
+      },
+      tabs: [],
+      recent_conversations: [
+        { id: 'conversation-0001', title: 'Recent one', updated_at: 101 },
+        { id: 'conversation-0002', title: 'Recent two', updated_at: 102 },
+        { id: 'conversation-0003', title: 'Recent three', updated_at: 103 },
+        { id: 'conversation-0004', title: 'Recent four', updated_at: 104 }
+      ]
+    })
   });
   if (!response.ok) throw new Error('register failed: ' + response.status + ' ' + await response.text());
   await new Promise(resolve => setTimeout(resolve, 500));
-  if (mode === 'disable') {
-    const activate = await fetch('http://127.0.0.1:' + port + '/activate', {
-      method: 'POST',
-      headers: bridgeHeaders(),
-      body: JSON.stringify({ profile: { id: 'persist-smoke-profile' } })
-    });
-    const commandOutcome = await Promise.race([
-      runBrowserExtensionCommand('check_chatgpt', {}, 'persist-smoke-profile').then(
-        () => 'resolved',
-        (error) => 'rejected:' + String(error?.message || error)
-      ),
-      new Promise((resolve) => setTimeout(() => resolve('pending'), 150))
-    ]);
-    console.log(JSON.stringify({
-      register_status: response.status,
-      activate_status: activate.status,
-      command_outcome: commandOutcome
-    }));
-  } else {
-    console.log(JSON.stringify(await response.json()));
-  }
+  console.log(JSON.stringify(await response.json()));
 } else if (mode === 'bind-task') {
   setBrowserExtensionProfileTask('persist-smoke-profile', 'cpt_999999999999999999999999', 'Persist active profile task');
   console.log(JSON.stringify({ bound: true }));
 } else if (mode === 'untrusted-register') {
   const response = await fetch('http://127.0.0.1:' + port + '/register', {
     method: 'POST',
-    headers: bridgeHeaders('chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),
+    headers: {
+      'content-type': 'application/json',
+      'origin': 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      'x-codexpro-extension': 'profile-bridge-v1'
+    },
     body: JSON.stringify({ profile: { id: 'untrusted-profile', enabled: true, worker_enabled_updated_at: Date.now() } })
   });
   console.log(JSON.stringify({ status: response.status, body: await response.text() }));
+} else if (mode === 'disable-security') {
+  const headers = {
+    'content-type': 'application/json',
+    'origin': 'chrome-extension://gndipignbnipohooclcbhjliikamjlpl',
+    'x-codexpro-extension': 'profile-bridge-v1'
+  };
+  const register = await fetch('http://127.0.0.1:' + port + '/register', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      profile: {
+        id: 'persist-smoke-profile',
+        email: 'persist@example.test',
+        label: 'Persist Smoke',
+        version: '0.5.105',
+        enabled: false,
+        worker_enabled_updated_at: Date.now(),
+        connector_server_fingerprint: 'fixture-fingerprint'
+      },
+      tabs: []
+    })
+  });
+  const activate = await fetch('http://127.0.0.1:' + port + '/activate', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ profile: { id: 'persist-smoke-profile' } })
+  });
+  const commandOutcome = await Promise.race([
+    runBrowserExtensionCommand('check_chatgpt', {}, 'persist-smoke-profile').then(
+      () => 'resolved',
+      (error) => 'rejected:' + String(error?.message || error)
+    ),
+    new Promise((resolve) => setTimeout(() => resolve('pending'), 150))
+  ]);
+  console.log(JSON.stringify({ register_status: register.status, activate_status: activate.status, command_outcome: commandOutcome }));
 } else if (mode === 'list') {
   console.log(JSON.stringify({ profiles: listBrowserExtensionProfiles(), disabled_profile_ids: listDisabledBrowserExtensionProfileIds() }));
 } else if (mode === 'forget') {
@@ -171,24 +188,28 @@ try {
   const taskState = JSON.parse(readFileSync(path.join(home, 'browser-profile-tasks.json'), 'utf8'));
   assert.equal(taskState.profiles['persist-smoke-profile'], undefined, 'terminal task binding cleanup must be durable');
 
-  const untrusted = JSON.parse(run('untrusted-register', seed + 5));
-  assert.equal(untrusted.status, 403, 'only the signed CodexPro extension origin may access the local profile bridge');
-
-  const disabled = JSON.parse(run('disable', seed + 6));
-  assert.equal(disabled.activate_status, 409, 'a disabled profile must not become ACTIVE again');
-  assert.match(disabled.command_outcome, /^rejected:/, 'commands targeting a disabled profile must fail immediately instead of timing out');
-  assert.match(disabled.command_outcome, /disabled|đã tắt|bị tắt/i);
+  run('disable', seed + 5);
   const disabledRegistry = JSON.parse(readFileSync(path.join(home, 'browser-profiles.json'), 'utf8'));
   assert.equal(disabledRegistry.profiles[0].enabled, false, 'disabled profile metadata must be persisted');
-  const disabledSnapshot = JSON.parse(run('list', seed + 7));
+  const disabledSnapshot = JSON.parse(run('list', seed + 6));
   assert.deepEqual(disabledSnapshot.profiles, [], 'disabled profiles must stay hidden after bridge restart');
   assert.deepEqual(disabledSnapshot.disabled_profile_ids, ['persist-smoke-profile'], 'bridge snapshots must identify explicit disabled removals');
-  assert.equal(JSON.parse(run('forget', seed + 8)).forgotten, true, 'a stale profile must be removable without reconnecting its extension');
+  assert.equal(JSON.parse(run('forget', seed + 7)).forgotten, true, 'a stale profile must be removable without reconnecting its extension');
   const forgottenRegistry = JSON.parse(readFileSync(path.join(home, 'browser-profiles.json'), 'utf8'));
   assert.deepEqual(forgottenRegistry.profiles, [], 'forgetting a profile must immediately persist the empty registry');
-  const forgottenSnapshot = JSON.parse(run('list', seed + 9));
+  const forgottenSnapshot = JSON.parse(run('list', seed + 8));
   assert.deepEqual(forgottenSnapshot.profiles, [], 'a forgotten profile must stay absent after bridge restart');
   assert.deepEqual(forgottenSnapshot.disabled_profile_ids, [], 'forgetting must remove stale disabled metadata too');
+
+  run('register', seed + 9);
+  const untrusted = JSON.parse(run('untrusted-register', seed + 10));
+  assert.equal(untrusted.status, 403, 'only the signed CodexPro extension origin may access the local profile bridge');
+  const disabledSecurity = JSON.parse(run('disable-security', seed + 11));
+  assert.equal(disabledSecurity.register_status, 200, 'the trusted extension must still be able to update its own enabled state');
+  assert.equal(disabledSecurity.activate_status, 409, 'a disabled profile must not become ACTIVE again');
+  assert.match(disabledSecurity.command_outcome, /^rejected:/, 'commands targeting a disabled profile must fail immediately instead of timing out');
+  assert.match(disabledSecurity.command_outcome, /disabled|đã tắt|bị tắt/i);
+
   console.log('✓ Browser profile registry survives runtime restart and reconnect state is safe');
 } finally {
   rmSync(home, { recursive: true, force: true });
