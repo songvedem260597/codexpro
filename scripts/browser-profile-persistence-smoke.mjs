@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,7 +16,7 @@ const home = mkdtempSync(path.join(tmpdir(), 'codexpro-profile-persist-'));
 const childPath = path.join(home, 'bridge-child.mjs');
 const bridgeUrl = pathToFileURL(path.resolve('dist/browserExtensionBridge.js')).href;
 writeFileSync(childPath, `
-import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds, runBrowserExtensionCommand } from ${JSON.stringify(bridgeUrl)};
+import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds, runBrowserExtensionCommand, setBrowserExtensionProfileTask } from ${JSON.stringify(bridgeUrl)};
 const mode = process.argv[2];
 const port = Number(process.env.CODEXPRO_BROWSER_EXTENSION_BRIDGE_PORT);
 const trustedOrigin = 'chrome-extension://gndipignbnipohooclcbhjliikamjlpl';
@@ -75,6 +75,9 @@ if (mode === 'register' || mode === 'disable') {
   } else {
     console.log(JSON.stringify(await response.json()));
   }
+} else if (mode === 'bind-task') {
+  setBrowserExtensionProfileTask('persist-smoke-profile', 'cpt_999999999999999999999999', 'Persist active profile task');
+  console.log(JSON.stringify({ bound: true }));
 } else if (mode === 'untrusted-register') {
   const response = await fetch('http://127.0.0.1:' + port + '/register', {
     method: 'POST',
@@ -125,22 +128,65 @@ try {
   assert.equal(profile.extension_version, '0.5.105');
   assert.deepEqual(profile.recent_conversations, [], 'restored profile must not resurrect stale ChatGPT conversation ids before the next heartbeat');
 
-  const untrusted = JSON.parse(run('untrusted-register', seed + 2));
+  const taskId = 'cpt_999999999999999999999999';
+  const jobsDir = path.join(home, 'worker-jobs');
+  mkdirSync(jobsDir, { recursive: true });
+  const workerJobPath = path.join(jobsDir, `${taskId}.json`);
+  writeFileSync(workerJobPath, `${JSON.stringify({
+    version: 1,
+    policyVersion: 'worker-policy-v2',
+    jobId: taskId,
+    workerId: 'persist-smoke-profile',
+    status: 'running',
+    scope: 'workspace',
+    root: '',
+    title: 'Persist active profile task',
+    kind: 'general',
+    preparedAt: new Date().toISOString(),
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    agentsFiles: [],
+    codexGraphActive: false,
+    requiredObligations: ['job_title'],
+    completedObligations: ['job_title'],
+    progressSequence: 0,
+    progressReports: [],
+    progressPercent: 0,
+    completedParts: [],
+    remainingParts: [],
+    checklist: [],
+    completionConfirmed: false,
+    events: []
+  }, null, 2)}\n`, 'utf8');
+  run('bind-task', seed + 2);
+  const boundSnapshot = JSON.parse(run('list', seed + 3));
+  assert.equal(boundSnapshot.profiles.find(item => item.profile_id === 'persist-smoke-profile')?.current_task_id, taskId, 'an active durable task binding must survive bridge restart');
+  const cancelledJob = JSON.parse(readFileSync(workerJobPath, 'utf8'));
+  cancelledJob.status = 'cancelled';
+  cancelledJob.finishedAt = new Date().toISOString();
+  cancelledJob.updatedAt = cancelledJob.finishedAt;
+  writeFileSync(workerJobPath, `${JSON.stringify(cancelledJob, null, 2)}\n`, 'utf8');
+  const clearedSnapshot = JSON.parse(run('list', seed + 4));
+  assert.equal(clearedSnapshot.profiles.find(item => item.profile_id === 'persist-smoke-profile')?.current_task_id, '', 'a terminal worker job must clear its stale profile task binding after restart');
+  const taskState = JSON.parse(readFileSync(path.join(home, 'browser-profile-tasks.json'), 'utf8'));
+  assert.equal(taskState.profiles['persist-smoke-profile'], undefined, 'terminal task binding cleanup must be durable');
+
+  const untrusted = JSON.parse(run('untrusted-register', seed + 5));
   assert.equal(untrusted.status, 403, 'only the signed CodexPro extension origin may access the local profile bridge');
 
-  const disabled = JSON.parse(run('disable', seed + 3));
+  const disabled = JSON.parse(run('disable', seed + 6));
   assert.equal(disabled.activate_status, 409, 'a disabled profile must not become ACTIVE again');
   assert.match(disabled.command_outcome, /^rejected:/, 'commands targeting a disabled profile must fail immediately instead of timing out');
   assert.match(disabled.command_outcome, /disabled|đã tắt|bị tắt/i);
   const disabledRegistry = JSON.parse(readFileSync(path.join(home, 'browser-profiles.json'), 'utf8'));
   assert.equal(disabledRegistry.profiles[0].enabled, false, 'disabled profile metadata must be persisted');
-  const disabledSnapshot = JSON.parse(run('list', seed + 4));
+  const disabledSnapshot = JSON.parse(run('list', seed + 7));
   assert.deepEqual(disabledSnapshot.profiles, [], 'disabled profiles must stay hidden after bridge restart');
   assert.deepEqual(disabledSnapshot.disabled_profile_ids, ['persist-smoke-profile'], 'bridge snapshots must identify explicit disabled removals');
-  assert.equal(JSON.parse(run('forget', seed + 5)).forgotten, true, 'a stale profile must be removable without reconnecting its extension');
+  assert.equal(JSON.parse(run('forget', seed + 8)).forgotten, true, 'a stale profile must be removable without reconnecting its extension');
   const forgottenRegistry = JSON.parse(readFileSync(path.join(home, 'browser-profiles.json'), 'utf8'));
   assert.deepEqual(forgottenRegistry.profiles, [], 'forgetting a profile must immediately persist the empty registry');
-  const forgottenSnapshot = JSON.parse(run('list', seed + 6));
+  const forgottenSnapshot = JSON.parse(run('list', seed + 9));
   assert.deepEqual(forgottenSnapshot.profiles, [], 'a forgotten profile must stay absent after bridge restart');
   assert.deepEqual(forgottenSnapshot.disabled_profile_ids, [], 'forgetting must remove stale disabled metadata too');
   console.log('✓ Browser profile registry survives runtime restart and reconnect state is safe');
