@@ -141,7 +141,7 @@
           await chromeApi.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyDown', key });
           await chromeApi.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', key });
         } finally {
-          releaseDebuggerTab(tab.id);
+          releaseDebuggerTab(tab.id, target);
         }
         return { action, target_id: tab.id, key: args.key, ok: true, persistent_debugger: true };
       }

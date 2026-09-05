@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import './debugger-session-smoke.mjs';
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,6 +87,73 @@ assert.doesNotMatch(rendererProbeSource, /scripting\.executeScript|tabs\.sendMes
 const rendererWakeSource = extractFunction("ensureChatRendererReadyForSend");
 assert.match(rendererWakeSource, /probeChatRendererForSend[\s\S]*?tabs\.update\(tab\.id,\{active:true\}\)[\s\S]*?windows\.update\(tab\.windowId,\{focused:true\}\)[\s\S]*?probeChatRendererForSend/, "only an unresponsive renderer may trigger one automatic tab/window wake followed by a second pure probe");
 assert.match(rendererWakeSource, /RENDERER_NEEDS_FOREGROUND/, "a renderer that stays frozen must stop before prepare and request Manager native foreground recovery");
+
+// Execute the real Manager recovery with the nested envelope produced by the bridge/MCP.
+const recoveryStart = managerMain.indexOf("function rendererNeedsForegroundError(");
+const recoveryEnd = managerMain.indexOf("function isMissingChromeTabError(", recoveryStart);
+assert.ok(recoveryStart >= 0 && recoveryEnd > recoveryStart);
+const recoverySource = managerMain.slice(recoveryStart, recoveryEnd);
+const foregroundFailure = (overrides = {}) => Object.assign(new Error("Chrome extension action failed: RENDERER_NEEDS_FOREGROUND: frozen"), {
+  code: "RENDERER_NEEDS_FOREGROUND",
+  details: { code: "RENDERER_NEEDS_FOREGROUND", stage: "prepare", action: "send_chat_request", details: { target_id: 123 } },
+  ...overrides
+});
+async function exerciseForegroundRecovery(error, options = {}) {
+  const calls = [];
+  const focusTitles = [];
+  const send = Function("localMcpToolInSession", "focusChromeWindow", "setTimeout", `${recoverySource}; return localMcpChatSendWithRendererRecovery;`)(
+    async (_session, _tool, args) => {
+      calls.push(args);
+      if (calls.length === 1) throw error;
+      if (args.action === "activate_tab" && options.activationError) throw options.activationError;
+      if (args.renderer_native_wake_retry && options.retryError) throw options.retryError;
+      return { ok: true };
+    },
+    async (title) => { focusTitles.push(title); return { ok: options.focusOk !== false }; },
+    (callback) => callback()
+  );
+  const args = { action: "send_chat_request", profile_id: "profile-a", conversation_id: "chat-a", message: "hello", attachments: [{ name: "image.png" }], ...options.args };
+  let result;
+  let failure;
+  try { result = await send({}, { conversation_tabs: [{ id: 123, title: "Exact chat" }] }, args); }
+  catch (caught) { failure = caught; }
+  return { calls, focusTitles, result, failure, args };
+}
+const recoveredForeground = await exerciseForegroundRecovery(foregroundFailure());
+assert.equal(recoveredForeground.failure, undefined, "nested MCP error must reach native foreground recovery");
+assert.deepEqual(recoveredForeground.calls.map((call) => call.action), ["send_chat_request", "activate_tab", "send_chat_request"]);
+assert.equal(recoveredForeground.calls[1].target_id, "123");
+assert.deepEqual(recoveredForeground.focusTitles, ["Exact chat"]);
+assert.deepEqual(recoveredForeground.calls[2], { ...recoveredForeground.args, renderer_native_wake_retry: true }, "retry must preserve the original request and attachments");
+assert.equal(recoveredForeground.result.renderer_native_wake_retry, true);
+const directForeground = await exerciseForegroundRecovery(foregroundFailure({ details: { target_id: 123 } }));
+assert.equal(directForeground.calls.length, 3, "direct extension error details must remain compatible");
+for (const [label, error, options] of [
+  ["unrelated timeout", Object.assign(new Error("timeout"), { code: "TIMEOUT" }), {}],
+  ["missing target", foregroundFailure({ details: { stage: "prepare", details: {} } }), {}],
+  ["invalid target", foregroundFailure({ details: { target_id: "not-a-tab" } }), {}],
+  ["uncertain submission", foregroundFailure({ details: { stage: "submit", details: { target_id: 123 } } }), {}],
+  ["already retried", foregroundFailure(), { args: { renderer_native_wake_retry: true } }],
+  ["different action", foregroundFailure(), { args: { action: "read_chat_response" } }]
+]) {
+  const outcome = await exerciseForegroundRecovery(error, options);
+  assert.equal(outcome.failure, error, `${label}: preserve the original error`);
+  assert.equal(outcome.calls.length, 1, `${label}: must not retry`);
+  assert.equal(outcome.focusTitles.length, 0, `${label}: must not steal focus`);
+}
+const activationFailure = foregroundFailure();
+const failedActivation = await exerciseForegroundRecovery(activationFailure, { activationError: new Error("tab closed") });
+assert.equal(failedActivation.failure, activationFailure);
+assert.equal(failedActivation.calls.length, 2, "failed activation must not resend");
+assert.equal(failedActivation.focusTitles.length, 0);
+const failedFocus = await exerciseForegroundRecovery(foregroundFailure(), { focusOk: false });
+assert.equal(failedFocus.failure.code, "RENDERER_RECOVERY_FAILED");
+assert.equal(failedFocus.calls.length, 2, "failed native focus must not resend");
+const retryFailure = foregroundFailure();
+const failedRetry = await exerciseForegroundRecovery(foregroundFailure(), { retryError: retryFailure });
+assert.equal(failedRetry.failure, retryFailure);
+assert.equal(failedRetry.calls.length, 3, "a second renderer failure must not loop or send a third time");
+assert.equal(failedRetry.focusTitles.length, 1);
 
 const safeExtensionTraceEventSource = extractFunction("safeExtensionTraceEvent");
 const safeExtensionTraceEvent = Function(`${safeExtensionTraceEventSource}; return safeExtensionTraceEvent;`)();

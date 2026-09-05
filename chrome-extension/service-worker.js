@@ -86,6 +86,7 @@ const chatNetworkPostWaitersByTab = new Map();
 const chatNetworkWaitersByTab = new Map();
 const cdpNetworkTrackersByTab = new Map();
 const debuggerSessionsByTab = new Map();
+const debuggerSessionTransitionsByTab = new Map();
 const debuggerEventSubscribersByTab = new Map();
 const browserMutationTailsByTab = new Map();
 const canonicalCompletionProbeAtByTab = new Map();
@@ -3589,31 +3590,65 @@ chrome.runtime.onStartup.addListener(()=>{ensureBridgeAlarm();pollLoop();});
 chrome.alarms.onAlarm.addListener(alarm=>{if(alarm.name==='codexpro-bridge'||alarm.name==='codexpro-reconnect'){ensureBridgeAlarm();pollLoop();}});
 async function acquireDebuggerTab(tabId) {
   if(!Number.isInteger(tabId))throw new Error('Trusted input target không hợp lệ.');
-  const existing=debuggerSessionsByTab.get(tabId);
-  if(existing){
-    if(existing.detachTimer)clearTimeout(existing.detachTimer);
-    existing.detachTimer=null;
-    existing.refs+=1;
-    return existing.target;
-  }
-  const target={tabId};
-  await chrome.debugger.attach(target,'1.3');
-  debuggerSessionsByTab.set(tabId,{target,refs:1,detachTimer:null,attachedAt:Date.now(),lastUsedAt:Date.now()});
-  return target;
+  return await withDebuggerSessionTransition(tabId,async()=>{
+    const existing=debuggerSessionsByTab.get(tabId);
+    if(existing){
+      if(existing.detachTimer)clearTimeout(existing.detachTimer);
+      existing.detachTimer=null;
+      existing.refs+=1;
+      return existing.target;
+    }
+    const target={tabId};
+    let adopted=false;
+    try{await chrome.debugger.attach(target,'1.3');}
+    catch(cause){
+      if(!/another debugger is already attached/i.test(String(cause?.message||cause))){
+        throw debuggerAccessError('DEBUGGER_ATTACH_FAILED',tabId,cause);
+      }
+      // Chrome only accepts commands from the owning extension. Do not detach an unknown owner.
+      try{await promiseWithTimeout(chrome.debugger.sendCommand(target,'Target.getTargetInfo',{}),1500,'Không xác minh được phiên debugger hiện có.');adopted=true;}
+      catch(ownershipError){throw debuggerAccessError('DEBUGGER_ATTACH_CONFLICT',tabId,cause,ownershipError);}
+    }
+    debuggerSessionsByTab.set(tabId,{target,refs:1,detachTimer:null,attachedAt:Date.now(),lastUsedAt:Date.now(),adopted});
+    return target;
+  });
 }
 
-function releaseDebuggerTab(tabId) {
+async function withDebuggerSessionTransition(tabId,operation) {
+  const previous=debuggerSessionTransitionsByTab.get(tabId)||Promise.resolve();
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const tail=previous.catch(()=>{}).then(()=>gate);
+  debuggerSessionTransitionsByTab.set(tabId,tail);
+  await previous.catch(()=>{});
+  try{return await operation();}
+  finally{release();if(debuggerSessionTransitionsByTab.get(tabId)===tail)debuggerSessionTransitionsByTab.delete(tabId);}
+}
+
+function debuggerAccessError(code,tabId,cause,ownershipError) {
+  const message=code==='DEBUGGER_ATTACH_CONFLICT'
+    ? 'Tab đang có phiên debugger khác hoặc chưa xác minh được quyền sở hữu; chưa gửi tin. Đây không phải lỗi Chrome bị treo.'
+    : 'Không truy cập được debugger của tab; chưa thể kiểm tra renderer để gửi tin.';
+  const error=new Error(`${code}: ${message}`);
+  error.code=code;
+  error.details={target_id:tabId,debugger_error:String(cause?.message||cause).slice(0,500),...(ownershipError?{ownership_error:String(ownershipError?.message||ownershipError).slice(0,500)}:{})};
+  return error;
+}
+
+function releaseDebuggerTab(tabId,expectedTarget) {
   const session=debuggerSessionsByTab.get(tabId);
-  if(!session)return;
+  if(!session||(expectedTarget&&session.target!==expectedTarget))return;
   session.refs=Math.max(0,Number(session.refs||0)-1);
   session.lastUsedAt=Date.now();
   if(session.refs>0)return;
   if(session.detachTimer)clearTimeout(session.detachTimer);
   session.detachTimer=setTimeout(()=>{
-    const current=debuggerSessionsByTab.get(tabId);
-    if(!current||current.refs>0)return;
-    debuggerSessionsByTab.delete(tabId);
-    void chrome.debugger.detach(current.target).catch(()=>{});
+    void withDebuggerSessionTransition(tabId,async()=>{
+      const current=debuggerSessionsByTab.get(tabId);
+      if(current!==session||current.refs>0)return;
+      try{await chrome.debugger.detach(current.target);}
+      finally{if(debuggerSessionsByTab.get(tabId)===current)debuggerSessionsByTab.delete(tabId);}
+    }).catch(()=>{});
   },DEBUGGER_SESSION_IDLE_MS);
 }
 
@@ -3622,33 +3657,49 @@ async function releaseChatDebuggerForRecovery(tabId) {
   if(!Number.isInteger(tabId))return false;
   const tracker=cdpNetworkTrackersByTab.get(tabId);
   if(tracker){try{await tracker.cleanup();}catch{}}
-  const session=debuggerSessionsByTab.get(tabId);
-  if(!session)return Boolean(tracker);
-  if(session.detachTimer)clearTimeout(session.detachTimer);
-  debuggerSessionsByTab.delete(tabId);
-  debuggerEventSubscribersByTab.delete(tabId);
-  try{await chrome.debugger.detach(session.target);}catch{}
-  return true;
+  return await withDebuggerSessionTransition(tabId,async()=>{
+    const session=debuggerSessionsByTab.get(tabId);
+    if(!session)return Boolean(tracker);
+    if(session.refs>0)return false;
+    if(session.detachTimer)clearTimeout(session.detachTimer);
+    try{await chrome.debugger.detach(session.target);}catch{}
+    finally{if(debuggerSessionsByTab.get(tabId)===session)debuggerSessionsByTab.delete(tabId);debuggerEventSubscribersByTab.delete(tabId);}
+    return true;
+  });
 }
 
 async function withDebuggerTab(tabId,callback) {
   const target=await acquireDebuggerTab(tabId);
   try{return await callback(target);}
-  finally{releaseDebuggerTab(tabId);}
+  finally{releaseDebuggerTab(tabId,target);}
 }
 
 async function probeChatRendererForSend(tabId,timeoutMs=RENDERER_SEND_PREFLIGHT_TIMEOUT_MS) {
   const startedAt=Date.now();
   try{
-    const value=await promiseWithTimeout(withDebuggerTab(tabId,async target=>{
-      const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression:"(()=>({ready:Boolean(document.documentElement),host:location.hostname,visibility:document.visibilityState}))()",awaitPromise:false,returnByValue:true});
+    const acquisition=acquireDebuggerTab(tabId);
+    let target;
+    try{target=await promiseWithTimeout(acquisition,2500,'DEBUGGER_ACQUIRE_TIMEOUT: Chưa lấy được phiên debugger để kiểm tra renderer.');}
+    catch(error){
+      void acquisition.then(lateTarget=>releaseDebuggerTab(tabId,lateTarget),()=>{});
+      throw String(error?.code||'').startsWith('DEBUGGER_')?error:debuggerAccessError('DEBUGGER_ACQUIRE_FAILED',tabId,error);
+    }
+    let value;
+    try{
+      const evaluated=await promiseWithTimeout(chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression:"(()=>({ready:Boolean(document.documentElement),host:location.hostname,visibility:document.visibilityState}))()",awaitPromise:false,returnByValue:true}),Math.max(250,Number(timeoutMs)||RENDERER_SEND_PREFLIGHT_TIMEOUT_MS),'RENDERER_PREFLIGHT_TIMEOUT: Chrome renderer không phản hồi CDP preflight trước khi gửi.');
       if(evaluated?.exceptionDetails)throw new Error(String(evaluated.exceptionDetails.text||'Runtime.evaluate failed'));
-      return evaluated?.result?.value||null;
-    }),Math.max(250,Number(timeoutMs)||RENDERER_SEND_PREFLIGHT_TIMEOUT_MS),'RENDERER_PREFLIGHT_TIMEOUT: Chrome renderer không phản hồi CDP preflight trước khi gửi.');
+      value=evaluated?.result?.value||null;
+    }finally{releaseDebuggerTab(tabId,target);}
     const responsive=Boolean(value?.ready&&value?.host==='chatgpt.com');
     return {responsive,visibility:String(value?.visibility||''),duration_ms:Math.max(0,Date.now()-startedAt),error:responsive?'':'Renderer không trả trạng thái ChatGPT hợp lệ.'};
   }catch(error){
-    return {responsive:false,visibility:'',duration_ms:Math.max(0,Date.now()-startedAt),error:String(error?.message||error).slice(0,500)};
+    const message=String(error?.message||error);
+    if(!message.startsWith('RENDERER_PREFLIGHT_TIMEOUT:')){
+      const failure=String(error?.code||'').startsWith('DEBUGGER_')?error:debuggerAccessError('DEBUGGER_PROBE_FAILED',tabId,error);
+      failure.stage='prepare';
+      throw failure;
+    }
+    return {responsive:false,visibility:'',duration_ms:Math.max(0,Date.now()-startedAt),error:message.slice(0,500)};
   }
 }
 
@@ -3799,7 +3850,7 @@ async function stopFlightRecorderForTab(tabId) {
   if(!tracker)return false;
   flightRecorderTrackersByTab.delete(tabId);
   try{tracker.unsubscribe?.();}catch{}
-  releaseDebuggerTab(tabId);
+  releaseDebuggerTab(tabId,tracker.target);
   return true;
 }
 
@@ -3825,7 +3876,7 @@ async function ensureFlightRecorderForTab(tabId,url='') {
     }catch(error){
       if(flightRecorderTrackersByTab.get(tabId)===tracker)flightRecorderTrackersByTab.delete(tabId);
       try{unsubscribe();}catch{}
-      releaseDebuggerTab(tabId);
+      releaseDebuggerTab(tabId,target);
       throw error;
     }
   })();
@@ -3851,7 +3902,7 @@ async function withExtensionCdpTrace(tabId,args,operation) {
     chrome.debugger.sendCommand(target,'Network.enable',{}),chrome.debugger.sendCommand(target,'Runtime.enable',{}),chrome.debugger.sendCommand(target,'Log.enable',{}),chrome.debugger.sendCommand(target,'Page.enable',{}),chrome.debugger.sendCommand(target,'Page.setLifecycleEventsEnabled',{enabled:true})
   ]);
   try{const result=await operation();const traceMs=Math.max(0,Math.min(10000,Number(args.trace_ms)||750));if(traceMs)await new Promise(resolve=>setTimeout(resolve,traceMs));return {...result,cdp_trace:{started_at:new Date(startedAt).toISOString(),duration_ms:Date.now()-startedAt,event_count:events.length,truncated:events.length>=500,events}};}
-  finally{unsubscribe();releaseDebuggerTab(tabId);}
+  finally{unsubscribe();releaseDebuggerTab(tabId,target);}
 }
 
 function browserActionMutates(action,args={}) {
@@ -3887,7 +3938,7 @@ async function startCdpChatNetworkTracker(tabId) {
   if(existing)return existing;
   const target=await acquireDebuggerTab(tabId);
   try{await chrome.debugger.sendCommand(target,'Network.enable',{});}
-  catch(error){releaseDebuggerTab(tabId);throw error;}
+  catch(error){releaseDebuggerTab(tabId,target);throw error;}
   let settled=false,cleaned=false,matchedRequestId='',matchedUrl='',statusCode=0,startTimeoutId=null,maxTimeoutId=null;
   let resolveStarted;
   const started=new Promise(resolve=>{resolveStarted=resolve;});
@@ -3899,7 +3950,7 @@ async function startCdpChatNetworkTracker(tabId) {
     chrome.debugger.onEvent.removeListener(onEvent);
     chrome.debugger.onDetach.removeListener(onDetach);
     cdpNetworkTrackersByTab.delete(tabId);
-    releaseDebuggerTab(tabId);
+    releaseDebuggerTab(tabId,target);
   };
   const finishStarted=value=>{if(settled)return;settled=true;resolveStarted(value);};
   const onDetach=source=>{

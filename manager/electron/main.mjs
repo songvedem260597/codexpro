@@ -361,7 +361,7 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.121";
+const WORKER_EXTENSION_VERSION = "0.5.122";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -2912,7 +2912,12 @@ async function localMcpChatSendWithRendererRecovery(session, profile, args, time
     return await localMcpToolInSession(session, "browser_control", args, timeoutMs);
   } catch (error) {
     if (!rendererNeedsForegroundError(error)) throw error;
-    const targetId = String(error?.details?.target_id ?? "").trim();
+    // The bridge wraps the extension envelope in CodexProError.details; MCP preserves it.
+    const envelope = error?.details;
+    const recoveryDetails = envelope?.details ?? envelope;
+    if (args?.renderer_native_wake_retry || args?.action !== "send_chat_request") throw error;
+    if (envelope?.stage && envelope.stage !== "prepare") throw error;
+    const targetId = String(recoveryDetails?.target_id ?? "").trim();
     if (!/^\d+$/.test(targetId)) throw error;
     let activation;
     try {
