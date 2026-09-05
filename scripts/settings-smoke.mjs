@@ -12,6 +12,18 @@ import {
   verifyCloudflaredAsset
 } from './cloudflared-release.mjs';
 
+const launcherSource = await fs.readFile(path.resolve('scripts/codexpro.mjs'), 'utf8');
+const profileStoreSource = await fs.readFile(path.resolve('scripts/workspace-profile-store.mjs'), 'utf8');
+if (!launcherSource.includes("from './workspace-profile-store.mjs'")) {
+  throw new Error('codexpro launcher must use the extracted workspace profile store');
+}
+if (/function (?:loadWorkspaceProfile|saveWorkspaceProfile|saveRuntimeConnection|clearRuntimeConnection)\b/.test(launcherSource)) {
+  throw new Error('workspace profile/runtime persistence must not drift back into codexpro.mjs');
+}
+for (const helper of ['loadWorkspaceProfile', 'saveWorkspaceProfile', 'saveRuntimeConnection', 'clearRuntimeConnection']) {
+  if (!profileStoreSource.includes(`export function ${helper}`)) throw new Error(`${helper} must stay in workspace-profile-store.mjs`);
+}
+
 const pinnedCloudflared = cloudflaredReleaseAsset('darwin', 'arm64');
 if (
   CLOUDFLARED_VERSION !== '2026.7.2' ||

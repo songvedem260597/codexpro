@@ -36,6 +36,18 @@ import {
 } from './opencode-subagent-runner.mjs';
 import { cloudflaredOutputLevel, createRuntimeLifecycleLogger } from './runtime-lifecycle-log.mjs';
 import { superviseQuickTunnel } from './quick-tunnel-supervisor.mjs';
+import {
+  clearRuntimeConnection,
+  codexProHome,
+  deleteWorkspaceProfile,
+  listWorkspaceProfiles,
+  loadWorkspaceProfile,
+  readJsonFile,
+  reusableProfilePayload,
+  sanitizedProfile,
+  saveRuntimeConnection,
+  saveWorkspaceProfile
+} from './workspace-profile-store.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UNTRACKED_FILE_HASH_BYTES = 64 * 1024;
@@ -679,40 +691,6 @@ function commandAvailableFromRoot(command, root) {
   return executableFileExists(resolved);
 }
 
-function codexProHome() {
-  const customHome = process.env.CODEXPRO_HOME;
-  return customHome ? path.resolve(expandHome(customHome)) : path.join(os.homedir(), '.codexpro');
-}
-
-function profileDir() {
-  return path.join(codexProHome(), 'profiles');
-}
-
-function profileIdForRoot(root) {
-  return createHash('sha256').update(root).digest('hex').slice(0, 24);
-}
-
-function profilePathForRoot(root) {
-  return path.join(profileDir(), `${profileIdForRoot(root)}.json`);
-}
-
-function runtimeDir() {
-  return path.join(codexProHome(), 'runtime');
-}
-
-function runtimeStatusPathForRoot(root) {
-  return path.join(runtimeDir(), `${profileIdForRoot(root)}.json`);
-}
-
-function readJsonFile(filePath) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch (error) {
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return {};
-    throw error;
-  }
-}
-
 function managerMaxSubagentsSetting() {
   try {
     const settings = readJsonFile(path.join(codexProHome(), 'manager-settings.json'));
@@ -720,118 +698,6 @@ function managerMaxSubagentsSetting() {
   } catch {
     return 1;
   }
-}
-
-function loadWorkspaceProfile(root) {
-  const profilePath = profilePathForRoot(root);
-  if (!fs.existsSync(profilePath)) return {};
-  const profile = readJsonFile(profilePath);
-  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return {};
-  if (profile.root && profile.root !== root) return {};
-  return { ...profile, profilePath };
-}
-
-function listWorkspaceProfiles() {
-  const dir = profileDir();
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir)
-    .filter((name) => name.endsWith('.json'))
-    .map((name) => {
-      const profilePath = path.join(dir, name);
-      const profile = readJsonFile(profilePath);
-      if (!profile || typeof profile !== 'object' || Array.isArray(profile) || !profile.root) return null;
-      return { ...profile, profilePath };
-    })
-    .filter(Boolean)
-    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
-}
-
-function deleteWorkspaceProfile(root) {
-  const filePath = profilePathForRoot(root);
-  if (!fs.existsSync(filePath)) return false;
-  fs.rmSync(filePath, { force: true });
-  return true;
-}
-
-function saveWorkspaceProfile(root, profile) {
-  const dir = profileDir();
-  const filePath = profilePathForRoot(root);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const payload = {
-    version: 1,
-    root,
-    updatedAt: new Date().toISOString(),
-    ...profile
-  };
-  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
-  try {
-    fs.chmodSync(filePath, 0o600);
-  } catch {}
-  return filePath;
-}
-
-function saveRuntimeConnection(root, details, options = {}) {
-  const filePath = runtimeStatusPathForRoot(root);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const payload = {
-    version: 1,
-    root,
-    pid: process.pid,
-    runtimePid: options.runtimePid ?? null,
-    tunnelPid: options.tunnelPid ?? null,
-    updatedAt: new Date().toISOString(),
-    endpoint: details.endpoint,
-    localBase: options.localBase ?? '',
-    localStatusUrl: details.localStatusUrl ? details.localStatusUrl.replace(/codexpro_token=[^&]+/, 'codexpro_token=<redacted>') : '',
-    tunnel: options.tunnel ?? '',
-    mode: options.mode ?? '',
-    bash: options.bash ?? '',
-    bashTranscript: options.bashTranscript ?? '',
-    codexSessions: options.codexSessions ?? '',
-    bashSession: options.bashSession ?? '',
-    requireBashSession: Boolean(options.requireBashSession),
-    write: options.write ?? '',
-    toolMode: options.toolMode ?? '',
-    toolCards: Boolean(options.toolCards)
-  };
-  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
-  try {
-    fs.chmodSync(filePath, 0o600);
-  } catch {}
-  return filePath;
-}
-
-function clearRuntimeConnection(root) {
-  try {
-    const filePath = runtimeStatusPathForRoot(root);
-    const runtime = readJsonFile(filePath);
-    if (runtime?.pid === process.pid) fs.rmSync(filePath, { force: true });
-  } catch {}
-}
-
-function sanitizedProfile(profile) {
-  if (!profile || !Object.keys(profile).length) return {};
-  const { token, cloudflareToken, ...rest } = profile;
-  return {
-    ...rest,
-    ...(token ? { token: '<saved>' } : {}),
-    ...(cloudflareToken ? { cloudflareToken: '<saved>' } : {})
-  };
-}
-
-function reusableProfilePayload(profile, overrides = {}) {
-  const {
-    version,
-    root,
-    updatedAt,
-    profilePath,
-    allowedRoots,
-    ...rest
-  } = profile || {};
-  return {
-    ...rest,
-    ...overrides
-  };
 }
 
 function optionValue(args, profile, field, envNames = [], fallback = undefined) {
