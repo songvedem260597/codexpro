@@ -27,7 +27,7 @@ assert.equal(bridge.BROWSER_EXTENSION_BRIDGE_PORT, port, "the smoke bridge must 
 const state = bridge.ensureBrowserExtensionBridge();
 if (!state.server.listening) await once(state.server, "listening");
 
-const origin = "chrome-extension://flight-recorder-smoke";
+const origin = "chrome-extension://gndipignbnipohooclcbhjliikamjlpl";
 const profileId = "flight-recorder-smoke-profile";
 const taskId = "cpt_flight_recorder_smoke";
 const taskTitle = "Smoke flight recorder endpoint";
@@ -220,8 +220,6 @@ try {
   assert.equal(profile.rate_limit_latest_retry_after, "2", "profile status must expose Retry-After when ChatGPT sends it");
   assert.equal(profile.rate_limit_latest_task_id, taskId, "rate-limit status must be correlated back to the active CodexPro task");
   assert.equal(profile.rate_limit_latest_conversation_id, "12345678-abcd", "rate-limit status must be correlated to the affected conversation");
-
-
 
   const logPath = path.join(home, "browser-flight-recorder.jsonl");
   assert.equal(fs.existsSync(logPath), true, "the flight recorder must write a durable JSONL file");
