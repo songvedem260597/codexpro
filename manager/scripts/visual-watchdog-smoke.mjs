@@ -48,6 +48,7 @@ function createMockService({ judgementText }) {
   let watchdogRegistered = false;
   const closed = [];
   const resumed = [];
+  const sentChatRequests = [];
   const readyRuntimeStatus = async () => ({
     local: { ok: true },
     config: { tokenFile: "fake-token" },
@@ -87,10 +88,13 @@ function createMockService({ judgementText }) {
     openSession: async () => ({ id: "session" }),
     closeSession: async () => {},
     callTool,
-    sendChat: async () => ({ target_id: 99, conversation_id: WATCHDOG_CONVERSATION }),
+    sendChat: async (_session, _profile, args) => {
+      sentChatRequests.push(args);
+      return { target_id: 99, conversation_id: WATCHDOG_CONVERSATION };
+    },
     resumeTask
   });
-  return { service, closed, resumed };
+  return { service, closed, resumed, sentChatRequests };
 }
 
 const stuck = createMockService({ judgementText: '{"state":"STUCK","confidence":0.95,"reason":"không tiến triển"}' });
@@ -108,6 +112,7 @@ assert.deepEqual(stuck.closed, [11]);
 assert.equal(stuck.resumed.length, 1);
 assert.equal(stuck.resumed[0].taskId, TASK_ID);
 assert.equal(stuck.resumed[0].hangRecovery, true);
+assert.equal(stuck.sentChatRequests[0]?.visual_watchdog, true);
 
 const uncertain = createMockService({ judgementText: '{"state":"STUCK","confidence":0.89,"reason":"chưa chắc"}' });
 const uncertainResult = await uncertain.service.check({

@@ -64,6 +64,7 @@ const ATTACHMENT_UPLOAD_QUIET_FALLBACK_MS = 2500;
 const CONVERSATION_LIMIT_PROBE_TIMEOUT_MS = 1500;
 const PENDING_CONVERSATION_TTL_MS = 60 * 1000;
 const MAX_CHATGPT_TABS = 3;
+const MAX_TASK_CHATGPT_TABS = 2;
 const CHAT_TAB_CLEANUP_INTERVAL_MS = 30 * 1000;
 const VISUAL_WATCHDOG_STORAGE_KEY = 'codexproVisualWatchdogTabV1';
 const CHAT_TAB_HEALTH_TIMEOUT_MS = 1200;
@@ -358,19 +359,30 @@ async function serializeChatGptTabCreation(operation) {
   }
 }
 
-async function createChatGptTab(createArgs={},source='createChatGptTab') {
+async function createChatGptTab(createArgs={},source='createChatGptTab',options={}) {
   const url=String(createArgs?.url||'https://chatgpt.com/');
   if(!isChatGptTabUrl(url))return await auditedCreateTab(createArgs,`${source}:non_chat`);
+  const visualWatchdog=options.visualWatchdog===true;
   return await serializeChatGptTabCreation(async()=>{
     let current=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(tab=>Number.isInteger(tab.id));
-    if(current.length>=MAX_CHATGPT_TABS){
+    let watchdogRegistration=await visualWatchdogRegistration();
+    const registeredWatchdog=(tab)=>Boolean(tab?.id&&(watchdogRegistration.tab_id===Number(tab.id)||(watchdogRegistration.conversation_id&&conversationIdFromUrl(tab.url)===watchdogRegistration.conversation_id)));
+    let taskTabs=current.filter(tab=>!registeredWatchdog(tab));
+    const watchdogPresent=current.some(tab=>registeredWatchdog(tab));
+    const atLimit=visualWatchdog?current.length>=MAX_CHATGPT_TABS:taskTabs.length>=MAX_TASK_CHATGPT_TABS;
+    if(atLimit){
       const summaries=await tabList();
       const recentConversations=await recentConversationList(MAX_CHATGPT_TABS);
-      await cleanupChatGptTabs(summaries,recentConversations,{force:true,maxTabs:MAX_CHATGPT_TABS-1});
+      const cleanupMaxTabs=visualWatchdog?MAX_CHATGPT_TABS-1:Math.max(1,(watchdogPresent?1:0)+MAX_TASK_CHATGPT_TABS-1);
+      await cleanupChatGptTabs(summaries,recentConversations,{force:true,maxTabs:cleanupMaxTabs});
       current=(await chrome.tabs.query({url:['https://chatgpt.com/*']})).filter(tab=>Number.isInteger(tab.id));
+      watchdogRegistration=await visualWatchdogRegistration();
+      taskTabs=current.filter(tab=>!(watchdogRegistration.tab_id===Number(tab.id)||(watchdogRegistration.conversation_id&&conversationIdFromUrl(tab.url)===watchdogRegistration.conversation_id)));
     }
-    if(current.length>=MAX_CHATGPT_TABS)throw new Error(`CHAT_TAB_LIMIT_REACHED: Worker chỉ cho phép tối đa ${MAX_CHATGPT_TABS} tab ChatGPT; các tab hiện tại đều đang hoạt động hoặc được bảo vệ.`);
+    if(visualWatchdog&&current.length>=MAX_CHATGPT_TABS)throw new Error(`WATCHDOG_TAB_LIMIT_REACHED: Không còn slot riêng cho Watchdog; tối đa ${MAX_CHATGPT_TABS} tab ChatGPT.`);
+    if(!visualWatchdog&&taskTabs.length>=MAX_TASK_CHATGPT_TABS)throw new Error(`TASK_TAB_LIMIT_REACHED: Worker chỉ cho phép tối đa ${MAX_TASK_CHATGPT_TABS} tab task; slot thứ 3 được dành riêng cho Watchdog.`);
     const created=await auditedCreateTab(createArgs,source);
+    if(visualWatchdog)await registerVisualWatchdogTab(created.id,'');
     if(createArgs?.active===true&&Number.isInteger(created?.windowId)){
       try{await chrome.tabs.update(created.id,{active:true});}catch{}
       try{await chrome.windows.update(created.windowId,{focused:true});}catch{}
@@ -2517,6 +2529,7 @@ async function execute(command) {
     const text=String(args.text||'').trim();
     const attachments=Array.isArray(args.attachments)?args.attachments.slice(0,4).map(file=>({name:String(file?.name||'').trim().slice(0,255),mime_type:String(file?.mime_type||'application/octet-stream').trim().slice(0,160),data_base64:String(file?.data_base64||'')})):[];
     const newChat=Boolean(args.new_chat);
+    const visualWatchdog=Boolean(args.visual_watchdog);
     // Older live MCP runtimes can strip allow_busy_followup until they restart; Manager also sends a legacy-safe title sentinel.
     const allowBusyFollowup=Boolean(!newChat&&(args.allow_busy_followup===true||args.title==='__codexpro_allow_busy_followup__'));
     const oneShotRecovery=Boolean(args.one_shot_recovery);
@@ -2529,9 +2542,11 @@ async function execute(command) {
     if(!newChat&&conversationId&&!/^[A-Za-z0-9-]{8,160}$/.test(conversationId))throw new Error('Conversation id không hợp lệ.');
     const findTabStartedAt=Date.now();
     const tabs=await chrome.tabs.query({});
-    const conversations=tabs.filter(candidate=>candidate.id&&String(candidate.url||'').startsWith('https://chatgpt.com/c/'));
+    const watchdogRegistration=await visualWatchdogRegistration();
+    const registeredWatchdog=(candidate)=>Boolean(candidate?.id&&(watchdogRegistration.tab_id===Number(candidate.id)||(watchdogRegistration.conversation_id&&conversationIdFromUrl(candidate.url)===watchdogRegistration.conversation_id)));
+    const conversations=tabs.filter(candidate=>candidate.id&&String(candidate.url||'').startsWith('https://chatgpt.com/c/')&&(visualWatchdog||!registeredWatchdog(candidate)));
     let tab=newChat
-      ? await createChatGptTab({url:'https://chatgpt.com/',active:true},'send_chat_request_new')
+      ? await createChatGptTab({url:'https://chatgpt.com/',active:true},visualWatchdog?'send_chat_request_watchdog':'send_chat_request_new',{visualWatchdog})
       : conversationId
         ? conversations.find(candidate=>{try{return new URL(candidate.url).pathname==='/c/'+conversationId;}catch{return false;}})
         : Number.isInteger(requestedId)
@@ -2541,7 +2556,7 @@ async function execute(command) {
     if(!tab&&conversationId){
       const recent=await recentConversationList(3);
       if(!recent.some(conversation=>conversation.id===conversationId))throw new Error('Đoạn chat không còn thuộc 3 chat gần nhất của profile này.');
-      tab=await createChatGptTab({url:'https://chatgpt.com/c/'+conversationId,active:true},'send_chat_request_existing');await waitForTab(tab.id,Math.max(1000,Math.min(45000,remainingCommandMs()-2000)));tab=await chrome.tabs.get(tab.id);
+      tab=await createChatGptTab({url:'https://chatgpt.com/c/'+conversationId,active:true},visualWatchdog?'send_chat_request_watchdog_existing':'send_chat_request_existing',{visualWatchdog});await waitForTab(tab.id,Math.max(1000,Math.min(45000,remainingCommandMs()-2000)));tab=await chrome.tabs.get(tab.id);
     }
     if(!tab?.id)throw new Error('Profile này không có đoạn chat dự án đang mở.');
     sendPhaseTimings.find_tab_ms=Math.max(0,Date.now()-findTabStartedAt);

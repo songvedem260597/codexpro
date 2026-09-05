@@ -108,6 +108,7 @@ export function createVisualWatchdogService({ readyRuntimeStatus, readToken, ope
       text: prompt,
       attachments,
       new_chat: !existing,
+      visual_watchdog: true,
       allow_busy_followup: false,
       ...(existing ? { target_id: String(watchdog.targetId), conversation_id: watchdog.conversationId } : {})
     };
