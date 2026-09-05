@@ -174,6 +174,9 @@ const managerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const rendererSource = fs.readFileSync(path.join(managerRoot, "src", "main.jsx"), "utf8");
 const mainProcessSource = fs.readFileSync(path.join(managerRoot, "electron", "main.mjs"), "utf8");
 assert.match(rendererSource, /onBrowserProfiles\?\.\(\(payload\) => \{[\s\S]*?normalizeTerminalMessageStreamProfiles\(incomingProfiles, current\.workerJobs\)/, "realtime profile events must normalize terminal message-stream settling before they can overwrite corrected status");
+assert.match(mainProcessSource, /const browserProfilesRaw = normalizeTerminalMessageStreamProfiles\(browserProfileSnapshot\.profiles, workerJobs\)/, "main-process status must normalize terminal stream state before worker and hang-tracker decisions");
+assert.match(mainProcessSource, /cachedBrowserProfileForSend[\s\S]*?normalizeTerminalMessageStreamProfiles\(latestBrowserProfileStream\.profiles, latestWorkerJobs\)/, "send preflight must not inherit terminal settling from the raw realtime snapshot");
+assert.match(mainProcessSource, /activeRuntimeProfiles\(normalizeTerminalMessageStreamProfiles\(profiles, runtimeWorkerJobs\)\)/, "runtime refresh guard must not be blocked by a terminal stream banner");
 assert.match(rendererSource, /const responseMemoryCache = useRef\(new Map\(\)\)/, "recent chat transcripts must stay in renderer memory for instant revisit");
 assert.match(rendererSource, /function prefetchProfileResponseCaches\(profile\)/, "recent chat transcript caches must be prefetched before selection");
 assert.match(rendererSource, /responseMemoryCache\.current\.has\(key\)[\s\S]{0,180}await getResponseCacheEntry/, "chat hydration must use the synchronous renderer-memory path before IPC");

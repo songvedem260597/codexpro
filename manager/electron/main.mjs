@@ -33,6 +33,7 @@ import { acceptsLogicalTaskAdjustment } from "./logical-chat-task.mjs";
 import { createTaskHangTracker } from "./task-hang-tracker.mjs";
 import { ALL_ALLOWED_WORKSPACES, createManagerSettingsStore } from "./manager-settings-store.mjs";
 import { captureClipboardImage, chooseRequestFiles, materializeApiWorkerRequest, mimeTypeForFile, requestFilePreview } from "./request-attachments.mjs";
+import { normalizeTerminalMessageStreamProfiles } from "./terminal-message-stream-state.mjs";
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "codexpro-plugin",
@@ -672,11 +673,12 @@ function saveManagerChatCacheEntry(payload) {
 
 const browserProfileStreamControllers = new WeakMap();
 let latestBrowserProfileStream = { connected: false, checkedAt: "", profiles: [] };
+let latestWorkerJobs = [];
 let lastBrowserProfileStreamErrorAt = 0;
 const browserProfileDiagnosticState = new Map();
 
 function activeBrowserTaskSummaries() {
-  return (Array.isArray(latestBrowserProfileStream?.profiles) ? latestBrowserProfileStream.profiles : [])
+  return normalizeTerminalMessageStreamProfiles(latestBrowserProfileStream?.profiles, latestWorkerJobs)
     .filter((profile) => {
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
       return ["working", "completing"].includes(String(profile?.activity || "").toLowerCase())
@@ -842,7 +844,8 @@ function recordBrowserProfileTransitions(profiles, checkedAt) {
 
 function cachedBrowserProfileForSend(profileId) {
   if (!latestBrowserProfileStream.connected) return null;
-  return latestBrowserProfileStream.profiles.find((profile) => profile?.profile_id === profileId && profile?.connected) || null;
+  return normalizeTerminalMessageStreamProfiles(latestBrowserProfileStream.profiles, latestWorkerJobs)
+    .find((profile) => profile?.profile_id === profileId && profile?.connected) || null;
 }
 
 function startBrowserProfileEventStream(win) {
@@ -2102,8 +2105,9 @@ async function collectRuntimeStatus(options = {}) {
       })).catch(() => ({ available: false, jobs: [] }))
     ])
     : [{ available: false, profiles: [] }, { available: false, jobs: [] }];
-  const browserProfilesRaw = browserProfileSnapshot.profiles;
   const workerJobs = workerJobSnapshot.jobs;
+  if (workerJobSnapshot.available) latestWorkerJobs = workerJobs;
+  const browserProfilesRaw = normalizeTerminalMessageStreamProfiles(browserProfileSnapshot.profiles, workerJobs);
   const countedTaskIds = new Set(workerJobs
     .filter((job) => job?.counts_as_task === true)
     .map((job) => String(job?.job_id || ""))
@@ -4068,20 +4072,27 @@ function ensureFreshRuntimeAfterManagerStart() {
     if (!expectedBuildId || activeBuildId === expectedBuildId) {
       return { checked: true, restarted: false, reason: expectedBuildId ? "current" : "build-unavailable" };
     }
-    const profiles = await listBrowserProfilesThroughMcp(base.config, base.token).catch((error) => {
-      diagnostic("warn", "manager", "runtime", "Chưa xác minh được profile trước khi đồng bộ runtime; Manager sẽ hoãn restart", {
-        action: "runtime-build-refresh-profile-check-failed",
-        active_build_id: activeBuildId,
-        expected_build_id: expectedBuildId,
-        error
-      });
-      return null;
-    });
+    const [profiles, runtimeWorkerJobs] = await Promise.all([
+      listBrowserProfilesThroughMcp(base.config, base.token).catch((error) => {
+        diagnostic("warn", "manager", "runtime", "Chưa xác minh được profile trước khi đồng bộ runtime; Manager sẽ hoãn restart", {
+          action: "runtime-build-refresh-profile-check-failed",
+          active_build_id: activeBuildId,
+          expected_build_id: expectedBuildId,
+          error
+        });
+        return null;
+      }),
+      localMcpTool(base.config, base.token, "worker_job_history", {
+        statuses: ["prepared", "running", "completed", "failed", "cancelled", "blocked"],
+        limit: 60
+      }).then((result) => Array.isArray(result?.jobs) ? result.jobs : []).catch(() => [])
+    ]);
     if (!profiles) {
       scheduleRuntimeFreshnessRetry();
       return { checked: true, restarted: false, reason: "profile-check-failed" };
     }
-    const activeProfiles = activeRuntimeProfiles(profiles);
+    if (runtimeWorkerJobs.length) latestWorkerJobs = runtimeWorkerJobs;
+    const activeProfiles = activeRuntimeProfiles(normalizeTerminalMessageStreamProfiles(profiles, runtimeWorkerJobs));
     if (activeProfiles.length) {
       diagnostic("warn", "manager", "runtime", "Runtime CodexPro đang chạy bản cũ nhưng còn task hoạt động; Manager hoãn restart", {
         action: "runtime-build-refresh-deferred",
