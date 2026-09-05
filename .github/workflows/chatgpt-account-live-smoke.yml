@@ -1,0 +1,29 @@
+name: ChatGPT Account Bridge Live Smoke
+
+on:
+  push:
+    branches:
+      - ci/codexpro-account-smoke
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  account-smoke:
+    runs-on: [self-hosted, Windows, X64, codexpro-local]
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout smoke branch
+        uses: actions/checkout@v4
+
+      - name: Verify expected extension branch version
+        shell: powershell
+        run: |
+          $manifest = Get-Content 'chrome-extension\manifest.json' -Raw | ConvertFrom-Json
+          Write-Host "Repo extension version=$($manifest.version)"
+
+      - name: Test active ChatGPT account through CodexPro bridge
+        shell: powershell
+        run: node scripts/chatgpt-account-live-smoke.mjs
