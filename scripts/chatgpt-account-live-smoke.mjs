@@ -109,11 +109,15 @@ async function findRuntime() {
   for (const candidate of await runtimeCandidates(hints)) {
     for (const token of tokens) {
       try {
-        const response = await fetch(`${candidate.base}/health`, {
+        const response = await fetch(`${candidate.base}/healthz`, {
           headers: token ? { authorization: `Bearer ${token}` } : {},
           signal: AbortSignal.timeout(1200)
         });
-        if (response.ok) return { base: candidate.base, token };
+        if (!response.ok) continue;
+        const payload = await response.json().catch(() => null);
+        if (payload?.ok === true && payload?.name === "CodexPro") {
+          return { base: candidate.base, token };
+        }
       } catch {}
     }
   }
