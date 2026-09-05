@@ -1,0 +1,97 @@
+name: ChatGPT Local Browser Login
+
+on:
+  push:
+    branches:
+      - ci/chatgpt-local-test
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser-login:
+    runs-on: [self-hosted, Windows, X64, codexpro-local]
+    timeout-minutes: 20
+
+    steps:
+      - name: Show runner identity
+        shell: powershell
+        run: |
+          Write-Host "RUNNER_NAME=$env:RUNNER_NAME"
+          Write-Host "RUNNER_OS=$env:RUNNER_OS"
+          Write-Host "RUNNER_ARCH=$env:RUNNER_ARCH"
+          Write-Host "COMPUTERNAME=$env:COMPUTERNAME"
+          Write-Host "USERNAME=$env:USERNAME"
+
+      - name: Find Chrome
+        id: chrome
+        shell: powershell
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+            "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+            "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+          )
+
+          $chrome = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (-not $chrome) {
+            throw 'Google Chrome was not found on this PC.'
+          }
+
+          Write-Host "Chrome found."
+          "chrome=$chrome" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Open dedicated ChatGPT profile
+        shell: powershell
+        env:
+          CHROME_EXE: ${{ steps.chrome.outputs.chrome }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $profile = 'C:\chatgpt-codexpro-profile'
+          New-Item -ItemType Directory -Path $profile -Force | Out-Null
+
+          Write-Host 'Opening ChatGPT in a dedicated local Chrome profile.'
+          Write-Host 'No cookies, passwords, screenshots, page titles, or ChatGPT content are uploaded by this workflow.'
+          Write-Host 'Sign in manually in the Chrome window, then CLOSE that Chrome window when login is complete.'
+
+          $args = @(
+            "--user-data-dir=$profile",
+            '--remote-debugging-address=127.0.0.1',
+            '--remote-debugging-port=9223',
+            '--no-first-run',
+            '--no-default-browser-check',
+            'https://chatgpt.com/'
+          )
+
+          Start-Process -FilePath $env:CHROME_EXE -ArgumentList $args | Out-Null
+
+          $deadline = (Get-Date).AddSeconds(30)
+          $reachable = $false
+          while ((Get-Date) -lt $deadline) {
+            try {
+              Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:9223/json/version' -TimeoutSec 2 | Out-Null
+              $reachable = $true
+              break
+            } catch {
+              Start-Sleep -Milliseconds 500
+            }
+          }
+
+          if (-not $reachable) {
+            throw 'Chrome opened but the local debugging endpoint did not become reachable.'
+          }
+
+          Write-Host 'PASS: Chrome is running in the dedicated ChatGPT profile and the local browser endpoint is reachable.'
+          Write-Host 'Waiting for you to finish login and close this dedicated Chrome window...'
+
+          while ($true) {
+            try {
+              Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:9223/json/version' -TimeoutSec 2 | Out-Null
+              Start-Sleep -Seconds 2
+            } catch {
+              break
+            }
+          }
+
+          Write-Host 'Dedicated ChatGPT Chrome window closed. Login profile remains stored locally at C:\chatgpt-codexpro-profile.'
