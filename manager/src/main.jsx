@@ -39,6 +39,7 @@ import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
 import { VISUAL_WATCHDOG_INTERVAL_MS, visualWatchdogCandidate } from "./visual-watchdog.js";
 import { chatHistoryRateLimitRecoveryCandidate } from "./chat-recovery-policy.js";
 import { confirmChatResponseFinality } from "./chat-response-finality.js";
+import { isConversationOutsideRecentWindowError, nextValidConversationTarget } from "./chat-response-target.js";
 import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState, profileTaskSummaryState } from "./profile-card-state.js";
 import { mergeRuntimeStatus, normalizeTerminalMessageStreamProfiles, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "./ui-performance.js";
 import { ALL_ALLOWED_WORKSPACES, formatRepoActivity, ProjectDropdown } from "./project-dropdown.jsx";
@@ -516,7 +517,7 @@ function App() {
   const openChatMessages = useMemo(() => openChatResponse && chatProfileId
     ? materializeTranscriptMessages(openChatResponse, String(openChatResponse.conversationId || ""))
     : [], [chatProfileId, openChatResponse]);
-  const openChatAwaitingAssistant = transcriptAwaitingAssistant(openChatMessages);
+  const openChatAwaitingAssistant = !openChatResponse?.nonRetryable && transcriptAwaitingAssistant(openChatMessages);
   const openChatLatestMessage = openChatMessages.at(-1);
   const openChatLatestMessageKey = openChatLatestMessage
     ? `${openChatLatestMessage.id || "message"}:${openChatLatestMessage.role || ""}:${String(openChatLatestMessage.text || "").length}`
@@ -3934,6 +3935,7 @@ function App() {
             responseReady,
             finalityPending,
             finalityReason: finality.reason,
+            nonRetryable: false,
             responseSource: incomingResponseSource,
             responseAudit,
             responseAuditFetchMode,
@@ -3953,9 +3955,33 @@ function App() {
       return result;
     } catch (err) {
       const message = err?.message || String(err);
+      const outsideRecentWindow = isConversationOutsideRecentWindowError(message);
+      const activeTaskId = String(profile?.current_task_id || "");
+      const activeTask = (status?.workerJobs || []).find((job) => (
+        String(job?.job_id || job?.jobId || "") === activeTaskId
+        && ["prepared", "running"].includes(String(job?.status || ""))
+      ));
+      const requestedConversationOwnsActiveTask = Boolean(
+        activeTask
+        && String(profile?.current_task_conversation_id || "") === conversationId
+      );
+      const fallbackConversationId = outsideRecentWindow && !requestedConversationOwnsActiveTask
+        ? nextValidConversationTarget(profile, conversationId)
+        : "";
       logRendererDiagnostic(api, "error", "chat", `Đọc phản hồi thất bại: ${message}`, { action: "load-response", profile_id: profile.profile_id, conversation_id: conversationId, read_dom: readDom, recover_stale_dom: recoverStaleDom, canonical_only: canonicalOnly, silent, error: err });
+      if (fallbackConversationId) {
+        requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: fallbackConversationId };
+        requestTargetReasons.current.set(profile.profile_id, "stale_conversation_fallback");
+        setRequestTargets((current) => ({ ...current, [profile.profile_id]: fallbackConversationId }));
+        setRequestResponses((current) => ({
+          ...current,
+          [profile.profile_id]: { visible: true, loading: false, transcriptLoading: true, error: "", conversationId: fallbackConversationId, text: "", messages: [], nonRetryable: false }
+        }));
+        window.setTimeout(() => void hydrateCachedResponse(profile, fallbackConversationId), 0);
+        return null;
+      }
       setRequestResponses((current) => responseTargetStillCurrent()
-        ? { ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: false, transcriptLoading: false, error: message, conversationId } }
+        ? { ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: false, transcriptLoading: false, error: message, conversationId, nonRetryable: outsideRecentWindow } }
         : current);
       if (!silent && responseTargetStillCurrent()) setError(message);
       return null;

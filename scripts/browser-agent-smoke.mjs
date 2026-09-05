@@ -507,7 +507,7 @@ assert.match(bridge, /connector_profile_bound:[\s\S]*?connector_update_required:
 assert.match(bridge, /loadBrowserProfileTasks\(\)/, "profile task titles must load when the bridge starts");
 assert.match(bridge, /persistBrowserProfileTasks\(\)/, "AI task titles must persist after begin_repo_task");
 assert.match(bridge, /LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS = 125_000[\s\S]*?action === "audit_long_running_chat"[\s\S]*?LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS/, "the extension bridge must allow the bounded reload, replacement, and probe sequence to finish");
-assert.ok(managerUi.includes('working || settling ? "Task hi\\u1ec7n t\\u1ea1i" : "Task g\\u1ea7n nh\\u1ea5t"'), "Manager must retain the last AI task title after completion");
+assert.match(managerUi, /const profileTaskSummary = profileTaskSummaryState\(\{ profile, cachedTitle: profileTaskLabels\[profile\.profile_id\], working, settling \}\);[\s\S]*?const profileTaskLabel = profileTaskSummary\.title;[\s\S]*?<span>\{profileTaskSummary\.label\}<\/span>[\s\S]*?<strong>\{profileTaskLabel\}<\/strong>/, "Manager must retain the last AI task title after completion through the shared profile task summary state");
 assert.match(managerMain, /const MANAGER_VERSION = app\.getVersion\(\)/, "MCP client metadata must use the packaged Manager version");
 assert.match(managerUi, /CodexPro Manager \{managerPackage\.version\}/, "Manager footer must use package.json instead of a stale hard-coded version");
 assert.doesNotMatch(managerUi, /CodexPro Manager 0\.2\.\d+/, "Manager UI must not hard-code a release version");

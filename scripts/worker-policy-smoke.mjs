@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -19,6 +20,7 @@ const {
   prepareWorkerJob,
   readWorkerJob,
   reconcileCompletedWorkerJob,
+  reconcileWorkerJobWorkspaceStatus,
   reportWorkerJobProgress,
   workerJobPublicRecord
 } = await import("../dist/workerPolicy.js");
@@ -288,6 +290,57 @@ try {
   });
   assert.equal(freshFollower.status, "running");
   await finalizeWorkerJob({ jobId: freshFollowerId, workerId: "chrome.fixture-fresh", outcome: "completed" });
+
+  const driftedId = "cpt_888888888888888888888888";
+  const driftedRoot = fs.mkdtempSync(path.join(home, "workspace-drift-"));
+  await prepareWorkerJob({ jobId: driftedId, workerId: "chrome.fixture-drift", scope: "workspace", root: driftedRoot });
+  await bootstrapWorkerJob({
+    jobId: driftedId,
+    workerId: "chrome.fixture-drift",
+    title: "Reconcile cancelled workspace task",
+    kind: "code",
+    root: driftedRoot,
+    workspaceId: "ws_drift",
+    scope: "workspace",
+    rulesHash: "rules",
+    agentsHash: "agents",
+    codexGraphActive: true
+  });
+  const canonicalDriftedRoot = fs.realpathSync.native(path.resolve(driftedRoot));
+  const workspaceIdentity = process.platform === "win32" ? canonicalDriftedRoot.toLowerCase() : canonicalDriftedRoot;
+  const workspaceKey = createHash("sha256").update(workspaceIdentity).digest("hex").slice(0, 32);
+  const workspaceFinishedAt = new Date().toISOString();
+  fs.mkdirSync(path.join(home, "workspace-coordination"), { recursive: true });
+  fs.writeFileSync(path.join(home, "workspace-coordination", `${workspaceKey}.json`), `${JSON.stringify({
+    version: 1,
+    root: canonicalDriftedRoot,
+    updatedAt: workspaceFinishedAt,
+    tasks: {
+      [driftedId]: {
+        taskId: driftedId,
+        workerId: "chrome.fixture-drift",
+        title: "Reconcile cancelled workspace task",
+        status: "cancelled",
+        baseHead: "",
+        baseBranch: "win",
+        baseRemoteHead: "",
+        initialDirtyPaths: [],
+        touchedPaths: [],
+        claimedPaths: [],
+        commitShas: [],
+        integrationStatus: "idle",
+        startedAt: workspaceFinishedAt,
+        updatedAt: workspaceFinishedAt,
+        finishedAt: workspaceFinishedAt
+      }
+    },
+    claims: {},
+    integrationQueue: []
+  }, null, 2)}\n`, "utf8");
+  assert.equal(readWorkerJob(driftedId)?.status, "cancelled", "workspace terminal state must override a stale running worker-job snapshot");
+  assert.equal(listWorkerJobs({ statuses: ["running"], limit: 200 }).some((job) => job.jobId === driftedId), false, "a workspace-cancelled task must not block the worker FIFO");
+  await reconcileWorkerJobWorkspaceStatus(driftedId);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home, "worker-jobs", `${driftedId}.json`), "utf8")).status, "cancelled", "workspace reconciliation must durably repair the worker-job file");
 
   const supersededId = "cpt_444444444444444444444444";
   const replacementId = "cpt_555555555555555555555555";

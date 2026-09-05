@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { codexProHome } from "./profileStore.js";
 import { saveWorkerContextCheckpoint } from "./workerContext.js";
+import { readWorkspaceCoordination } from "./workspaceCoordination.js";
 
 export const WORKER_POLICY_VERSION = "worker-policy-v2";
 export const WORKER_PREPARED_PLACEHOLDER_TTL_MS = 15 * 60 * 1000;
@@ -266,7 +267,7 @@ function normalizeRecord(value: unknown): WorkerJobRecord | undefined {
   };
 }
 
-export function readWorkerJob(jobId: string): WorkerJobRecord | undefined {
+function readWorkerJobFile(jobId: string): WorkerJobRecord | undefined {
   try {
     const parsed = JSON.parse(fs.readFileSync(jobPath(jobId), "utf8"));
     return normalizeRecord(parsed);
@@ -274,6 +275,41 @@ export function readWorkerJob(jobId: string): WorkerJobRecord | undefined {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
     return undefined;
   }
+}
+
+function reconcileWorkerJobRecordWithWorkspace(record: WorkerJobRecord | undefined): WorkerJobRecord | undefined {
+  if (!record || !["prepared", "running"].includes(record.status) || record.kind !== "code" || !record.root) return record;
+  try {
+    const workspaceTask = readWorkspaceCoordination(record.root).tasks[record.jobId];
+    if (!workspaceTask || !["completed", "failed", "cancelled"].includes(workspaceTask.status)) return record;
+    if (workerOwnerKey(workspaceTask.workerId) !== workerOwnerKey(record.workerId)) return record;
+    const status = workspaceTask.status as "completed" | "failed" | "cancelled";
+    const finishedAt = workspaceTask.finishedAt || workspaceTask.updatedAt || new Date().toISOString();
+    const completionConfirmed = status === "completed";
+    const alreadyRecorded = record.events.some((entry) => entry.type === "workspace_status_reconciled" && entry.details?.status === status);
+    return {
+      ...record,
+      status,
+      finishedAt,
+      updatedAt: workspaceTask.updatedAt || finishedAt,
+      progressPercent: completionConfirmed ? 100 : record.progressPercent,
+      remainingParts: completionConfirmed ? [] : record.remainingParts,
+      completionConfirmed,
+      completionConfirmedAt: completionConfirmed ? finishedAt : undefined,
+      completionEvidence: completionConfirmed ? record.completionEvidence || "workspace_coordination" : undefined,
+      events: alreadyRecorded ? record.events : [...record.events, {
+        at: new Date().toISOString(),
+        type: "workspace_status_reconciled",
+        details: { status, workspace_finished_at: finishedAt }
+      }]
+    };
+  } catch {
+    return record;
+  }
+}
+
+export function readWorkerJob(jobId: string): WorkerJobRecord | undefined {
+  return reconcileWorkerJobRecordWithWorkspace(readWorkerJobFile(jobId));
 }
 
 export function listWorkerJobs(options: { statuses?: WorkerJobStatus[]; limit?: number } = {}): WorkerJobRecord[] {
@@ -310,7 +346,7 @@ async function updateWorkerJob(jobId: string, update: (current: WorkerJobRecord 
   let result!: WorkerJobRecord;
   const previous = writeTails.get(jobId) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(async () => {
-    result = normalizeRecord(update(readWorkerJob(jobId)))!;
+    result = normalizeRecord(update(reconcileWorkerJobRecordWithWorkspace(readWorkerJobFile(jobId))))!;
     if (!result) throw new Error("Worker job update produced an invalid record.");
     result.updatedAt = new Date().toISOString();
     result.events = result.events.slice(-MAX_EVENTS);
@@ -323,6 +359,17 @@ async function updateWorkerJob(jobId: string, update: (current: WorkerJobRecord 
   } finally {
     if (writeTails.get(jobId) === next) writeTails.delete(jobId);
   }
+}
+
+export async function reconcileWorkerJobWorkspaceStatus(jobId: string): Promise<WorkerJobRecord | undefined> {
+  const current = readWorkerJob(jobId);
+  if (!current) return undefined;
+  const stored = readWorkerJobFile(jobId);
+  if (stored?.status === current.status && stored?.finishedAt === current.finishedAt) return current;
+  return await updateWorkerJob(jobId, (record) => {
+    if (!record) throw new Error("Worker job was not prepared.");
+    return record;
+  });
 }
 
 function event(type: string, details?: Record<string, unknown>): WorkerJobRecord["events"][number] {

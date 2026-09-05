@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CodexProError } from "./guard.js";
+import { readWorkerJob, reconcileWorkerJobWorkspaceStatus } from "./workerPolicy.js";
 import { createRuntimeTraceContext, currentRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import {
   browserProfilePersistenceSnapshot,
@@ -491,6 +492,7 @@ function profileTaskConversationCandidateLog(profileId: string): string {
 }
 
 function loadBrowserProfileTasks(): void {
+  let discardedInactiveTask = false;
   try {
     const parsed = JSON.parse(fs.readFileSync(browserProfileTaskStatePath(), "utf8")) as {
       profiles?: Record<string, {
@@ -512,11 +514,16 @@ function loadBrowserProfileTasks(): void {
       const updatedAt = String(value?.updated_at || "").trim();
       if (/^cpt_[a-f0-9]{24}$/.test(taskId) && taskTitle.length >= 4 && taskTitle.length <= 56) {
         const wordCount = taskTitle.split(/\s+/).filter(Boolean).length;
-        if (wordCount >= 2 && wordCount <= 6) {
+        const workerJob = readWorkerJob(taskId);
+        const workerOwner = String(workerJob?.workerId || "").replace(/^browser:/, "");
+        if (wordCount >= 2 && wordCount <= 6 && workerJob && ["prepared", "running"].includes(workerJob.status) && workerOwner === profileId) {
           profileTaskIds.set(profileId, taskId);
           profileTaskTitles.set(profileId, taskTitle);
           if (/^[A-Za-z0-9-]{8,160}$/.test(taskConversationId)) profileTaskConversationIds.set(profileId, taskConversationId);
           profileTaskUpdatedAt.set(profileId, updatedAt || new Date(0).toISOString());
+        } else if (wordCount >= 2 && wordCount <= 6) {
+          discardedInactiveTask = true;
+          void reconcileWorkerJobWorkspaceStatus(taskId).catch(() => undefined);
         }
       }
       const pendingTaskId = String(value?.pending_task_id || "").trim();
@@ -532,9 +539,33 @@ function loadBrowserProfileTasks(): void {
         });
       }
     }
+    if (discardedInactiveTask) persistBrowserProfileTasks();
   } catch {
     // Missing or malformed state must not prevent the local bridge from starting.
   }
+}
+
+function discardInactiveBrowserProfileTasks(): void {
+  let changed = false;
+  for (const [profileId, taskId] of profileTaskIds) {
+    const workerJob = readWorkerJob(taskId);
+    if (!workerJob) continue;
+    const workerOwner = String(workerJob.workerId || "").replace(/^browser:/, "");
+    if (["prepared", "running"].includes(workerJob.status) && workerOwner === profileId) continue;
+    profileTaskIds.delete(profileId);
+    profileTaskTitles.delete(profileId);
+    profileTaskConversationIds.delete(profileId);
+    profileTaskUpdatedAt.delete(profileId);
+    changed = true;
+    void reconcileWorkerJobWorkspaceStatus(taskId).catch(() => undefined);
+    recordBrowserProfileTaskEvent("profile_task_binding_cleared", {
+      profile_id: profileId,
+      task_id: taskId,
+      worker_job_status: workerJob?.status || "missing",
+      reason: "task_not_active"
+    });
+  }
+  if (changed) persistBrowserProfileTasks();
 }
 
 function persistBrowserProfileTasks(): void {
@@ -1083,6 +1114,7 @@ export function ensureBrowserExtensionBridge(options: BrowserExtensionBridgeOpti
 
 export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
   const state = ensureBrowserExtensionBridge();
+  discardInactiveBrowserProfileTasks();
   const now = Date.now();
   pruneExpiredProfiles(state, now);
   const visibleProfiles = [...state.profiles.values()]

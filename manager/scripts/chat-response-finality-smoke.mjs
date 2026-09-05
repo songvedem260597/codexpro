@@ -2,8 +2,31 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { confirmChatResponseFinality } from "../src/chat-response-finality.js";
+import { isConversationOutsideRecentWindowError, nextValidConversationTarget } from "../src/chat-response-target.js";
 import { canAcceptNextChatMessage, shouldShowChatSettling } from "../src/chat-status.js";
 import { replaceCanonicalTranscript } from "../src/chat-transcript.js";
+
+assert.equal(
+  isConversationOutsideRecentWindowError("Chrome extension action failed: Đoạn chat không còn thuộc 3 chat gần nhất của profile này."),
+  true,
+  "the deterministic stale-conversation failure must be classified as non-retryable"
+);
+assert.equal(
+  nextValidConversationTarget({
+    recent_conversations: [{ id: "recent-0001" }],
+    conversation_tabs: [{ active: true, url: "https://chatgpt.com/c/active-0002" }]
+  }),
+  "active-0002",
+  "a stale conversation must fall back to the active open chat before a merely recent chat"
+);
+assert.equal(
+  nextValidConversationTarget({
+    recent_conversations: [{ id: "recent-0001" }, { id: "recent-0003" }],
+    conversation_tabs: [{ active: true, url: "https://chatgpt.com/c/active-0002" }]
+  }, "active-0002"),
+  "recent-0001",
+  "fallback selection must never return the conversation that just failed"
+);
 
 const fragmentSignature = JSON.stringify(["user:1", "assistant:1", "52:fragment", ""]);
 const fullSignature = JSON.stringify(["user:1", "assistant:1", "1755:full", ""]);
