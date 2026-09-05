@@ -11,6 +11,17 @@ const secret = "sk-" + "A".repeat(36);
 const requests = [];
 let completionTurn = 0;
 
+async function waitForWorkerToSettle(registry, workerId, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  let state = await registry.invoke("read", workerId);
+  while (state.activity === "working" && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    state = await registry.invoke("read", workerId);
+  }
+  assert.notEqual(state.activity, "working", `${workerId} did not settle within ${timeoutMs}ms`);
+  return state;
+}
+
 const server = http.createServer(async (req, res) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -318,12 +329,7 @@ try {
     text: "Trả lời trong repo."
   });
   assert.equal(accepted.accepted, true);
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const state = await registry.invoke("read", "api:fixture-api");
-    if (state.activity !== "working") break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  const after = await registry.invoke("read", "api:fixture-api");
+  const after = await waitForWorkerToSettle(registry, "api:fixture-api");
   assert.equal(after.activity, "idle");
   assert.equal(after.task_title, "Trả lời yêu cầu API");
   assert.equal(after.result.text, "API worker hoàn tất.");
@@ -352,10 +358,7 @@ try {
     text: "Nhắn tiếp trong cùng repo."
   });
   assert.equal(continued.accepted, true);
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if ((await registry.invoke("read", "api:fixture-api")).activity !== "working") break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
+  await waitForWorkerToSettle(registry, "api:fixture-api");
   assert.equal(apiProviderInputs.at(-1).messages.some((message) => message.role === "assistant" && message.content === "API worker hoàn tất."), true, "Nhắn tiếp must preserve the previous worker response in the same repo");
 
   const rejectedLifecycle = [];

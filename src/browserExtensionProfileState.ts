@@ -31,6 +31,16 @@ export interface BrowserExtensionStreamUpdate {
   activity_text: string;
 }
 
+function conversationIdFromChatGptUrl(value: unknown): string {
+  try {
+    const url = new URL(String(value ?? ""));
+    if (url.origin !== "https://chatgpt.com") return "";
+    return url.pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})(?:\/|$)/)?.[1] ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export function normalizeRecentConversations(value: unknown): Array<Record<string, unknown>> {
   return (Array.isArray(value) ? value : [])
     .filter((conversation) => conversation && typeof conversation === "object" && !Array.isArray(conversation))
@@ -109,11 +119,25 @@ export function mergeBrowserExtensionStreamBatch(
     const recordId = Math.max(0, Number(stream.record_id) || 0);
     const revision = Math.max(0, Number(stream.revision) || 0);
     if (!recordId || !revision) continue;
+
+    const streamConversationId = String(stream.conversation_id ?? "").trim().slice(0, 180);
+    const tabConversationId = conversationIdFromChatGptUrl(tab.url);
+    if (streamConversationId && tabConversationId && streamConversationId !== tabConversationId) continue;
+
     const currentRecordId = Math.max(0, Number(tab.network_stream_record_id) || 0);
     const currentRevision = Math.max(0, Number(tab.network_stream_revision) || 0);
-    if (currentRecordId === recordId && revision <= currentRevision) continue;
+    const currentConversationId = String(tab.network_stream_conversation_id ?? "").trim().slice(0, 180);
+    const conversationChanged = Boolean(
+      streamConversationId
+      && currentConversationId
+      && streamConversationId !== currentConversationId
+    );
+    if (!conversationChanged && recordId < currentRecordId) continue;
+    if (!conversationChanged && currentRecordId === recordId && revision <= currentRevision) continue;
+
     tab.network_stream_record_id = recordId;
     tab.network_stream_revision = revision;
+    tab.network_stream_conversation_id = streamConversationId || tabConversationId || currentConversationId;
     tab.network_stream_text = String(stream.text ?? "").slice(0, 200_000);
     tab.network_stream_event_count = Math.max(0, Number(stream.event_count) || 0);
     tab.network_stream_updated_at = String(stream.updated_at ?? "").slice(0, 64);
@@ -132,7 +156,7 @@ export function mergeBrowserExtensionStreamBatch(
     updates.push({
       profile_id: profile,
       tab_id: tabId,
-      conversation_id: String(stream.conversation_id ?? "").slice(0, 180),
+      conversation_id: streamConversationId,
       record_id: recordId,
       revision,
       text: String(tab.network_stream_text ?? ""),

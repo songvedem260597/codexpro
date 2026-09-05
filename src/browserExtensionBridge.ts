@@ -670,7 +670,7 @@ function trustedConnectorRequest(req: IncomingMessage): boolean {
 
 function setCors(req: IncomingMessage, res: ServerResponse): void {
   const origin = extensionOrigin(req);
-  if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+  if (origin === CODEXPRO_EXTENSION_ORIGIN) res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CodexPro-Extension");
   res.setHeader("Access-Control-Allow-Private-Network", "true");
@@ -681,7 +681,7 @@ function allowedRequest(req: IncomingMessage): boolean {
   if (!isLoopbackAddress(req.socket.remoteAddress)) return false;
   const host = String(req.headers.host ?? "").toLowerCase();
   if (host !== `${BRIDGE_HOST}:${BROWSER_EXTENSION_BRIDGE_PORT}` && host !== `localhost:${BROWSER_EXTENSION_BRIDGE_PORT}`) return false;
-  return Boolean(extensionOrigin(req)) && req.headers["x-codexpro-extension"] === "profile-bridge-v1";
+  return trustedConnectorRequest(req) && req.headers["x-codexpro-extension"] === "profile-bridge-v1";
 }
 
 function sendJson(req: IncomingMessage, res: ServerResponse, status: number, value: unknown): void {
@@ -761,7 +761,19 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     profile.enabled = source.enabled !== false;
     profile.enabledUpdatedAt = incomingEnabledUpdatedAt;
   }
-  if (!profile.enabled && state.activeProfileId === id) state.activeProfileId = undefined;
+  if (!profile.enabled) {
+    if (state.activeProfileId === id) state.activeProfileId = undefined;
+    for (const command of profile.queued.splice(0)) {
+      const pending = state.pending.get(command.id);
+      if (!pending) continue;
+      clearPendingCommandTimers(pending);
+      state.pending.delete(command.id);
+      pending.reject(new CodexProError(`Chrome profile ${profile.label || id} is disabled.`, {
+        code: "PROFILE_DISABLED",
+        details: { profile_id: id }
+      }));
+    }
+  }
   profile.email = String(source.email ?? profile.email ?? "").trim().slice(0, 320);
   profile.label = String(source.label ?? profile.label ?? profile.email ?? `Chrome ${id.slice(0, 8)}`).trim().slice(0, 320);
   profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
@@ -951,7 +963,7 @@ function syncWaiters(state: BridgeState): void {
 async function handleRequest(state: BridgeState, req: IncomingMessage, res: ServerResponse): Promise<void> {
   setCors(req, res);
   if (req.method === "OPTIONS") {
-    if (!extensionOrigin(req)) {
+    if (!trustedConnectorRequest(req)) {
       res.statusCode = 403;
       res.end();
       return;
@@ -968,6 +980,13 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
   const body = await readJson(req);
   if (req.url === "/activate") {
     const profile = profileFromBody(state, body);
+    if (!profile.enabled) {
+      if (state.activeProfileId === profile.id) state.activeProfileId = undefined;
+      scheduleProfileNotification(state);
+      syncWaiters(state);
+      sendJson(req, res, 409, { error: "Browser extension profile is disabled.", profile_id: profile.id });
+      return;
+    }
     state.activeProfileId = profile.id;
     scheduleProfileNotification(state);
     syncWaiters(state);
@@ -1043,7 +1062,7 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
 
   if (req.url === "/poll") {
     const profile = profileFromBody(state, body);
-    if (body.active === true && !state.activeProfileId) state.activeProfileId = profile.id;
+    if (profile.enabled && body.active === true && !state.activeProfileId) state.activeProfileId = profile.id;
     const queuedCommand = nextLiveCommand(state, profile);
     if (queuedCommand) {
       sendJson(req, res, 200, { command: queuedCommand, active_profile_id: state.activeProfileId ?? null });
@@ -1563,6 +1582,12 @@ async function runBrowserExtensionCommandCore(
   const profile = state.profiles.get(selectedId);
   if (!profile) {
     throw new CodexProError("The selected Chrome profile bridge is offline. Open that profile and verify the CodexPro extension is enabled.");
+  }
+  if (!profile.enabled) {
+    throw new CodexProError(`Chrome profile ${profile.label || profile.id} is disabled.`, {
+      code: "PROFILE_DISABLED",
+      details: { profile_id: profile.id }
+    });
   }
   const waitingForReconnect = Date.now() - profile.lastSeen > PROFILE_TTL_MS;
   const timeoutMs = action === "setup_chatgpt"

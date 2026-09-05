@@ -3,9 +3,15 @@ import { reconcileRunningTaskGates, runningTaskRecoveryCandidates } from "../ele
 
 const profile = { profile_id: "profile-a", connected: true };
 const running = { job_id: "cpt_aaaaaaaaaaaaaaaaaaaaaaaa", worker_id: "profile-a", status: "running", kind: "code", title: "Resume running task safely" };
+const secondRunning = { ...running, job_id: "cpt_bbbbbbbbbbbbbbbbbbbbbbbb" };
 assert.equal(runningTaskRecoveryCandidates([profile], [running]).length, 1);
 assert.equal(runningTaskRecoveryCandidates([{ ...profile, connected: false }], [running])[0]?.message, "Đang kết nối lại");
-assert.match(runningTaskRecoveryCandidates([profile], [running, { ...running, job_id: "cpt_bbbbbbbbbbbbbbbbbbbbbbbb" }])[0]?.message || "", /Không thể tiếp tục/);
+assert.match(runningTaskRecoveryCandidates([profile], [running, secondRunning])[0]?.message || "", /Không thể tiếp tục/);
+const disconnectedAmbiguous = runningTaskRecoveryCandidates([{ ...profile, connected: false }], [running, secondRunning]);
+assert.equal(disconnectedAmbiguous.length, 1, "an offline worker with multiple running tasks must remain visible to recovery diagnostics");
+assert.equal(disconnectedAmbiguous[0]?.state, "blocked");
+assert.equal(disconnectedAmbiguous[0]?.taskId, "");
+assert.match(disconnectedAmbiguous[0]?.message || "", /nhiều task running/);
 
 let transientAttempts = 0;
 const transientStates = [];
