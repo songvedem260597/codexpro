@@ -385,7 +385,7 @@
 .codexgraph-empty { display: grid; gap: 5px; margin-top: 16px; border-color: #314153; background: #101720; color: #7f8da0; }
 .codexgraph-empty strong { color: #cbd5df; }
 
-.modal.codexgraph-modal { width: min(1600px, 98vw); height: min(940px, 96vh); max-height: 96vh; overflow: auto; padding: 18px; }
+.modal.codexgraph-modal { width: min(1600px, calc(100vw - 60px)); height: min(940px, calc(100vh - 60px)); max-height: calc(100vh - 60px); overflow: auto; padding: 18px; }
 .codexgraph-modal .modal-head { position: sticky; top: -18px; z-index: 12; margin: -18px -18px 0; padding: 16px 18px 13px; border-bottom: 1px solid #252f3a; background: #11151df4; backdrop-filter: blur(12px); }
 .codexgraph-modal .modal-head h2 { margin-bottom: 0; }
 .codexgraph-modal .inspection-grid { margin-top: 14px; }

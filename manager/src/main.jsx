@@ -25,6 +25,8 @@ import { AttachmentPreviewModal } from "./features/chat/attachment-preview-modal
 import { ChatDropdown, NEW_CHAT_TARGET } from "./features/chat/chat-dropdown.jsx";
 import { ChatRequestComposer } from "./features/chat/chat-request-composer.jsx";
 import { ProfileTaskModal } from "./features/tasks/profile-task-modal.jsx";
+import { WorkerUpdateConfirmModal } from "./features/profiles/worker-update-confirm-modal.jsx";
+import { InspectionModal } from "./features/projects/inspection-modal.jsx";
 import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
 import { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, recordResponseScroll, responseScrollMetrics, scheduleResponseAutoResume, scrollResponseToTurnAnchor as applyResponseTurnAnchor } from "./chat-scroll.js";
 import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, latestTurnHasProvisionalAssistant, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
@@ -46,7 +48,7 @@ import { synchronizeWorkerBorderAnimations } from "./worker-border-sync.js";
 
 const loadResponseMarkdownModule = () => import("./response-markdown.jsx");
 const ResponseText = React.lazy(() => loadResponseMarkdownModule().then((module) => ({ default: module.ResponseText })));
-const CodeGraphView = React.lazy(() => import("./code-graph-view.jsx").then((module) => ({ default: module.CodeGraphView })));
+
 const ControlCenter = React.lazy(() => import("./control-center.jsx").then((module) => ({ default: module.ControlCenter })));
 const api = window.codexpro;
 const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
@@ -4671,50 +4673,16 @@ function App() {
 
       <AttachmentPreviewModal preview={attachmentPreview} onClose={() => setAttachmentPreview(null)} />
 
-      {workerUpdateConfirmOpen && (
-        <div className="modal-backdrop worker-update-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setWorkerUpdateConfirmOpen(false)}>
-          <div className="worker-update-dialog" role="dialog" aria-modal="true" aria-labelledby="worker-update-title">
-            <div className="worker-update-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" focusable="false">
-                <path d="M12 3v12m0 0 4-4m-4 4-4-4" />
-                <path d="M5 17v2h14v-2" />
-              </svg>
-            </div>
-            <div className="worker-update-copy">
-              <p className="eyebrow">WORKER UPDATE</p>
-              <h2 id="worker-update-title">Cập nhật CodexPro Worker</h2>
-              <p>Cập nhật <strong>{profileSummary.reload} worker đang rảnh</strong> lên phiên bản <code>{WORKER_EXTENSION_VERSION}</code>.</p>
-              {profileSummary.deferredUpdate > 0 && <p className="worker-update-note">{profileSummary.deferredUpdate} worker đang làm việc sẽ được giữ nguyên để không gián đoạn task.</p>}
-            </div>
-            <div className="worker-update-actions">
-              <button type="button" className="button ghost" onClick={() => setWorkerUpdateConfirmOpen(false)}>Hủy</button>
-              <button type="button" className="button primary" onClick={() => void reloadProfiles()}>Cập nhật worker</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <WorkerUpdateConfirmModal
+        open={workerUpdateConfirmOpen}
+        reloadCount={profileSummary.reload}
+        deferredUpdateCount={profileSummary.deferredUpdate}
+        workerVersion={WORKER_EXTENSION_VERSION}
+        onClose={() => setWorkerUpdateConfirmOpen(false)}
+        onConfirm={() => void reloadProfiles()}
+      />
 
-      {inspection && (
-        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setInspection(null)}>
-          <div className="modal codexgraph-modal">
-            <div className="modal-head"><div><p className="eyebrow">MCP INSPECTION</p><h2>{inspection.project.name}</h2></div><button onClick={() => setInspection(null)}>×</button></div>
-            <div className="inspection-grid">
-              <div><small>Workspace ID</small><code>{inspection.result.workspace_id || "—"}</code></div>
-              <div><small>Root</small><code>{inspection.result.root || inspection.project.root}</code></div>
-            </div>
-            <React.Suspense fallback={<div className="codexgraph-loading">Đang tải Code Graph…</div>}>
-              <CodeGraphView graphData={inspection.result.codexgraph} />
-            </React.Suspense>
-            <details className="codexgraph-raw-details">
-              <summary>Chi tiết workspace / Git / cây dự án</summary>
-              <h3>Git status</h3>
-            <pre>{inspection.result.git_status || "Working tree sạch hoặc không có dữ liệu."}</pre>
-            <h3>Cây dự án</h3>
-              <pre>{inspection.result.tree || inspection.result.tree_text || "CodexPro đã mở workspace thành công."}</pre>
-            </details>
-          </div>
-        </div>
-      )}
+      <InspectionModal inspection={inspection} onClose={() => setInspection(null)} />
 
       {toast && (
         <div className="toast" role="status" aria-live="polite">
