@@ -1,6 +1,9 @@
 name: Browser Bridge Account Smoke
 
 on:
+  push:
+    branches:
+      - codex/worker-plugin-architecture
   workflow_dispatch:
 
 permissions:
