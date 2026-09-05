@@ -32,7 +32,17 @@ import { registerReturnToManagerShortcut, RETURN_TO_MANAGER_ACCELERATOR } from "
 import { acceptsLogicalTaskAdjustment } from "./logical-chat-task.mjs";
 import { createTaskHangTracker } from "./task-hang-tracker.mjs";
 import { ALL_ALLOWED_WORKSPACES, createManagerSettingsStore } from "./manager-settings-store.mjs";
-import { captureClipboardImage, chooseRequestFiles, materializeApiWorkerRequest, mimeTypeForFile, requestFilePreview } from "./request-attachments.mjs";
+import {
+  captureClipboardImage,
+  chooseRequestFiles,
+  materializeApiWorkerRequest,
+  MAX_REQUEST_ATTACHMENT_BYTES,
+  MAX_REQUEST_ATTACHMENTS,
+  MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES,
+  mimeTypeForFile,
+  requestFilePreview,
+  requestFileSummary
+} from "./request-attachments.mjs";
 import { normalizeTerminalMessageStreamProfiles } from "./terminal-message-stream-state.mjs";
 
 protocol.registerSchemesAsPrivileged([{

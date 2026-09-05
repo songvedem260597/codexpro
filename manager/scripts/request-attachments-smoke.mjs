@@ -3,7 +3,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { materializeApiWorkerRequest, mimeTypeForFile, requestFilePreview } from "../electron/request-attachments.mjs";
+import { fileURLToPath } from "node:url";
+
+import {
+  materializeApiWorkerRequest,
+  MAX_REQUEST_ATTACHMENT_BYTES,
+  MAX_REQUEST_ATTACHMENTS,
+  MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES,
+  mimeTypeForFile,
+  requestFilePreview,
+  requestFileSummary
+} from "../electron/request-attachments.mjs";
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-request-attachments-"));
 
@@ -13,6 +23,18 @@ try {
 
   assert.equal(mimeTypeForFile(markdownPath), "text/markdown");
   assert.equal(mimeTypeForFile(path.join(temp, "archive.unknown")), "application/octet-stream");
+  assert.equal(MAX_REQUEST_ATTACHMENTS, 4);
+  assert.equal(MAX_REQUEST_ATTACHMENT_BYTES, 8 * 1024 * 1024);
+  assert.equal(MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES, 10 * 1024 * 1024);
+  assert.equal(requestFileSummary(markdownPath).name, "notes.md");
+
+  const managerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const mainProcessSource = fs.readFileSync(path.join(managerRoot, "electron", "main.mjs"), "utf8");
+  assert.match(
+    mainProcessSource,
+    /import \{[\s\S]*?MAX_REQUEST_ATTACHMENT_BYTES,[\s\S]*?MAX_REQUEST_ATTACHMENTS,[\s\S]*?MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES,[\s\S]*?requestFileSummary[\s\S]*?\} from "\.\/request-attachments\.mjs";/,
+    "Chrome request attachment preflight must import every symbol extracted from the main process"
+  );
 
   const preview = await requestFilePreview(markdownPath);
   assert.equal(preview.kind, "text");

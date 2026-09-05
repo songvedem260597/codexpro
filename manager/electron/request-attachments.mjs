@@ -4,9 +4,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MAX_REQUEST_ATTACHMENTS = 4;
-const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
-const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
+export const MAX_REQUEST_ATTACHMENTS = 4;
+export const MAX_REQUEST_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+export const MAX_REQUEST_ATTACHMENTS_TOTAL_BYTES = 10 * 1024 * 1024;
 const MAX_REQUEST_TEXT_PREVIEW_BYTES = 512 * 1024;
 
 export function mimeTypeForFile(filePath) {
@@ -22,7 +22,7 @@ export function mimeTypeForFile(filePath) {
   })[extension] || "application/octet-stream";
 }
 
-function requestFileSummary(filePath) {
+export function requestFileSummary(filePath) {
   const resolved = path.resolve(String(filePath || ""));
   const stat = fs.statSync(resolved);
   if (!stat.isFile()) throw new Error(`Không phải file hợp lệ: ${path.basename(resolved)}`);
