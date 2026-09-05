@@ -349,12 +349,13 @@ const completedStreamAudit = buildChatResponseAuditRecord({
 });
 assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
 assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
-const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, server, httpSource, bridge, profileState, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
+const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, browserControlWorker, server, httpSource, bridge, profileState, managerMain, managerPreload, managerUi, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "tab-policy.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "network-policy.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "response-policy.js"), "utf8"),
+  readFile(join(root, "chrome-extension", "service-worker", "browser-control.js"), "utf8"),
   readFile(join(root, "src", "server.ts"), "utf8"),
   readFile(join(root, "src", "http.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
@@ -573,11 +574,11 @@ assert.match(worker, /const DEBUGGER_SESSION_IDLE_MS = 30000/);
 assert.match(worker, /const debuggerSessionsByTab = new Map\(\)/);
 assert.match(worker, /async function acquireDebuggerTab/);
 assert.match(worker, /function releaseDebuggerTab/);
-assert.match(worker, /persistent_debugger:true/);
-assert.match(worker, /if\(action==='batch'\)/);
-assert.match(worker, /if\(action==='wait_for'\)/);
-assert.match(worker, /if\(action==='inspect_element'\)/);
-assert.match(worker, /if\(action==='evaluate'\)/);
+assert.match(browserControlWorker, /persistent_debugger: true/);
+assert.match(browserControlWorker, /if \(action === 'batch'\)/);
+assert.match(browserControlWorker, /if \(action === 'wait_for'\)/);
+assert.match(browserControlWorker, /if \(action === 'inspect_element'\)/);
+assert.match(browserControlWorker, /if \(action === 'evaluate'\)/);
 assert.match(worker, /WORKER_BUSY:/, "extension reload must refuse while a worker is generating");
 assert.match(worker, /reconcileChatNetworkCompletion/, "canonical/stream completion must reconcile stuck network state");
 assert.match(worker, /networkStream\.completed/, "stream completion must end a generation without waiting for CDP loadingFinished");
@@ -634,17 +635,20 @@ assert.match(worker, /subscribeDebuggerEvents/);
 assert.match(worker, /withExtensionCdpTrace/);
 assert.match(worker, /url\.searchParams\.set\(key,'<redacted>'\)/, "extension trace must redact query values");
 assert.match(worker, /serializeBrowserTabMutation/);
-assert.match(worker, /Page\.captureScreenshot/);
-assert.doesNotMatch(worker, /chrome\.tabs\.captureVisibleTab/, "extension screenshots must not activate/capture the foreground tab");
+assert.match(worker, /CodexProBrowserControl[\s\S]*?executeBrowserControlOnTab/, "generic browser actions must stay behind the extracted browser-control seam");
+assert.doesNotMatch(worker, /const executeOnTab=async/, "generic browser action dispatch must not drift back into service-worker.js");
+assert.match(browserControlWorker, /function createBrowserControlExecutor[\s\S]*?const executeOnTab = async/, "the browser-control module must own generic per-tab action dispatch");
+assert.match(browserControlWorker, /Page\.captureScreenshot/);
+assert.doesNotMatch(worker + "\n" + browserControlWorker, /chrome\.tabs\.captureVisibleTab/, "extension screenshots must not activate/capture the foreground tab");
 assert.doesNotMatch(worker, /composer_html|connector_debug/, "generic snapshots must not contain ChatGPT-specific diagnostics");
 assert.match(worker, /chatNetworkPostWaitersByTab/, "attachment upload waits must subscribe to network events");
 const attachmentWait = worker.slice(worker.indexOf("async function waitForAttachmentUploadNetwork"), worker.indexOf("async function ensureChatNetworkStateLoaded"));
 assert.doesNotMatch(attachmentWait, /setTimeout\(resolve,100\)/, "attachment upload waits must not poll every 100 ms");
 assert.match(attachmentWait, /isRecoverableAttachmentUploadAbort/, "library reuse ERR_ABORTED must be treated as a recoverable branch while waiting for definitive upload evidence");
-const extensionBatch = worker.slice(worker.indexOf("if(action==='batch')"), worker.indexOf("if(action==='snapshot')"));
+const extensionBatch = browserControlWorker.slice(browserControlWorker.indexOf("if (action === 'batch')"), browserControlWorker.indexOf("if (action === 'snapshot')"));
 assert.match(extensionBatch, /executeOnTab/);
 assert.doesNotMatch(extensionBatch, /await execute\(/, "extension batch must not resolve the tab again per step");
-assert.doesNotMatch(worker, /if\(action==='press'\)\{\s*const target=\{tabId:tab\.id\};await chrome\.debugger\.attach/, "press must not attach/detach a fresh debugger session per action");
+assert.doesNotMatch(browserControlWorker, /if \(action === 'press'\)[\s\S]*?chromeApi\.debugger\.attach/, "press must not attach/detach a fresh debugger session per action");
 
 const openProfileChat = managerMain.slice(managerMain.indexOf("async function openProfileChat"), managerMain.indexOf("async function reloadChromeProfiles"));
 assert.match(openProfileChat, /const cachedActiveTabFocusEligible = Boolean\([\s\S]*?selectionReason === "focus_only_active_tab"[\s\S]*?activeTargetId === targetId[\s\S]*?cached_active_window_focus_ms[\s\S]*?runtime_connection_source: "native-active-tab"/, "Mở Chrome must native-focus a known active tab without waiting for a congested MCP session");
