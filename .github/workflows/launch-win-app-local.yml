@@ -1,37 +1,50 @@
-name: Launch Win App Local
+name: Launch Win TEST App Local
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - win
-    paths:
-      - .github/workflows/launch-win-app-local.yml
 
 jobs:
-  launch-win-app:
-    name: Launch CodexPro Manager on local PC
+  launch-win-test-app:
+    name: Launch CodexPro Manager WIN TEST on local PC
     runs-on: self-hosted
     timeout-minutes: 5
 
     steps:
-      - name: Launch detached app
+      - name: Launch detached WIN TEST app
         shell: powershell
         run: |
-          $exe = Join-Path $env:LOCALAPPDATA 'CodexProWinBuild\win-unpacked\CodexPro Manager.exe'
-          if (-not (Test-Path $exe)) { throw "Built app not found: $exe" }
+          $testRoot = Join-Path $env:LOCALAPPDATA 'CodexProWinTest'
+          $exe = Join-Path $testRoot 'win-unpacked\CodexPro Manager WIN TEST.exe'
+          $oldTestExe = Join-Path $env:LOCALAPPDATA 'CodexProWinBuild\win-unpacked\CodexPro Manager.exe'
+          if (-not (Test-Path $exe)) { throw "WIN TEST build not found: $exe" }
 
+          # Stop only preview/test copies. Never touch an installed CodexPro Manager.
           Get-Process | Where-Object {
-            try { $_.Path -eq $exe } catch { $false }
+            try { $_.Path -eq $exe -or $_.Path -eq $oldTestExe } catch { $false }
           } | Stop-Process -Force -ErrorAction SilentlyContinue
 
+          $env:CODEXPRO_HOME = Join-Path $testRoot 'profile-home'
           $env:RUNNER_TRACKING_ID = ''
           Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe)
           Start-Sleep -Seconds 5
 
           $running = Get-Process | Where-Object {
             try { $_.Path -eq $exe } catch { $false }
-          } | Select-Object -First 1
-          if (-not $running) { throw 'CodexPro Manager did not stay running.' }
+          }
+          if (-not $running) { throw 'CodexPro Manager WIN TEST did not stay running.' }
 
-          Write-Host "CODEXPRO_WIN_LAUNCH status=PASS pid=$($running.Id) exe=$exe"
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class CodexProWinTestWindow {
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+            public static extern bool SetWindowText(IntPtr hWnd, string text);
+          }
+          '@
+
+          $windowProcess = $running | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+          if ($windowProcess) {
+            [CodexProWinTestWindow]::SetWindowText($windowProcess.MainWindowHandle, 'CodexPro Manager - WIN TEST') | Out-Null
+          }
+
+          Write-Host "CODEXPRO_WIN_TEST_LAUNCH status=PASS exe=$exe data=$env:CODEXPRO_HOME"
