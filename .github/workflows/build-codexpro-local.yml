@@ -52,3 +52,5 @@ jobs:
           ) | Set-Content -Encoding utf8 (Join-Path $dest 'build-info.txt')
 
           Write-Host "CODEXPRO_BUILD dist=PASS package=$package destination=$dest"
+
+# manual trigger 2026-09-06
