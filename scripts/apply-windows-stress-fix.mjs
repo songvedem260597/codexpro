@@ -3,34 +3,22 @@ import fs from 'node:fs/promises';
 const bashPath = 'src/bashOps.ts';
 const ciPath = '.github/workflows/ci.yml';
 
-const oldShellArgs = `function shellArgs(command: string): string[] {
-  if (process.platform === "win32") {
-    const encoded = Buffer.from(command, "utf16le").toString("base64");
-    return ["/d", "/s", "/c", \`powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand \${encoded}\`];
-  }
-  return ["-lc", command];
-}`;
-
-const newShellArgs = `function shellArgs(command: string): string[] {
-  if (process.platform === "win32") {
-    // In PowerShell a quoted executable path is a string expression unless it is
-    // invoked with the call operator. Preserve the cross-platform command shape
-    // used by callers such as \"C:\\\\Program Files\\\\node.exe\" -e ... by adding
-    // '&' only when the first token is a quoted Windows executable.
+let bashSource = await fs.readFile(bashPath, 'utf8');
+const oldEncodedLine = '    const encoded = Buffer.from(command, "utf16le").toString("base64");';
+const newEncodedBlock = `    // PowerShell treats a quoted executable path as a string expression unless
+    // it is invoked with the call operator. Keep callers cross-platform by
+    // normalizing commands such as \"C:\\\\Program Files\\\\node.exe\" -e ...
+    // immediately before PowerShell encodes and executes them.
     const powershellCommand = /^\\s*(?:\"[^\"\\r\\n]+\\.(?:exe|cmd|bat|com)\"|'[^'\\r\\n]+\\.(?:exe|cmd|bat|com)')(?:\\s|$)/i.test(command)
       ? \`& \${command}\`
       : command;
-    const encoded = Buffer.from(powershellCommand, "utf16le").toString("base64");
-    return ["/d", "/s", "/c", \`powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand \${encoded}\`];
-  }
-  return ["-lc", command];
-}`;
+    const encoded = Buffer.from(powershellCommand, "utf16le").toString("base64");`;
 
-let bashSource = await fs.readFile(bashPath, 'utf8');
-if (!bashSource.includes(oldShellArgs)) {
-  throw new Error('Expected shellArgs block was not found; refusing to patch an unknown source revision.');
+const encodedMatches = bashSource.split(oldEncodedLine).length - 1;
+if (encodedMatches !== 1) {
+  throw new Error(`Expected exactly one Windows PowerShell encoding line, found ${encodedMatches}.`);
 }
-bashSource = bashSource.replace(oldShellArgs, newShellArgs);
+bashSource = bashSource.replace(oldEncodedLine, newEncodedBlock);
 await fs.writeFile(bashPath, bashSource, 'utf8');
 
 let ciSource = await fs.readFile(ciPath, 'utf8');
@@ -40,14 +28,12 @@ const windowsSkipComment = `      # scripts/stress.mjs currently builds a shell 
       # a false red workflow for that quoting-only test harness issue.
 `;
 ciSource = ciSource.replace(windowsSkipComment, '');
-const before = ciSource;
-ciSource = ciSource.replaceAll(`      - name: Stress Test
-        if: runner.os != 'Windows'
-        run: npm run stress`, `      - name: Stress Test
-        run: npm run stress`);
-if (ciSource === before || ciSource.includes("if: runner.os != 'Windows'")) {
-  throw new Error('Expected Windows Stress Test skip was not removed cleanly.');
+const skipLine = "        if: runner.os != 'Windows'\n";
+const skipCount = ciSource.split(skipLine).length - 1;
+if (skipCount !== 2) {
+  throw new Error(`Expected exactly two Windows Stress Test skip lines, found ${skipCount}.`);
 }
+ciSource = ciSource.replaceAll(skipLine, '');
 await fs.writeFile(ciPath, ciSource, 'utf8');
 
 for (const file of [
