@@ -23,7 +23,7 @@ assert.match(responseReader, /text_length:text\.length,links,truncated:/, "the l
 assert.match(markdownRenderer, /safeMarkdownHref[\s\S]*?https\?:\\\/\\\/[\s\S]*?mailto:/, "Manager Markdown rendering must whitelist safe clickable link schemes");
 assert.match(markdownRenderer, /onClick=\{\(event\) => openExternalLink\(event, safeHref\)\}/, "Manager Markdown links must route clicks through the Electron openExternal bridge instead of a denied popup");
 assert.match(markdownRenderer, /globalThis\.window\?\.codexpro\?\.openExternal[\s\S]*?event\.preventDefault\(\)/, "clickable response links must prevent the denied in-app navigation only when the external-link bridge exists");
-assert.equal(manifest.version, "0.5.124", "message-stream recovery must be packaged in a reloadable extension version");
+assert.equal(manifest.version, "0.5.125", "prepare renderer recovery must be packaged in a reloadable extension version");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager updater must require the packaged worker version");
 assert.match(managerMain, /\["http:", "https:", "mailto:"\][\s\S]*?shell\.openExternal/, "Manager external-link IPC must allow the same safe schemes rendered by response Markdown");
 

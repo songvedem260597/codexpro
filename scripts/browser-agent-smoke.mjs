@@ -971,7 +971,7 @@ assert.match(worker, /if\(domActivity\.busy&&!allowBusyFollowup\)\{[\s\S]*?probe
 assert.match(worker, /allowBusyFollowup&&\(requestState\.busy&&requestState\.network_state==='generating'\|\|networkCaptureProbe\?\.in_progress===true\)/, "explicit manual follow-ups must accept either the live request state or an authoritative in-progress network stream");
 assert.doesNotMatch(worker, /SEND_POST_ACK_STABILITY_MS = 650/, "accepted sends must not add a fixed delay after authoritative network ACK");
 assert.match(worker, /SEND_CONFIRMED_STABILITY_SOURCE = 'network_ack'[\s\S]*?send_stability_wait_ms:0/, "accepted sends must release immediately after authoritative network ACK while keeping stability telemetry");
-assert.equal(manifest.version, "0.5.124");
+assert.equal(manifest.version, "0.5.125");
 assert.doesNotMatch(worker, /function focusNewChatGptTab|forceChatFocus/, "audited tab creation must not add a second ad-hoc focus helper");
 assert.match(worker, /createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\},visualWatchdog\?'send_chat_request_watchdog':'send_chat_request_new',\{visualWatchdog\}\)/, "new-chat sends must explicitly distinguish normal task tabs from the dedicated Watchdog tab");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");

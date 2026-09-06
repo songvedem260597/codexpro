@@ -231,7 +231,9 @@ export function useChatSession({
 
   useEffect(() => {
     const conversationId = String(openChatResponse?.conversationId || "");
-    if (!chatProfileId || !/^[A-Za-z0-9-]{8,160}$/.test(conversationId) || !openChatAwaitingAssistant) return;
+    const networkState = String(openChatResponse?.networkState || "").toLowerCase();
+    const liveNetworkHealthy = networkState === "generating" || openChatResponse?.networkStreamInProgress === true;
+    if (!chatProfileId || !/^[A-Za-z0-9-]{8,160}$/.test(conversationId) || !openChatAwaitingAssistant || liveNetworkHealthy) return;
     let cancelled = false;
     let timer = 0;
     const pollLatestResponse = async () => {
@@ -256,7 +258,7 @@ export function useChatSession({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [chatProfileId, openChatResponse?.conversationId, openChatAwaitingAssistant, openChatLatestMessageKey]);
+  }, [chatProfileId, openChatResponse?.conversationId, openChatResponse?.networkState, openChatResponse?.networkStreamInProgress, openChatAwaitingAssistant, openChatLatestMessageKey]);
 
   useEffect(() => {
     if (!chatProfileId) return;

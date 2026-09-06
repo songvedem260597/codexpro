@@ -7,6 +7,7 @@ import {
 
 const worker = readFileSync(new URL("../chrome-extension/service-worker.js", import.meta.url), "utf8");
 const manager = ["../manager/src/main.jsx", "../manager/src/hooks/use-chat-recovery.js", "../manager/src/hooks/use-chat-send-actions.js"].map((file) => readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
+const managerSession = readFileSync(new URL("../manager/src/hooks/use-chat-session.js", import.meta.url), "utf8");
 const managerMain = readFileSync(new URL("../manager/electron/main.mjs", import.meta.url), "utf8");
 const bridge = readFileSync(new URL("../src/browserExtensionBridge.ts", import.meta.url), "utf8");
 const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
@@ -34,6 +35,20 @@ assert.equal(chatHistoryRateLimitRecoveryCandidate({
   }
 }), null, "one transient burst must stay in cooldown instead of moving the task");
 
+assert.equal(chatHistoryRateLimitRecoveryCandidate({
+  profile,
+  jobs: [{ job_id: taskId, worker_id: profile.profile_id, status: "running" }],
+  response: {
+    conversationId,
+    repoTaskId: taskId,
+    awaitingAssistant: true,
+    canonicalRateLimited: true,
+    canonicalRateLimitCount: 3,
+    networkState: "generating",
+    networkStreamInProgress: true
+  }
+}), null, "history 429 must never roll over a task whose submitted turn is still healthy on the live network path");
+
 assert.deepEqual(chatHistoryRateLimitRecoveryCandidate({
   profile,
   jobs: [{ job_id: taskId, worker_id: profile.profile_id, status: "running" }],
@@ -42,9 +57,11 @@ assert.deepEqual(chatHistoryRateLimitRecoveryCandidate({
     repoTaskId: taskId,
     awaitingAssistant: true,
     canonicalRateLimited: true,
-    canonicalRateLimitCount: 3
+    canonicalRateLimitCount: 3,
+    networkState: "idle",
+    networkStreamInProgress: false
   }
-}), { profileId: profile.profile_id, conversationId, taskId, reason: "chatgpt_history_rate_limited" }, "a running task must move after the bounded 429 threshold");
+}), { profileId: profile.profile_id, conversationId, taskId, reason: "chatgpt_history_rate_limited" }, "a running task may move after the bounded 429 threshold only when the live network path is no longer healthy");
 
 assert.equal(chatHistoryRateLimitRecoveryCandidate({
   profile: { ...profile, activity: "idle" },
@@ -64,7 +81,8 @@ assert.match(worker, /canonical_rate_limited:true[\s\S]*canonical_rate_limit_cou
 assert.match(worker, /const activityAnchor=current\.busy[\s\S]*current\.busy_since/, "failed probes must not keep canonical busy alive forever");
 assert.match(worker, /function resetChatTabDocumentEpoch[\s\S]*realtimeNetworkStreamsByTab\.delete\(tabId\)[\s\S]*chatCanonicalActivityByTab\.delete\(tabId\)[\s\S]*changeInfo\?\.status==='loading'\)resetChatTabDocumentEpoch\(tabId\)/, "same-URL reloads must discard the previous document's realtime and canonical epochs");
 
-assert.match(manager, /chatHistoryRateLimitRecoveryCandidate[\s\S]*forceContinuation: true/, "Manager must automatically move a throttled running task to a continuation chat");
+assert.match(manager, /chatHistoryRateLimitRecoveryCandidate[\s\S]*forceContinuation: true/, "Manager must retain bounded continuation recovery for a task whose history is throttled and live network path is unavailable");
+assert.match(managerSession, /liveNetworkHealthy[\s\S]*networkState === "generating"[\s\S]*networkStreamInProgress[\s\S]*openChatAwaitingAssistant \|\| liveNetworkHealthy/, "Manager must not canonical-poll a turn that is already healthy on the live network stream");
 assert.match(manager, /checkpointContinuation[\s\S]*api\.resumeProfileTask\(\{[\s\S]*taskId: activeTaskId[\s\S]*hangRecovery: true/, "recovery rollover must preserve the logical Task ID through checkpoint-first task resume");
 assert.match(managerMain, /const recoveryRequested = payload\?\.taskMode === "recovery"/, "backend must distinguish recovery from a new FIFO task");
 assert.match(managerMain, /repo_task_mode: recoveryAccepted \? "recovery"/, "backend result must report recovery ownership explicitly");

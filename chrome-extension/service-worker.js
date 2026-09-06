@@ -2433,6 +2433,12 @@ async function readUnopenedChatResponse(tabs,conversation,args={},expiresAt=0) {
   },{canonical});
 }
 
+function classifyChatPrepareRecovery(prepareError,prepareAttempt=0,oneShotRecovery=false) {
+  const hardRendererHang=/Chrome renderer không phản hồi/i.test(String(prepareError||''));
+  const canRetry=Number(prepareAttempt)===0&&!oneShotRecovery;
+  return {hard_renderer_hang:hardRendererHang,mode:canRetry?(hardRendererHang?'replace-tab':'wait'):'none'};
+}
+
 async function execute(command) {
   const {action,args={}}=command;
   const commandExpiresAt=Number(command?.expires_at_ms)||0;
@@ -2734,18 +2740,19 @@ async function execute(command) {
       }catch(error){
         const prepareError=String(error?.message||error).slice(0,500);
         prepareErrors.push(prepareError);
-        const hardRendererHang=/Chrome renderer không phản hồi/i.test(prepareError);
+        const prepareRecovery=classifyChatPrepareRecovery(prepareError,prepareAttempt,oneShotRecovery);
+        const hardRendererHang=prepareRecovery.hard_renderer_hang;
         let networkAck=null;
         try{if(remainingCommandMs()>500)networkAck=await waitForNetworkGeneration(tab.id,networkAckStartedAfterMs,Math.max(100,Math.min(5000,remainingCommandMs()-500)));}catch{}
         if(networkAck)return await resultForNetwork(networkAck,{dom_timeout:true,dom_error:prepareError,prepare_attempts:prepareAttempt+1});
         if(hardRendererHang){
           pendingConversationByTab.delete(tab.id);
-          return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'uncertain',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'prepare-renderer-timeout',submit_path:'prepare-renderer-timeout',path_attempted:['renderer-preflight','prepare'],send_uncertain:true,error:'PREPARE_UNCERTAIN: Chrome renderer ngừng phản hồi sau CDP preflight. CodexPro không queue lần prepare thứ hai vì executeScript đầu có thể tiếp tục khi profile thức lại; không tự gửi lại để tránh draft hoặc tin nhắn xuất hiện muộn.',attempt_id:attemptId,prepare_attempts:prepareAttempt+1,cleanup:null,cleanup_skipped:true,cleanup_reason:'Renderer timeout có thể để lại executeScript đang chờ; không đụng draft cho tới khi trạng thái được xác minh.',...sendTimingPayload()};
+          // sendChatRequestPage never submits. Its injectImmediately deadline/conversation fence makes a late prepare safe to abandon before replacing this stuck tab.
         }
-        await cleanupAttempt();
-        if(prepareAttempt===0&&!oneShotRecovery){
+        if(!hardRendererHang)await cleanupAttempt();
+        if(prepareRecovery.mode!=='none'){
           try{
-            if(hardRendererHang){
+            if(prepareRecovery.mode==='replace-tab'){
               const hungTabId=tab.id;
               const recoveryUrl=String(tab.url||(newChat?'https://chatgpt.com/':`https://chatgpt.com/c/${conversationId}`));
               pendingConversationByTab.delete(hungTabId);
@@ -2764,9 +2771,9 @@ async function execute(command) {
           }catch(reloadError){prepareErrors.push('Reload recovery: '+String(reloadError?.message||reloadError).slice(0,500));}
         }
         pendingConversationByTab.delete(tab.id);
-        const limit=await probeConversationLimit(tab.id);
+        const limit=hardRendererHang?{reached:false}:await probeConversationLimit(tab.id);
         if(limit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(limit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
-        return {action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'failed',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'prepare-recovery-retry',submit_path:'prepare-recovery-retry',path_attempted:['prepare',preparationRecovery.renderer_replaced?'replace-tab':'wait','prepare'],send_uncertain:false,error:'PREPARE_FAILED: '+prepareErrors.join(' | '),attempt_id:attemptId,prepare_attempts:prepareAttempt+1,renderer_reloaded:false,renderer_replaced:Boolean(preparationRecovery.renderer_replaced),...sendTimingPayload()};
+        return hardRendererHang?{action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'failed',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'prepare-renderer-recovery-failed',submit_path:'prepare-renderer-recovery-failed',path_attempted:['renderer-preflight','prepare',...(prepareRecovery.mode==='replace-tab'?['replace-tab']:[])],send_uncertain:false,error:'PREPARE_RECOVERY_FAILED: Chrome renderer ngừng phản hồi trước trusted submit và CodexPro không thay được tab để thử lại an toàn. Tin nhắn chưa được dispatch; có thể thử lại.',attempt_id:attemptId,prepare_attempts:prepareAttempt+1,cleanup:null,cleanup_skipped:true,cleanup_reason:'Renderer treo trước trusted submit; bỏ cleanup trên tab cũ để không queue thêm executeScript.',renderer_reloaded:false,renderer_replaced:Boolean(preparationRecovery.renderer_replaced),...sendTimingPayload()}:{action,target_id:tab.id,conversation_id:newChat?'':conversationId,new_chat:newChat,ok:true,submission_state:'failed',generation_state:'idle',network_state:'idle',network_tracking:true,network_acknowledged:false,submitted:false,submitted_by:'prepare-recovery-retry',submit_path:'prepare-recovery-retry',path_attempted:['prepare',preparationRecovery.renderer_replaced?'replace-tab':'wait','prepare'],send_uncertain:false,error:'PREPARE_FAILED: '+prepareErrors.join(' | '),attempt_id:attemptId,prepare_attempts:prepareAttempt+1,renderer_reloaded:false,renderer_replaced:Boolean(preparationRecovery.renderer_replaced),...sendTimingPayload()};
       }
     }
     if(!injected?.result?.ok){

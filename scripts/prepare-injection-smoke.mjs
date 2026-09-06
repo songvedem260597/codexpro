@@ -4,6 +4,15 @@ import vm from 'node:vm';
 
 const source = await readFile(new URL('../chrome-extension/service-worker.js', import.meta.url), 'utf8');
 const prepareSource = source.slice(source.indexOf('async function sendChatRequestPage('), source.indexOf('async function cleanupChatRequestDraftPage('));
+const recoveryStart = source.indexOf('function classifyChatPrepareRecovery(');
+const recoveryEnd = source.indexOf('\n\nasync function execute(', recoveryStart);
+assert.ok(recoveryStart >= 0 && recoveryEnd > recoveryStart, 'prepare recovery classifier must exist');
+const classifyChatPrepareRecovery = Function(`${source.slice(recoveryStart, recoveryEnd)}; return classifyChatPrepareRecovery;`)();
+assert.deepEqual(classifyChatPrepareRecovery('Chrome renderer không phản hồi khi chuẩn bị tin nhắn.', 0, false), { hard_renderer_hang: true, mode: 'replace-tab' });
+assert.deepEqual(classifyChatPrepareRecovery('Không tìm thấy ô nhập ChatGPT.', 0, false), { hard_renderer_hang: false, mode: 'wait' });
+assert.deepEqual(classifyChatPrepareRecovery('Chrome renderer không phản hồi khi chuẩn bị tin nhắn.', 1, false), { hard_renderer_hang: true, mode: 'none' });
+assert.deepEqual(classifyChatPrepareRecovery('Chrome renderer không phản hồi khi chuẩn bị tin nhắn.', 0, true), { hard_renderer_hang: true, mode: 'none' });
+console.log('prepare-injection-smoke: PASS (hard renderer hang selects one replace-tab retry)');
 const injection = source.match(/chrome\.scripting\.executeScript\(\{[^\n]+func:sendChatRequestPage[^\n]+\}\)/)?.[0];
 assert.ok(injection, 'test must execute the actual production prepare injection options');
 let dispatches = 0;

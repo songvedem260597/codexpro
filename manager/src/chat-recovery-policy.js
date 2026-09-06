@@ -7,6 +7,12 @@ const CONVERSATION_ID_PATTERN = /^[A-Za-z0-9-]{8,160}$/;
 export function chatHistoryRateLimitRecoveryCandidate({ profile, jobs = [], response } = {}) {
   if (!profile?.connected || response?.canonicalRateLimited !== true) return null;
   if (Number(response?.canonicalRateLimitCount) < CHAT_HISTORY_RATE_LIMIT_ROLLOVER_THRESHOLD) return null;
+  const networkState = String(response?.networkState || "").toLowerCase();
+  const liveNetworkHealthy = networkState === "generating" || response?.networkStreamInProgress === true;
+  // A /backend-api/conversations 429 is only a history-read failure. If the
+  // already-submitted turn is still streaming through the live network path,
+  // rolling over creates a new chat for an account-wide throttle and can loop.
+  if (liveNetworkHealthy) return null;
 
   const conversationId = String(response?.conversationId || "").trim();
   if (!CONVERSATION_ID_PATTERN.test(conversationId)) return null;
