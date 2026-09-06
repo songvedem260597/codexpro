@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Menu } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -121,8 +121,9 @@ function createWindow() {
     height: 780,
     minWidth: 900,
     minHeight: 600,
-    backgroundColor: '#0b1020',
+    backgroundColor: '#07111f',
     title: 'CodexPro GitHub Actions Monitor',
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -131,6 +132,8 @@ function createWindow() {
     }
   });
 
+  win.setMenuBarVisibility(false);
+  win.removeMenu();
   win.loadFile('index.html');
   win.once('ready-to-show', () => {
     win.show();
@@ -140,6 +143,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
