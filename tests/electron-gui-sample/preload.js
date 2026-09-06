@@ -1,8 +1,12 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('actionsMonitor', {
+  listRepos: (input) => ipcRenderer.invoke('actions:repos', input),
   listRuns: (input) => ipcRenderer.invoke('actions:list', input),
   listJobs: (input) => ipcRenderer.invoke('actions:jobs', input),
+  runnerStatus: (input) => ipcRenderer.invoke('runner:status', input),
+  startRunner: (input) => ipcRenderer.invoke('runner:start', input),
+  stopRunner: (input) => ipcRenderer.invoke('runner:stop', input),
   openUrl: (url) => ipcRenderer.invoke('actions:open-url', url)
 });
 
@@ -88,6 +92,72 @@ function installMonitorEnhancementStyles() {
       color: #eef6ff;
       font-weight: 720;
     }
+    .repo-wrap #repo { display: none !important; }
+    .repo-picker {
+      min-width: 235px;
+      max-width: 300px;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: #f3f7ff;
+      padding: 10px 30px 10px 0;
+      cursor: pointer;
+      font: inherit;
+    }
+    .repo-picker option { background: #0d1b2e; color: #f3f7ff; }
+    .runner-load-button,
+    .runner-toggle-button {
+      min-height: 39px;
+      white-space: nowrap;
+      font-weight: 800;
+    }
+    .runner-load-button {
+      color: #bcd4f2;
+      background: #10233b;
+    }
+    .runner-toggle-button.start {
+      border-color: rgba(64, 216, 137, .62);
+      background: linear-gradient(180deg, #1b985f, #137749);
+      color: #f2fff8;
+      box-shadow: 0 8px 20px rgba(27, 152, 95, .20);
+    }
+    .runner-toggle-button.stop {
+      border-color: rgba(255, 101, 116, .62);
+      background: linear-gradient(180deg, #b94351, #8e2f3b);
+      color: #fff6f7;
+      box-shadow: 0 8px 20px rgba(185, 67, 81, .18);
+    }
+    .runner-toggle-button.busy { opacity: .72; cursor: wait; }
+    .runner-status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 34px;
+      padding: 0 9px;
+      border-radius: 999px;
+      border: 1px solid #294563;
+      color: #94a9c5;
+      background: rgba(10, 23, 40, .80);
+      font-size: 10px;
+      font-weight: 850;
+      letter-spacing: .4px;
+      white-space: nowrap;
+    }
+    .runner-status-chip::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #647b99;
+      box-shadow: 0 0 0 3px rgba(100, 123, 153, .10);
+    }
+    .runner-status-chip.online { color: #68e3a4; border-color: rgba(64, 216, 137, .40); }
+    .runner-status-chip.online::before { background: #40d889; box-shadow: 0 0 8px rgba(64,216,137,.55); }
+    .runner-status-chip.busy { color: #7bb8ff; border-color: rgba(77, 156, 255, .40); }
+    .runner-status-chip.busy::before { background: #4d9cff; box-shadow: 0 0 8px rgba(77,156,255,.55); }
+    .runner-status-chip.error { color: #ff8591; border-color: rgba(255, 101, 116, .40); }
+    .runner-status-chip.error::before { background: #ff6574; }
+    .runner-repo-count { color: #94a9c5; font-size: 10px; white-space: nowrap; }
   `;
   document.head.appendChild(style);
 }
@@ -319,7 +389,212 @@ function installLiveStepTracking() {
   }, { once: true });
 }
 
+function installRunnerControls() {
+  installMonitorEnhancementStyles();
+  const controls = document.querySelector('.controls');
+  const repoInput = document.getElementById('repo');
+  const tokenInput = document.getElementById('token');
+  const refreshButton = document.getElementById('refresh');
+  const repoWrap = repoInput?.closest('.repo-wrap');
+  if (!controls || !repoInput || !tokenInput || !repoWrap || !refreshButton) return;
+
+  const picker = document.createElement('select');
+  picker.id = 'repoPicker';
+  picker.className = 'repo-picker';
+  picker.setAttribute('aria-label', 'Repository');
+
+  const count = document.createElement('span');
+  count.className = 'runner-repo-count';
+
+  const loadButton = document.createElement('button');
+  loadButton.type = 'button';
+  loadButton.className = 'runner-load-button';
+  loadButton.textContent = '↻ Repos';
+  loadButton.title = 'Load tất cả repository mà token truy cập được';
+
+  const status = document.createElement('span');
+  status.className = 'runner-status-chip';
+  status.textContent = 'RUNNER OFF';
+
+  const runnerButton = document.createElement('button');
+  runnerButton.type = 'button';
+  runnerButton.className = 'runner-toggle-button start';
+  runnerButton.textContent = '▶ Start Runner';
+  runnerButton.disabled = true;
+
+  repoWrap.append(picker, count);
+  repoInput.hidden = true;
+  controls.insertBefore(loadButton, refreshButton);
+  controls.insertBefore(status, refreshButton);
+  controls.insertBefore(runnerButton, refreshButton);
+
+  let runnerState = { running: false, online: false, busy: false };
+  let statusTimer = null;
+  let operationBusy = false;
+
+  function selectedRepo() {
+    return String(picker.value || repoInput.value || '').trim();
+  }
+
+  function token() {
+    return String(tokenInput.value || '').trim();
+  }
+
+  function setPickerValue(repo) {
+    if (!repo) return;
+    repoInput.value = repo;
+    const existing = [...picker.options].find((option) => option.value === repo);
+    if (!existing) {
+      const option = document.createElement('option');
+      option.value = repo;
+      option.textContent = repo;
+      picker.append(option);
+    }
+    picker.value = repo;
+    repoInput.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function populateRepos(repos) {
+    const current = selectedRepo() || repoInput.value;
+    picker.replaceChildren();
+    for (const repo of repos) {
+      const option = document.createElement('option');
+      option.value = repo.fullName;
+      const access = repo.admin ? '' : ' · no admin';
+      option.textContent = `${repo.private ? '🔒 ' : ''}${repo.fullName}${access}`;
+      option.disabled = Boolean(repo.archived || repo.disabled);
+      option.dataset.admin = repo.admin ? '1' : '0';
+      picker.append(option);
+    }
+    count.textContent = repos.length ? `${repos.length} repos` : '';
+    const preferred = repos.find((repo) => repo.fullName === current)?.fullName || repos[0]?.fullName || current;
+    if (preferred) setPickerValue(preferred);
+  }
+
+  function renderRunnerState(next) {
+    runnerState = { ...runnerState, ...next };
+    status.className = 'runner-status-chip';
+    if (runnerState.busy) {
+      status.classList.add('busy');
+      status.textContent = 'RUNNER BUSY';
+    } else if (runnerState.online || runnerState.running) {
+      status.classList.add('online');
+      status.textContent = 'RUNNER ONLINE';
+    } else if (runnerState.error) {
+      status.classList.add('error');
+      status.textContent = 'RUNNER ERROR';
+    } else {
+      status.textContent = runnerState.configured ? 'RUNNER OFFLINE' : 'RUNNER OFF';
+    }
+
+    const running = Boolean(runnerState.online || runnerState.running);
+    runnerButton.className = `runner-toggle-button ${running ? 'stop' : 'start'}${operationBusy ? ' busy' : ''}`;
+    runnerButton.textContent = operationBusy
+      ? (running ? 'Stopping…' : 'Starting…')
+      : (running ? '■ Stop Runner' : '▶ Start Runner');
+    runnerButton.disabled = operationBusy || !token() || !selectedRepo();
+    runnerButton.title = runnerState.runnerName ? `Runner: ${runnerState.runnerName}` : '';
+  }
+
+  async function refreshRunnerStatus() {
+    const repo = selectedRepo();
+    if (!repo) return;
+    if (!token()) {
+      renderRunnerState({ configured: false, running: false, online: false, busy: false, error: '' });
+      return;
+    }
+    try {
+      const result = await ipcRenderer.invoke('runner:status', { repo, token: token() });
+      renderRunnerState({ ...result, error: result.remoteError || '' });
+    } catch (error) {
+      renderRunnerState({ running: false, online: false, busy: false, error: error?.message || String(error) });
+    }
+  }
+
+  async function loadRepos() {
+    if (!token()) {
+      status.className = 'runner-status-chip error';
+      status.textContent = 'NHẬP TOKEN';
+      tokenInput.focus();
+      return;
+    }
+    loadButton.disabled = true;
+    const previous = loadButton.textContent;
+    loadButton.textContent = 'Loading…';
+    try {
+      const result = await ipcRenderer.invoke('actions:repos', { token: token() });
+      populateRepos(result.repos || []);
+      await refreshRunnerStatus();
+      refreshButton.click();
+    } catch (error) {
+      status.className = 'runner-status-chip error';
+      status.textContent = 'REPO ERROR';
+      status.title = error?.message || String(error);
+    } finally {
+      loadButton.disabled = false;
+      loadButton.textContent = previous;
+    }
+  }
+
+  async function toggleRunner() {
+    const repo = selectedRepo();
+    const authToken = token();
+    if (!repo || !authToken || operationBusy) return;
+    operationBusy = true;
+    renderRunnerState({});
+    try {
+      if (runnerState.online || runnerState.running) {
+        await ipcRenderer.invoke('runner:stop', { repo, token: authToken });
+        renderRunnerState({ configured: true, running: false, online: false, busy: false, error: '' });
+      } else {
+        status.className = 'runner-status-chip busy';
+        status.textContent = 'STARTING';
+        const result = await ipcRenderer.invoke('runner:start', { repo, token: authToken });
+        renderRunnerState({
+          configured: true,
+          running: true,
+          online: Boolean(result.online),
+          busy: Boolean(result.busy),
+          runnerName: result.runnerName,
+          error: ''
+        });
+      }
+    } catch (error) {
+      renderRunnerState({ running: false, online: false, busy: false, error: error?.message || String(error) });
+      status.title = error?.message || String(error);
+    } finally {
+      operationBusy = false;
+      renderRunnerState({});
+      setTimeout(refreshRunnerStatus, 1500);
+    }
+  }
+
+  picker.addEventListener('change', () => {
+    setPickerValue(picker.value);
+    refreshRunnerStatus();
+    refreshButton.click();
+  });
+  loadButton.addEventListener('click', loadRepos);
+  runnerButton.addEventListener('click', toggleRunner);
+  tokenInput.addEventListener('input', () => renderRunnerState({}));
+  tokenInput.addEventListener('change', () => {
+    if (token()) loadRepos();
+  });
+  tokenInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      loadRepos();
+    }
+  });
+
+  setPickerValue(repoInput.value);
+  renderRunnerState({ configured: false, running: false, online: false, busy: false, error: '' });
+  statusTimer = setInterval(refreshRunnerStatus, 10000);
+  window.addEventListener('beforeunload', () => clearInterval(statusTimer), { once: true });
+}
+
 window.addEventListener('DOMContentLoaded', () => {
   installRunningStatusSpinner();
   installLiveStepTracking();
+  installRunnerControls();
 }, { once: true });
