@@ -21,7 +21,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6.4.0
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Build monitor with icon
         shell: powershell
@@ -86,6 +86,7 @@ jobs:
           $marker = Join-Path $env:RUNNER_TEMP 'github-actions-monitor-ready.txt'
           Remove-Item $marker -Force -ErrorAction SilentlyContinue
           $env:CODEXPRO_ELECTRON_TEST_MARKER = $marker
+          $env:RUNNER_TRACKING_ID = ''
           Start-Process -FilePath $exe -WorkingDirectory $installDir
 
           $ready = $false
@@ -97,7 +98,7 @@ jobs:
             Start-Sleep -Milliseconds 500
           }
           if (-not $ready) { throw 'Monitor window did not reach ready-to-show.' }
-          Write-Host 'MONITOR_LAUNCH window_ready=PASS'
+          Write-Host 'MONITOR_LAUNCH window_ready=PASS detached=PASS'
 
       - name: Clean build cache only
         if: always()
