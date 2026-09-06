@@ -1,0 +1,40 @@
+name: GUI Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  gui:
+    name: GUI Test on local PC
+    runs-on: self-hosted
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Run GUI probe
+        shell: powershell
+        run: .\scripts\gui-probe.ps1
+
+      - name: Verify GUI is usable
+        shell: powershell
+        run: |
+          $report = Get-Content "$env:RUNNER_TEMP\codexpro-gui-probe\report.json" -Raw | ConvertFrom-Json
+          if (-not $report.interactive_desktop) { throw 'Runner is not attached to the logged-in Windows desktop.' }
+          if (-not $report.chrome_launch_ok) { throw 'Chrome could not be launched visibly by the runner.' }
+          if ($report.electron_target_configured -and -not $report.electron_launch_ok) { throw 'Configured Electron app could not be launched.' }
+
+      - name: Upload GUI evidence privately
+        if: always() && github.event.repository.private == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-test-${{ runner.name }}
+          path: ${{ runner.temp }}\codexpro-gui-probe
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Clean GUI files
+        if: always()
+        shell: powershell
+        run: Remove-Item -Recurse -Force "$env:RUNNER_TEMP\codexpro-gui-probe" -ErrorAction SilentlyContinue
