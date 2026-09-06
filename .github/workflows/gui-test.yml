@@ -1,14 +1,11 @@
-name: GUI Test
+name: Install Actions Monitor
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - ci/self-hosted-runner
 
 jobs:
-  gui:
-    name: GUI Test on local PC
+  install:
+    name: Install GitHub Actions Monitor on local PC
     runs-on: self-hosted
     timeout-minutes: 15
 
@@ -21,50 +18,66 @@ jobs:
         with:
           node-version: 20
 
-      - name: Build Electron test exe
+      - name: Build monitor
         shell: powershell
         run: |
           $sample = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample'
           Push-Location $sample
           npm install --no-audit --no-fund
           npm run package:win
-          $exe = (Resolve-Path '.\dist\CodexProElectronTest-win32-x64\CodexProElectronTest.exe').Path
           Pop-Location
-          $marker = Join-Path $env:RUNNER_TEMP 'codexpro-electron-test-ready.txt'
-          Remove-Item $marker -Force -ErrorAction SilentlyContinue
-          "CODEXPRO_GUI_ELECTRON_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "CODEXPRO_ELECTRON_TEST_MARKER=$marker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "ELECTRON_BUILD exe_ready=$([bool](Test-Path $exe))"
 
-      - name: Run GUI probe
-        shell: powershell
-        run: .\scripts\gui-probe.ps1
-
-      - name: Verify Electron app really opened
+      - name: Install monitor locally
         shell: powershell
         run: |
-          $report = Get-Content "$env:RUNNER_TEMP\codexpro-gui-probe\report.json" -Raw | ConvertFrom-Json
-          if (-not $report.interactive_desktop) { throw 'Runner is not attached to the logged-in Windows desktop.' }
-          if (-not $report.chrome_launch_ok) { throw 'Chrome could not be launched visibly by the runner.' }
-          if (-not $report.electron_target_configured) { throw 'Packaged Electron exe was not configured.' }
-          if (-not $report.electron_launch_ok) { throw 'Packaged Electron exe did not launch.' }
-          if (-not (Test-Path $env:CODEXPRO_ELECTRON_TEST_MARKER)) { throw 'Electron window never reached ready-to-show.' }
-          Write-Host 'ELECTRON_TEST packaged_exe=PASS window_ready=PASS'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample\dist\CodexProActionsMonitor-win32-x64'
+          $installDir = Join-Path $env:LOCALAPPDATA 'CodexProActionsMonitor'
+          $exe = Join-Path $installDir 'CodexProActionsMonitor.exe'
 
-      - name: Upload GUI evidence privately
-        if: always() && github.event.repository.private == true
-        uses: actions/upload-artifact@v4
-        with:
-          name: gui-test-${{ runner.name }}
-          path: ${{ runner.temp }}\codexpro-gui-probe
-          if-no-files-found: ignore
-          retention-days: 1
+          Get-Process CodexProActionsMonitor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Milliseconds 500
 
-      - name: Clean GUI files
+          Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          Copy-Item -Path (Join-Path $source '*') -Destination $installDir -Recurse -Force
+
+          $desktop = [Environment]::GetFolderPath('Desktop')
+          $shortcutPath = Join-Path $desktop 'CodexPro Actions Monitor.lnk'
+          $wshell = New-Object -ComObject WScript.Shell
+          $shortcut = $wshell.CreateShortcut($shortcutPath)
+          $shortcut.TargetPath = $exe
+          $shortcut.WorkingDirectory = $installDir
+          $shortcut.Description = 'Monitor GitHub Actions for CodexPro'
+          $shortcut.Save()
+
+          if (-not (Test-Path $exe)) { throw 'Installed monitor executable was not found.' }
+          Write-Host 'MONITOR_INSTALL installed=PASS shortcut=PASS'
+
+      - name: Launch installed monitor
+        shell: powershell
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA 'CodexProActionsMonitor'
+          $exe = Join-Path $installDir 'CodexProActionsMonitor.exe'
+          $marker = Join-Path $env:RUNNER_TEMP 'codexpro-actions-monitor-ready.txt'
+          Remove-Item $marker -Force -ErrorAction SilentlyContinue
+          $env:CODEXPRO_ELECTRON_TEST_MARKER = $marker
+          Start-Process -FilePath $exe -WorkingDirectory $installDir
+
+          $ready = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            if (Test-Path $marker) {
+              $ready = $true
+              break
+            }
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $ready) { throw 'Monitor window did not reach ready-to-show.' }
+          Write-Host 'MONITOR_LAUNCH window_ready=PASS'
+
+      - name: Clean build cache only
         if: always()
         shell: powershell
         run: |
-          Remove-Item -Recurse -Force "$env:RUNNER_TEMP\codexpro-gui-probe" -ErrorAction SilentlyContinue
-          Remove-Item -Force "$env:RUNNER_TEMP\codexpro-electron-test-ready.txt" -ErrorAction SilentlyContinue
+          Remove-Item -Force "$env:RUNNER_TEMP\codexpro-actions-monitor-ready.txt" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\tests\electron-gui-sample\node_modules" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\tests\electron-gui-sample\dist" -ErrorAction SilentlyContinue
