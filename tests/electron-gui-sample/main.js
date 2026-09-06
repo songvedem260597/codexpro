@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const DEFAULT_REPO = 'songvedem260597/codexpro';
@@ -131,6 +132,11 @@ function createWindow() {
   });
 
   win.loadFile('index.html');
+  win.once('ready-to-show', () => {
+    win.show();
+    const marker = process.env.CODEXPRO_ELECTRON_TEST_MARKER;
+    if (marker) fs.writeFileSync(marker, `ready ${new Date().toISOString()}\n`, 'utf8');
+  });
 }
 
 app.whenReady().then(() => {
