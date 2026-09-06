@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CodexPro Electron GUI Test</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #111827; color: #f9fafb; display: grid; place-items: center; min-height: 100vh; }
+    main { width: min(720px, 90vw); padding: 36px; border-radius: 18px; background: #1f2937; box-shadow: 0 18px 60px rgba(0,0,0,.35); }
+    h1 { margin-top: 0; font-size: 34px; }
+    button { font-size: 18px; padding: 12px 18px; border: 0; border-radius: 10px; cursor: pointer; }
+    #status { margin-top: 18px; font-size: 18px; color: #93c5fd; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Electron test app is running</h1>
+    <p>This window was packaged and launched on the self-hosted Windows runner.</p>
+    <button id="testButton">Test button</button>
+    <div id="status">Waiting for click</div>
+  </main>
+  <script>
+    document.getElementById('testButton').addEventListener('click', () => {
+      document.getElementById('status').textContent = 'Button works';
+    });
+  </script>
+</body>
+</html>
