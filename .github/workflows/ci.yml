@@ -54,25 +54,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7.0.0
 
-      - name: GUI Probe
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: .\scripts\gui-probe.ps1
-
-      - name: Upload GUI probe privately
-        if: always() && runner.os == 'Windows' && github.event.repository.private == true
-        uses: actions/upload-artifact@v4
-        with:
-          name: gui-probe-${{ runner.name }}
-          path: ${{ runner.temp }}\codexpro-gui-probe
-          if-no-files-found: ignore
-          retention-days: 1
-
-      - name: Clean GUI probe files
-        if: always() && runner.os == 'Windows'
-        shell: powershell
-        run: Remove-Item -Recurse -Force "$env:RUNNER_TEMP\codexpro-gui-probe" -ErrorAction SilentlyContinue
-
       - name: Setup Node
         uses: actions/setup-node@v6.4.0
         with:
