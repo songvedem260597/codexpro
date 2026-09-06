@@ -438,20 +438,6 @@ function App() {
     }
   }, [managerSettings.taskNotifications, status?.browserProfiles, status?.workerJobs]);
 
-  useEffect(() => {
-    if (!managerSettings.autoUpdateWorkers || busy || !status?.local?.ok || status?.workerSnapshotStale) return;
-    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
-    const hasSafeOutdatedWorker = profiles.some((profile) => {
-      if (!profile?.connected || extensionReady(profile.extension_version, workerExtensionVersion)) return false;
-      const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
-      const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
-      return profile.activity === "idle" && Number(profile.busy_request_count || 0) === 0 && !hasBusyTab;
-    });
-    if (!hasSafeOutdatedWorker || Date.now() - operationsAutoUpdateAt.current < 60_000) return;
-    operationsAutoUpdateAt.current = Date.now();
-    void reloadProfiles();
-  }, [busy, managerSettings.autoUpdateWorkers, reloadProfiles, status?.browserProfiles, status?.local?.ok, status?.workerSnapshotStale, workerExtensionVersion]);
-
   useLayoutEffect(() => {
     if (!chatProfileId || !openChatScrollKey) return;
     if (openChatTurnActive) restoreOpenResponseTurnAnchor(chatProfileId);
@@ -524,6 +510,20 @@ function App() {
     setProfileTaskLabels,
     setWorkerUpdateConfirmOpen
   });
+
+  useEffect(() => {
+    if (!managerSettings.autoUpdateWorkers || busy || !status?.local?.ok || status?.workerSnapshotStale) return;
+    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
+    const hasSafeOutdatedWorker = profiles.some((profile) => {
+      if (!profile?.connected || extensionReady(profile.extension_version, workerExtensionVersion)) return false;
+      const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
+      const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
+      return profile.activity === "idle" && Number(profile.busy_request_count || 0) === 0 && !hasBusyTab;
+    });
+    if (!hasSafeOutdatedWorker || Date.now() - operationsAutoUpdateAt.current < 60_000) return;
+    operationsAutoUpdateAt.current = Date.now();
+    void reloadProfiles();
+  }, [busy, managerSettings.autoUpdateWorkers, reloadProfiles, status?.browserProfiles, status?.local?.ok, status?.workerSnapshotStale, workerExtensionVersion]);
 
   const { copyLink, rotateLink, control } = createManagerRuntimeActions({
     api,

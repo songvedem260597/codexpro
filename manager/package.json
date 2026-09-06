@@ -1,6 +1,6 @@
 {
   "name": "codexpro-manager",
-  "version": "0.2.141",
+  "version": "0.2.142",
   "private": true,
   "description": "Windows desktop manager for a local CodexPro MCP server.",
   "author": "CodexPro contributors",
@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env CODEXPRO_MANAGER_DEV_URL=http://127.0.0.1:5173 electron .\"",
     "build": "vite build",
+    "test:startup": "electron scripts/renderer-startup-smoke.cjs",
+    "postbuild": "npm run test:startup",
     "test:markdown": "node scripts/markdown-response-smoke.mjs",
     "test:diagnostic": "node scripts/user-reported-error-smoke.mjs && node scripts/diagnostic-log-smoke.mjs && node scripts/runtime-health-diagnostic-smoke.mjs && node scripts/task-unfinalized-diagnostic-smoke.mjs && node scripts/tunnel-offline-diagnostic-smoke.mjs",
     "test:chat-composer": "node scripts/chat-composer-isolation-smoke.mjs && electron scripts/chat-request-composer-visual-smoke.cjs",
