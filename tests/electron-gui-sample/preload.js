@@ -1,9 +1,29 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+function authToken(input) {
+  return String(input?.token || '').trim();
+}
+
 contextBridge.exposeInMainWorld('actionsMonitor', {
   listRepos: (input) => ipcRenderer.invoke('actions:repos', input),
-  listRuns: (input) => ipcRenderer.invoke('actions:list', input),
-  listJobs: (input) => ipcRenderer.invoke('actions:jobs', input),
+  listRuns: (input) => {
+    if (!authToken(input)) {
+      return Promise.resolve({
+        repo: String(input?.repo || '').trim(),
+        authenticated: false,
+        requiresToken: true,
+        rateLimit: { remaining: null, reset: null },
+        runs: []
+      });
+    }
+    return ipcRenderer.invoke('actions:list', input);
+  },
+  listJobs: (input) => {
+    if (!authToken(input)) {
+      return Promise.reject(new Error('Nhập GitHub token trước để tải Jobs / Steps.'));
+    }
+    return ipcRenderer.invoke('actions:jobs', input);
+  },
   runnerStatus: (input) => ipcRenderer.invoke('runner:status', input),
   startRunner: (input) => ipcRenderer.invoke('runner:start', input),
   stopRunner: (input) => ipcRenderer.invoke('runner:stop', input),
@@ -231,7 +251,7 @@ function installLiveStepTracking() {
     if (!target || !active) return;
     target.textContent = authenticated
       ? 'Steps LIVE ~3s · timer 1s'
-      : 'Steps 60s · thêm token để LIVE ~3s';
+      : 'Chờ GitHub token';
   }
 
   function syncStepRows(card, job) {
@@ -342,6 +362,12 @@ function installLiveStepTracking() {
 
     const repo = String(document.getElementById('repo')?.value || '').trim();
     const token = String(document.getElementById('token')?.value || '').trim();
+    if (!token) {
+      lastAuthenticated = false;
+      setRefreshMode(false, true);
+      schedule(5000);
+      return;
+    }
     if (!repo || busy) {
       schedule(1000);
       return;
@@ -354,14 +380,14 @@ function installLiveStepTracking() {
         runId: selection.runId,
         token
       });
-      lastAuthenticated = Boolean(token || result?.authenticated);
+      lastAuthenticated = true;
       applyJobs(result?.jobs || []);
-      setRefreshMode(lastAuthenticated, true);
+      setRefreshMode(true, true);
     } catch (error) {
       console.warn('[actions-monitor-live-steps]', error?.message || error);
     } finally {
       busy = false;
-      schedule(lastAuthenticated ? 3000 : 60000);
+      schedule(lastAuthenticated ? 3000 : 5000);
     }
   }
 
@@ -397,6 +423,8 @@ function installRunnerControls() {
   const refreshButton = document.getElementById('refresh');
   const repoWrap = repoInput?.closest('.repo-wrap');
   if (!controls || !repoInput || !tokenInput || !repoWrap || !refreshButton) return;
+
+  tokenInput.placeholder = 'GitHub token (bắt buộc)';
 
   const picker = document.createElement('select');
   picker.id = 'repoPicker';
@@ -438,6 +466,32 @@ function installRunnerControls() {
 
   function token() {
     return String(tokenInput.value || '').trim();
+  }
+
+  function showTokenRequiredState() {
+    const message = document.getElementById('message');
+    const runs = document.getElementById('runsList');
+    const details = document.getElementById('details');
+    const mode = document.getElementById('refreshMode');
+    if (message) {
+      message.className = 'small';
+      message.textContent = 'Nhập GitHub token để tải dữ liệu';
+    }
+    if (runs) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'Nhập GitHub token, sau đó bấm Repos để bắt đầu.';
+      runs.replaceChildren(empty);
+    }
+    if (details) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'Chờ GitHub token.';
+      details.replaceChildren(empty);
+    }
+    if (mode) mode.textContent = 'Chờ token';
+    const apiCount = document.getElementById('apiCount');
+    if (apiCount) apiCount.textContent = '—';
   }
 
   function setPickerValue(repo) {
@@ -515,6 +569,7 @@ function installRunnerControls() {
     if (!token()) {
       status.className = 'runner-status-chip error';
       status.textContent = 'NHẬP TOKEN';
+      showTokenRequiredState();
       tokenInput.focus();
       return;
     }
@@ -572,13 +627,26 @@ function installRunnerControls() {
   picker.addEventListener('change', () => {
     setPickerValue(picker.value);
     refreshRunnerStatus();
-    refreshButton.click();
+    if (token()) refreshButton.click();
   });
   loadButton.addEventListener('click', loadRepos);
   runnerButton.addEventListener('click', toggleRunner);
-  tokenInput.addEventListener('input', () => renderRunnerState({}));
+  refreshButton.addEventListener('click', (event) => {
+    if (token()) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    status.className = 'runner-status-chip error';
+    status.textContent = 'NHẬP TOKEN';
+    showTokenRequiredState();
+    tokenInput.focus();
+  }, true);
+  tokenInput.addEventListener('input', () => {
+    renderRunnerState({});
+    if (!token()) showTokenRequiredState();
+  });
   tokenInput.addEventListener('change', () => {
     if (token()) loadRepos();
+    else showTokenRequiredState();
   });
   tokenInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
@@ -589,6 +657,7 @@ function installRunnerControls() {
 
   setPickerValue(repoInput.value);
   renderRunnerState({ configured: false, running: false, online: false, busy: false, error: '' });
+  if (!token()) showTokenRequiredState();
   statusTimer = setInterval(refreshRunnerStatus, 10000);
   window.addEventListener('beforeunload', () => clearInterval(statusTimer), { once: true });
 }
