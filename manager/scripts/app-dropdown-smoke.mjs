@@ -39,13 +39,15 @@ assert.deepEqual(legacyDropdowns, [], `legacy dropdowns remain: ${legacyDropdown
 
 const mainSource = fs.readFileSync(path.join(sourceRoot, "main.jsx"), "utf8");
 const apiWorkerJobModalSource = fs.readFileSync(path.join(sourceRoot, "features", "api-workers", "api-worker-job-modal.jsx"), "utf8");
+const chatModalSource = fs.readFileSync(path.join(sourceRoot, "features", "chat", "chat-modal.jsx"), "utf8");
 const projectDropdownSource = fs.readFileSync(path.join(sourceRoot, "project-dropdown.jsx"), "utf8");
 const workflowSource = fs.readFileSync(path.join(sourceRoot, "task-workflow-center.jsx"), "utf8");
 const pluginSource = fs.readFileSync(path.join(sourceRoot, "app-plugin-center.jsx"), "utf8");
 assert.match(projectDropdownSource, /export function ProjectDropdown[\s\S]*?className="project-dropdown-trigger"[\s\S]*?className="project-dropdown-search"/, "the repo picker must retain its dedicated searchable green UI");
 assert.doesNotMatch(projectDropdownSource, /<AppDropdown/, "the repo picker must not inherit the generic shared dropdown theme");
-assert.match(mainSource, /import \{ ALL_ALLOWED_WORKSPACES, formatRepoActivity, ProjectDropdown \} from "\.\/project-dropdown\.jsx";/, "main request surfaces must use the shared repo picker");
-assert.match(mainSource, /<ProjectDropdown/, "Chrome request surface must use the shared repo picker");
+assert.match(mainSource, /import \{ ChatModal \} from "\.\/features\/chat\/chat-modal\.jsx";/, "main must render the extracted Chat request surface");
+assert.match(chatModalSource, /import \{ ALL_ALLOWED_WORKSPACES, ProjectDropdown \} from "\.\.\/\.\.\/project-dropdown\.jsx";/, "Chat request surface must import the shared repo picker");
+assert.match(chatModalSource, /<ProjectDropdown/, "Chrome request surface must use the shared repo picker");
 assert.match(apiWorkerJobModalSource, /<ProjectDropdown/, "API worker request surface must use the shared repo picker");
 assert.match(workflowSource, /<ProjectDropdown[\s\S]{0,500}?ariaLabel="Chọn workspace"/, "workflow workspace selection must use the shared repo picker");
 assert.doesNotMatch(workflowSource, /<AppDropdown[\s\S]{0,400}?projects\.map\(\(project\)/, "workflow workspace selection must not fall back to generic AppDropdown");

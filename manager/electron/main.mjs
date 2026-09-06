@@ -36,6 +36,8 @@ import { createVisualWatchdogService } from "./visual-watchdog.mjs";
 import { ALL_ALLOWED_WORKSPACES, createManagerSettingsStore } from "./manager-settings-store.mjs";
 import { createManagerChatCache } from "./manager-chat-cache.mjs";
 import { createManagerChatDiagnostics } from "./manager-chat-diagnostics.mjs";
+import { createDiagnosticIpcRegistrar } from "./ipc/diagnostic-ipc.mjs";
+import { registerWorkerIpcHandlers } from "./ipc/worker-ipc.mjs";
 import {
   captureClipboardImage,
   chooseRequestFiles,
@@ -187,81 +189,7 @@ function recordUserReportedError(payload, context = {}) {
   });
   return report;
 }
-const diagnosticThrottleState = new Map();
-function diagnosticAllowed(key, intervalMs) {
-  if (!key || !(Number(intervalMs) > 0)) return true;
-  const now = Date.now();
-  const previous = Number(diagnosticThrottleState.get(key)) || 0;
-  if (now - previous < Number(intervalMs)) return false;
-  diagnosticThrottleState.set(key, now);
-  if (diagnosticThrottleState.size > 1000) {
-    for (const [candidate, at] of diagnosticThrottleState.entries()) {
-      if (now - at > 60 * 60 * 1000) diagnosticThrottleState.delete(candidate);
-    }
-  }
-  return true;
-}
-function diagnosticProjection(factory, args, fallback = {}) {
-  if (typeof factory !== "function") return fallback;
-  try {
-    const value = factory(...args);
-    return value && typeof value === "object" ? value : fallback;
-  } catch (error) {
-    return { diagnostic_projection_error: String(error?.message || error) };
-  }
-}
-function diagnosticIpcHandle(channel, options, handler) {
-  const action = String(options?.action || channel.replace(/^codexpro:/, ""));
-  const category = String(options?.category || "runtime");
-  const successMessage = String(options?.successMessage || `${action} hoàn tất`);
-  const failureMessage = String(options?.failureMessage || `${action} thất bại`);
-  ipcMain.handle(channel, async (event, ...args) => {
-    const startedAt = Date.now();
-    const ipcCallId = `ipc_${startedAt.toString(36)}_${randomBytes(3).toString("hex")}`;
-    const context = {
-      ipc_call_id: ipcCallId,
-      ipc_channel: channel,
-      ...diagnosticProjection(options?.details, args)
-    };
-    try {
-      const result = await handler(event, ...args);
-      const durationMs = Date.now() - startedAt;
-      const envelopeError = result && typeof result === "object" && result.ok === false && result.error ? result.error : null;
-      const resultContext = diagnosticProjection(options?.resultDetails, [result, ...args]);
-      const resultDiagnostic = diagnosticProjection(options?.resultDiagnostic, [result, ...args], null);
-      if (envelopeError) {
-        diagnostic("error", "manager", category, `${failureMessage}: ${envelopeError.message || "Lỗi không xác định"}`, {
-          action,
-          duration_ms: durationMs,
-          ...context,
-          error: envelopeError
-        });
-      } else if (resultDiagnostic && diagnosticAllowed(resultDiagnostic.dedupeKey, resultDiagnostic.throttleMs)) {
-        diagnostic(resultDiagnostic.level || "warn", "manager", category, resultDiagnostic.message || `${action} cần chú ý`, {
-          action,
-          duration_ms: durationMs,
-          ...context,
-          ...resultContext,
-          ...(resultDiagnostic.details || {})
-        });
-      } else if (options?.logSuccess) {
-        diagnostic("info", "manager", category, successMessage, { action, duration_ms: durationMs, ...context, ...resultContext });
-      } else if (Number(options?.slowMs) > 0 && durationMs >= Number(options.slowMs)) {
-        diagnostic("warn", "manager", category, `${action} phản hồi chậm (${durationMs} ms)`, { action, duration_ms: durationMs, ...context, ...resultContext });
-      }
-      return result;
-    } catch (error) {
-      diagnostic("error", "manager", category, `${failureMessage}: ${error?.message || String(error)}`, {
-        action,
-        duration_ms: Date.now() - startedAt,
-        ...context,
-        error,
-        error_details: error?.details && typeof error.details === "object" ? error.details : {}
-      });
-      throw error;
-    }
-  });
-}
+const { handle: diagnosticIpcHandle, allowed: diagnosticAllowed } = createDiagnosticIpcRegistrar({ ipcMain, diagnostic });
 
 async function handleAppPluginProtocol(request) {
   try {
@@ -3991,79 +3919,15 @@ function ensureFreshRuntimeAfterManagerStart() {
   return runtimeFreshnessPromise;
 }
 
-diagnosticIpcHandle("codexpro:status", { category: "status", action: "runtime-status", slowMs: 5_000 }, () => runtimeStatus());
-diagnosticIpcHandle("codexpro:workers", { category: "status", action: "list-workers", slowMs: 5_000 }, async () => {
-  const status = await runtimeStatus();
-  return { workers: status.workers, sources: status.workerSources };
-});
-diagnosticIpcHandle("codexpro:worker-send", {
-  category: "worker",
-  action: "worker-send",
-  logSuccess: true,
-  successMessage: "Worker đã nhận job",
-  failureMessage: "Không gửi được job tới worker",
-  details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || ""), task_id: String(payload?.task_id || payload?.taskId || ""), task_kind: String(payload?.task_kind || payload?.taskKind || ""), workflow_id: String(payload?.workflow || "") })
-}, async (_event, payload) => {
-  const prepared = await materializeApiWorkerRequest(payload);
-  recordUserReportedError(prepared, { request_channel: "worker_job" });
-  return await workerPluginRegistry.invoke("send", String(prepared?.workerId || prepared?.worker_id || ""), prepared);
-});
-diagnosticIpcHandle("codexpro:worker-read", {
-  category: "worker",
-  action: "worker-read",
-  failureMessage: "Không đọc được trạng thái worker",
-  details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || "") })
-}, (_event, payload) => workerPluginRegistry.invoke("read", String(payload?.workerId || payload?.worker_id || ""), payload));
-diagnosticIpcHandle("codexpro:worker-stop", {
-  category: "worker",
-  action: "worker-stop",
-  logSuccess: true,
-  successMessage: "Đã gửi lệnh dừng worker",
-  failureMessage: "Không dừng được worker",
-  details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || "") })
-}, (_event, payload) => workerPluginRegistry.invoke("stop", String(payload?.workerId || payload?.worker_id || ""), payload));
-diagnosticIpcHandle("codexpro:api-worker-configs", { category: "settings", action: "list-api-workers" }, () => apiWorkerStore.list());
-diagnosticIpcHandle("codexpro:list-api-worker-models", {
-  category: "settings",
-  action: "list-api-worker-models",
-  slowMs: 15_000,
-  logSuccess: true,
-  successMessage: "Đã tải danh sách model cho API worker",
-  failureMessage: "Không tải được danh sách model",
-  details: (payload) => ({ id: String(payload?.id || ""), provider: String(payload?.provider || ""), credential_supplied: Boolean(payload?.api_key || payload?.apiKey) }),
-  resultDetails: (result) => ({ model_count: Array.isArray(result?.models) ? result.models.length : 0 })
-}, (_event, payload) => discoverApiWorkerModels(payload, {
-  getStoredCredential: async (id) => apiWorkerStore.credential(id),
-  createProvider: async (config, getApiKey) => createProviderForApiWorker(config, { getApiKey })
-}));
-diagnosticIpcHandle("codexpro:save-api-worker", {
-  category: "settings",
-  action: "save-api-worker",
-  logSuccess: true,
-  successMessage: "Đã lưu API worker",
-  failureMessage: "Không lưu được API worker",
-  details: (payload) => ({ id: String(payload?.id || ""), provider: String(payload?.provider || ""), model: String(payload?.model || ""), credential_changed: Boolean(payload?.api_key || payload?.apiKey || payload?.clear_credential || payload?.clearCredential) })
-}, (_event, payload) => apiWorkerStore.save(payload));
-diagnosticIpcHandle("codexpro:delete-api-worker", {
-  category: "settings",
-  action: "delete-api-worker",
-  logSuccess: true,
-  successMessage: "Đã xóa API worker",
-  failureMessage: "Không xóa được API worker",
-  details: (id) => ({ id: String(id || "") })
-}, (_event, id) => apiWorkerStore.remove(id));
-diagnosticIpcHandle("codexpro:test-api-worker", {
-  category: "settings",
-  action: "test-api-worker",
-  slowMs: 15_000,
-  logSuccess: true,
-  successMessage: "API worker kết nối thành công",
-  failureMessage: "API worker không kết nối được",
-  details: (id) => ({ id: String(id || "") })
-}, async (_event, id) => {
-  const config = apiWorkerStore.list().find((item) => item.id === String(id || ""));
-  if (!config) throw new Error("API worker configuration was not found.");
-  return await createProviderForApiWorker(config).probe();
+registerWorkerIpcHandlers({
+  diagnosticIpcHandle,
+  runtimeStatus,
+  materializeApiWorkerRequest,
+  recordUserReportedError,
+  workerPluginRegistry,
+  apiWorkerStore,
+  discoverApiWorkerModels,
+  createProviderForApiWorker
 });
 diagnosticIpcHandle("codexpro:check-visual-watchdog", {
   category: "watchdog",

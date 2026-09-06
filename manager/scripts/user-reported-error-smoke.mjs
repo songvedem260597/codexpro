@@ -30,9 +30,11 @@ assert.equal(classifyUserReportedError({ text: "Thêm bộ lọc theo dự án t
 assert.equal(classifyUserReportedError({ text: "Viết tài liệu giải thích error handling trong JavaScript" }).is_error, false, "educational mentions of error handling must not become incidents");
 
 const main = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
+const workerIpc = fs.readFileSync(new URL("../electron/ipc/worker-ipc.mjs", import.meta.url), "utf8");
 const view = fs.readFileSync(new URL("../src/diagnostic-log-view.jsx", import.meta.url), "utf8");
 assert.match(main, /function recordUserReportedError[\s\S]*?diagnostic\("error", "user", "user-reported-error"[\s\S]*?incident_fingerprint/, "Manager must persist classified user reports with a stable incident fingerprint");
-assert.match(main, /codexpro:worker-send[\s\S]*?recordUserReportedError\(prepared[\s\S]*?codexpro:send-profile-request[\s\S]*?recordUserReportedError\(payload/, "both API-worker and direct ChatGPT requests must pass through user-error classification");
+assert.match(workerIpc, /codexpro:worker-send[\s\S]*?recordUserReportedError\(prepared/, "API-worker requests must pass through user-error classification in the extracted worker IPC owner");
+assert.match(main, /codexpro:send-profile-request[\s\S]*?recordUserReportedError\(payload/, "direct ChatGPT requests must pass through user-error classification");
 assert.match(view, /user: "Người dùng"[\s\S]*?"user-reported-error": "Lỗi người dùng phát hiện"[\s\S]*?occurrence_count/, "Diagnostic UI must expose the user source, classification, and repeat count");
 
 console.log("✓ user-reported error classification and integration smoke test passed");

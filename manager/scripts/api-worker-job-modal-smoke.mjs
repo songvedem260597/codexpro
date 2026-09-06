@@ -7,6 +7,7 @@ const cardsSource = fs.readFileSync(new URL("../src/features/api-workers/api-wor
 const apiWorkerFormSource = fs.readFileSync(new URL("../src/api-worker-form.js", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const latestMessagePanel = fs.readFileSync(new URL("../src/latest-message-panel.jsx", import.meta.url), "utf8");
+const runtimeStatusSource = fs.readFileSync(new URL("../src/hooks/use-runtime-status.js", import.meta.url), "utf8");
 
 assert.match(source, /import \{ ApiWorkerJobModal \} from "\.\/features\/api-workers\/api-worker-job-modal\.jsx";/, "Manager must render the extracted API worker job modal module");
 assert.doesNotMatch(source, /function ApiWorkerJobModal\(/, "API worker job modal implementation must stay out of main.jsx");
@@ -36,6 +37,7 @@ assert.doesNotMatch(cardsSource, /Kết quả job gần nhất/, "API cards must
 assert.doesNotMatch(cardsSource, />Chạy job<\/button>/, "the legacy API worker action label must be removed");
 assert.doesNotMatch(cardsSource, /<code>api:\{worker\.worker_id\}/, "registry worker ids already contain the api: prefix and must not be duplicated");
 assert.match(apiWorkerFormSource, /label: "9Router"/, "new 9Router workers must use the concise display label");
-assert.match(source, /onWorkerUpdate/, "Manager must subscribe to push worker updates instead of waiting for the 30-second status watchdog");
+assert.match(source, /useRuntimeStatus\(/, "Manager must wire runtime status through the extracted runtime hook");
+assert.match(runtimeStatusSource, /api\.onWorkerUpdate\?\.\(/, "runtime status hook must subscribe to push worker updates instead of waiting for the status watchdog");
 
 console.log("✓ API worker Chat-style job modal smoke test passed");
