@@ -26,6 +26,7 @@ assert.equal(coordinator.acknowledge(11, { requestId: sent[0].payload.requestId 
 assert.equal(coordinator.acknowledge(22, { requestId: sent[0].payload.requestId }), true);
 const result = await flush;
 assert.equal(result.flushed, true);
+assert.equal(result.timedOut, false, "successful renderer and main flushes must report no aggregate timeout");
 assert.equal(result.renderer.expected, 2);
 assert.equal(result.renderer.acknowledged, 2);
 assert.equal(result.renderer.timedOut, false);
