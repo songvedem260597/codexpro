@@ -2,6 +2,11 @@ name: Install Actions Monitor
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - ci/self-hosted-runner
+    paths:
+      - .github/run-monitor-install
 
 jobs:
   install:
