@@ -1,0 +1,76 @@
+name: Launch CodexPro Local
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/self-hosted-runner
+    paths:
+      - .github/workflows/launch-codexpro-local.yml
+
+jobs:
+  launch-local:
+    name: Launch CodexPro on local PC
+    runs-on: self-hosted
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build CodexPro
+        run: npm run build
+
+      - name: Launch CodexPro control panel
+        shell: powershell
+        run: |
+          $url = 'http://127.0.0.1:8787/'
+          $health = 'http://127.0.0.1:8787/healthz'
+          $env:CODEXPRO_ALLOW_NO_HTTP_TOKEN = '1'
+
+          $server = Start-Process -FilePath 'node' -ArgumentList @(
+            'scripts/codexpro.mjs',
+            'start',
+            '--root', $env:GITHUB_WORKSPACE,
+            '--tunnel', 'none',
+            '--no-auth'
+          ) -PassThru
+
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              Start-Sleep -Seconds 1
+              if ($server.HasExited) {
+                throw "CodexPro exited early with code $($server.ExitCode)."
+              }
+              try {
+                $response = Invoke-WebRequest -UseBasicParsing -Uri $health -TimeoutSec 2
+                if ($response.StatusCode -eq 200) {
+                  $ready = $true
+                  break
+                }
+              } catch {
+              }
+            }
+
+            if (-not $ready) {
+              throw 'CodexPro did not become ready on port 8787.'
+            }
+
+            Start-Process $url
+            Write-Host "CODEXPRO_LAUNCH ready=PASS url=$url pid=$($server.Id)"
+            Write-Host 'The control panel will stay available while this workflow is running.'
+            Wait-Process -Id $server.Id
+          } finally {
+            if (-not $server.HasExited) {
+              Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+            }
+          }
