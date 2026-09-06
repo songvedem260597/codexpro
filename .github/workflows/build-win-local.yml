@@ -1,0 +1,66 @@
+name: Build Win App Local
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - win
+    paths:
+      - .github/workflows/build-win-local.yml
+
+jobs:
+  build-win-app:
+    name: Build CodexPro Windows app on local PC
+    runs-on: self-hosted
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout win branch
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: win
+
+      - name: Setup Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: 20
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install manager dependencies
+        run: npm --prefix manager ci
+
+      - name: Build CodexPro core
+        run: npm run build
+
+      - name: Build Windows installer
+        run: npm --prefix manager run dist
+
+      - name: Copy build and launch app
+        shell: powershell
+        run: |
+          $release = Join-Path $env:GITHUB_WORKSPACE 'manager\release'
+          $installer = Get-ChildItem -Path $release -Filter 'CodexPro-Manager-Setup-*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $installer) { throw 'Windows installer was not created.' }
+
+          $sourceExe = Join-Path $release 'win-unpacked\CodexPro Manager.exe'
+          if (-not (Test-Path $sourceExe)) { throw 'Unpacked CodexPro Manager executable was not created.' }
+
+          $dest = Join-Path $env:LOCALAPPDATA 'CodexProWinBuild'
+          Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Copy-Item -Recurse -Force (Join-Path $release 'win-unpacked') (Join-Path $dest 'win-unpacked')
+          Copy-Item -Force $installer.FullName (Join-Path $dest $installer.Name)
+
+          Get-Process | Where-Object { $_.ProcessName -like 'CodexPro*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+          $launchExe = Join-Path $dest 'win-unpacked\CodexPro Manager.exe'
+          Start-Process -FilePath $launchExe
+          Start-Sleep -Seconds 5
+
+          $running = Get-Process | Where-Object {
+            try { $_.Path -eq $launchExe } catch { $false }
+          } | Select-Object -First 1
+          if (-not $running) { throw 'CodexPro Manager did not stay running.' }
+
+          Write-Host "CODEXPRO_WIN_APP status=PASS installer=$($installer.Name) exe=$launchExe"
