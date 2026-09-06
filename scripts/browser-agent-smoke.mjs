@@ -528,6 +528,7 @@ assert.match(managerMain, /function recordBrowserProfileTransitions[\s\S]*?profi
 assert.match(managerMain, /createManagerChatDiagnostics\(\{ home: codexProHome, diagnostic \}\)/, "Manager must wire the extracted chat diagnostics service into the main process");
 assert.match(managerChatDiagnostics, /function recordChatResponseAuditDiagnostic[\s\S]*?chat-response-audit-mismatch[\s\S]*?expected_assistant[\s\S]*?manager_state_assistant[\s\S]*?manager_ui_assistant/, "response diagnostics must compare ChatGPT source, Manager state, and rendered UI fingerprints");
 assert.match(worker, /attempt_id:attemptId/, "extension send results must return the attempt id used for prepare diagnostics");
+assert.match(managerMain, /attempt_id: String\(value\?\.attempt_id \|\| ""\)/, "Manager send diagnostics must persist the exact extension attempt id");
 assert.match(managerMain, /action: "send-profile-request"[\s\S]*?repo_task_id[\s\S]*?attempt_id[\s\S]*?submission_state[\s\S]*?generation_state[\s\S]*?manager_preflight_ms/, "send diagnostics must correlate task, attempt, submission, network, and Manager timing evidence");
 assert.match(managerMain, /action: "get-profile-response"[\s\S]*?network_state[\s\S]*?response_ready[\s\S]*?dom_error[\s\S]*?canonical_available/, "response diagnostics must retain network, readiness, DOM, and canonical evidence");
 assert.match(managerMain, /action: "get-repo-task-status"[\s\S]*?task_title[\s\S]*?task_kind[\s\S]*?verified/, "task verification diagnostics must retain the required title and classification");
