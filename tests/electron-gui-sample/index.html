@@ -1,28 +1,325 @@
 <!doctype html>
-<html lang="en">
+<html lang="vi">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CodexPro Electron GUI Test</title>
+  <title>CodexPro GitHub Actions Monitor</title>
   <style>
-    body { margin: 0; font-family: Arial, sans-serif; background: #111827; color: #f9fafb; display: grid; place-items: center; min-height: 100vh; }
-    main { width: min(720px, 90vw); padding: 36px; border-radius: 18px; background: #1f2937; box-shadow: 0 18px 60px rgba(0,0,0,.35); }
-    h1 { margin-top: 0; font-size: 34px; }
-    button { font-size: 18px; padding: 12px 18px; border: 0; border-radius: 10px; cursor: pointer; }
-    #status { margin-top: 18px; font-size: 18px; color: #93c5fd; }
+    :root {
+      color-scheme: dark;
+      --bg: #08111f;
+      --panel: #0f1b2d;
+      --panel-2: #132238;
+      --line: #26364d;
+      --text: #eef4ff;
+      --muted: #8fa3bf;
+      --blue: #5aa2ff;
+      --green: #45d483;
+      --red: #ff6b78;
+      --yellow: #f2c94c;
+      --purple: #ad8cff;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    .app { min-height: 100vh; display: grid; grid-template-rows: auto auto 1fr; }
+    header { padding: 18px 22px; border-bottom: 1px solid var(--line); background: rgba(15,27,45,.96); display: flex; gap: 16px; align-items: center; justify-content: space-between; }
+    .brand h1 { margin: 0; font-size: 20px; letter-spacing: -.2px; }
+    .brand p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+    input { background: #0a1424; color: var(--text); border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; outline: none; }
+    input:focus { border-color: var(--blue); }
+    #repo { width: 230px; }
+    #token { width: 190px; }
+    button { border: 1px solid var(--line); background: var(--panel-2); border-radius: 9px; padding: 9px 12px; cursor: pointer; }
+    button:hover { border-color: #466181; }
+    button.primary { background: #1d64c8; border-color: #2f78dd; }
+    .summary { padding: 14px 22px; display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 10px; border-bottom: 1px solid var(--line); }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+    .card .label { color: var(--muted); font-size: 12px; }
+    .card .value { font-size: 25px; font-weight: 750; margin-top: 2px; }
+    .layout { min-height: 0; display: grid; grid-template-columns: minmax(560px, 1.2fr) minmax(340px, .8fr); }
+    .runs, .details { min-height: 0; overflow: auto; }
+    .runs { border-right: 1px solid var(--line); }
+    .section-head { position: sticky; top: 0; z-index: 3; padding: 11px 16px; background: rgba(8,17,31,.96); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .section-head strong { font-size: 13px; }
+    .small { color: var(--muted); font-size: 12px; }
+    .run { padding: 13px 16px; border-bottom: 1px solid rgba(38,54,77,.7); display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; cursor: pointer; }
+    .run:hover, .run.selected { background: #101e32; }
+    .dot { width: 11px; height: 11px; border-radius: 999px; margin-top: 5px; background: #6b7c93; box-shadow: 0 0 0 3px rgba(107,124,147,.12); }
+    .dot.in_progress { background: var(--blue); box-shadow: 0 0 0 3px rgba(90,162,255,.16); }
+    .dot.queued, .dot.waiting, .dot.pending { background: var(--yellow); box-shadow: 0 0 0 3px rgba(242,201,76,.15); }
+    .dot.success { background: var(--green); box-shadow: 0 0 0 3px rgba(69,212,131,.14); }
+    .dot.failure, .dot.cancelled, .dot.timed_out { background: var(--red); box-shadow: 0 0 0 3px rgba(255,107,120,.14); }
+    .title { font-weight: 680; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .meta { color: var(--muted); margin-top: 3px; font-size: 12px; display: flex; gap: 9px; flex-wrap: wrap; }
+    .badge { border: 1px solid var(--line); border-radius: 999px; padding: 2px 7px; color: #b9c9de; }
+    .status { text-transform: uppercase; font-size: 10px; letter-spacing: .7px; font-weight: 800; color: var(--muted); padding-top: 3px; }
+    .details-content { padding: 16px; }
+    .empty { color: var(--muted); padding: 28px 18px; text-align: center; }
+    .detail-title { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; margin-bottom: 15px; }
+    .detail-title h2 { margin: 0; font-size: 18px; }
+    .job { background: var(--panel); border: 1px solid var(--line); border-radius: 11px; margin-bottom: 10px; overflow: hidden; }
+    .job-head { padding: 11px 12px; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .job-name { font-weight: 680; }
+    .runner { color: var(--purple); font-size: 11px; margin-top: 2px; }
+    .steps { border-top: 1px solid var(--line); }
+    .step { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; padding: 7px 11px; color: #c7d3e4; border-bottom: 1px solid rgba(38,54,77,.45); font-size: 12px; }
+    .step:last-child { border-bottom: 0; }
+    .step-symbol { font-weight: 900; }
+    .ok { color: var(--green); }
+    .bad { color: var(--red); }
+    .active { color: var(--blue); }
+    .queued { color: var(--yellow); }
+    #message { color: var(--muted); }
+    #message.error { color: var(--red); }
+    .pulse { animation: pulse 1.25s infinite; }
+    @keyframes pulse { 50% { opacity: .4; } }
+    @media (max-width: 900px) {
+      .summary { grid-template-columns: repeat(3, 1fr); }
+      .layout { grid-template-columns: 1fr; }
+      .runs { border-right: 0; border-bottom: 1px solid var(--line); max-height: 52vh; }
+    }
   </style>
 </head>
 <body>
-  <main>
-    <h1>Electron test app is running</h1>
-    <p>This window was packaged and launched on the self-hosted Windows runner.</p>
-    <button id="testButton">Test button</button>
-    <div id="status">Waiting for click</div>
-  </main>
+  <div class="app">
+    <header>
+      <div class="brand">
+        <h1>GitHub Actions Monitor</h1>
+        <p>CodexPro · theo dõi workflow trên PC</p>
+      </div>
+      <div class="controls">
+        <input id="repo" value="songvedem260597/codexpro" spellcheck="false" aria-label="Repository" />
+        <input id="token" type="password" placeholder="GitHub token (tuỳ chọn)" autocomplete="off" aria-label="GitHub token" />
+        <button id="refresh" class="primary">Refresh</button>
+      </div>
+    </header>
+
+    <section class="summary">
+      <div class="card"><div class="label">Running</div><div id="runningCount" class="value">0</div></div>
+      <div class="card"><div class="label">Queued</div><div id="queuedCount" class="value">0</div></div>
+      <div class="card"><div class="label">Failed</div><div id="failedCount" class="value">0</div></div>
+      <div class="card"><div class="label">Success</div><div id="successCount" class="value">0</div></div>
+      <div class="card"><div class="label">API</div><div id="apiCount" class="value">—</div></div>
+    </section>
+
+    <main class="layout">
+      <section class="runs">
+        <div class="section-head">
+          <strong>Workflow runs</strong>
+          <span id="message" class="small">Đang tải…</span>
+        </div>
+        <div id="runsList"></div>
+      </section>
+      <section class="details">
+        <div class="section-head">
+          <strong>Jobs / Steps</strong>
+          <span id="refreshMode" class="small"></span>
+        </div>
+        <div id="details" class="details-content"><div class="empty">Chọn một workflow để xem job.</div></div>
+      </section>
+    </main>
+  </div>
+
   <script>
-    document.getElementById('testButton').addEventListener('click', () => {
-      document.getElementById('status').textContent = 'Button works';
-    });
+    const state = {
+      repo: 'songvedem260597/codexpro',
+      token: '',
+      runs: [],
+      selectedId: null,
+      timer: null,
+      loading: false
+    };
+
+    const $ = (id) => document.getElementById(id);
+    const repoInput = $('repo');
+    const tokenInput = $('token');
+    const runsList = $('runsList');
+    const details = $('details');
+    const message = $('message');
+
+    function statusKey(item) {
+      return item.status === 'completed' ? (item.conclusion || 'completed') : item.status;
+    }
+
+    function symbolFor(item) {
+      const key = statusKey(item);
+      if (key === 'success') return ['✓', 'ok'];
+      if (['failure', 'cancelled', 'timed_out', 'startup_failure'].includes(key)) return ['×', 'bad'];
+      if (['in_progress'].includes(key)) return ['●', 'active'];
+      return ['•', 'queued'];
+    }
+
+    function fmtTime(value) {
+      if (!value) return '—';
+      const date = new Date(value);
+      return new Intl.DateTimeFormat('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(date);
+    }
+
+    function elapsed(start, end) {
+      if (!start) return '';
+      const ms = Math.max(0, new Date(end || Date.now()).getTime() - new Date(start).getTime());
+      const sec = Math.floor(ms / 1000);
+      if (sec < 60) return `${sec}s`;
+      const min = Math.floor(sec / 60);
+      if (min < 60) return `${min}m ${sec % 60}s`;
+      return `${Math.floor(min / 60)}h ${min % 60}m`;
+    }
+
+    function text(tag, className, value) {
+      const el = document.createElement(tag);
+      if (className) el.className = className;
+      el.textContent = value ?? '';
+      return el;
+    }
+
+    function renderSummary(rateLimit) {
+      const active = state.runs.filter((r) => r.status === 'in_progress').length;
+      const queued = state.runs.filter((r) => ['queued', 'waiting', 'pending', 'requested'].includes(r.status)).length;
+      const failed = state.runs.filter((r) => ['failure', 'timed_out', 'startup_failure'].includes(r.conclusion)).length;
+      const success = state.runs.filter((r) => r.conclusion === 'success').length;
+      $('runningCount').textContent = String(active);
+      $('queuedCount').textContent = String(queued);
+      $('failedCount').textContent = String(failed);
+      $('successCount').textContent = String(success);
+      $('apiCount').textContent = rateLimit?.remaining ?? '—';
+    }
+
+    function renderRuns() {
+      runsList.replaceChildren();
+      if (!state.runs.length) {
+        runsList.append(text('div', 'empty', 'Không có workflow run nào.'));
+        return;
+      }
+
+      for (const run of state.runs) {
+        const row = document.createElement('div');
+        row.className = `run${run.id === state.selectedId ? ' selected' : ''}`;
+        row.dataset.id = String(run.id);
+
+        const dot = document.createElement('span');
+        dot.className = `dot ${statusKey(run)}${run.status === 'in_progress' ? ' pulse' : ''}`;
+
+        const body = document.createElement('div');
+        body.append(text('div', 'title', `${run.name} · #${run.runNumber}`));
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.append(
+          text('span', 'badge', run.branch || '—'),
+          text('span', '', run.event),
+          text('span', '', run.actor ? `@${run.actor}` : ''),
+          text('span', '', fmtTime(run.startedAt || run.createdAt)),
+          text('span', '', elapsed(run.startedAt || run.createdAt, run.status === 'completed' ? run.updatedAt : null))
+        );
+        body.append(meta);
+
+        const status = text('div', 'status', statusKey(run).replaceAll('_', ' '));
+        row.append(dot, body, status);
+        row.addEventListener('click', () => selectRun(run));
+        runsList.append(row);
+      }
+    }
+
+    async function selectRun(run) {
+      state.selectedId = run.id;
+      renderRuns();
+      details.replaceChildren(text('div', 'empty', 'Đang tải jobs…'));
+      try {
+        const result = await window.actionsMonitor.listJobs({ repo: state.repo, runId: run.id, token: state.token });
+        renderDetails(run, result.jobs);
+      } catch (error) {
+        details.replaceChildren(text('div', 'empty', `Không tải được jobs: ${error.message || error}`));
+      }
+    }
+
+    function renderDetails(run, jobs) {
+      details.replaceChildren();
+      const head = document.createElement('div');
+      head.className = 'detail-title';
+      const titleWrap = document.createElement('div');
+      titleWrap.append(text('h2', '', `${run.name} #${run.runNumber}`));
+      titleWrap.append(text('div', 'small', `${run.branch || '—'} · ${statusKey(run)} · ${elapsed(run.startedAt || run.createdAt, run.status === 'completed' ? run.updatedAt : null)}`));
+      const open = text('button', '', 'Mở GitHub');
+      open.addEventListener('click', () => window.actionsMonitor.openUrl(run.htmlUrl));
+      head.append(titleWrap, open);
+      details.append(head);
+
+      if (!jobs.length) {
+        details.append(text('div', 'empty', 'Workflow chưa có job.'));
+        return;
+      }
+
+      for (const job of jobs) {
+        const card = document.createElement('div');
+        card.className = 'job';
+        const jobHead = document.createElement('div');
+        jobHead.className = 'job-head';
+        const left = document.createElement('div');
+        left.append(text('div', 'job-name', job.name));
+        if (job.runnerName) left.append(text('div', 'runner', `Runner: ${job.runnerName}`));
+        const right = text('span', 'small', `${statusKey(job)} · ${elapsed(job.startedAt, job.completedAt)}`);
+        jobHead.append(left, right);
+        card.append(jobHead);
+
+        if (job.steps?.length) {
+          const steps = document.createElement('div');
+          steps.className = 'steps';
+          for (const step of job.steps) {
+            const [symbol, cls] = symbolFor(step);
+            const row = document.createElement('div');
+            row.className = 'step';
+            row.append(
+              text('span', `step-symbol ${cls}`, symbol),
+              text('span', '', step.name),
+              text('span', 'small', elapsed(step.startedAt, step.completedAt))
+            );
+            steps.append(row);
+          }
+          card.append(steps);
+        }
+        details.append(card);
+      }
+    }
+
+    function scheduleRefresh() {
+      clearTimeout(state.timer);
+      const delay = state.token ? 10000 : 60000;
+      $('refreshMode').textContent = state.token ? 'Auto 10s · token mode' : 'Auto 60s · public mode';
+      state.timer = setTimeout(refresh, delay);
+    }
+
+    async function refresh() {
+      if (state.loading) return;
+      state.loading = true;
+      message.className = 'small';
+      message.textContent = 'Đang cập nhật…';
+      try {
+        state.repo = repoInput.value.trim();
+        state.token = tokenInput.value.trim();
+        const result = await window.actionsMonitor.listRuns({ repo: state.repo, token: state.token });
+        state.runs = result.runs;
+        renderSummary(result.rateLimit);
+        renderRuns();
+        message.textContent = `Cập nhật ${fmtTime(Date.now())}`;
+        if (state.selectedId) {
+          const current = state.runs.find((run) => run.id === state.selectedId);
+          if (current) selectRun(current);
+        }
+      } catch (error) {
+        message.className = 'small error';
+        message.textContent = error.message || String(error);
+      } finally {
+        state.loading = false;
+        scheduleRefresh();
+      }
+    }
+
+    $('refresh').addEventListener('click', refresh);
+    repoInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') refresh(); });
+    tokenInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') refresh(); });
+    refresh();
   </script>
 </body>
 </html>
