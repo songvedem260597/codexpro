@@ -1,8 +1,8 @@
 export const WORKER_EXTENSION_VERSION = "0.5.123";
 
-export function extensionReady(version) {
+export function extensionReady(version, targetVersion = WORKER_EXTENSION_VERSION) {
   const parts = String(version || "").split(".").map(Number);
-  const target = WORKER_EXTENSION_VERSION.split(".").map(Number);
+  const target = targetVersion.split(".").map(Number);
   for (let index = 0; index < target.length; index += 1) {
     const current = Number.isFinite(parts[index]) ? parts[index] : 0;
     if (current !== target[index]) return current > target[index];

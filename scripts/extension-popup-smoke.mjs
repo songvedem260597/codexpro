@@ -160,3 +160,4 @@ assert.equal(disablePublishAttempts, 2, "the service worker must retry a failed 
 assert.equal(workerDisableState.workerDisablePending, false, "a successful retry must acknowledge the tombstone");
 
 console.log("✓ Extension popup UI and worker enable toggle smoke test passed");
+import "../manager/scripts/extension-release-smoke.mjs";

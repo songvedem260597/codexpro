@@ -195,7 +195,7 @@ export function useProfileActions({
       } else if (result.mode === "runtime_unavailable") {
         notify("MCP tạm thời không phản hồi · sẽ tự update worker khi kết nối phục hồi");
       } else {
-        notify(`Worker extension đã ở bản ${WORKER_EXTENSION_VERSION}`);
+        notify(`Worker extension đã ở bản ${result.version || status?.workerExtensionVersion || WORKER_EXTENSION_VERSION}`);
       }
       window.setTimeout(() => void refresh(false), result.mode === "bootstrap_reload" || result.mode === "mixed_update" ? 8000 : 3500);
     } catch (err) {
@@ -203,7 +203,7 @@ export function useProfileActions({
     } finally {
       setBusy("");
     }
-  }, [api, notify, profileSummary.reload, refresh, setBusy, setError, setWorkerUpdateConfirmOpen]);
+  }, [api, notify, status?.workerExtensionVersion, profileSummary.reload, refresh, setBusy, setError, setWorkerUpdateConfirmOpen]);
 
   return {
     setupProfile,

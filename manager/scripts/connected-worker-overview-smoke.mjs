@@ -37,7 +37,7 @@ assert.match(runtimeStatusSource, /connectorAutoMigrationInFlight\.current[\s\S]
 assert.match(runtimeStatusSource, /CONNECTOR_AUTO_MIGRATION_RETRY_MS[\s\S]*?connectorAutoMigrationAttempts\.current\.get\(profile\.profile_id\)/, "failed automatic connector migration must use retry backoff");
 assert.match(profilesSource, /autoMigratingProfileId === profile\.profile_id[\s\S]*?Đang cập nhật \+ test/, "the card must surface automatic connector migration as an in-progress update");
 assert.doesNotMatch(`${source}\n${profilesSource}`, /Ẩn khỏi danh sách|async function forgetProfile\(profile\)/, "disconnected Chrome profiles must disappear without a manual hide action");
-assert.match(profilesSource, /\{profile\.connected && !ready && <span className="update-needed">/, "an offline or disabled profile must not be presented as updateable");
+assert.match(profilesSource, /\{profile\.connected && !ready && <span className="update-needed" role="status">/, "an offline or disabled profile must not be presented as updateable");
 assert.doesNotMatch(profilesSource, /flightRecorderCount|browserIncidentKindLabel|browserIncidentTooltip|Recorder \{/, "flight recorder diagnostics must not clutter worker cards");
 assert.match(preloadSource, /forgetProfile: \(profileId\) => invoke\("codexpro:forget-profile", profileId\)/, "the preload must expose the forget-profile action");
 assert.match(electronSource, /codexpro:forget-profile[\s\S]*?action: "forget_profile"/, "the main process must route profile forgetting through the local MCP runtime");

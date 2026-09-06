@@ -1,5 +1,6 @@
 import { app, BrowserWindow, clipboard, ClipboardItem, dialog, globalShortcut, ipcMain, nativeImage, Notification, protocol, safeStorage, shell } from "electron";
 import { runGitProcess, runPowerShellProcess } from "./process-runner.mjs";
+import { availableExtensionVersion } from "./extension-release.mjs";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -1788,6 +1789,7 @@ async function runtimeBaseStatus(options = {}) {
 
 async function collectRuntimeStatus(options = {}) {
   const base = await runtimeBaseStatus(options);
+  const workerExtensionVersion = await availableExtensionVersion(base.config.root, WORKER_EXTENSION_VERSION);
   const [browserProfileSnapshot, workerJobSnapshot] = base.local.ok
     ? await Promise.all([
       listBrowserProfilesThroughMcp(base.config, base.token).then((profiles) => ({
@@ -1891,6 +1893,7 @@ async function collectRuntimeStatus(options = {}) {
     tunnel: base.tunnel,
     processes: base.processes,
     browserProfiles,
+    workerExtensionVersion,
     workers: workerStatus.workers,
     workerSources: workerStatus.sources,
     workerJobs,
@@ -2959,17 +2962,19 @@ async function stopProfileTask(payload) {
 
 async function reloadChromeProfiles() {
   let status = await readyRuntimeStatus();
+  let targetVersion = await availableExtensionVersion(status.config.root, WORKER_EXTENSION_VERSION);
   for (let attempt = 0; attempt < 2 && (!status.local.ok || status.workerSnapshotAvailable === false); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 750));
     status = await runtimeStatus({ forceRefresh: true });
   }
   if (!status.local.ok || status.workerSnapshotAvailable === false) {
-    return { ok: true, mode: "runtime_unavailable", count: 0, failed: 0, deferred: 0, outdated: 0, version: WORKER_EXTENSION_VERSION };
+    return { ok: true, mode: "runtime_unavailable", count: 0, failed: 0, deferred: 0, outdated: 0, version: targetVersion };
   }
+  targetVersion = await availableExtensionVersion(status.config.root, WORKER_EXTENSION_VERSION);
   const connectedProfiles = status.browserProfiles.filter((profile) => profile.connected);
   if (!connectedProfiles.length) throw new Error("Không có Chrome profile nào đang kết nối.");
-  const outdated = connectedProfiles.filter((profile) => !versionAtLeast(profile.extension_version));
-  if (!outdated.length) return { ok: true, mode: "up_to_date", count: 0, failed: 0, deferred: 0, outdated: 0, version: WORKER_EXTENSION_VERSION };
+  const outdated = connectedProfiles.filter((profile) => !versionAtLeast(profile.extension_version, targetVersion));
+  if (!outdated.length) return { ok: true, mode: "up_to_date", count: 0, failed: 0, deferred: 0, outdated: 0, version: targetVersion };
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
 
   const safeToReload = (profile) => {
@@ -2987,7 +2992,7 @@ async function reloadChromeProfiles() {
       failed: 0,
       deferred: deferred.length,
       outdated: outdated.length,
-      version: WORKER_EXTENSION_VERSION
+      version: targetVersion
     };
   }
 
@@ -3019,7 +3024,7 @@ async function reloadChromeProfiles() {
       await new Promise((resolve) => setTimeout(resolve, 500));
       const refreshed = await runtimeStatus();
       confirmedIds = new Set(refreshed.browserProfiles
-        .filter((profile) => reloadAcceptedIds.has(profile.profile_id) && profile.connected && versionAtLeast(profile.extension_version))
+        .filter((profile) => reloadAcceptedIds.has(profile.profile_id) && profile.connected && versionAtLeast(profile.extension_version, targetVersion))
         .map((profile) => profile.profile_id));
       if (confirmedIds.size === reloadAcceptedIds.size) break;
     }
@@ -3029,7 +3034,7 @@ async function reloadChromeProfiles() {
   const hardFailures = results.length - reloadAcceptedIds.size - racedBusy + unconfirmed;
   const deferredCount = deferred.length + racedBusy;
   if (!updated && hardFailures) {
-    throw new Error(`Worker đã nhận lệnh reload nhưng chưa xác nhận chạy bản ${WORKER_EXTENSION_VERSION}. Hãy kiểm tra đường dẫn extension trong chrome://extensions.`);
+    throw new Error(`Worker đã nhận lệnh reload nhưng chưa xác nhận chạy bản ${targetVersion}. Hãy kiểm tra đường dẫn extension trong chrome://extensions.`);
   }
   if (!updated) {
     return {
@@ -3039,7 +3044,7 @@ async function reloadChromeProfiles() {
       failed: 0,
       deferred: deferredCount,
       outdated: outdated.length,
-      version: WORKER_EXTENSION_VERSION
+      version: targetVersion
     };
   }
   return {
@@ -3049,7 +3054,7 @@ async function reloadChromeProfiles() {
     failed: hardFailures,
     deferred: deferredCount,
     outdated: outdated.length,
-    version: WORKER_EXTENSION_VERSION
+    version: targetVersion
   };
 }
 

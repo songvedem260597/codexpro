@@ -442,7 +442,7 @@ function App() {
     if (!managerSettings.autoUpdateWorkers || busy || !status?.local?.ok || status?.workerSnapshotStale) return;
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
     const hasSafeOutdatedWorker = profiles.some((profile) => {
-      if (!profile?.connected || extensionReady(profile.extension_version)) return false;
+      if (!profile?.connected || extensionReady(profile.extension_version, workerExtensionVersion)) return false;
       const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
       const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
       return profile.activity === "idle" && Number(profile.busy_request_count || 0) === 0 && !hasBusyTab;
@@ -483,22 +483,23 @@ function App() {
     [status?.browserProfiles]
   );
 
+  const workerExtensionVersion = status?.workerExtensionVersion || WORKER_EXTENSION_VERSION;
   const profileSummary = useMemo(() => {
     const allProfiles = status?.browserProfiles || [];
     const profiles = visibleBrowserProfiles.filter((profile) => profile.connected);
     const connectedProfiles = allProfiles.filter((profile) => profile.connected);
     const apiWorkers = (status?.workers || []).filter((worker) => worker.worker_type === "api");
-    const outdated = connectedProfiles.filter((profile) => !extensionReady(profile.extension_version));
+    const outdated = connectedProfiles.filter((profile) => !extensionReady(profile.extension_version, workerExtensionVersion));
     return {
       working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length + apiWorkers.filter((worker) => worker.connected && worker.activity === "working").length,
-      idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile.extension_version))).length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
+      idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile.extension_version, workerExtensionVersion))).length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
       hung: visibleBrowserProfiles.filter((profile) => !profile.connected).length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
       missing: profiles.filter((profile) => profile.activity === "no_chatgpt" && !profile.connector_installed).length,
       reload: outdated.filter(profileSafeForWorkerUpdate).length,
       deferredUpdate: outdated.filter((profile) => !profileSafeForWorkerUpdate(profile)).length,
       outdated: outdated.length
     };
-  }, [status?.browserProfiles, status?.workers, visibleBrowserProfiles]);
+  }, [status?.browserProfiles, status?.workers, visibleBrowserProfiles, workerExtensionVersion]);
   const {
     setupProfile,
     openProfile,
@@ -688,10 +689,10 @@ function App() {
                 onClick={() => setWorkerUpdateConfirmOpen(true)}
                 disabled={Boolean(busy) || profileSummary.reload === 0}
                 title={profileSummary.reload
-                  ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${WORKER_EXTENSION_VERSION}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
+                  ? `Chỉ update ${profileSummary.reload} worker đang rảnh lên ${workerExtensionVersion}${profileSummary.deferredUpdate ? `; ${profileSummary.deferredUpdate} worker đang làm việc sẽ được bỏ qua` : ""}`
                   : profileSummary.deferredUpdate
                     ? `${profileSummary.deferredUpdate} worker cần update nhưng đang làm việc; chờ rảnh rồi update`
-                    : `Tất cả profile đã dùng worker ${WORKER_EXTENSION_VERSION}`}
+                    : `Tất cả profile đã dùng worker ${workerExtensionVersion}`}
               >
                 {busy === "reload-profiles" ? "Đang update extension…" : "Update extension"}
               </button>
@@ -760,7 +761,7 @@ function App() {
                 diagnosticEntries={operationsLogs}
                 settings={managerSettings}
                 managerVersion={managerPackage.version}
-                workerVersion={WORKER_EXTENSION_VERSION}
+                workerVersion={workerExtensionVersion}
                 profileSummary={profileSummary}
                 busy={busy}
                 onOpenChat={setChatProfileId}
@@ -895,7 +896,7 @@ function App() {
         open={workerUpdateConfirmOpen}
         reloadCount={profileSummary.reload}
         deferredUpdateCount={profileSummary.deferredUpdate}
-        workerVersion={WORKER_EXTENSION_VERSION}
+        workerVersion={workerExtensionVersion}
         onClose={() => setWorkerUpdateConfirmOpen(false)}
         onConfirm={() => void reloadProfiles()}
       />

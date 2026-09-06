@@ -32,7 +32,8 @@ function BrowserProfileCard({
   onOpenProfile,
   onSetupProfile
 }) {
-  const ready = extensionReady(profile.extension_version);
+  const workerExtensionVersion = status?.workerExtensionVersion || WORKER_EXTENSION_VERSION;
+  const ready = extensionReady(profile.extension_version, workerExtensionVersion);
   const profileBusy = busy === `profile:${profile.profile_id}` || autoMigratingProfileId === profile.profile_id;
   const profileChecking = checkingProfiles.includes(profile.profile_id);
   const hung = !profile.connected;
@@ -114,7 +115,7 @@ function BrowserProfileCard({
       </div>
       <div className="profile-actions">
         <button className="button secondary profile-task-button" type="button" onClick={() => onOpenTask(profile.profile_id)} title="Xem task của worker này"><span>Task</span>{profileJobCount > 0 && <b>{profileJobCount}</b>}</button>
-        {profile.connected && !ready && <span className="update-needed">Có worker {WORKER_EXTENSION_VERSION} mới</span>}
+        {profile.connected && !ready && <span className="update-needed" role="status">Có extension {workerExtensionVersion} mới</span>}
         {profileChecking && <span className="checking-profile">Đang kiểm tra ChatGPT…</span>}
         <div className="profile-action-buttons">
           <button
