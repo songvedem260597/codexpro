@@ -450,7 +450,7 @@ function App() {
     if (!hasSafeOutdatedWorker || Date.now() - operationsAutoUpdateAt.current < 60_000) return;
     operationsAutoUpdateAt.current = Date.now();
     void reloadProfiles();
-  }, [busy, managerSettings.autoUpdateWorkers, status?.browserProfiles, status?.local?.ok, status?.workerSnapshotStale]);
+  }, [busy, managerSettings.autoUpdateWorkers, reloadProfiles, status?.browserProfiles, status?.local?.ok, status?.workerSnapshotStale, workerExtensionVersion]);
 
   useLayoutEffect(() => {
     if (!chatProfileId || !openChatScrollKey) return;
