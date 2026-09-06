@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
+// P03 ownership guard: orchestration belongs in chat modules/hooks, not back in main.jsx.
 const mainSource = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const modalSource = fs.readFileSync(new URL("../src/features/chat/chat-modal.jsx", import.meta.url), "utf8");
 const uiActionsSource = fs.readFileSync(new URL("../src/features/chat/chat-ui-actions.js", import.meta.url), "utf8");
