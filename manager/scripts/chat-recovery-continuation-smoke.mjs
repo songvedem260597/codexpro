@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const normalizeNewlines = (text) => text.replace(/\r\n/g, "\n");
-const managerUi = normalizeNewlines(fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8"));
+const recoveryUi = normalizeNewlines(fs.readFileSync(new URL("../src/hooks/use-chat-recovery.js", import.meta.url), "utf8"));
+const sendActionsUi = normalizeNewlines(fs.readFileSync(new URL("../src/hooks/use-chat-send-actions.js", import.meta.url), "utf8"));
+const conversationUtils = normalizeNewlines(fs.readFileSync(new URL("../src/features/chat/chat-conversation-utils.js", import.meta.url), "utf8"));
 const managerMain = normalizeNewlines(fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8"));
+const managerChatCache = normalizeNewlines(fs.readFileSync(new URL("../electron/manager-chat-cache.mjs", import.meta.url), "utf8"));
 const worker = normalizeNewlines(fs.readFileSync(new URL("../../chrome-extension/service-worker.js", import.meta.url), "utf8"));
 
 const between = (source, start, end) => {
@@ -14,10 +17,10 @@ const between = (source, start, end) => {
   return source.slice(from, to);
 };
 
-const autoRecovery = between(managerUi, "useEffect(() => {\n    if (!managerSettings.autoRecovery)", "}, [managerSettings.autoRecovery, status?.browserProfiles, status?.workerJobs]);");
+const autoRecovery = between(recoveryUi, "useEffect(() => {\n    if (!managerSettings.autoRecovery)", "}, [managerSettings.autoRecovery, status?.browserProfiles, status?.workerJobs]);");
 assert.match(autoRecovery, /recoverProfileTab\(profile, \{ targetTab, silent: true, automatic: true, hardFailure \}\)/, "auto recovery must use the same guarded continuation pipeline as manual recovery");
 
-const recovery = between(managerUi, "async function recoveryContinuationSnapshot", "async function stopControlTask");
+const recovery = between(recoveryUi, "async function recoveryContinuationSnapshot", "async function continueTaskFromCheckpoint");
 assert.match(recovery, /getChatResponseCache\(\{ profileId, conversationId \}\)/, "recovery must fall back to the persisted transcript cache before abandoning a stuck tab");
 assert.match(recovery, /materializeTranscriptMessages\(liveResponse, conversationId\)/, "recovery must preserve the live manager transcript when available");
 assert.match(recovery, /newChat: false/, "recovery must first try to reopen the original conversation");
@@ -25,7 +28,7 @@ assert.match(recovery, /continuation_reason: "recovery"/, "unrecoverable tabs mu
 assert.match(recovery, /discardOnly: true/, "old stuck tab must be discarded only after the continuation chat is created");
 assert.match(recovery, /requestTargetsRef\.current = \{ \.\.\.requestTargetsRef\.current, \[profile\.profile_id\]: conversationId \}/, "successful same-conversation recovery must keep the original conversation selected");
 
-const responseCache = between(managerMain, "function retainRecentManagerChatCacheEntries", "function readManagerChatCache");
+const responseCache = between(managerChatCache, "function retainRecentManagerChatCacheEntries", "export function createManagerChatCache");
 assert.match(responseCache, /MAX_CHAT_CACHE_ENTRIES_PER_PROFILE/, "persistent manager cache must be capped per profile");
 assert.match(responseCache, /deduped\.slice\(-MAX_CHAT_CACHE_ENTRIES_PER_PROFILE\)/, "persistent manager cache must retain only three recent conversations per profile");
 const cachedRead = between(managerMain, "function managerChatCacheResponse", "async function inspectThroughMcp");
@@ -56,14 +59,14 @@ assert.match(canonicalRecovery, /task_id:\s*previousTaskId/, "recovery-mode chec
 assert.match(canonicalRecovery, /recoveryContexts = Array\.isArray\(contextResult\?\.checkpoints\) \? contextResult\.checkpoints\.slice\(-3\) : \[\]/, "canonical recovery must cap restored task checkpoints at three before prompt construction");
 assert.match(canonicalRecovery, /recoveryCheckpointText[\s\S]*?\.join\("\\n"\)/, "recovery-mode prompt must use canonical checkpoint text rather than the renderer transcript payload");
 
-const rolloverPrompt = between(managerUi, "function buildConversationRolloverPrompt", "function ChatRequestComposer");
+const rolloverPrompt = conversationUtils.slice(conversationUtils.indexOf("export function buildConversationRolloverPrompt"));
 assert.match(rolloverPrompt, /continuation_reason \|\| ""\) === "recovery"/, "handoff prompt must distinguish recovery from conversation-limit rollover");
 assert.match(rolloverPrompt, /recovery_reason/, "handoff prompt must include why the old tab could not be safely recovered");
 
-assert.equal((managerUi.match(/async function continueTaskFromCheckpoint\(/g) || []).length, 1, "renderer must keep exactly one canonical checkpoint-recovery implementation");
-const checkpointRecovery = between(managerUi, "async function continueTaskFromCheckpoint", "async function continueTaskAfterHang");
+assert.equal((recoveryUi.match(/async function continueTaskFromCheckpoint\(/g) || []).length, 1, "renderer must keep exactly one canonical checkpoint-recovery implementation");
+const checkpointRecovery = between(recoveryUi, "async function continueTaskFromCheckpoint", "async function continueTaskAfterHang");
 assert.doesNotMatch(checkpointRecovery, /recoveryContinuationSnapshot\(/, "checkpoint recovery must not rebuild context from the stale ChatGPT conversation transcript");
-const rollover = between(managerUi, "async function rolloverFullConversation", "async function verifyRepoTaskUse");
+const rollover = between(sendActionsUi, "async function rolloverFullConversation", "async function verifyRepoTaskUse");
 assert.match(rollover, /rolloverReason: continuationReason/, "continuation state must retain the rollover reason");
 assert.match(rollover, /requestTargetsRef\.current = \{ \.\.\.requestTargetsRef\.current, \[profileId\]: newConversationId \}/, "continuation must atomically select the new conversation");
 assert.match(rollover, /checkpointContinuation[\s\S]*?api\.resumeProfileTask\(\{[\s\S]*?taskId: activeTaskId[\s\S]*?hangRecovery: true/, "task continuation must preserve the running Task ID by delegating to checkpoint resume instead of enqueuing a new task");

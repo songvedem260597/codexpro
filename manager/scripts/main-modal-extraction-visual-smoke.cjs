@@ -50,7 +50,7 @@ app.whenReady().then(async () => {
       };
     })()`, true);
     if (!worker) throw new Error("Worker update modal did not render");
-    if (worker.title !== "Cập nhật CodexPro Worker" || !worker.text.includes("3 worker đang rảnh") || !worker.text.includes("2 worker đang làm việc") || !worker.text.includes("0.5.121")) throw new Error(`Worker update content regressed: ${JSON.stringify(worker)}`);
+    if (worker.title !== "Cập nhật CodexPro Worker" || !worker.text.includes("3 worker đang rảnh") || !worker.text.includes("2 worker đang làm việc") || !worker.text.includes("0.5.122")) throw new Error(`Worker update content regressed: ${JSON.stringify(worker)}`);
     if (worker.role !== "dialog" || worker.modal !== "true") throw new Error(`Worker update accessibility regressed: ${JSON.stringify(worker)}`);
     if (worker.rect.left < 0 || worker.rect.top < 0 || worker.rect.right > worker.viewport.width || worker.rect.bottom > worker.viewport.height) throw new Error(`Worker update escaped viewport: ${JSON.stringify(worker.rect)}`);
     fs.mkdirSync(screenshotRoot, { recursive: true });

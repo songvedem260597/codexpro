@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const renderer = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+const profilesSource = fs.readFileSync(new URL("../src/features/profiles/browser-profiles-section.jsx", import.meta.url), "utf8");
+const chatModalSource = fs.readFileSync(new URL("../src/features/chat/chat-modal.jsx", import.meta.url), "utf8");
 const settingsView = fs.readFileSync(new URL("../src/features/settings/settings-view.jsx", import.meta.url), "utf8");
 const apiWorkerCards = fs.readFileSync(new URL("../src/features/api-workers/api-worker-cards.jsx", import.meta.url), "utf8");
 const styles = fs.readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
@@ -19,9 +21,10 @@ assert.match(renderer, /import \{ SettingsView \} from "\.\/features\/settings\/
 assert.match(renderer, /<SettingsView[\s\S]*?active=\{activePage === "settings"\}/, "App must mount the extracted SettingsView only for the Settings page");
 assert.doesNotMatch(renderer, /<div className="settings-view" hidden=\{activePage !== "settings"\}/, "the large Settings JSX must not drift back into main.jsx");
 
-assert.ok((`${renderer}\n${settingsView}`.match(/working-border-\$\{managerSettings\.workingBorderStyle\}/g) || []).length >= 2, "worker list and preview must expose all normalized border styles without collapsing them into the old modes");
+assert.match(profilesSource, /working-border-\$\{settings\.workingBorderStyle\}/, "worker list must expose the normalized border style");
+assert.match(settingsView, /working-border-\$\{managerSettings\.workingBorderStyle\}/, "settings preview must expose the normalized border style");
 assert.match(settingsView, /value:\s*"shine"[\s\S]*?Ánh sáng xoay[\s\S]*?value:\s*"mint"[\s\S]*?Glow mint xanh[\s\S]*?value:\s*"beam"[\s\S]*?Tia chạy quanh viền/, "settings must keep both existing styles and add the mint border as a third option");
-assert.ok((`${renderer}\n${settingsView}\n${apiWorkerCards}`.match(/className="worker-active-border"/g) || []).length >= 3, "browser, API, and preview cards must render the beam layer");
+assert.ok((`${profilesSource}\n${settingsView}\n${apiWorkerCards}`.match(/className="worker-active-border"/g) || []).length >= 3, "browser, API, and preview cards must render the beam layer");
 
 assert.match(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working::before,[\s\S]*?transparent 0deg 225deg[\s\S]*?#f4a340 244deg[\s\S]*?#ff9f1c 346deg[\s\S]*?animation:\s*profile-border-shine\s+2\.75s\s+linear\s+infinite/, "the original orange rotating shine must remain unchanged as its own style");
 assert.doesNotMatch(styles, /\.profile-list\.working-border-shine \.browser-profile\.is-working\s*\{[^}]*border-color:\s*#334052/, "the original shine must not inherit the mint style's neutral static ring");
@@ -36,8 +39,8 @@ assert.match(styles, /prefers-reduced-motion:\s*reduce[\s\S]*?working-border-min
 
 assert.match(styles, /\.chat-response::before\s*\{[^}]*opacity:\s*0;[^}]*animation:\s*profile-border-shine[^}]*animation-play-state:\s*paused/, "chat shine must stay mounted but hidden and paused while idle or only sending");
 assert.match(styles, /\.chat-response\.is-streaming::before\s*\{[^}]*opacity:\s*1;[^}]*animation-play-state:\s*running/, "confirmed processing must reveal and resume the existing chat shine layer");
-assert.match(renderer, /const responseBorderActive = selectedBusy \|\| selectedSettling;/, "the latest-message border must stay active continuously from confirmed processing through settling");
-assert.match(renderer, /chat-response is-inline \$\{responseBorderActive \? "is-streaming" : sending \? "is-sending" : ""\}/, "confirmed processing must outrank the local sending state for the latest-message border");
+assert.match(chatModalSource, /const responseBorderActive = selectedBusy \|\| selectedSettling;/, "the latest-message border must stay active continuously from confirmed processing through settling");
+assert.match(chatModalSource, /chat-response is-inline \$\{responseBorderActive \? "is-streaming" : sending \? "is-sending" : ""\}/, "confirmed processing must outrank the local sending state for the latest-message border");
 assert.match(styles, /\.chat-response\.is-streaming\s*\{[^}]*border-color:/, "only confirmed processing may change the latest-message border color");
 assert.doesNotMatch(styles, /\.chat-response\.is-sending(?:\s*,|\s*\{)[^}]*border(?:-color)?:/, "pre-ACK sending must not change the latest-message border at all");
 assert.doesNotMatch(styles, /\.chat-response\.is-sending::before/, "pre-ACK sending must not own the animated border paint layer");

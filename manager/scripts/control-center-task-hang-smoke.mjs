@@ -174,6 +174,7 @@ try {
 const controlCenter = fs.readFileSync(new URL("../src/control-center.jsx", import.meta.url), "utf8");
 const controlStyles = fs.readFileSync(new URL("../src/control-center.css", import.meta.url), "utf8");
 const main = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+const recoveryUi = fs.readFileSync(new URL("../src/hooks/use-chat-recovery.js", import.meta.url), "utf8");
 const electronMain = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
 
 assert.match(controlCenter, /Lỗi mạng \/ OpenAI làm treo task/, "Control Center must expose a dedicated task-hang management section");
@@ -182,11 +183,11 @@ assert.match(controlCenter, /Đóng tab \+ tiếp tục task/, "active hang rows
 assert.match(controlCenter, /onRecover\(profile, \{ conversationId: incident\.conversation_id, targetTab \}\)/, "same-tab recovery must target the exact incident conversation/tab");
 assert.match(controlCenter, /onContinueAfterHang\(incident\)/, "continuation action must be delegated to the existing recovery path");
 assert.match(controlStyles, /\.control-hang-row\.is-active\.is-openai/, "OpenAI hangs must have a distinct active incident state");
-assert.match(main, /taskHangIncidents[\s\S]*?no_meaningful_progress[\s\S]*?continueTaskFromCheckpoint\(profile, taskId,[\s\S]*?automatic: true/, "Auto Recovery must continue stale running tasks from checkpoints without reopening the old conversation");
-const checkpointRecoveryStart = main.indexOf("async function continueTaskFromCheckpoint(profile, taskId, options = {})");
-const hangContinuationStart = main.indexOf("async function continueTaskAfterHang(incident)");
-const checkpointRecovery = main.slice(checkpointRecoveryStart, hangContinuationStart);
-const hangContinuation = main.slice(hangContinuationStart, main.indexOf("async function stopControlTask", hangContinuationStart));
+assert.match(recoveryUi, /taskHangIncidents[\s\S]*?no_meaningful_progress[\s\S]*?continueTaskFromCheckpoint\(profile, taskId,[\s\S]*?automatic: true/, "Auto Recovery must continue stale running tasks from checkpoints without reopening the old conversation");
+const checkpointRecoveryStart = recoveryUi.indexOf("async function continueTaskFromCheckpoint(profile, taskId, options = {})");
+const hangContinuationStart = recoveryUi.indexOf("async function continueTaskAfterHang(incident)");
+const checkpointRecovery = recoveryUi.slice(checkpointRecoveryStart, hangContinuationStart);
+const hangContinuation = recoveryUi.slice(hangContinuationStart, recoveryUi.indexOf("useEffect(() =>", hangContinuationStart));
 assert.match(checkpointRecovery, /api\.resumeProfileTask\(\{[\s\S]*?profileId[\s\S]*?taskId: normalizedTaskId[\s\S]*?hangRecovery: true/, "checkpoint recovery must resume the exact Task ID in a new recovery chat");
 assert.match(checkpointRecovery, /recoverProfileChat\([\s\S]*?discardOnly: true/, "old stuck tab must be discarded only after checkpoint recovery creates the new chat");
 assert.match(hangContinuation, /continueTaskFromCheckpoint\(profile, taskId, \{/, "Control Center hang continuation must delegate to checkpoint recovery");

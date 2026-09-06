@@ -9,7 +9,7 @@ assert.equal(formatWorkerRunningDuration("2026-08-31T15:10:00.000Z", now), "20:0
 assert.equal(formatWorkerRunningDuration("2026-08-31T15:17:45.000Z", now), "12:15");
 assert.equal(formatWorkerRunningDuration("2026-08-31T13:17:45.000Z", now), "2:12:15");
 
-const source = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
+const source = fs.readFileSync(new URL("../src/features/profiles/browser-profiles-section.jsx", import.meta.url), "utf8");
 const apiWorkerCardsSource = fs.readFileSync(new URL("../src/features/api-workers/api-worker-cards.jsx", import.meta.url), "utf8");
 assert.match(source, /<WorkerRunningDuration startedAt=\{profile\.busy_since \|\| liveTab\?\.network_last_started_at\}/, "Chrome worker duration must use the actual generation start time");
 assert.match(apiWorkerCardsSource, /<WorkerRunningDuration startedAt=\{worker\.started_at\}/, "API worker duration must use its job start time");

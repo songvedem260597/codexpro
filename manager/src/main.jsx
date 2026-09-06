@@ -18,378 +18,46 @@ import { TaskWorkflowCenter } from "./task-workflow-center.jsx";
 import { AppPluginCenter } from "./app-plugin-center.jsx";
 import { Icon, ProfileSummaryItem, StatusCard, TitleGalaxyAccent } from "./components/manager-overview-ui.jsx";
 import { SettingsView } from "./features/settings/settings-view.jsx";
-import { ChatGalaxyButtonContent, Dot, WorkerIcon, WorkingBadge } from "./components/worker-ui.jsx";
-import { ApiWorkerCards } from "./features/api-workers/api-worker-cards.jsx";
+import { Dot } from "./components/worker-ui.jsx";
 import { ApiWorkerJobModal } from "./features/api-workers/api-worker-job-modal.jsx";
 import { AttachmentPreviewModal } from "./features/chat/attachment-preview-modal.jsx";
-import { ChatDropdown, NEW_CHAT_TARGET } from "./features/chat/chat-dropdown.jsx";
-import { ChatRequestComposer } from "./features/chat/chat-request-composer.jsx";
+import { ChatModal } from "./features/chat/chat-modal.jsx";
+import { createChatUiActions } from "./features/chat/chat-ui-actions.js";
 import { ProfileTaskModal } from "./features/tasks/profile-task-modal.jsx";
-import { profileTaskJobsForWorker } from "./profile-task-popup.js";
 import { WorkerUpdateConfirmModal } from "./features/profiles/worker-update-confirm-modal.jsx";
+import { BrowserProfilesSection } from "./features/profiles/browser-profiles-section.jsx";
 import { InspectionModal } from "./features/projects/inspection-modal.jsx";
-import { canAcceptNextChatMessage, canVerifyRepoTaskUse, isRecoverableAbortedChatNetworkFailure, isRetryableChatTurnBusyError, isTerminalChatNetworkState, shouldShowChatBusy, shouldShowChatSettling } from "./chat-status.js";
-import { cancelResponseAutoResume, handleResponseWheel, installResponseAutoPin, recordResponseScroll, responseScrollMetrics, scheduleResponseAutoResume, scrollResponseToTurnAnchor as applyResponseTurnAnchor } from "./chat-scroll.js";
-import { cacheableTranscriptMessages, completedResponseNeedsDomFallback, discardProvisionalAssistantAfterLatestUser, isNetworkStreamCurrentGeneration, latestTurnHasProvisionalAssistant, materializeTranscriptMessages, mergeNetworkStreamTranscript, mergeProgressiveResponseText, replaceCanonicalTranscript, transcriptAwaitingAssistant, trimRecentTranscriptMessages } from "./chat-transcript.js";
-import { projectSelectionChanged } from "./chat-project.js";
-import { buildChatResponseAuditRecord, responseAuditTextFingerprint } from "./chat-response-audit.js";
-import { conversationCompletedTaskCount, conversationMessageLimit, conversationTotalMessageCount, logicalTaskTracking, recordCompletedLogicalTask, shouldQualifyFastMessageLimit, shouldRolloverConversation } from "./conversation-message-limit.js";
-import { activeLogicalTaskAdjustment } from "../electron/logical-chat-task.mjs";
-import { longRunningChatWatchdogCandidate } from "./long-task-watchdog.js";
-import { VISUAL_WATCHDOG_INTERVAL_MS, visualWatchdogCandidate } from "./visual-watchdog.js";
-import { chatHistoryRateLimitRecoveryCandidate } from "./chat-recovery-policy.js";
-import { confirmChatResponseFinality } from "./chat-response-finality.js";
-import { isConversationOutsideRecentWindowError, nextValidConversationTarget } from "./chat-response-target.js";
-import { profileCardBorderState, profileChromeActionState, profileChromeTarget, profileTabFailureState, profileTaskSummaryState } from "./profile-card-state.js";
-import { mergeRuntimeStatus, normalizeTerminalMessageStreamProfiles, sameProjectList, stabilizeEmptyBrowserProfileSnapshot } from "./ui-performance.js";
-import { ALL_ALLOWED_WORKSPACES, formatRepoActivity, ProjectDropdown } from "./project-dropdown.jsx";
-import { DiagnosticLogView, logRendererDiagnostic } from "./diagnostic-log-view.jsx";
-import { WorkerRunningDuration } from "./worker-running-duration.jsx";
+import { ProjectsSection } from "./features/projects/projects-section.jsx";
+import { createManagerRuntimeActions } from "./features/runtime/manager-runtime-actions.js";
+import { extensionReady, profileSafeForWorkerUpdate, profileVisibleInWorkerList, WORKER_EXTENSION_VERSION } from "./features/profiles/profile-runtime-utils.js";
+import { loadProfileTaskLabels, persistProfileTaskLabels } from "./features/tasks/profile-task-labels.js";
+import { FONT_OPTIONS, FONT_ROLE_OPTIONS, FONT_WEIGHT_LABELS, GLOBAL_RULES_TEMPLATE } from "./manager-settings-model.js";
+import { useManagerSettings } from "./hooks/use-manager-settings.js";
+import { useManagerDiagnostics } from "./hooks/use-manager-diagnostics.js";
+import { useChatViewport } from "./hooks/use-chat-viewport.js";
+import { useRuntimeStatus } from "./hooks/use-runtime-status.js";
+import { useProjectActions } from "./hooks/use-project-actions.js";
+import { useProfileActions } from "./hooks/use-profile-actions.js";
+import { useChatResponseCache } from "./hooks/use-chat-response-cache.js";
+import { useChatResponseLoader } from "./hooks/use-chat-response-loader.js";
+import { useChatSendActions } from "./hooks/use-chat-send-actions.js";
+import { useChatRecovery } from "./hooks/use-chat-recovery.js";
+import { useChatSession } from "./hooks/use-chat-session.js";
+import { materializeTranscriptMessages, transcriptAwaitingAssistant } from "./chat-transcript.js";
+import { DiagnosticLogView } from "./diagnostic-log-view.jsx";
 import { playTaskCompletionSound } from "./task-completion-sound.js";
-import { pruneTimestampMap, trimMapEntries, trimSetEntries } from "./performance-retention.js";
+import { trimMapEntries } from "./performance-retention.js";
 import { synchronizeWorkerBorderAnimations } from "./worker-border-sync.js";
 
 const loadResponseMarkdownModule = () => import("./response-markdown.jsx");
-const ResponseText = React.lazy(() => loadResponseMarkdownModule().then((module) => ({ default: module.ResponseText })));
 
 const ControlCenter = React.lazy(() => import("./control-center.jsx").then((module) => ({ default: module.ControlCenter })));
 const api = window.codexpro;
-const PROFILE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
-const PROFILE_CHECK_RETRY_MS = 30 * 60 * 1000;
-const CONNECTOR_AUTO_MIGRATION_RETRY_MS = 5 * 60 * 1000;
-const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
-const RESPONSE_MANUAL_SCROLL_RESUME_MS = 5000;
-const REALTIME_WATCHDOG_MS = 30000;
-const PROJECT_REFRESH_MS = 5 * 60 * 1000;
-const ROLLOVER_CONTEXT_MAX_CHARS = 9000;
-const REPO_TASK_VERIFICATION_RETRY_MS = 1500;
-const LATEST_RESPONSE_RECOVERY_POLL_MS = 3000;
 const PROJECTS_PER_PAGE = 8;
-const PROFILE_TASK_LABELS_STORAGE_KEY = "codexpro.profileTaskLabels.v2";
 const DEEP_UI_DIAGNOSTICS_ENABLED = new URLSearchParams(window.location.search).get("debugUi") === "1";
 
-function loadProfileTaskLabels() {
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(PROFILE_TASK_LABELS_STORAGE_KEY) || "{}");
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-
-
-
-const FONT_OPTIONS = [
-  { value: "system", label: "Segoe UI / mặc định Windows", css: '"Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", sans-serif' },
-  { value: "be-vietnam-pro", label: "Be Vietnam Pro", hint: "Text dài · tiếng Việt rõ và dễ đọc", css: '"Be Vietnam Pro", "Segoe UI", sans-serif' },
-  { value: "manrope", label: "Manrope", hint: "Tiêu đề · giao diện hiện đại, gọn", css: 'Manrope, "Segoe UI", sans-serif' },
-  { value: "jetbrains-mono", label: "JetBrains Mono", hint: "Code · ID · log kỹ thuật", css: '"JetBrains Mono", "Cascadia Code", Consolas, monospace' },
-  { value: "arial", label: "Arial", css: 'Arial, sans-serif' },
-  { value: "tahoma", label: "Tahoma", css: 'Tahoma, sans-serif' },
-  { value: "verdana", label: "Verdana", css: 'Verdana, sans-serif' },
-  { value: "trebuchet", label: "Trebuchet MS", css: '"Trebuchet MS", sans-serif' },
-  { value: "georgia", label: "Georgia", css: 'Georgia, serif' },
-  { value: "cascadia", label: "Cascadia Code", css: '"Cascadia Code", Consolas, monospace' }
-];
-
-const FONT_ROLE_OPTIONS = [
-  { value: "inherit", label: "Theo font nội dung", hint: "Dùng cùng font với nội dung & control" },
-  ...FONT_OPTIONS
-];
-
-const FONT_WEIGHT_LABELS = {
-  400: "Regular",
-  500: "Medium",
-  600: "Semibold",
-  700: "Bold"
-};
-
-const GLOBAL_RULES_TEMPLATE = `# CodexPro Global Rules
-
-<!-- Rule trong file này áp dụng cho mọi repo/dự án được thao tác qua MCP CodexPro. -->
-<!-- Thêm hoặc sửa rule bên dưới. Không lưu password, token hoặc API key trong file này. -->
-
-- Đọc và tuân thủ file này trước khi đọc rule riêng của từng repo/dự án.
-- Rule riêng của repo có thể bổ sung chi tiết nhưng không được âm thầm bỏ qua rule toàn cục này.
-`;
-
-const DEFAULT_MANAGER_SETTINGS = {
-  chatWidth: 940,
-  chatHeight: 330,
-  showChatConversationSelector: true,
-  fontFamily: "system",
-  headingFontFamily: "inherit",
-  monoFontFamily: "inherit",
-  fontSize: 14,
-  fontWeight: 400,
-  profileLayout: "rows",
-  profileCardHeight: 390,
-  workingBorderStyle: "shine",
-  maxSubagents: 1,
-  autoRecovery: false,
-  autoUpdateWorkers: false,
-  taskNotifications: true,
-  appBackground: "",
-  appBackgroundDataUrl: "",
-  appBackgroundBlur: 6,
-  appBackgroundDim: 54,
-  globalRules: GLOBAL_RULES_TEMPLATE,
-  repoSelections: {},
-  selectedWorkerPackId: "default",
-  workerImagePacks: [],
-  workerImages: { idle: "", working: "", hung: "" },
-  workerImageDataUrls: { idle: "", working: "", hung: "" }
-};
-
-
-const GENERIC_TOOL_ACTIVITY_TEXT = "Codex Pro đang sử dụng công cụ";
-
-function codexProToolActivityLabel(text) {
-  return /^Codex\s*Pro đang\b/i.test(String(text || "").trim());
-}
-
-function looksLikeToolArgumentPayload(text, { requireCodexHint = true } = {}) {
-  const source = String(text || "").trim().replace(/\\"/g, '"');
-  if (!source || source.length > 12000 || !source.startsWith("{") || !source.endsWith("}")) return false;
-  try {
-    const payload = JSON.parse(source);
-    if (!payload || Array.isArray(payload) || typeof payload !== "object") return false;
-    const keys = Object.keys(payload);
-    if (!keys.length) return false;
-    const codexHint = JSON.stringify(payload).toLowerCase().includes("codexpro");
-    const toolKeys = new Set(["action", "args", "browser", "command", "cwd", "path", "paths", "profile_id", "query", "root", "scope", "selector", "target_id", "task_id", "task_kind", "task_title", "text", "url", "workspace_id"]);
-    return (!requireCodexHint || codexHint) && keys.every((key) => toolKeys.has(key));
-  } catch {
-    return false;
-  }
-}
-
-function toolActivityFromText(text, { collapseArgumentPayload = false } = {}) {
-  const source = String(text || "").trim();
-  if (!source) return null;
-  if (collapseArgumentPayload && looksLikeToolArgumentPayload(source, { requireCodexHint: false })) return GENERIC_TOOL_ACTIVITY_TEXT;
-  const normalized = source.replace(/\\"/g, '"');
-  if (normalized.includes("/CodexPro/") && normalized.includes("args")) return GENERIC_TOOL_ACTIVITY_TEXT;
-  if (looksLikeToolArgumentPayload(normalized)) return GENERIC_TOOL_ACTIVITY_TEXT;
-  return null;
-}
-
-function compactToolActivityMessages(messages, { collapseArgumentPayloads = false } = {}) {
-  const output = [];
-  let pendingActivity = null;
-  for (const message of Array.isArray(messages) ? messages : []) {
-    const activity = message?.role === "assistant" ? toolActivityFromText(message.text, { collapseArgumentPayload: collapseArgumentPayloads }) : null;
-    if (activity) {
-      pendingActivity = { ...message, id: "codexpro-live-tool-activity", text: GENERIC_TOOL_ACTIVITY_TEXT, toolActivity: true };
-      continue;
-    }
-    if (pendingActivity) {
-      output.push(pendingActivity);
-      pendingActivity = null;
-    }
-    output.push(message);
-  }
-  if (pendingActivity) output.push(pendingActivity);
-  return output;
-}
-
-function sendDebugEvidence(result = {}, error = null) {
-  const details = error?.details && typeof error.details === "object" ? error.details : {};
-  const source = result && typeof result === "object" ? result : {};
-  const evidence = Array.isArray(source.network_evidence)
-    ? source.network_evidence.slice(-12)
-    : Array.isArray(details.network_evidence)
-      ? details.network_evidence.slice(-12)
-      : [];
-  return {
-    recordedAt: new Date().toISOString(),
-    attemptId: String(source.attempt_id || details.attempt_id || details.command_id || ""),
-    state: String(source.submission_state || (error ? "failed" : "")),
-    path: String(source.submitted_by || source.submit_path || details.submitted_by || details.stage || ""),
-    pathAttempted: Array.isArray(source.path_attempted) ? source.path_attempted : [],
-    networkAck: source.network_acknowledged === true,
-    endpoint: String(source.network_generation_endpoint || details.network_generation_endpoint || ""),
-    statusCode: Number(source.network_status_code || details.network_status_code) || 0,
-    message: String(source.error || error?.message || details.message || ""),
-    code: String(error?.code || details.code || ""),
-    trustedEnterError: String(source.trusted_enter_error || details.trusted_enter_error || ""),
-    trustedClickError: String(source.trusted_click_error || details.trusted_click_error || ""),
-    fallbackReason: String(source.fallback_reason || details.fallback_reason || ""),
-    evidence
-  };
-}
-
-const WORKER_EXTENSION_VERSION = "0.5.122";
-
-function extensionReady(version) {
-  const parts = String(version || "").split(".").map(Number);
-  const target = WORKER_EXTENSION_VERSION.split(".").map(Number);
-  for (let index = 0; index < target.length; index += 1) {
-    const current = Number.isFinite(parts[index]) ? parts[index] : 0;
-    if (current !== target[index]) return current > target[index];
-  }
-  return true;
-}
-
-function repoTaskEvidenceSummary(proof) {
-  if (!proof) return "";
-  const title = String(proof.task_title || "").trim() || "Task chưa có tên";
-  if (proof.task_kind !== "code") return `${title} · GENERAL · không tải Rules/CodexGraph`;
-  const rulesHash = String(proof.global_rules_sha256 || "").slice(0, 8);
-  const coverage = proof.codexgraph?.coverage || {};
-  const symbols = Number(coverage.symbolCount) || 0;
-  const relationships = Number(coverage.relationshipCount) || 0;
-  return `${title} · CODE · Rules ${rulesHash || "thiếu hash"} ✓ · CodexGraph ${symbols} symbols / ${relationships} edges ✓`;
-}
-
-function profileVisibleInWorkerList(profile) {
-  return Boolean(profile?.connected)
-    && (Number(profile?.tab_count || 0) > 0 || Boolean(profile?.connector_installed));
-}
-
-function profileSafeForWorkerUpdate(profile) {
-  const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-  const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
-  return ["idle", "no_chatgpt"].includes(profile?.activity) && Number(profile?.busy_request_count || 0) === 0 && !hasBusyTab;
-}
-
-function conversationIdFromTab(tab) {
-  return String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-}
-
-function normalizedTaskTitleTokens(value) {
-  const ignored = new Set(["task", "chat", "codexpro", "dong", "bo", "cap", "nhat", "sua", "them", "fix"]);
-  return String(value || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLocaleLowerCase("vi-VN")
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 3 && !ignored.has(token));
-}
-
-function taskConversationIdForProfile(profile) {
-  const persisted = String(profile?.current_task_conversation_id || "").trim();
-  if (/^[A-Za-z0-9-]{8,160}$/.test(persisted)) return persisted;
-  const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-  const liveTab = tabs.find((tab) =>
-    Boolean(conversationIdFromTab(tab))
-    && (tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating" || tab?.network_stream_in_progress)
-  );
-  if (liveTab) return conversationIdFromTab(liveTab);
-  const taskTokens = normalizedTaskTitleTokens(profile?.current_task_title);
-  if (taskTokens.length < 2) return "";
-  const taskTokenSet = new Set(taskTokens);
-  const candidates = [
-    ...tabs.map((tab) => ({ id: conversationIdFromTab(tab), title: tab?.title || "" })),
-    ...(Array.isArray(profile?.recent_conversations) ? profile.recent_conversations : []).map((chat) => ({ id: String(chat?.id || ""), title: chat?.title || "" }))
-  ]
-    .filter((item) => /^[A-Za-z0-9-]{8,160}$/.test(item.id))
-    .map((item) => ({ ...item, overlap: normalizedTaskTitleTokens(item.title).filter((token) => taskTokenSet.has(token)).length }))
-    .sort((left, right) => right.overlap - left.overlap);
-  return candidates[0]?.overlap >= 2 ? candidates[0].id : "";
-}
-
-function profileRequestChats(profile, preferredId = "") {
-  const recent = Array.isArray(profile?.recent_conversations) ? profile.recent_conversations : [];
-  const tabs = (profile?.conversation_tabs || []).map((tab) => {
-    const id = conversationIdFromTab(tab);
-    return id ? { id, title: tab.title, url: tab.url, open: true, active: tab.active, busy: tab.busy, settling: tab.settling, network_state: tab.network_state, long_task_watchdog_hung: Boolean(tab.long_task_watchdog_hung), long_task_watchdog_attempt_key: String(tab.long_task_watchdog_attempt_key || "") } : null;
-  }).filter(Boolean);
-  const tabById = new Map(tabs.map((chat) => [chat.id, chat]));
-  const conversations = [...recent.map((chat) => ({ ...chat, ...(tabById.get(String(chat.id)) || {}) })), ...tabs]
-    .filter((chat, index, all) => chat.id && all.findIndex((candidate) => String(candidate.id) === String(chat.id)) === index);
-  const preferred = conversations.find((chat) => String(chat.id) === String(preferredId));
-  return preferred ? [preferred, ...conversations.filter((chat) => chat !== preferred)].slice(0, 3) : conversations.slice(0, 3);
-}
-
-function applyConversationTitleOverrides(status, overrides) {
-  if (!status || !overrides || !Object.keys(overrides).length) return status;
-  return {
-    ...status,
-    browserProfiles: (status.browserProfiles || []).map((profile) => {
-      const recentConversations = (profile.recent_conversations || []).map((chat) => {
-        const title = overrides[`${profile.profile_id}:${chat.id}`];
-        return title ? { ...chat, title } : chat;
-      });
-      const conversationTabs = (profile.conversation_tabs || []).map((tab) => {
-        const conversationId = String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-        const title = overrides[`${profile.profile_id}:${conversationId}`];
-        return title ? { ...tab, title } : tab;
-      });
-      const activeTab = conversationTabs.find((tab) => tab.active) || conversationTabs[0];
-      return {
-        ...profile,
-        recent_conversations: recentConversations,
-        conversation_tabs: conversationTabs,
-        active_chat_title: activeTab?.title || profile.active_chat_title
-      };
-    })
-  };
-}
-
-function visibleUserMessageText(value) {
-  const text = String(value || "").trim();
-  const marker = "Yêu cầu của người dùng:";
-  const markerIndex = text.lastIndexOf(marker);
-  if (markerIndex >= 0) return text.slice(markerIndex + marker.length).trim();
-  if (text.includes("Yêu cầu của người dùng nằm trong file đính kèm.")) return "Yêu cầu nằm trong file đính kèm.";
-  return text;
-}
-
-function buildConversationRolloverPrompt(result) {
-  const recoveryContinuation = String(result?.continuation_reason || "") === "recovery";
-  const prefix = [
-    recoveryContinuation
-      ? "Tab ChatGPT trước bị treo hoặc không thể khôi phục an toàn nên CodexPro đã tự tạo cuộc chat tiếp nối này."
-      : "Đoạn chat trước vừa đạt giới hạn độ dài nên CodexPro đã tự tạo cuộc chat mới này.",
-    "Hãy tiếp tục đúng dự án/công việc đang làm từ bối cảnh gần nhất bên dưới. Không bắt đầu lại từ đầu và không yêu cầu người dùng lặp lại thông tin đã có nếu có thể suy ra từ bối cảnh.",
-    result?.projectRoot ? `Repo tiếp tục (đã khóa trong CodexPro): ${String(result.projectRoot).trim()}` : "",
-    result?.title ? `Tên chat trước: ${String(result.title).trim()}` : "",
-    result?.recovery_reason ? `Lý do chuyển chat: ${String(result.recovery_reason).trim()}` : "",
-    "",
-    "Bối cảnh gần nhất từ chat trước:"
-  ].filter((line) => line !== "").join("\n");
-  const messages = Array.isArray(result?.messages) ? result.messages.filter((message) => String(message?.text || "").trim()) : [];
-  const chunks = [];
-  let remaining = ROLLOVER_CONTEXT_MAX_CHARS;
-  for (let index = messages.length - 1; index >= 0 && remaining > 200; index -= 1) {
-    const message = messages[index];
-    const role = message?.role === "user" ? "Bạn" : "ChatGPT";
-    const messageText = message?.role === "user" ? visibleUserMessageText(message.text) : String(message.text || "").trim();
-    const fullChunk = `${role}:\n${messageText}`;
-    if (fullChunk.length <= remaining) {
-      chunks.unshift(fullChunk);
-      remaining -= fullChunk.length + 2;
-      continue;
-    }
-    const tailLength = Math.max(0, remaining - role.length - 6);
-    if (tailLength > 180) chunks.unshift(`${role}:\n…${fullChunk.slice(-tailLength)}`);
-    break;
-  }
-  const context = chunks.length ? chunks.join("\n\n") : "(Không đọc được transcript gần nhất; hãy tiếp tục dựa trên yêu cầu tiếp theo của người dùng.)";
-  return `${prefix}\n\n${context}\n\nTiếp tục từ đúng việc còn dang dở. Nếu cần chờ người dùng đưa yêu cầu tiếp theo thì chỉ báo ngắn gọn rằng chat mới đã sẵn sàng để tiếp tục dự án.`.slice(0, 11800);
-}
-
-// Recovery smoke boundary: function ChatRequestComposer now lives in features/chat/chat-request-composer.jsx.
 function App() {
   const [activePage, setActivePage] = useState("overview");
-  const [diagnosticLogs, setDiagnosticLogs] = useState({ summary: { total: 0, info: 0, warn: 0, error: 0 }, entries: [], sources: [], categories: [], queried_hours: 24, checked_at: "" });
-  const [diagnosticFilters, setDiagnosticFilters] = useState({ level: "all", source: "all", category: "all", errorType: "all", hours: 24, query: "" });
-  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
-  const [selectedDiagnostic, setSelectedDiagnostic] = useState(null);
-  const [operationsPerformance, setOperationsPerformance] = useState(null);
-  const [operationsLogs, setOperationsLogs] = useState([]);
-  const [uiPerformance, setUiPerformance] = useState({ fps: 60, longTasks: 0, maxLongTaskMs: 0 });
-  const [managerSettings, setManagerSettings] = useState(DEFAULT_MANAGER_SETTINGS);
-  const [chatWidthInput, setChatWidthInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatWidth));
-  const [chatHeightInput, setChatHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.chatHeight));
-  const [profileCardHeightInput, setProfileCardHeightInput] = useState(String(DEFAULT_MANAGER_SETTINGS.profileCardHeight));
-  const [globalRulesDraft, setGlobalRulesDraft] = useState(DEFAULT_MANAGER_SETTINGS.globalRules);
-  const [settingsBusy, setSettingsBusy] = useState("");
-  const [workerPackDraft, setWorkerPackDraft] = useState("");
-  const [showWorkerPackCreator, setShowWorkerPackCreator] = useState(false);
-  const [workerPackDeleteArmed, setWorkerPackDeleteArmed] = useState("");
   const [chatProfileId, setChatProfileId] = useState("");
   const [status, setStatus] = useState(null);
   const [projects, setProjects] = useState([]);
@@ -397,6 +65,55 @@ function App() {
   const [busy, setBusy] = useState("");
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
+  const notify = useCallback((message) => {
+    setToast(message);
+    window.setTimeout(() => setToast(""), 2600);
+  }, []);
+  const reportApiWorkerError = useCallback((workerError) => setError(workerError?.message || String(workerError)), []);
+  const {
+    managerSettings,
+    setManagerSettings,
+    chatWidthInput,
+    setChatWidthInput,
+    chatHeightInput,
+    setChatHeightInput,
+    profileCardHeightInput,
+    setProfileCardHeightInput,
+    globalRulesDraft,
+    setGlobalRulesDraft,
+    settingsBusy,
+    workerPackDraft,
+    setWorkerPackDraft,
+    showWorkerPackCreator,
+    setShowWorkerPackCreator,
+    workerPackDeleteArmed,
+    applyManagerSettings,
+    saveManagerSetting,
+    commitChatWidthInput,
+    commitChatHeightInput,
+    commitProfileCardHeightInput,
+    changeAppBackground,
+    restoreAppBackground,
+    changeWorkerImage,
+    restoreWorkerImage,
+    createWorkerImagePack,
+    selectWorkerImagePack,
+    deleteWorkerImagePack,
+    restoreManagerSettings
+  } = useManagerSettings({ api, notify, setError });
+  const {
+    diagnosticLogs,
+    diagnosticFilters,
+    setDiagnosticFilters,
+    diagnosticBusy,
+    selectedDiagnostic,
+    setSelectedDiagnostic,
+    operationsPerformance,
+    operationsLogs,
+    uiPerformance,
+    loadDiagnosticLogs,
+    clearDiagnosticLogHistory
+  } = useManagerDiagnostics({ api, activePage, status, notify, setError });
   const [workerUpdateConfirmOpen, setWorkerUpdateConfirmOpen] = useState(false);
   const [apiJobWorker, setApiJobWorker] = useState(null);
   const [taskProfileId, setTaskProfileId] = useState("");
@@ -418,53 +135,148 @@ function App() {
   const [clearedResponseTargets, setClearedResponseTargets] = useState({});
   const [requestSendErrors, setRequestSendErrors] = useState({});
   const [requestSendEvidence, setRequestSendEvidence] = useState({});
-  const [renameChat, setRenameChat] = useState(null);
   const conversationTitleOverridesRef = useRef({});
-  const refreshInFlight = useRef(false);
-  const refreshQueued = useRef(false);
-  const refreshForegroundQueued = useRef(false);
-  const projectRefreshInFlight = useRef(false);
-  const statusRefreshInFlight = useRef(false);
-  const emptyBrowserSnapshotSince = useRef(0);
-  const emptyBrowserSnapshotTimer = useRef(0);
-  const refreshStatusRef = useRef(null);
-  const profileCheckTimes = useRef(new Map());
-  const profileChecksInFlight = useRef(new Set());
-  const connectorAutoMigrationAttempts = useRef(new Map());
-  const connectorAutoMigrationInFlight = useRef("");
-  const responseFetches = useRef(new Set());
-  const responseCacheLoads = useRef(new Map());
-  const responseMemoryCache = useRef(new Map());
-  const responseCacheSaveSignatures = useRef(new Map());
-  const networkStreamReads = useRef(new Map());
   const networkStreamPushTimes = useRef(new Map());
-  const pendingBrowserStreamUpdates = useRef(new Map());
-  const browserStreamFrame = useRef(0);
-  const networkCompletionReads = useRef(new Map());
-  const connectionRecoveryReads = useRef(new Map());
-  const repoTaskVerificationReads = useRef(new Map());
-  const conversationRollovers = useRef(new Map());
-  const profilesRef = useRef([]);
   const requestTargetsRef = useRef({});
   const requestTargetReasons = useRef(new Map());
-  const requestTargetDiagnostics = useRef(new Map());
-  const responseBodyRefs = useRef(new Map());
-  const chatModalRef = useRef(null);
-  const chatResponseRef = useRef(null);
-  const responseScrollLocked = useRef(new Map());
-  const responseComposerActive = useRef(new Map());
-  const responseScrollResumeTimers = useRef(new Map());
-  const responseScrollPositions = useRef(new Map());
-  const responseScrollDiagnostics = useRef(new Map());
-  const responseTurnAnchors = useRef(new Map());
-  const responseAuditSignatures = useRef(new Map());
-  const responseFinalCandidates = useRef(new Map());
-  const operationsRecoveryTimes = useRef(new Map());
   const operationsNotificationState = useRef(new Map());
-  const operationsLongTaskAudits = useRef(new Set());
-  const operationsVisualWatchdogChecks = useRef(new Set());
-  const operationsVisualWatchdogNextAt = useRef(new Map());
   const operationsAutoUpdateAt = useRef(0);
+  const {
+    responseBodyRefs,
+    chatModalRef,
+    chatResponseRef,
+    responseScrollLocked,
+    responseComposerActive,
+    responseScrollPositions,
+    responseScrollDiagnostics,
+    responseTurnAnchors,
+    maintainResponsePosition,
+    restoreOpenResponseTurnAnchor,
+    positionOpenChatViewport,
+    holdOpenChatAutoScroll,
+    holdResponseAutoScroll,
+    pauseResponseAutoScroll,
+    resetChatViewport,
+    captureResponseSelection
+  } = useChatViewport({
+    api,
+    chatProfileId,
+    selectedRequestTarget: requestTargets[chatProfileId],
+    requestTargetsRef,
+    setResponseSelection,
+    deepDiagnosticsEnabled: DEEP_UI_DIAGNOSTICS_ENABLED
+  });
+  const { refresh, refreshStatus } = useRuntimeStatus({
+    api,
+    status,
+    setStatus,
+    setProjects,
+    busy,
+    setBusy,
+    setError,
+    conversationTitleOverridesRef,
+    requestTargetsRef,
+    setRequestResponses,
+    networkStreamPushTimes,
+    checkingProfiles,
+    setCheckingProfiles,
+    setAutoMigratingProfileId
+  });
+  const {
+    addProject,
+    inspect,
+    projectRootForProfile,
+    selectProjectForProfile,
+    changeProjectForProfile
+  } = useProjectActions({
+    api,
+    projects,
+    requestProjectRoots,
+    managerSettings,
+    requestTargetsRef,
+    setProjects,
+    setInspection,
+    setBusy,
+    setError,
+    setRequestProjectRoots,
+    setManagerSettings,
+    setRequestTargets,
+    setRequestResponses,
+    setRequestSendErrors,
+    setRequestSendEvidence,
+    applyManagerSettings,
+    resetChatViewport,
+    notify
+  });
+  const { loadResponse } = useChatResponseLoader({
+    api,
+    status,
+    chatProfileId,
+    requestTargets,
+    requestTargetsRef,
+    requestTargetReasons,
+    requestResponsesRef,
+    setRequestTargets,
+    setRequestResponses,
+    setError
+  });
+  const {
+    prefetchProfileResponseCaches,
+    persistResponseCache,
+    hydrateCachedResponse
+  } = useChatResponseCache({
+    api,
+    requestTargetsRef,
+    setRequestResponses,
+    loadResponse
+  });
+  const { sendRequest, rolloverFullConversation, verifyRepoTaskUse } = useChatSendActions({
+    api,
+    status,
+    projects,
+    requestTargets,
+    requestDraftsRef,
+    requestFiles,
+    requestResponses,
+    requestTargetsRef,
+    requestTargetReasons,
+    setRequestTargets,
+    setRequestFiles,
+    setRequestResponses,
+    setRequestSendErrors,
+    setRequestSendEvidence,
+    setClearedResponseTargets,
+    setChatProfileId,
+    setBusy,
+    setError,
+    notify,
+    refresh,
+    refreshStatus,
+    projectRootForProfile,
+    responseScrollLocked,
+    responseTurnAnchors
+  });
+  const { recoverProfileTab, continueTaskAfterHang } = useChatRecovery({
+    api,
+    status,
+    projects,
+    managerSettings,
+    requestResponses,
+    requestProjectRoots,
+    requestTargets,
+    requestTargetsRef,
+    requestResponsesRef,
+    setRequestTargets,
+    setRequestResponses,
+    setRequestSendErrors,
+    setChatProfileId,
+    setBusy,
+    setError,
+    notify,
+    refresh,
+    projectRootForProfile,
+    rolloverFullConversation
+  });
 
   useLayoutEffect(() => {
     if (activePage !== "overview") return;
@@ -480,31 +292,13 @@ function App() {
 
   useEffect(() => {
     const sweepRetentionCaches = () => {
-      const timedMaps = [
-        profileCheckTimes.current,
-        connectorAutoMigrationAttempts.current,
-        networkStreamReads.current,
-        networkCompletionReads.current,
-        connectionRecoveryReads.current,
-        repoTaskVerificationReads.current,
-        operationsRecoveryTimes.current,
-        operationsVisualWatchdogNextAt.current
-      ];
-      for (const map of timedMaps) pruneTimestampMap(map, { maxEntries: 96, maxAgeMs: 60 * 60_000 });
       for (const map of [
-        responseCacheSaveSignatures.current,
-        conversationRollovers.current,
         requestTargetReasons.current,
-        requestTargetDiagnostics.current,
         responseScrollPositions.current,
         responseScrollDiagnostics.current,
         responseTurnAnchors.current,
-        responseAuditSignatures.current,
-        responseFinalCandidates.current,
         operationsNotificationState.current
       ]) trimMapEntries(map, 96);
-      trimSetEntries(operationsLongTaskAudits.current, 128);
-      trimSetEntries(operationsVisualWatchdogChecks.current, 128);
     };
     sweepRetentionCaches();
     const timer = window.setInterval(sweepRetentionCaches, 60_000);
@@ -568,17 +362,34 @@ function App() {
     );
   }, [busy, chatProfileId, openChatAwaitingAssistant, openChatResponse, requestTargets, status?.browserProfiles]);
 
+  useChatSession({
+    api,
+    status,
+    chatProfileId,
+    busy,
+    requestTargets,
+    requestTargetsRef,
+    requestTargetReasons,
+    requestResponses,
+    setRequestTargets,
+    setRequestResponses,
+    networkStreamPushTimes,
+    prefetchProfileResponseCaches,
+    hydrateCachedResponse,
+    persistResponseCache,
+    loadResponse,
+    verifyRepoTaskUse,
+    notify,
+    openChatResponse,
+    openChatAwaitingAssistant,
+    openChatLatestMessageKey,
+    responseBodyRefs
+  });
   useEffect(() => {
     setProjectPage((current) => Math.min(current, Math.max(0, Math.ceil(projects.length / PROJECTS_PER_PAGE) - 1)));
   }, [projects.length]);
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(PROFILE_TASK_LABELS_STORAGE_KEY, JSON.stringify(profileTaskLabels));
-    } catch {
-      // Convenience UI only; storage failure must not affect request sending.
-    }
-  }, [profileTaskLabels]);
+  useEffect(() => persistProfileTaskLabels(profileTaskLabels), [profileTaskLabels]);
 
   useEffect(() => {
     const browserProfiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
@@ -595,176 +406,9 @@ function App() {
       return changed ? next : current;
     });
   }, [status?.browserProfiles]);
-  const notify = useCallback((message) => {
-    setToast(message);
-    window.setTimeout(() => setToast(""), 2600);
-  }, []);
-  const reportApiWorkerError = useCallback((workerError) => setError(workerError?.message || String(workerError)), []);
-
-  const loadDiagnosticLogs = useCallback(async (showBusy = true) => {
-    if (typeof api.getDiagnosticLogs !== "function") return;
-    if (showBusy) setDiagnosticBusy(true);
-    try {
-      const next = await api.getDiagnosticLogs({ ...diagnosticFilters, limit: 1500 });
-      setDiagnosticLogs(next || { summary: { total: 0, info: 0, warn: 0, error: 0 }, entries: [] });
-      setSelectedDiagnostic(null);
-    } catch (err) {
-      logRendererDiagnostic(api, "error", "runtime", `Không tải được nhật ký: ${err?.message || String(err)}`, { action: "get-diagnostic-logs", error: err });
-      setError(err?.message || String(err));
-    } finally {
-      if (showBusy) setDiagnosticBusy(false);
-    }
-  }, [diagnosticFilters]);
-
-  const clearDiagnosticLogHistory = useCallback(async () => {
-    setDiagnosticBusy(true);
-    try {
-      await api.clearDiagnosticLogs?.();
-      setSelectedDiagnostic(null);
-      await loadDiagnosticLogs(false);
-      notify("Đã xóa nhật ký chẩn đoán");
-    } catch (err) {
-      logRendererDiagnostic(api, "error", "runtime", `Không xóa được nhật ký: ${err?.message || String(err)}`, { action: "clear-diagnostic-logs", error: err });
-      setError(err?.message || String(err));
-    } finally {
-      setDiagnosticBusy(false);
-    }
-  }, [loadDiagnosticLogs, notify]);
-
-  useEffect(() => {
-    if (activePage !== "logs") return undefined;
-    const timer = window.setTimeout(() => void loadDiagnosticLogs(false), 140);
-    return () => window.clearTimeout(timer);
-  }, [activePage, loadDiagnosticLogs]);
-
-
-  useEffect(() => {
-    if (activePage !== "control") return undefined;
-    let cancelled = false;
-    const loadOperations = async () => {
-      const pids = (status?.processes || []).map((item) => Number(item?.pid)).filter(Boolean);
-      try {
-        const [nextPerformance, nextLogs] = await Promise.all([
-          api.getOperationsPerformance?.(pids),
-          api.getDiagnosticLogs?.({ level: "all", source: "all", category: "all", hours: 24, query: "", limit: 80 })
-        ]);
-        if (cancelled) return;
-        if (nextPerformance) setOperationsPerformance(nextPerformance);
-        if (Array.isArray(nextLogs?.entries)) setOperationsLogs(nextLogs.entries);
-      } catch (err) {
-        if (!cancelled) logRendererDiagnostic(api, "warn", "performance", `Không tải được Control Center: ${err?.message || String(err)}`, { action: "control-center-refresh", error: err });
-      }
-    };
-    void loadOperations();
-    const timer = window.setInterval(() => void loadOperations(), 10_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [activePage, status?.processes]);
-
-  useEffect(() => {
-    if (activePage !== "control") return undefined;
-    let frameCount = 0;
-    let lastSampleAt = window.performance.now();
-    let rafId = 0;
-    const longTasks = [];
-    const tick = () => {
-      if (!document.hidden) frameCount += 1;
-      rafId = window.requestAnimationFrame(tick);
-    };
-    rafId = window.requestAnimationFrame(tick);
-    let observer = null;
-    if (typeof PerformanceObserver !== "undefined") {
-      try {
-        observer = new PerformanceObserver((list) => {
-          const now = window.performance.now();
-          for (const entry of list.getEntries()) longTasks.push({ at: now, duration: Number(entry.duration) || 0 });
-        });
-        observer.observe({ type: "longtask", buffered: false });
-      } catch {
-        observer = null;
-      }
-    }
-    const handleVisibilityChange = () => {
-      if (document.hidden) return;
-      frameCount = 0;
-      lastSampleAt = window.performance.now();
-    };
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    const timer = window.setInterval(() => {
-      if (document.hidden) return;
-      const now = window.performance.now();
-      const elapsed = Math.max(1, now - lastSampleAt);
-      const fps = Math.min(120, frameCount * 1000 / elapsed);
-      frameCount = 0;
-      lastSampleAt = now;
-      while (longTasks.length && now - longTasks[0].at > 10_000) longTasks.shift();
-      setUiPerformance({
-        fps: Number(fps.toFixed(1)),
-        longTasks: longTasks.length,
-        maxLongTaskMs: longTasks.reduce((max, item) => Math.max(max, item.duration), 0)
-      });
-    }, 1000);
-    return () => {
-      window.cancelAnimationFrame(rafId);
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      observer?.disconnect();
-    };
-  }, [activePage]);
-
-  useEffect(() => {
-    const onError = (event) => logRendererDiagnostic(api, "error", "runtime", event?.message || "Renderer error", { action: "window.error", filename: event?.filename, lineno: event?.lineno, colno: event?.colno, error: event?.error });
-    const onRejection = (event) => logRendererDiagnostic(api, "error", "runtime", event?.reason?.message || String(event?.reason || "Unhandled promise rejection"), { action: "unhandledrejection", reason: event?.reason });
-    window.addEventListener("error", onError);
-    window.addEventListener("unhandledrejection", onRejection);
-    return () => {
-      window.removeEventListener("error", onError);
-      window.removeEventListener("unhandledrejection", onRejection);
-    };
-  }, []);
-
-  const applyManagerSettings = useCallback((next) => {
-    setManagerSettings({
-      ...DEFAULT_MANAGER_SETTINGS,
-      ...(next || {}),
-      repoSelections: { ...DEFAULT_MANAGER_SETTINGS.repoSelections, ...(next?.repoSelections || {}) },
-      workerImages: { ...DEFAULT_MANAGER_SETTINGS.workerImages, ...(next?.workerImages || {}) },
-      workerImageDataUrls: { ...DEFAULT_MANAGER_SETTINGS.workerImageDataUrls, ...(next?.workerImageDataUrls || {}) },
-      workerImagePacks: Array.isArray(next?.workerImagePacks) ? next.workerImagePacks : []
-    });
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    api.getManagerSettings()
-      .then((next) => { if (!cancelled) applyManagerSettings(next); })
-      .catch((err) => {
-        if (!cancelled) {
-          logRendererDiagnostic(api, "error", "settings", `Không tải được cài đặt: ${err?.message || String(err)}`, { action: "get-manager-settings", error: err });
-          setError(err?.message || String(err));
-        }
-      });
-    return () => { cancelled = true; };
-  }, [applyManagerSettings]);
-
   useEffect(() => {
     setRequestProjectRoots((current) => ({ ...current, ...(managerSettings.repoSelections || {}) }));
   }, [managerSettings.repoSelections]);
-
-  const saveManagerSetting = useCallback(async (patch, message = "Đã lưu cài đặt") => {
-    setSettingsBusy("save");
-    try {
-      applyManagerSettings(await api.saveManagerSettings(patch));
-      if (message) notify(message);
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setSettingsBusy("");
-    }
-  }, [applyManagerSettings, notify]);
-
 
   useEffect(() => {
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
@@ -795,424 +439,10 @@ function App() {
   }, [managerSettings.taskNotifications, status?.browserProfiles, status?.workerJobs]);
 
   useEffect(() => {
-    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
-    const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
-    for (const profile of profiles) {
-      const candidate = longRunningChatWatchdogCandidate(profile, jobs);
-      if (!candidate || operationsLongTaskAudits.current.has(candidate.attemptKey)) continue;
-      operationsLongTaskAudits.current.add(candidate.attemptKey);
-      const recoveryIncidentFingerprint = candidate.connectionInterrupted
-        ? `long-task-connection-interrupted:${candidate.profileId}:${candidate.conversationId}`
-        : `long-task-${candidate.failureReason || "health"}:${candidate.profileId}:${candidate.conversationId}`;
-      logRendererDiagnostic(api, candidate.hardFailure ? "error" : "info", "chat", candidate.connectionInterrupted
-        ? "Phát hiện Connection interrupted ở task chạy lâu; bắt đầu phục hồi đúng một lần"
-        : candidate.hardFailure
-          ? "Phát hiện task chạy lâu có lỗi; bắt đầu phục hồi đúng một lần"
-          : "Task ChatGPT chạy quá 30 phút; kiểm tra sức khỏe không reload tab đang hoạt động", {
-        action: candidate.connectionInterrupted ? "long-task-watchdog-connection-interrupted" : "long-task-watchdog-start",
-        profile_id: candidate.profileId,
-        task_id: candidate.taskId,
-        task_title: candidate.title,
-        conversation_id: candidate.conversationId,
-        target_id: candidate.targetId,
-        started_at: candidate.startedAt,
-        age_ms: candidate.ageMs,
-        attempt_key: candidate.attemptKey,
-        incident_fingerprint: recoveryIncidentFingerprint,
-        watchdog_phase: candidate.phase,
-        hard_failure: candidate.hardFailure,
-        failure_reason: candidate.failureReason,
-        network_state: candidate.networkState,
-        network_error: candidate.networkError,
-        connection_interrupted: candidate.connectionInterrupted,
-        message_delivery_timed_out: candidate.messageDeliveryTimedOut,
-        renderer_unresponsive: candidate.rendererUnresponsive
-      });
-      void api.auditLongRunningProfileChat({
-        profileId: candidate.profileId,
-        taskId: candidate.taskId,
-        conversationId: candidate.conversationId,
-        targetId: candidate.targetId,
-        startedAt: candidate.startedAt,
-        attemptKey: candidate.attemptKey
-      }).then(async (result) => {
-        if (result?.already_attempted && result?.status !== "hung") {
-          logRendererDiagnostic(api, "info", "chat", "Bỏ qua audit task chạy lâu đã thực hiện trước đó", { action: "long-task-watchdog-deduplicated", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, status: String(result?.status || "") });
-          return;
-        }
-        if (result?.status === "active_without_reload" || result?.status === "completed_without_reload") {
-          const completed = result.status === "completed_without_reload";
-          logRendererDiagnostic(api, "info", "chat", completed ? "Task chạy lâu đã hoàn tất; watchdog không reload tab" : "Task chạy lâu vẫn hoạt động; watchdog không reload tab", {
-            action: completed ? "long-task-watchdog-completed-no-reload" : "long-task-watchdog-active-no-reload",
-            profile_id: candidate.profileId,
-            task_id: candidate.taskId,
-            conversation_id: candidate.conversationId,
-            target_id: String(result?.recovery_tab_id || result?.target_id || candidate.targetId),
-            attempt_key: candidate.attemptKey,
-            busy: Boolean(result?.preflight?.busy),
-            response_ready: Boolean(result?.preflight?.response_ready),
-            network_state: String(result?.preflight?.network_state || candidate.networkState || ""),
-            network_error: String(result?.preflight?.network_error || ""),
-            reloaded: false,
-            retry_allowed: true
-          });
-          return;
-        }
-        if (candidate.hardFailure && result?.status === "responsive_after_reload") {
-          const recoveryTaskId = /^cpt_[a-f0-9]{24}$/.test(candidate.taskId) ? candidate.taskId : "";
-          if (!recoveryTaskId) throw new Error("Không thể gửi ‘tiếp tục’ vì task bị gián đoạn không có Task ID hợp lệ.");
-          const targetTab = (profile.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(result?.recovery_tab_id || candidate.targetId));
-          const snapshot = await recoveryContinuationSnapshot(profile, candidate.conversationId, targetTab);
-          const resumeProjectRoot = snapshot?.projectRoot || projectRootForProfile(profile);
-          const resumeAllAllowed = snapshot?.repoTaskScope === "all_allowed" || resumeProjectRoot === ALL_ALLOWED_WORKSPACES;
-          logRendererDiagnostic(api, "warn", "chat", "Tab đã phản hồi sau reload; gửi ‘tiếp tục’ đúng một lần trong conversation cũ", {
-            action: "long-task-watchdog-resume-start",
-            profile_id: candidate.profileId,
-            task_id: recoveryTaskId,
-            conversation_id: candidate.conversationId,
-            target_id: String(result?.recovery_tab_id || candidate.targetId),
-            attempt_key: candidate.attemptKey,
-            recovery_incident_fingerprint: recoveryIncidentFingerprint,
-            reload_probe: result?.reload_probe || null,
-            resume_text: "tiếp tục",
-            retry_allowed: false
-          });
-          const resumed = await api.sendProfileRequest({
-            profileId: candidate.profileId,
-            conversationId: candidate.conversationId,
-            newChat: false,
-            scope: resumeAllAllowed ? "all_allowed" : "workspace",
-            projectRoot: resumeAllAllowed ? "" : resumeProjectRoot,
-            workspaceCandidates: resumeAllAllowed ? projects.map((project) => project.root) : [],
-            text: "tiếp tục",
-            attachments: [],
-            taskMode: "adjustment",
-            toolRetry: false,
-            previousTaskId: recoveryTaskId,
-            oneShotRecovery: true,
-            user_report_logging: false
-          });
-          if (String(resumed?.submission_state || "") === "uncertain") throw new Error("Lệnh ‘tiếp tục’ có trạng thái gửi không chắc chắn; watchdog đã dừng để tránh gửi trùng.");
-          if (String(resumed?.repo_task_id || "") !== recoveryTaskId) throw new Error("Task ID đổi khi gửi ‘tiếp tục’; watchdog đã dừng để tránh duplicate.");
-          requestTargetsRef.current = { ...requestTargetsRef.current, [candidate.profileId]: candidate.conversationId };
-          setRequestTargets((current) => ({ ...current, [candidate.profileId]: candidate.conversationId }));
-          setRequestResponses((current) => {
-            const previous = current[candidate.profileId] || {};
-            return {
-              ...current,
-              [candidate.profileId]: {
-                ...previous,
-                visible: true,
-                loading: true,
-                error: "",
-                conversationId: candidate.conversationId,
-                busy: true,
-                submissionState: "submitted",
-                sendUncertain: false,
-                networkState: String(resumed?.generation_state || resumed?.network_state || "generating"),
-                networkError: String(resumed?.network_error || ""),
-                repoTaskId: recoveryTaskId,
-                repoTaskDispatchedAt: String(resumed?.repo_task_dispatched_at || ""),
-                repoTaskScope: String(resumed?.repo_task_scope || (resumeAllAllowed ? "all_allowed" : "workspace")),
-                logicalTaskStatus: String(resumed?.worker_job_status || previous.logicalTaskStatus || "running"),
-                repoTaskStatus: "waiting",
-                repoTaskVerified: false,
-                repoTaskRequest: snapshot?.repoTaskRequest || previous.repoTaskRequest || null
-              }
-            };
-          });
-          logRendererDiagnostic(api, "warn", "chat", "Đã gửi ‘tiếp tục’ trong conversation cũ sau Connection interrupted", {
-            action: "long-task-watchdog-resume-done",
-            profile_id: candidate.profileId,
-            task_id: recoveryTaskId,
-            conversation_id: candidate.conversationId,
-            target_id: String(resumed?.target_id || result?.recovery_tab_id || candidate.targetId),
-            attempt_key: candidate.attemptKey,
-            recovery_incident_fingerprint: recoveryIncidentFingerprint,
-            request_id: String(resumed?.request_id || resumed?.generation_request_id || ""),
-            submission_state: String(resumed?.submission_state || ""),
-            network_state: String(resumed?.generation_state || resumed?.network_state || ""),
-            network_error: String(resumed?.network_error || ""),
-            task_id_preserved: true,
-            retry_allowed: false
-          });
-          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã tiếp tục task", body: `“${candidate.title}” đã được reload và gửi “tiếp tục” trong chat cũ.` });
-          return;
-        }
-        if (result?.renderer_unresponsive || result?.status === "hung") {
-          logRendererDiagnostic(api, "error", "chat", "Tab task chạy lâu vẫn bị treo sau một lần reload; chuyển sang chat tiếp nối", {
-            action: "long-task-watchdog-hung",
-            profile_id: candidate.profileId,
-            task_id: candidate.taskId,
-            conversation_id: candidate.conversationId,
-            target_id: String(result?.recovery_tab_id || result?.target_id || candidate.targetId),
-            attempt_key: candidate.attemptKey,
-            recovery_incident_fingerprint: recoveryIncidentFingerprint,
-            failure_reason: candidate.failureReason,
-            network_state: candidate.networkState,
-            network_error: candidate.networkError,
-            connection_interrupted: candidate.connectionInterrupted,
-            preflight_probe: result?.preflight || null,
-            reload_probe: result?.reload_probe || null,
-            retry_allowed: false
-          });
-          const targetTab = (profile.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(result?.recovery_tab_id || result?.target_id || candidate.targetId));
-          const continuation = await recoverProfileTab(profile, {
-            conversationId: candidate.conversationId,
-            taskId: candidate.taskId,
-            targetTab,
-            forceContinuation: true,
-            recoveryReason: "Tab vẫn không phản hồi sau một lần reload watchdog.",
-            silent: true,
-            automatic: true,
-            hardFailure: true
-          });
-          if (!continuation) throw new Error("Tab cũ vẫn bị treo và không tạo được chat tiếp nối.");
-          if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã chuyển tab task", body: `“${candidate.title}” đã tiếp tục trong chat mới với cùng Task ID.` });
-          return;
-        }
-        const statusLabel = "tab đã phản hồi sau reload";
-        logRendererDiagnostic(api, "info", "chat", `Task chạy lâu đã được kiểm tra: ${statusLabel}`, { action: "long-task-watchdog-responsive", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, attempt_key: candidate.attemptKey, status: String(result?.status || ""), busy: Boolean(result?.reload_probe?.busy), response_ready: Boolean(result?.reload_probe?.response_ready), retry_allowed: false });
-        if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã kiểm tra task chạy lâu", body: `“${candidate.title}” · ${statusLabel}. Watchdog sẽ không reload lại task này.` });
-      }).catch((err) => {
-        logRendererDiagnostic(api, "error", "chat", `Không hoàn tất được phục hồi task chạy lâu: ${err?.message || String(err)}`, { action: "long-task-watchdog-failed", profile_id: candidate.profileId, task_id: candidate.taskId, conversation_id: candidate.conversationId, target_id: candidate.targetId, attempt_key: candidate.attemptKey, recovery_incident_fingerprint: recoveryIncidentFingerprint, failure_reason: candidate.failureReason, network_state: candidate.networkState, network_error: candidate.networkError, connection_interrupted: candidate.connectionInterrupted, retry_allowed: false, error: err });
-        if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Không kiểm tra được task chạy lâu", body: `“${candidate.title}” · đã dừng thử lại tự động để tránh reload liên tục.` });
-      }).finally(() => {
-        window.setTimeout(() => void refresh(false), 1200);
-      });
-    }
-  }, [managerSettings.taskNotifications, status?.browserProfiles, status?.workerJobs]);
-  useEffect(() => {
-    if (!managerSettings.autoRecovery) return;
-    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
-    const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
-    const now = Date.now();
-    for (const profile of profiles) {
-      const candidate = visualWatchdogCandidate(profile, jobs, now);
-      if (!candidate) continue;
-      const key = `${candidate.profileId}:${candidate.taskId}`;
-      const nextAt = Number(operationsVisualWatchdogNextAt.current.get(key) || 0);
-      if (operationsVisualWatchdogChecks.current.has(key) || now < nextAt) continue;
-      operationsVisualWatchdogChecks.current.add(key);
-      operationsVisualWatchdogNextAt.current.set(key, now + VISUAL_WATCHDOG_INTERVAL_MS);
-      logRendererDiagnostic(api, "info", "chat", "Visual Watchdog bắt đầu kiểm tra ảnh task", {
-        action: "visual-watchdog-start",
-        profile_id: candidate.profileId,
-        task_id: candidate.taskId,
-        conversation_id: candidate.conversationId,
-        target_id: candidate.targetId,
-        interval_ms: VISUAL_WATCHDOG_INTERVAL_MS
-      });
-      void api.checkVisualWatchdog({
-        profileId: candidate.profileId,
-        taskId: candidate.taskId,
-        conversationId: candidate.conversationId,
-        targetId: candidate.targetId,
-        title: candidate.title,
-        autoRecover: true
-      }).then((result) => {
-        const parsedNextAt = Date.parse(String(result?.next_check_at || ""));
-        operationsVisualWatchdogNextAt.current.set(key, Number.isFinite(parsedNextAt) ? parsedNextAt : Date.now() + VISUAL_WATCHDOG_INTERVAL_MS);
-        const state = String(result?.state || "UNCERTAIN").toUpperCase();
-        const recovered = result?.recovery?.recovered === true;
-        logRendererDiagnostic(api, state === "STUCK" ? "error" : "info", "chat", recovered ? "Visual Watchdog đã chuyển task sang chat mới" : `Visual Watchdog kết luận ${state}`, {
-          action: recovered ? "visual-watchdog-recovered" : "visual-watchdog-result",
-          profile_id: candidate.profileId,
-          task_id: candidate.taskId,
-          conversation_id: candidate.conversationId,
-          target_id: candidate.targetId,
-          state,
-          confidence: Number(result?.confidence || 0),
-          reason: String(result?.reason || ""),
-          compared_two_images: Boolean(result?.compared_two_images),
-          watchdog_target_id: Number(result?.watchdog_target_id) || 0,
-          watchdog_conversation_id: String(result?.watchdog_conversation_id || ""),
-          recovery: result?.recovery || null
-        });
-        if (recovered && managerSettings.taskNotifications !== false) {
-          void api.showNotification?.({
-            title: "CodexPro · Watchdog đã chuyển tab",
-            body: `“${candidate.title}” được xác nhận treo và đã tiếp tục trong chat mới với cùng Task ID.`
-          });
-        }
-      }).catch((err) => {
-        operationsVisualWatchdogNextAt.current.set(key, Date.now() + 60_000);
-        logRendererDiagnostic(api, "error", "chat", `Visual Watchdog kiểm tra/phục hồi thất bại: ${err?.message || String(err)}`, {
-          action: "visual-watchdog-failed",
-          profile_id: candidate.profileId,
-          task_id: candidate.taskId,
-          conversation_id: candidate.conversationId,
-          target_id: candidate.targetId,
-          error: err
-        });
-      }).finally(() => {
-        operationsVisualWatchdogChecks.current.delete(key);
-        window.setTimeout(() => void refresh(false), 900);
-      });
-    }
-  }, [managerSettings.autoRecovery, managerSettings.taskNotifications, status?.browserProfiles, status?.workerJobs]);
-
-
-  useEffect(() => {
-    if (!managerSettings.autoRecovery) return;
-    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
-    const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
-    for (const profile of profiles) {
-      if (!profile?.connected) continue;
-      const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-      const messageStreamTab = tabs.find((tab) => !tab?.long_task_watchdog_hung && tab?.message_stream_error);
-      if (messageStreamTab?.id) {
-        const conversationId = String(messageStreamTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-        const taskId = String(profile?.current_task_id || "");
-        if (!conversationId) continue;
-        const taskJob = /^cpt_[a-f0-9]{24}$/.test(taskId)
-          ? jobs.find((job) => String(job?.job_id || job?.jobId || "") === taskId && String(job?.worker_id || job?.workerId || "") === String(profile.profile_id || ""))
-          : null;
-        const taskTerminal = Boolean(taskJob && (["completed", "cancelled"].includes(String(taskJob?.status || "").toLowerCase()) || taskJob?.completion_confirmed === true || taskJob?.completionConfirmed === true));
-        if (taskTerminal) {
-          logRendererDiagnostic(api, "info", "chat", "Bỏ qua Error in message stream vì task hiện tại đã terminal", { action: "message-stream-error-terminal-task-skip", profile_id: profile.profile_id, task_id: taskId, conversation_id: conversationId, worker_job_status: String(taskJob?.status || "") });
-          continue;
-        }
-        const key = `message-stream:${profile.profile_id}:${conversationId}:${taskId || "no-task"}`;
-        const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
-        if (Date.now() - previous < 120_000) continue;
-        operationsRecoveryTimes.current.set(key, Date.now());
-        logRendererDiagnostic(api, "error", "chat", "ChatGPT báo Error in message stream; chuyển task hiện tại sang chat mới", {
-          action: "message-stream-error-rollover",
-          profile_id: profile.profile_id,
-          task_id: taskId,
-          conversation_id: conversationId,
-          target_id: String(messageStreamTab.id),
-          incident_fingerprint: `message-stream-error:${profile.profile_id}:${conversationId}`,
-          retry_old_chat: false
-        });
-        void recoverProfileTab(profile, {
-          targetTab: messageStreamTab,
-          conversationId,
-          taskId,
-          forceContinuation: true,
-          silent: true,
-          automatic: true,
-          hardFailure: true,
-          recoveryReason: "ChatGPT báo Error in message stream. Bỏ qua Retry ở chat cũ và tiếp tục đúng Task ID hiện tại trong chat mới."
-        }).then((continuation) => {
-          if (continuation && managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Đã chuyển chat", body: `“${profile.current_task_title || "Task hiện tại"}” gặp Error in message stream và đã tiếp tục trong chat mới.` });
-        });
-        continue;
-      }
-      if (longRunningChatWatchdogCandidate(profile, jobs)) continue;
-      const targetTab = tabs.find((tab) => !tab?.long_task_watchdog_hung && (tab?.renderer_unresponsive || tab?.message_delivery_timed_out || tab?.connection_interrupted || String(tab?.network_state || "").toLowerCase() === "failed" || tab?.network_error));
-      if (!targetTab?.id) continue;
-      const conversationId = String(targetTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-      if (!conversationId) continue;
-      const hardFailure = Boolean(targetTab.renderer_unresponsive || targetTab.message_delivery_timed_out || String(targetTab.network_state || "").toLowerCase() === "failed" || targetTab.network_error);
-      const key = `${profile.profile_id}:${conversationId}`;
-      const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
-      if (Date.now() - previous < 120_000) continue;
-      operationsRecoveryTimes.current.set(key, Date.now());
-      void recoverProfileTab(profile, { targetTab, silent: true, automatic: true, hardFailure });
-    }
-  }, [managerSettings.autoRecovery, status?.browserProfiles, status?.workerJobs]);
-
-  useEffect(() => {
-    if (!managerSettings.autoRecovery) return;
-    const incidents = Array.isArray(status?.taskHangIncidents) ? status.taskHangIncidents : [];
-    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
-    for (const incident of incidents) {
-      if (!incident?.active || !incident?.recoverable) continue;
-      if (incident?.no_meaningful_progress !== true && String(incident?.conversation_id || "")) continue;
-      const profileId = String(incident?.profile_id || "");
-      const taskId = String(incident?.task_id || "");
-      const profile = profiles.find((item) => String(item?.profile_id || "") === profileId);
-      if (!profile || String(profile?.current_task_id || "") !== taskId || !/^cpt_[a-f0-9]{24}$/.test(taskId)) continue;
-      const key = `checkpoint-hang:${profileId}:${taskId}:${String(incident?.id || incident?.started_at || "active")}`;
-      const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
-      if (Date.now() - previous < 120_000) continue;
-      operationsRecoveryTimes.current.set(key, Date.now());
-      const targetTab = (profile.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(incident?.tab_id));
-      void continueTaskFromCheckpoint(profile, taskId, {
-        conversationId: String(incident?.conversation_id || ""),
-        targetTab,
-        recoveryReason: String(incident?.message || "Task bị treo hoặc không có tiến triển; tiếp tục từ checkpoint gần nhất."),
-        automatic: true,
-        silent: true
-      });
-    }
-  }, [managerSettings.autoRecovery, status?.taskHangIncidents, status?.browserProfiles]);
-
-  useEffect(() => {
-    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
-    const jobs = Array.isArray(status?.workerJobs) ? status.workerJobs : [];
-    for (const profile of profiles) {
-      const response = requestResponses[profile.profile_id];
-      const candidate = chatHistoryRateLimitRecoveryCandidate({ profile, jobs, response });
-      if (!candidate) continue;
-      const key = `history-rate-limit:${candidate.profileId}:${candidate.conversationId}:${candidate.taskId}`;
-      const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
-      if (Date.now() - previous < 120_000) continue;
-      operationsRecoveryTimes.current.set(key, Date.now());
-      const targetTab = (profile.conversation_tabs || []).find((tab) => String(tab?.url || "").includes(`/c/${candidate.conversationId}`));
-      void recoverProfileTab(profile, {
-        conversationId: candidate.conversationId,
-        taskId: candidate.taskId,
-        targetTab,
-        forceContinuation: true,
-        recoveryReason: "ChatGPT giới hạn đọc lịch sử nhiều lần; chuyển task sang chat mới để chặn vòng lặp 429.",
-        silent: true,
-        automatic: true,
-        hardFailure: true
-      });
-    }
-  }, [requestResponses, status?.browserProfiles, status?.workerJobs]);
-
-  useEffect(() => {
-    const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
-    for (const profile of profiles) {
-      if (!profile?.connected) continue;
-      const selectedConversationId = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
-      const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-      const targetTab = tabs.find((tab) => {
-        if (!tab?.conversation_limit_reached) return false;
-        const conversationId = String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-        return Boolean(conversationId && (tab.active || conversationId === selectedConversationId));
-      });
-      if (!targetTab?.id) continue;
-      const conversationId = String(targetTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-      if (!conversationId) continue;
-      const key = `conversation-limit:${profile.profile_id}:${conversationId}`;
-      const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
-      if (Date.now() - previous < 120_000) continue;
-      operationsRecoveryTimes.current.set(key, Date.now());
-      void (async () => {
-        const snapshot = await recoveryContinuationSnapshot(profile, conversationId, targetTab);
-        const title = snapshot?.title || targetTab?.title || profile.active_chat_title || "";
-        const projectRoot = snapshot?.projectRoot || projectRootForProfile(profile);
-        logRendererDiagnostic(api, "warn", "chat", "ChatGPT reported terminal conversation length; creating continuation tab automatically", { action: "conversation-limit-auto-rollover-start", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(targetTab.id), conversation_limit_message: String(targetTab.conversation_limit_message || "").slice(0, 500) });
-        const newConversationId = await rolloverFullConversation(profile, conversationId, {
-          ...snapshot,
-          title,
-          projectRoot,
-          continuation_reason: "limit",
-          conversation_limit_reached: true,
-          conversation_limit_message: String(targetTab.conversation_limit_message || "ChatGPT báo đoạn chat đã đạt giới hạn độ dài."),
-          silent: true
-        });
-        if (!newConversationId) throw new Error("Không tạo được chat tiếp nối sau khi ChatGPT báo đạt giới hạn độ dài.");
-        logRendererDiagnostic(api, "info", "chat", "Automatically moved full conversation context to a focused continuation tab", { action: "conversation-limit-auto-rollover-done", profile_id: profile.profile_id, previous_conversation_id: conversationId, conversation_id: newConversationId, target_id: String(targetTab.id) });
-        if (managerSettings.taskNotifications !== false) void api.showNotification?.({ title: "CodexPro · Chat đã đầy", body: `“${title || "Đoạn chat"}” đã chuyển bối cảnh sang tab mới.` });
-      })().catch((err) => {
-        logRendererDiagnostic(api, "error", "chat", `Automatic full-conversation rollover failed: ${err?.message || String(err)}`, { action: "conversation-limit-auto-rollover-failed", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(targetTab.id), error: err });
-      }).finally(() => {
-        window.setTimeout(() => void refresh(false), 900);
-      });
-    }
-  }, [managerSettings.taskNotifications, requestTargets, status?.browserProfiles]);
-
-  useEffect(() => {
     if (!managerSettings.autoUpdateWorkers || busy || !status?.local?.ok || status?.workerSnapshotStale) return;
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
     const hasSafeOutdatedWorker = profiles.some((profile) => {
-      if (!profile?.connected || versionAtLeast(profile.extension_version)) return false;
+      if (!profile?.connected || extensionReady(profile.extension_version)) return false;
       const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
       const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
       return profile.activity === "idle" && Number(profile.busy_request_count || 0) === 0 && !hasBusyTab;
@@ -1222,1106 +452,11 @@ function App() {
     void reloadProfiles();
   }, [busy, managerSettings.autoUpdateWorkers, status?.browserProfiles, status?.local?.ok, status?.workerSnapshotStale]);
 
-  useEffect(() => {
-    setChatWidthInput(String(managerSettings.chatWidth));
-  }, [managerSettings.chatWidth]);
-
-  useEffect(() => {
-    setChatHeightInput(String(managerSettings.chatHeight));
-  }, [managerSettings.chatHeight]);
-
-  useEffect(() => {
-    setProfileCardHeightInput(String(managerSettings.profileCardHeight));
-  }, [managerSettings.profileCardHeight]);
-
-  useEffect(() => {
-    setGlobalRulesDraft(managerSettings.globalRules || GLOBAL_RULES_TEMPLATE);
-  }, [managerSettings.globalRules]);
-
-  const commitChatWidthInput = useCallback(() => {
-    const parsed = Number(chatWidthInput);
-    const nextWidth = Math.max(720, Math.min(1600, Number.isFinite(parsed) ? Math.round(parsed / 20) * 20 : managerSettings.chatWidth));
-    setChatWidthInput(String(nextWidth));
-    if (nextWidth !== managerSettings.chatWidth) void saveManagerSetting({ chatWidth: nextWidth }, "Đã lưu độ rộng popup");
-  }, [chatWidthInput, managerSettings.chatWidth, saveManagerSetting]);
-
-  const commitChatHeightInput = useCallback(() => {
-    const parsed = Number(chatHeightInput);
-    const nextHeight = Math.max(180, Math.min(700, Number.isFinite(parsed) ? Math.round(parsed / 10) * 10 : managerSettings.chatHeight));
-    setChatHeightInput(String(nextHeight));
-    if (nextHeight !== managerSettings.chatHeight) void saveManagerSetting({ chatHeight: nextHeight }, "Đã lưu chiều cao khung chat");
-  }, [chatHeightInput, managerSettings.chatHeight, saveManagerSetting]);
-
-  const commitProfileCardHeightInput = useCallback(() => {
-    const parsed = Number(profileCardHeightInput);
-    const nextHeight = Math.max(390, Math.min(760, Number.isFinite(parsed) ? Math.round(parsed / 10) * 10 : managerSettings.profileCardHeight));
-    setProfileCardHeightInput(String(nextHeight));
-    if (nextHeight !== managerSettings.profileCardHeight) void saveManagerSetting({ profileCardHeight: nextHeight }, "Đã lưu chiều cao thẻ profile");
-  }, [profileCardHeightInput, managerSettings.profileCardHeight, saveManagerSetting]);
-
-  const changeAppBackground = useCallback(async () => {
-    setSettingsBusy("background");
-    try {
-      applyManagerSettings(await api.chooseAppBackground());
-      notify("Đã đổi hình nền ứng dụng");
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setSettingsBusy("");
-    }
-  }, [applyManagerSettings, notify]);
-
-  const restoreAppBackground = useCallback(async () => {
-    setSettingsBusy("background");
-    try {
-      applyManagerSettings(await api.resetAppBackground());
-      notify("Đã xóa hình nền ứng dụng");
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setSettingsBusy("");
-    }
-  }, [applyManagerSettings, notify]);
-
-  const changeWorkerImage = useCallback(async (state) => {
-    setSettingsBusy(`worker:${state}`);
-    try {
-      applyManagerSettings(await api.chooseWorkerImage({ packId: managerSettings.selectedWorkerPackId, state }));
-      notify(`Đã đổi ảnh worker ${state}`);
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setSettingsBusy("");
-    }
-  }, [applyManagerSettings, managerSettings.selectedWorkerPackId, notify]);
-
-  const restoreWorkerImage = useCallback(async (state) => {
-    setSettingsBusy(`worker:${state}`);
-    try {
-      applyManagerSettings(await api.resetWorkerImage({ packId: managerSettings.selectedWorkerPackId, state }));
-      notify(`Đã khôi phục ảnh worker ${state}`);
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setSettingsBusy("");
-    }
-  }, [applyManagerSettings, managerSettings.selectedWorkerPackId, notify]);
-
-  const createWorkerImagePack = useCallback(async () => {
-    const name = workerPackDraft.trim();
-    if (!name) return;
-    setSettingsBusy("worker-pack:create");
-    try {
-      applyManagerSettings(await api.createWorkerImagePack(name));
-      setWorkerPackDraft("");
-      setShowWorkerPackCreator(false);
-      setWorkerPackDeleteArmed("");
-      notify(`Đã tạo bộ ảnh “${name.slice(0, 60)}”`);
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setSettingsBusy("");
-    }
-  }, [applyManagerSettings, notify, workerPackDraft]);
-
-  const selectWorkerImagePack = useCallback(async (packId) => {
-    setSettingsBusy("worker-pack:select");
-    try {
-      const next = await api.selectWorkerImagePack(packId);
-      applyManagerSettings(next);
-      setWorkerPackDeleteArmed("");
-      const selected = next.workerImagePacks?.find((pack) => pack.id === packId);
-      notify(`Đang dùng ${selected ? `bộ “${selected.name}”` : "bộ mặc định"}`);
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setSettingsBusy("");
-    }
-  }, [applyManagerSettings, notify]);
-
-  const deleteWorkerImagePack = useCallback(async () => {
-    const pack = managerSettings.workerImagePacks.find((item) => item.id === managerSettings.selectedWorkerPackId);
-    if (!pack) return;
-    if (workerPackDeleteArmed !== pack.id) {
-      setWorkerPackDeleteArmed(pack.id);
-      return;
-    }
-    setSettingsBusy("worker-pack:delete");
-    try {
-      applyManagerSettings(await api.deleteWorkerImagePack(pack.id));
-      setWorkerPackDeleteArmed("");
-      notify(`Đã xóa bộ ảnh “${pack.name}”`);
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setSettingsBusy("");
-    }
-  }, [applyManagerSettings, managerSettings.selectedWorkerPackId, managerSettings.workerImagePacks, notify, workerPackDeleteArmed]);
-
-  const restoreManagerSettings = useCallback(async () => {
-    setSettingsBusy("reset");
-    try {
-      applyManagerSettings(await api.resetManagerSettings());
-      notify("Đã khôi phục giao diện mặc định");
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setSettingsBusy("");
-    }
-  }, [applyManagerSettings, notify]);
-
-  const logResponseScrollAdjustment = useCallback((profileId, container, before, after, cause, mode, extra = {}) => {
-    if (!before || !after) return;
-    const previous = responseScrollDiagnostics.current.get(profileId) || null;
-    const delta = {
-      scrollTop: after.scrollTop - before.scrollTop,
-      scrollHeight: previous ? before.scrollHeight - previous.scrollHeight : 0,
-      clientHeight: previous ? before.clientHeight - previous.clientHeight : 0,
-      distanceFromBottom: after.distanceFromBottom - before.distanceFromBottom
-    };
-    const signature = `${mode}:${cause}:${before.scrollTop}:${before.scrollHeight}:${before.clientHeight}:${after.scrollTop}:${after.scrollHeight}:${after.clientHeight}:${extra.anchorId || ""}`;
-    const shouldLog = Math.abs(delta.scrollTop) >= 2 || Math.abs(delta.scrollHeight) >= 2 || Math.abs(delta.clientHeight) >= 2;
-    responseScrollDiagnostics.current.set(profileId, { ...after, signature });
-    if (!shouldLog || previous?.signature === signature || typeof api.logChatLayout !== "function") return;
-    const panel = chatResponseRef.current;
-    api.logChatLayout({
-      at: new Date().toISOString(),
-      type: "scroll-jump",
-      profileId,
-      conversationId: String(requestTargetsRef.current[profileId] || panel?.dataset.layoutConversationId || ""),
-      cause,
-      mode,
-      locked: Boolean(responseScrollLocked.current.get(profileId)),
-      before,
-      after,
-      delta,
-      ...extra,
-      panel: panel ? {
-        height: Math.round(panel.getBoundingClientRect().height),
-        scrollHeight: Math.round(panel.scrollHeight),
-        clientHeight: Math.round(panel.clientHeight)
-      } : null,
-      messages: [...container.children].slice(-8).map((node) => ({
-        id: String(node.dataset.messageId || "").slice(0, 180),
-        role: String(node.dataset.auditRole || ""),
-        height: Math.round(node.getBoundingClientRect().height),
-        textLength: String(node.textContent || "").length
-      }))
-    });
-  }, []);
-
-  const scrollResponseToBottom = useCallback((profileId, cause = "unspecified") => {
-    const container = responseBodyRefs.current.get(profileId);
-    if (!container) return;
-    container.classList.remove("has-turn-anchor");
-    container.style.removeProperty("--chat-turn-anchor-space");
-    const before = responseScrollMetrics(container);
-    container.scrollTop = container.scrollHeight;
-    const after = responseScrollMetrics(container);
-    responseScrollPositions.current.set(profileId, container.scrollTop);
-    logResponseScrollAdjustment(profileId, container, before, after, cause, "bottom");
-  }, [logResponseScrollAdjustment]);
-
-  const scrollResponseToTurnAnchor = useCallback((profileId, cause = "unspecified") => {
-    const container = responseBodyRefs.current.get(profileId);
-    const anchorState = responseTurnAnchors.current.get(profileId);
-    if (!container || !anchorState) return false;
-    const activeConversationId = String(requestTargetsRef.current[profileId] || chatResponseRef.current?.dataset.layoutConversationId || "");
-    if (anchorState.conversationId && activeConversationId && anchorState.conversationId !== activeConversationId) {
-      responseTurnAnchors.current.delete(profileId);
-      return false;
-    }
-    const userMessages = [...container.querySelectorAll('.chat-transcript-message.is-user[data-audit-fingerprint]')];
-    const anchor = anchorState.fingerprint
-      ? userMessages.findLast((node) => node.dataset.auditFingerprint === anchorState.fingerprint)
-      : userMessages.at(-1);
-    if (!anchor) return false;
-    const anchorRect = anchor.getBoundingClientRect();
-    const anchorViewportTop = 56;
-    container.classList.add("has-turn-anchor");
-    container.style.setProperty("--chat-turn-anchor-space", `${Math.max(240, Math.round(container.clientHeight - anchorViewportTop - anchorRect.height + 24))}px`);
-    const before = responseScrollMetrics(container);
-    const beforeAnchorTop = Math.round(anchorRect.top - container.getBoundingClientRect().top);
-    const after = applyResponseTurnAnchor(container, anchor, 0.42, anchorViewportTop);
-    const afterAnchorTop = Math.round(anchor.getBoundingClientRect().top - container.getBoundingClientRect().top);
-    responseScrollPositions.current.set(profileId, container.scrollTop);
-    logResponseScrollAdjustment(profileId, container, before, after, cause, "turn-anchor", {
-      anchorId: String(anchor.dataset.messageId || "").slice(0, 180),
-      anchorFingerprint: String(anchor.dataset.auditFingerprint || ""),
-      anchorViewportTopBefore: beforeAnchorTop,
-      anchorViewportTopAfter: afterAnchorTop,
-      anchorViewportDelta: afterAnchorTop - beforeAnchorTop
-    });
-    return true;
-  }, [logResponseScrollAdjustment]);
-
-  const maintainResponsePosition = useCallback((profileId, cause = "unspecified") => {
-    if (responseScrollLocked.current.get(profileId) || responseComposerActive.current.get(profileId)) return;
-    if (scrollResponseToTurnAnchor(profileId, cause)) return;
-    scrollResponseToBottom(profileId, cause);
-  }, [scrollResponseToBottom, scrollResponseToTurnAnchor]);
-
-  const restoreOpenResponseTurnAnchor = useCallback((profileId) => {
-    if (responseTurnAnchors.current.has(profileId)) return true;
-    const container = responseBodyRefs.current.get(profileId);
-    const anchor = [...(container?.querySelectorAll('.chat-transcript-message.is-user[data-audit-fingerprint]') || [])].at(-1);
-    if (!anchor) return false;
-    responseTurnAnchors.current.set(profileId, {
-      conversationId: String(requestTargetsRef.current[profileId] || chatResponseRef.current?.dataset.layoutConversationId || ""),
-      fingerprint: String(anchor.dataset.auditFingerprint || ""),
-      messageId: String(anchor.dataset.messageId || ""),
-      restoredAt: Date.now()
-    });
-    return true;
-  }, []);
-
-  const positionOpenChatViewport = useCallback((profileId, cause = "open-chat") => {
-    if (responseScrollLocked.current.get(profileId) || responseComposerActive.current.get(profileId)) return;
-    maintainResponsePosition(profileId, cause);
-    const modal = chatModalRef.current;
-    if (!modal) return;
-    const previousBehavior = modal.style.scrollBehavior;
-    modal.style.scrollBehavior = 'auto';
-    modal.scrollTop = modal.scrollHeight;
-    modal.style.scrollBehavior = previousBehavior;
-  }, [maintainResponsePosition]);
-
-  const scheduleOpenChatAutoResume = useCallback((profileId) => {
-    scheduleResponseAutoResume({
-      profileId,
-      lockedProfiles: responseScrollLocked.current,
-      timers: responseScrollResumeTimers.current,
-      delay: RESPONSE_MANUAL_SCROLL_RESUME_MS,
-      resume: (resumedProfileId) => {
-        window.requestAnimationFrame(() => positionOpenChatViewport(resumedProfileId, "manual-scroll-idle"));
-      }
-    });
-  }, [positionOpenChatViewport]);
-
-  const holdOpenChatAutoScroll = useCallback((profileId, deltaY = 0) => {
-    if (deltaY < 0) responseScrollLocked.current.set(profileId, true);
-    if (responseScrollLocked.current.get(profileId)) scheduleOpenChatAutoResume(profileId);
-  }, [scheduleOpenChatAutoResume]);
-
-  const holdResponseAutoScroll = useCallback((profileId, container, deltaY = 0) => {
-    if (responseTurnAnchors.current.has(profileId) && deltaY) {
-      responseTurnAnchors.current.delete(profileId);
-      container.classList.remove("has-turn-anchor");
-      container.style.removeProperty("--chat-turn-anchor-space");
-      responseScrollLocked.current.set(profileId, true);
-      responseScrollPositions.current.set(profileId, container.scrollTop);
-      scheduleOpenChatAutoResume(profileId);
-      return;
-    }
-    handleResponseWheel(profileId, container, deltaY, responseScrollLocked.current, RESPONSE_BOTTOM_THRESHOLD_PX);
-    if (responseScrollLocked.current.get(profileId)) scheduleOpenChatAutoResume(profileId);
-    else cancelResponseAutoResume(profileId, responseScrollResumeTimers.current);
-  }, [scheduleOpenChatAutoResume]);
-
-  const pauseResponseAutoScroll = useCallback((profileId, container) => {
-    recordResponseScroll(profileId, container, responseScrollLocked.current, responseScrollPositions.current, RESPONSE_BOTTOM_THRESHOLD_PX);
-    if (!responseScrollLocked.current.get(profileId)) cancelResponseAutoResume(profileId, responseScrollResumeTimers.current);
-  }, []);
-
-  const captureResponseSelection = useCallback((key, container) => {
-    const selection = window.getSelection?.();
-    const text = selection?.toString() || "";
-    const inside = Boolean(
-      selection
-      && selection.rangeCount > 0
-      && !selection.isCollapsed
-      && selection.anchorNode
-      && selection.focusNode
-      && container.contains(selection.anchorNode)
-      && container.contains(selection.focusNode)
-    );
-    setResponseSelection(inside && text.trim() ? { key, text } : (current) => current.key === key ? { key: "", text: "" } : current);
-  }, []);
-
-  const refresh = useCallback(async (foreground = false) => {
-    if (refreshInFlight.current) {
-      refreshQueued.current = true;
-      refreshForegroundQueued.current = refreshForegroundQueued.current || foreground;
-      return;
-    }
-    refreshInFlight.current = true;
-    if (foreground) setBusy("refresh");
-    setError("");
-    try {
-      const nextStatus = await api.getStatus();
-      setStatus((current) => {
-        const merged = mergeRuntimeStatus(current, nextStatus);
-        if (!current || nextStatus?.workerSnapshotAvailable === false || nextStatus?.local?.ok === false) return applyConversationTitleOverrides(merged, conversationTitleOverridesRef.current);
-        const stabilized = stabilizeEmptyBrowserProfileSnapshot(current.browserProfiles, merged.browserProfiles, { emptySinceMs: emptyBrowserSnapshotSince.current });
-        const firstTransientEmpty = stabilized.preserved && !emptyBrowserSnapshotSince.current;
-        emptyBrowserSnapshotSince.current = stabilized.emptySinceMs;
-        if (stabilized.preserved) {
-          if (firstTransientEmpty) logRendererDiagnostic(api, "warn", "status", "Snapshot worker tạm thời rỗng; giữ dữ liệu gần nhất để xác minh", { action: "worker-empty-snapshot-grace", retry_after_ms: stabilized.retryAfterMs });
-          if (!emptyBrowserSnapshotTimer.current) emptyBrowserSnapshotTimer.current = window.setTimeout(() => {
-            emptyBrowserSnapshotTimer.current = 0;
-            void refreshStatusRef.current?.();
-          }, stabilized.retryAfterMs);
-          return applyConversationTitleOverrides({
-            ...merged,
-            browserProfiles: stabilized.profiles,
-            workers: current.workers || merged.workers,
-            workerSources: current.workerSources || merged.workerSources,
-            workerSnapshotStale: true,
-            workerSnapshotStaleReason: "empty-grace",
-            workerSnapshotStaleSince: current.workerSnapshotStaleReason === "empty-grace" ? current.workerSnapshotStaleSince : (nextStatus.checkedAt || new Date().toISOString())
-          }, conversationTitleOverridesRef.current);
-        }
-        if (emptyBrowserSnapshotTimer.current) window.clearTimeout(emptyBrowserSnapshotTimer.current);
-        emptyBrowserSnapshotTimer.current = 0;
-        return applyConversationTitleOverrides({ ...merged, browserProfiles: stabilized.profiles, workerSnapshotStaleReason: "" }, conversationTitleOverridesRef.current);
-      });
-      if (foreground) {
-        const nextProjects = await api.listProjects();
-        setProjects((current) => sameProjectList(current, nextProjects) ? current : nextProjects);
-      }
-    } catch (err) {
-      logRendererDiagnostic(api, "error", "status", `Không làm mới Manager: ${err?.message || String(err)}`, { action: "refresh", error: err });
-      setError(err?.message || String(err));
-    } finally {
-      refreshInFlight.current = false;
-      if (foreground) setBusy("");
-      if (refreshQueued.current) {
-        const queuedForeground = refreshForegroundQueued.current;
-        refreshQueued.current = false;
-        refreshForegroundQueued.current = false;
-        void refresh(queuedForeground);
-      }
-    }
-  }, []);
-
-  const refreshStatus = useCallback(async () => {
-    if (statusRefreshInFlight.current || refreshInFlight.current) return;
-    statusRefreshInFlight.current = true;
-    try {
-      const nextStatus = await api.getStatus();
-      setStatus((current) => {
-        const merged = mergeRuntimeStatus(current, nextStatus);
-        if (!current || nextStatus?.workerSnapshotAvailable === false || nextStatus?.local?.ok === false) return applyConversationTitleOverrides(merged, conversationTitleOverridesRef.current);
-        const stabilized = stabilizeEmptyBrowserProfileSnapshot(current.browserProfiles, merged.browserProfiles, { emptySinceMs: emptyBrowserSnapshotSince.current });
-        const firstTransientEmpty = stabilized.preserved && !emptyBrowserSnapshotSince.current;
-        emptyBrowserSnapshotSince.current = stabilized.emptySinceMs;
-        if (stabilized.preserved) {
-          if (firstTransientEmpty) logRendererDiagnostic(api, "warn", "status", "Snapshot worker tạm thời rỗng; giữ dữ liệu gần nhất để xác minh", { action: "worker-empty-snapshot-grace", retry_after_ms: stabilized.retryAfterMs });
-          if (!emptyBrowserSnapshotTimer.current) emptyBrowserSnapshotTimer.current = window.setTimeout(() => {
-            emptyBrowserSnapshotTimer.current = 0;
-            void refreshStatusRef.current?.();
-          }, stabilized.retryAfterMs);
-          return applyConversationTitleOverrides({
-            ...merged,
-            browserProfiles: stabilized.profiles,
-            workers: current.workers || merged.workers,
-            workerSources: current.workerSources || merged.workerSources,
-            workerSnapshotStale: true,
-            workerSnapshotStaleReason: "empty-grace",
-            workerSnapshotStaleSince: current.workerSnapshotStaleReason === "empty-grace" ? current.workerSnapshotStaleSince : (nextStatus.checkedAt || new Date().toISOString())
-          }, conversationTitleOverridesRef.current);
-        }
-        if (emptyBrowserSnapshotTimer.current) window.clearTimeout(emptyBrowserSnapshotTimer.current);
-        emptyBrowserSnapshotTimer.current = 0;
-        return applyConversationTitleOverrides({ ...merged, browserProfiles: stabilized.profiles, workerSnapshotStaleReason: "" }, conversationTitleOverridesRef.current);
-      });
-    } catch (err) {
-      logRendererDiagnostic(api, "warn", "status", `Background status refresh lỗi: ${err?.message || String(err)}`, { action: "refresh-status", error: err });
-      // Background realtime refresh should not flash a global error for a transient miss.
-    } finally {
-      statusRefreshInFlight.current = false;
-    }
-  }, []);
-  refreshStatusRef.current = refreshStatus;
-
-  const refreshProjects = useCallback(async () => {
-    if (projectRefreshInFlight.current || refreshInFlight.current) return;
-    projectRefreshInFlight.current = true;
-    try {
-      const nextProjects = await api.listProjects();
-      setProjects((current) => sameProjectList(current, nextProjects) ? current : nextProjects);
-    } catch (err) {
-      logRendererDiagnostic(api, "warn", "projects", `Background project refresh lỗi: ${err?.message || String(err)}`, { action: "refresh-projects", error: err });
-      // Keep the last good project list when a background discovery refresh transiently fails.
-    } finally {
-      projectRefreshInFlight.current = false;
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh(true);
-    const unsubscribe = api.onBrowserProfiles?.((payload) => {
-      const incomingProfiles = Array.isArray(payload?.profiles) ? payload.profiles : [];
-      setStatus((current) => {
-        if (!current) return current;
-        const profiles = normalizeTerminalMessageStreamProfiles(incomingProfiles, current.workerJobs);
-        const stabilized = stabilizeEmptyBrowserProfileSnapshot(current.browserProfiles, profiles, {
-          emptySinceMs: emptyBrowserSnapshotSince.current,
-          removedProfileIds: payload?.disabled_profile_ids
-        });
-        const firstTransientEmpty = stabilized.preserved && !emptyBrowserSnapshotSince.current;
-        emptyBrowserSnapshotSince.current = stabilized.emptySinceMs;
-        if (stabilized.preserved && firstTransientEmpty) logRendererDiagnostic(api, "warn", "status", "Luồng realtime trả danh sách worker rỗng; giữ dữ liệu gần nhất để xác minh", { action: "worker-empty-snapshot-grace", retry_after_ms: stabilized.retryAfterMs });
-        if (stabilized.preserved && !emptyBrowserSnapshotTimer.current) emptyBrowserSnapshotTimer.current = window.setTimeout(() => {
-          emptyBrowserSnapshotTimer.current = 0;
-          void refreshStatusRef.current?.();
-        }, stabilized.retryAfterMs);
-        if (!stabilized.preserved && emptyBrowserSnapshotTimer.current) window.clearTimeout(emptyBrowserSnapshotTimer.current);
-        if (!stabilized.preserved) emptyBrowserSnapshotTimer.current = 0;
-        const browserProfiles = stabilized.profiles;
-        const clearedEmptyGrace = !stabilized.preserved && current.workerSnapshotStaleReason === "empty-grace";
-        if (browserProfiles === current.browserProfiles && !clearedEmptyGrace) return current;
-        return applyConversationTitleOverrides({
-          ...current,
-          checkedAt: payload?.checked_at || new Date().toISOString(),
-          browserProfiles,
-          workerSnapshotStale: stabilized.preserved,
-          workerSnapshotStaleReason: stabilized.preserved ? "empty-grace" : "",
-          workerSnapshotStaleSince: stabilized.preserved ? (current.workerSnapshotStaleSince || payload?.checked_at || new Date().toISOString()) : ""
-        }, conversationTitleOverridesRef.current);
-      });
-    });
-    const unsubscribeBrowserStream = api.onBrowserStream?.((payload) => {
-      for (const update of Array.isArray(payload?.updates) ? payload.updates : []) {
-        const profileId = String(update?.profile_id || "");
-        const conversationId = String(update?.conversation_id || "");
-        if (!profileId || !conversationId) continue;
-        pendingBrowserStreamUpdates.current.set(`${profileId}:${conversationId}`, update);
-      }
-      if (browserStreamFrame.current || !pendingBrowserStreamUpdates.current.size) return;
-      browserStreamFrame.current = window.requestAnimationFrame(() => {
-        browserStreamFrame.current = 0;
-        const updates = [...pendingBrowserStreamUpdates.current.values()];
-        pendingBrowserStreamUpdates.current.clear();
-        setRequestResponses((current) => {
-          let next = current;
-          for (const update of updates) {
-            const profileId = String(update?.profile_id || "");
-            const conversationId = String(update?.conversation_id || "");
-            const selectedTarget = String(requestTargetsRef.current[profileId] || "");
-            if (!profileId || !conversationId || (selectedTarget && selectedTarget !== conversationId)) continue;
-            const previous = next[profileId] || {};
-            if (previous.conversationId && previous.conversationId !== conversationId) continue;
-            const recordId = Math.max(0, Number(update?.record_id) || 0);
-            const revision = Math.max(0, Number(update?.revision) || 0);
-            const previousRecordId = Math.max(0, Number(previous.networkStreamPushRecordId) || 0);
-            const previousRevision = Math.max(0, Number(previous.networkStreamPushRevision) || 0);
-            if (previousRecordId === recordId && revision <= previousRevision) continue;
-            const streamUpdatedAt = String(update?.updated_at || "");
-            if (!isNetworkStreamCurrentGeneration({ networkStartedAt: previous.networkStartedAt, streamUpdatedAt })) continue;
-            const streamText = String(update?.text || "");
-            const messages = streamText
-              ? mergeNetworkStreamTranscript(previous.messages || [], { conversationId, text: streamText, truncated: false })
-              : previous.messages || [];
-            networkStreamPushTimes.current.set(`${profileId}:${conversationId}`, Date.now());
-            if (next === current) next = { ...current };
-            next[profileId] = {
-              ...previous,
-              visible: true,
-              conversationId,
-              messages,
-              text: streamText || previous.text || "",
-              busy: update?.in_progress === true,
-              loading: false,
-              networkStreamAvailable: Boolean(streamText || update?.activity_text || previous.networkStreamAvailable),
-              networkStreamInProgress: update?.in_progress === true,
-              networkStreamUpdatedAt: streamUpdatedAt,
-              networkStreamEventCount: Math.max(0, Number(update?.event_count) || 0),
-              networkStreamError: String(update?.error || ""),
-              networkStreamActivityText: String(update?.activity_text || ""),
-              networkStreamPushRecordId: recordId,
-              networkStreamPushRevision: revision,
-              incomplete: update?.in_progress === true,
-              incompleteReason: update?.in_progress === true ? "network_stream_in_progress" : "",
-              contentNeedsRefresh: false,
-              updatedAt: streamUpdatedAt || previous.updatedAt
-            };
-          }
-          return next;
-        });
-      });
-    });
-    const unsubscribeWorkers = api.onWorkerUpdate?.((payload) => {
-      const workerId = String(payload?.worker_id || "");
-      if (!workerId) return;
-      setStatus((current) => {
-        if (!current || !Array.isArray(current.workers)) return current;
-        const index = current.workers.findIndex((worker) => worker.worker_id === workerId);
-        if (index < 0) return current;
-        const workers = current.workers.slice();
-        workers[index] = { ...workers[index], ...payload };
-        return { ...current, workers };
-      });
-    });
-    const statusTimer = window.setInterval(() => void refreshStatus(), REALTIME_WATCHDOG_MS);
-    const projectsTimer = window.setInterval(() => void refreshProjects(), PROJECT_REFRESH_MS);
-    return () => {
-      unsubscribe?.();
-      unsubscribeBrowserStream?.();
-      unsubscribeWorkers?.();
-      if (browserStreamFrame.current) window.cancelAnimationFrame(browserStreamFrame.current);
-      browserStreamFrame.current = 0;
-      pendingBrowserStreamUpdates.current.clear();
-      window.clearInterval(statusTimer);
-      window.clearInterval(projectsTimer);
-      if (emptyBrowserSnapshotTimer.current) window.clearTimeout(emptyBrowserSnapshotTimer.current);
-      emptyBrowserSnapshotTimer.current = 0;
-    };
-  }, [refresh, refreshProjects, refreshStatus]);
-
-  useEffect(() => {
-    const profiles = status?.browserProfiles || [];
-    for (const profile of profiles) {
-      const lastCheck = profileCheckTimes.current.get(profile.profile_id) || 0;
-      const checkedAt = Date.parse(profile.connector_checked_at || "");
-      const recentlyVerified = Number.isFinite(checkedAt) && Date.now() - checkedAt < PROFILE_CHECK_TTL_MS;
-      if (!profile.connected || !extensionReady(profile.extension_version) || recentlyVerified || Date.now() - lastCheck < PROFILE_CHECK_RETRY_MS) continue;
-      profileCheckTimes.current.set(profile.profile_id, Date.now());
-      profileChecksInFlight.current.add(profile.profile_id);
-      setCheckingProfiles((current) => [...new Set([...current, profile.profile_id])]);
-      void api.checkProfile(profile.profile_id)
-        .catch((err) => {
-          logRendererDiagnostic(api, "warn", "profile", `Kiểm tra profile ${profile.profile_id} lỗi: ${err?.message || String(err)}`, { action: "check-profile", profile_id: profile.profile_id, error: err });
-          return null;
-        })
-        .finally(() => {
-          profileChecksInFlight.current.delete(profile.profile_id);
-          setCheckingProfiles((current) => current.filter((id) => id !== profile.profile_id));
-          window.setTimeout(() => void refresh(false), 1200);
-        });
-    }
-  }, [status?.browserProfiles, refresh]);
-
-  useEffect(() => {
-    if (busy || connectorAutoMigrationInFlight.current) return;
-    const now = Date.now();
-    const candidate = (status?.browserProfiles || []).find((profile) => {
-      if (!profile?.connected || profile.connector_update_required !== true || !extensionReady(profile.extension_version)) return false;
-      if (!profileSafeForWorkerUpdate(profile) || profileChecksInFlight.current.has(profile.profile_id) || checkingProfiles.includes(profile.profile_id)) return false;
-      const lastAttempt = connectorAutoMigrationAttempts.current.get(profile.profile_id) || 0;
-      return now - lastAttempt >= CONNECTOR_AUTO_MIGRATION_RETRY_MS;
-    });
-    if (!candidate) return;
-
-    const profileId = candidate.profile_id;
-    connectorAutoMigrationInFlight.current = profileId;
-    connectorAutoMigrationAttempts.current.set(profileId, now);
-    setAutoMigratingProfileId(profileId);
-    logRendererDiagnostic(api, "info", "profile", `Tự cập nhật connector ${profileId}`, { action: "auto-migrate-profile-connector", profile_id: profileId });
-    void api.setupProfile(profileId)
-      .then((result) => {
-        logRendererDiagnostic(api, "info", "profile", `Tự cập nhật connector ${profileId} hoàn tất`, {
-          action: "auto-migrate-profile-connector-success",
-          profile_id: profileId,
-          connector_profile_bound: result?.connector_profile_bound,
-          connector_installed: result?.connector_installed
-        });
-      })
-      .catch((err) => {
-        logRendererDiagnostic(api, "warn", "profile", `Tự cập nhật connector ${profileId} lỗi: ${err?.message || String(err)}`, {
-          action: "auto-migrate-profile-connector-error",
-          profile_id: profileId,
-          error: err
-        });
-      })
-      .finally(() => {
-        connectorAutoMigrationAttempts.current.set(profileId, Date.now());
-        if (connectorAutoMigrationInFlight.current === profileId) connectorAutoMigrationInFlight.current = "";
-        setAutoMigratingProfileId((current) => current === profileId ? "" : current);
-        window.setTimeout(() => void refresh(false), 1200);
-      });
-  }, [busy, checkingProfiles, status?.browserProfiles, refresh]);
-
-  useEffect(() => {
-    profilesRef.current = status?.browserProfiles || [];
-  }, [status?.browserProfiles]);
-
-  useEffect(() => {
-    const profiles = status?.browserProfiles || [];
-    if (!profiles.length) return undefined;
-    const timer = window.setTimeout(() => {
-      for (const profile of profiles) prefetchProfileResponseCaches(profile);
-    }, 100);
-    return () => window.clearTimeout(timer);
-  }, [status?.browserProfiles]);
-
-  useEffect(() => {
-    for (const profile of status?.browserProfiles || []) {
-      if (!profile?.connected || !extensionReady(profile.extension_version)) continue;
-      for (const tab of profile.conversation_tabs || []) {
-        const conversationId = String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-        if (!conversationId) continue;
-        const selectedTarget = String(requestTargetsRef.current[profile.profile_id] || "");
-        const currentResponse = requestResponses[profile.profile_id];
-        const relevant = selectedTarget
-          ? selectedTarget === conversationId
-          : currentResponse?.conversationId === conversationId || (chatProfileId === profile.profile_id && tab.active);
-        if (!relevant) continue;
-        const networkState = String(tab.network_state || (tab.busy ? "generating" : "idle"));
-        const networkCompletedAt = String(tab.network_last_completed_at || "");
-        setRequestResponses((current) => {
-          const previous = current[profile.profile_id] || {};
-          if (previous.conversationId && previous.conversationId !== conversationId) return current;
-          if (previous.networkState === networkState && previous.networkCompletedAt === networkCompletedAt && previous.networkError === String(tab.network_error || "")) return current;
-          return {
-            ...current,
-            [profile.profile_id]: {
-              ...previous,
-              visible: true,
-              conversationId,
-              busy: networkState === "generating",
-              loading: networkState === "generating" ? previous.loading !== false : false,
-              networkState,
-              networkSource: String(tab.network_source || ""),
-              networkStartedAt: String(tab.network_last_started_at || ""),
-              networkCompletedAt,
-              networkStatusCode: Number(tab.network_status_code) || 0,
-              networkError: String(tab.network_error || ""),
-              networkDurationMs: Number(tab.network_duration_ms) || 0,
-              contentNeedsRefresh: networkState === "completed" ? true : networkState === "generating" ? false : Boolean(previous.contentNeedsRefresh)
-            }
-          };
-        });
-        if (tab.connection_interrupted) {
-          const recoveryKey = `${profile.profile_id}:${conversationId}`;
-          const lastRecovery = Number(connectionRecoveryReads.current.get(recoveryKey) || 0);
-          if (Date.now() - lastRecovery >= 15000) {
-            connectionRecoveryReads.current.set(recoveryKey, Date.now());
-            void loadResponse(profile, conversationId, true, true, true);
-          }
-          continue;
-        }
-        const recoverableAbort = isRecoverableAbortedChatNetworkFailure({
-          networkState,
-          networkError: tab.network_error,
-          networkCompletedAt,
-          responseReady: Boolean(currentResponse?.responseReady)
-        });
-        if (recoverableAbort) {
-          const recoveryKey = `network-abort:${profile.profile_id}:${conversationId}`;
-          const lastRecovery = Number(connectionRecoveryReads.current.get(recoveryKey) || 0);
-          if (Date.now() - lastRecovery >= LATEST_RESPONSE_RECOVERY_POLL_MS) {
-            connectionRecoveryReads.current.set(recoveryKey, Date.now());
-            void loadResponse(profile, conversationId, true, false, false, true);
-          }
-          continue;
-        }
-        if (networkState === "generating" || tab.busy || tab.settling) {
-          const streamKey = `${profile.profile_id}:${conversationId}`;
-          const lastStreamRead = Number(networkStreamReads.current.get(streamKey) || 0);
-          const lastStreamPush = Number(networkStreamPushTimes.current.get(streamKey) || 0);
-          const realtimePushFresh = Date.now() - lastStreamPush < 1500;
-          const activityPollMs = realtimePushFresh ? LATEST_RESPONSE_RECOVERY_POLL_MS : networkState === "generating" ? 850 : LATEST_RESPONSE_RECOVERY_POLL_MS;
-          if (Date.now() - lastStreamRead >= activityPollMs) {
-            networkStreamReads.current.set(streamKey, Date.now());
-            void loadResponse(profile, conversationId, true, false, false, networkState !== "generating");
-          }
-          continue;
-        }
-        if (currentResponse?.finalityPending) {
-          const finalityPollKey = `finality:${profile.profile_id}:${conversationId}`;
-          const lastFinalityRead = Number(connectionRecoveryReads.current.get(finalityPollKey) || 0);
-          if (Date.now() - lastFinalityRead >= LATEST_RESPONSE_RECOVERY_POLL_MS) {
-            connectionRecoveryReads.current.set(finalityPollKey, Date.now());
-            void loadResponse(profile, conversationId, true, true, false, false);
-          }
-          continue;
-        }
-        if (networkState !== "completed" || !networkCompletedAt) continue;
-        const completionKey = `${profile.profile_id}:${conversationId}`;
-        const contentAlreadyRead = networkCompletionReads.current.get(completionKey) === networkCompletedAt;
-        if (!contentAlreadyRead) {
-          networkCompletionReads.current.set(completionKey, networkCompletedAt);
-          void (async () => {
-            const canonical = await loadResponse(profile, conversationId, true, false, false, true);
-            if (!canonical) {
-              if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) networkCompletionReads.current.delete(completionKey);
-              return;
-            }
-            if (completedResponseNeedsDomFallback(canonical)) {
-              const dom = await loadResponse(profile, conversationId, true, true);
-              if (!dom && networkCompletionReads.current.get(completionKey) === networkCompletedAt) networkCompletionReads.current.delete(completionKey);
-            }
-          })();
-          if (Date.now() - Date.parse(networkCompletedAt) < 15000 && tab.network_source === "codexpro") notify("AI đã phản hồi xong · xác nhận trực tiếp từ network");
-        }
-        if (currentResponse?.repoTaskId && canVerifyRepoTaskUse({
-          responseCurrent: currentResponse.conversationId === conversationId,
-          responseReady: currentResponse.responseReady,
-          responseBusy: currentResponse.busy,
-          responseIncomplete: currentResponse.incomplete,
-          awaitingAssistant: currentResponse.awaitingAssistant,
-          tabBusy: tab.busy,
-          tabSettling: tab.settling,
-          canonicalBusy: currentResponse.canonicalBusy,
-          streamBusy: currentResponse.networkStreamInProgress,
-          networkCompletedAt,
-          repoTaskDispatchedAt: currentResponse.repoTaskDispatchedAt
-        })) {
-          void verifyRepoTaskUse(profile, conversationId, currentResponse, networkCompletedAt);
-        }
-      }
-    }
-  }, [status?.browserProfiles, chatProfileId, requestResponses, notify]);
-
-  useEffect(() => {
-    requestTargetsRef.current = requestTargets;
-  }, [requestTargets]);
-
-  useEffect(() => {
-    if (!chatProfileId) return;
-    const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
-    const target = String(requestTargetsRef.current[chatProfileId] || requestTargets[chatProfileId] || "");
-    if (!profile || !target) return;
-    const response = requestResponses[chatProfileId];
-    const selectedTab = (profile.conversation_tabs || []).find((tab) => conversationIdFromTab(tab) === target);
-    const composerLockReason = !profile.connected
-      ? "profile_disconnected"
-      : busy === `request:${chatProfileId}`
-        ? "request_sending"
-        : selectedTab?.busy || String(selectedTab?.network_state || "") === "generating"
-          ? "selected_tab_busy"
-          : selectedTab?.settling
-            ? "selected_tab_settling"
-            : response?.conversationId === target && response?.rolloverStatus === "creating"
-              ? "conversation_rollover"
-              : response?.conversationId === target && (response?.busy || response?.loading || response?.transcriptLoading || response?.networkStreamInProgress || response?.canonicalBusy)
-                ? "selected_response_busy"
-                : "";
-    const previous = requestTargetDiagnostics.current.get(chatProfileId);
-    const reason = requestTargetReasons.current.get(chatProfileId) || (previous?.target && previous.target !== target ? "state_update" : "status_refresh");
-    const signature = JSON.stringify([target, composerLockReason, (profile.conversation_tabs || []).map((tab) => [tab.id, conversationIdFromTab(tab), tab.active, tab.busy, tab.settling, tab.network_state])]);
-    if (previous?.signature === signature) return;
-    logRendererDiagnostic(api, "info", "chat", `Mục tiêu composer ${chatProfileId}: ${previous?.target || "(chưa chọn)"} -> ${target}`, {
-      action: "composer-target-state",
-      profile_id: chatProfileId,
-      from_conversation_id: previous?.target || "",
-      to_conversation_id: target,
-      selection_reason: reason,
-      composer_locked: Boolean(composerLockReason),
-      composer_lock_reason: composerLockReason,
-      tab_candidates: (profile.conversation_tabs || []).slice(0, 20).map((tab) => ({ id: String(tab?.id || ""), conversation_id: conversationIdFromTab(tab), active: Boolean(tab?.active), busy: Boolean(tab?.busy), settling: Boolean(tab?.settling), network_state: String(tab?.network_state || ""), title: String(tab?.title || "").slice(0, 160) }))
-    });
-    requestTargetReasons.current.delete(chatProfileId);
-    requestTargetDiagnostics.current.set(chatProfileId, { target, signature });
-  }, [busy, chatProfileId, requestResponses, requestTargets, status?.browserProfiles]);
-
-  useEffect(() => {
-    if (!chatProfileId) return;
-    const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
-    if (!profile) return;
-    const conversations = profileRequestChats(profile);
-    const initialTarget = requestTargetsRef.current[chatProfileId] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET;
-    if (!requestTargetsRef.current[chatProfileId]) {
-      requestTargetsRef.current = { ...requestTargetsRef.current, [chatProfileId]: initialTarget };
-      requestTargetReasons.current.set(chatProfileId, "initial_open");
-      setRequestTargets((current) => ({ ...current, [chatProfileId]: initialTarget }));
-    }
-    const response = requestResponses[chatProfileId];
-    if (profile.connected && initialTarget !== NEW_CHAT_TARGET && (!response || response.conversationId !== initialTarget)) void hydrateCachedResponse(profile, initialTarget);
-  }, [chatProfileId, status?.browserProfiles, requestResponses]);
-
-  useEffect(() => {
-    const conversationId = String(openChatResponse?.conversationId || "");
-    if (!chatProfileId || !/^[A-Za-z0-9-]{8,160}$/.test(conversationId) || !openChatAwaitingAssistant) return;
-    let cancelled = false;
-    let timer = 0;
-    const pollLatestResponse = async () => {
-      let nextPollMs = LATEST_RESPONSE_RECOVERY_POLL_MS;
-      const profile = profilesRef.current.find((item) => item.profile_id === chatProfileId);
-      if (cancelled) return;
-      if (profile?.connected) {
-        const canonical = await loadResponse(profile, conversationId, true, false, false, true);
-        if (canonical?.canonical_rate_limited) {
-          const retryAtMs = Date.parse(String(canonical.canonical_retry_at || ""));
-          const retryAfterMs = Number(canonical.canonical_retry_after_ms) || 0;
-          nextPollMs = Math.max(nextPollMs, Math.min(60_000, Number.isFinite(retryAtMs) ? retryAtMs - Date.now() : retryAfterMs));
-        }
-        if (!cancelled && !canonical?.canonical_rate_limited && completedResponseNeedsDomFallback(canonical)) {
-          await loadResponse(profile, conversationId, true, true);
-        }
-      }
-      if (!cancelled) timer = window.setTimeout(pollLatestResponse, Math.max(500, nextPollMs));
-    };
-    timer = window.setTimeout(pollLatestResponse, 500);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [chatProfileId, openChatResponse?.conversationId, openChatAwaitingAssistant, openChatLatestMessageKey]);
-
-  useEffect(() => {
-    if (!chatProfileId) return;
-    cancelResponseAutoResume(chatProfileId, responseScrollResumeTimers.current);
-    responseScrollLocked.current.delete(chatProfileId);
-    responseScrollPositions.current.delete(chatProfileId);
-    return () => cancelResponseAutoResume(chatProfileId, responseScrollResumeTimers.current);
-  }, [chatProfileId, requestTargets[chatProfileId]]);
-
-  useEffect(() => {
-    if (!chatProfileId) return;
-    const response = requestResponses[chatProfileId];
-    persistResponseCache(chatProfileId, response);
-  }, [chatProfileId, requestResponses]);
-
-  useEffect(() => {
-    if (!chatProfileId || !openChatResponse?.responseAudit || typeof api.logChatResponseAudit !== "function") return undefined;
-    const conversationId = String(openChatResponse.conversationId || "");
-    const timer = window.setTimeout(() => {
-      const transcript = responseBodyRefs.current.get(chatProfileId);
-      const renderedMessages = transcript ? [...transcript.querySelectorAll(".chat-transcript-message[data-audit-role]")].map((node) => {
-        const content = node.querySelector(".chat-message-text");
-        const visibleText = String(content?.innerText || content?.textContent || "").replace(/\s+/g, " ").trim();
-        return {
-          role: String(node.dataset.auditRole || ""),
-          fingerprint: String(node.dataset.auditFingerprint || ""),
-          length: Number(node.dataset.auditLength) || 0,
-          preview: visibleText.slice(-180)
-        };
-      }) : [];
-      const record = buildChatResponseAuditRecord({
-        profileId: chatProfileId,
-        conversationId,
-        requestId: openChatResponse.repoTaskId,
-        fetchMode: openChatResponse.responseAuditFetchMode,
-        sourceAudit: openChatResponse.responseAudit,
-        managerMessages: materializeTranscriptMessages(openChatResponse, conversationId),
-        renderedMessages,
-        networkState: openChatResponse.networkState,
-        networkStartedAt: openChatResponse.networkStartedAt,
-        networkCompletedAt: openChatResponse.networkCompletedAt
-      });
-      const key = `${chatProfileId}:${conversationId}`;
-      const signature = JSON.stringify({
-        comparison: record.comparison,
-        basis: record.comparisonBasis,
-        selectedSource: record.selectedSource,
-        source: record.sources[record.comparisonBasis === "chatgpt_dom" ? "chatgptDom" : record.comparisonBasis === "canonical_api" ? "canonical" : "networkStream"],
-        managerState: record.managerState,
-        managerUi: record.managerUi
-      });
-      if (responseAuditSignatures.current.get(key) === signature) return;
-      responseAuditSignatures.current.set(key, signature);
-      api.logChatResponseAudit(record);
-    }, 80);
-    return () => window.clearTimeout(timer);
-  }, [chatProfileId, openChatResponse?.conversationId, openChatResponse?.responseAuditKey, openChatLatestMessageKey]);
-
   useLayoutEffect(() => {
     if (!chatProfileId || !openChatScrollKey) return;
     if (openChatTurnActive) restoreOpenResponseTurnAnchor(chatProfileId);
     maintainResponsePosition(chatProfileId, "layout-effect:open-chat-scroll-key");
   }, [chatProfileId, openChatScrollKey, openChatTurnActive, maintainResponsePosition, restoreOpenResponseTurnAnchor]);
-
-  useEffect(() => {
-    if (!chatProfileId) return undefined;
-    return installResponseAutoPin({
-      panel: chatResponseRef.current,
-      getContainer: () => responseBodyRefs.current.get(chatProfileId),
-      isLocked: () => Boolean(responseScrollLocked.current.get(chatProfileId) || responseComposerActive.current.get(chatProfileId)),
-      scrollToBottom: (cause) => maintainResponsePosition(chatProfileId, `observer:${cause}`)
-    });
-  }, [chatProfileId, requestTargets[chatProfileId], maintainResponsePosition]);
-
-  useEffect(() => {
-    if (!chatProfileId || typeof api.logChatLayout !== "function") return undefined;
-    const modal = chatModalRef.current;
-    const panel = chatResponseRef.current;
-    if (!modal || !panel) return undefined;
-    let timer = 0;
-    let previousSignature = "";
-    let textarea = null;
-    const observedNodes = new WeakSet();
-    const resizeObserver = new ResizeObserver(() => schedule("geometry-resize"));
-    const roundedRect = (node) => {
-      if (!node) return null;
-      const rect = node.getBoundingClientRect();
-      return { top: Math.round(rect.top), height: Math.round(rect.height) };
-    };
-    const observeNode = (node) => {
-      if (!node || observedNodes.has(node)) return;
-      observedNodes.add(node);
-      resizeObserver.observe(node);
-    };
-    const capture = (cause) => {
-      const transcript = responseBodyRefs.current.get(chatProfileId) || panel.querySelector(".latest-response");
-      const composer = modal.querySelector(".request-composer");
-      const nextTextarea = composer?.querySelector("textarea") || null;
-      const notices = [...panel.querySelectorAll(".chat-response-notices > .conversation-rollover-notice, .chat-response-notices > .network-response-notice")].map((node) => ({
-        className: String(node.className || "").slice(0, 160),
-        height: Math.round(node.getBoundingClientRect().height)
-      }));
-      const geometry = {
-        panel: { ...roundedRect(panel), clientHeight: panel.clientHeight },
-        transcript: transcript ? { ...roundedRect(transcript), clientHeight: transcript.clientHeight, scrollTop: Math.round(transcript.scrollTop), scrollHeight: transcript.scrollHeight } : null,
-        composer: roundedRect(composer),
-        textarea: nextTextarea ? { ...roundedRect(nextTextarea), scrollHeight: nextTextarea.scrollHeight, draftLength: nextTextarea.value.length, draftActive: Boolean(nextTextarea.value.trim()) } : null,
-        modal: { scrollTop: Math.round(modal.scrollTop), scrollHeight: modal.scrollHeight, clientHeight: modal.clientHeight },
-        notices,
-        scrollLocked: Boolean(responseScrollLocked.current.get(chatProfileId)),
-        composerActive: Boolean(responseComposerActive.current.get(chatProfileId))
-      };
-      const signature = JSON.stringify({
-        panel: geometry.panel,
-        transcript: geometry.transcript ? { top: geometry.transcript.top, height: geometry.transcript.height, clientHeight: geometry.transcript.clientHeight } : null,
-        composer: geometry.composer,
-        textarea: geometry.textarea ? { height: geometry.textarea.height, scrollHeight: geometry.textarea.scrollHeight, draftActive: geometry.textarea.draftActive } : null,
-        notices,
-        scrollLocked: geometry.scrollLocked,
-        composerActive: geometry.composerActive
-      });
-      if (signature === previousSignature) return;
-      previousSignature = signature;
-      api.logChatLayout({
-        at: new Date().toISOString(),
-        type: "chat-frame-geometry",
-        profileId: chatProfileId,
-        conversationId: String(panel.dataset.layoutConversationId || requestTargetsRef.current[chatProfileId] || ""),
-        cause,
-        ...geometry
-      });
-      observeNode(transcript);
-      observeNode(composer);
-      observeNode(nextTextarea);
-    };
-    function schedule(cause) {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => capture(cause), 90);
-    }
-    const onComposerInput = () => schedule("composer-input");
-    const attachTextarea = () => {
-      const nextTextarea = modal.querySelector(".request-composer textarea");
-      if (textarea === nextTextarea) return;
-      textarea?.removeEventListener("input", onComposerInput);
-      textarea = nextTextarea;
-      textarea?.addEventListener("input", onComposerInput, { passive: true });
-      observeNode(textarea);
-    };
-    const mutationObserver = new MutationObserver(() => {
-      attachTextarea();
-      schedule("panel-mutation");
-    });
-    observeNode(panel);
-    observeNode(modal.querySelector(".request-composer"));
-    observeNode(responseBodyRefs.current.get(chatProfileId) || panel.querySelector(".latest-response"));
-    attachTextarea();
-    mutationObserver.observe(panel, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
-    schedule("attach");
-    return () => {
-      window.clearTimeout(timer);
-      textarea?.removeEventListener("input", onComposerInput);
-      mutationObserver.disconnect();
-      resizeObserver.disconnect();
-    };
-  }, [chatProfileId, requestTargets[chatProfileId]]);
-
-  useEffect(() => {
-    if (!DEEP_UI_DIAGNOSTICS_ENABLED || !chatProfileId || typeof api.logChatLayout !== "function") return undefined;
-    const panel = chatResponseRef.current;
-    if (!panel) return undefined;
-    let animationFrame = 0;
-    let flushTimer = 0;
-    let previousSnapshot = null;
-    const pendingChanges = [];
-    const describeNode = (node) => {
-      if (!(node instanceof Element)) return { nodeType: node?.nodeType || 0 };
-      return {
-        tag: node.tagName.toLowerCase(),
-        className: String(node.className || "").slice(0, 180),
-        height: Math.round(node.getBoundingClientRect().height),
-        children: node.childElementCount,
-        textLength: String(node.textContent || "").length
-      };
-    };
-    const captureSnapshot = (cause) => {
-      const transcript = panel.querySelector(".chat-transcript");
-      const panelNodes = [...panel.children].map(describeNode);
-      const transcriptNodes = transcript ? [...transcript.children].map(describeNode) : [];
-      const snapshot = {
-        at: new Date().toISOString(),
-        profileId: chatProfileId,
-        conversationId: String(panel.dataset.layoutConversationId || ""),
-        cause,
-        state: {
-          sending: panel.dataset.layoutSending === "1",
-          busy: panel.dataset.layoutBusy === "1",
-          settling: panel.dataset.layoutSettling === "1",
-          stream: panel.dataset.layoutStream === "1",
-          hasContent: panel.dataset.layoutHasContent === "1",
-          networkState: String(panel.dataset.layoutNetworkState || ""),
-          messageCount: Number(panel.dataset.layoutMessageCount || 0)
-        },
-        panel: {
-          height: Math.round(panel.getBoundingClientRect().height),
-          scrollHeight: panel.scrollHeight,
-          clientHeight: panel.clientHeight
-        },
-        transcript: transcript ? {
-          height: Math.round(transcript.getBoundingClientRect().height),
-          scrollTop: Math.round(transcript.scrollTop),
-          scrollHeight: transcript.scrollHeight,
-          clientHeight: transcript.clientHeight,
-          locked: Boolean(responseScrollLocked.current.get(chatProfileId))
-        } : null,
-        panelNodes,
-        transcriptNodes,
-        changes: pendingChanges.splice(0, pendingChanges.length)
-      };
-      const layoutPanelNodes = panelNodes.map(({ textLength: _textLength, ...node }) => node);
-      const layoutTranscriptNodes = transcriptNodes.map(({ textLength: _textLength, ...node }) => node);
-      const signature = JSON.stringify({ state: snapshot.state, panel: snapshot.panel, transcript: snapshot.transcript, panelNodes: layoutPanelNodes, transcriptNodes: layoutTranscriptNodes });
-      if (!previousSnapshot || previousSnapshot.signature !== signature) {
-        snapshot.delta = previousSnapshot ? {
-          panelHeight: snapshot.panel.height - previousSnapshot.panelHeight,
-          transcriptHeight: (snapshot.transcript?.height || 0) - previousSnapshot.transcriptHeight,
-          scrollTop: (snapshot.transcript?.scrollTop || 0) - previousSnapshot.scrollTop
-        } : null;
-        api.logChatLayout(snapshot);
-        previousSnapshot = {
-          signature,
-          panelHeight: snapshot.panel.height,
-          transcriptHeight: snapshot.transcript?.height || 0,
-          scrollTop: snapshot.transcript?.scrollTop || 0
-        };
-      }
-    };
-    const scheduleSnapshot = (cause) => {
-      window.clearTimeout(flushTimer);
-      window.cancelAnimationFrame(animationFrame);
-      flushTimer = window.setTimeout(() => {
-        animationFrame = window.requestAnimationFrame(() => captureSnapshot(cause));
-      }, 80);
-    };
-    const mutationObserver = new MutationObserver((records) => {
-      for (const record of records) {
-        pendingChanges.push({
-          type: record.type,
-          attribute: record.attributeName || "",
-          target: describeNode(record.target),
-          added: [...record.addedNodes].map(describeNode),
-          removed: [...record.removedNodes].map(describeNode)
-        });
-      }
-      if (pendingChanges.length > 24) pendingChanges.splice(0, pendingChanges.length - 24);
-      scheduleSnapshot("mutation");
-    });
-    const resizeObserver = new ResizeObserver(() => scheduleSnapshot("resize"));
-    mutationObserver.observe(panel, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["class", "data-layout-sending", "data-layout-busy", "data-layout-settling", "data-layout-stream", "data-layout-has-content", "data-layout-network-state", "data-layout-message-count"]
-    });
-    resizeObserver.observe(panel);
-    scheduleSnapshot("attach");
-    return () => {
-      window.clearTimeout(flushTimer);
-      window.cancelAnimationFrame(animationFrame);
-      mutationObserver.disconnect();
-      resizeObserver.disconnect();
-    };
-  }, [chatProfileId, requestTargets[chatProfileId]]);
-
 
   useEffect(() => {
     if (!chatProfileId) return undefined;
@@ -2364,1967 +499,113 @@ function App() {
       outdated: outdated.length
     };
   }, [status?.browserProfiles, status?.workers, visibleBrowserProfiles]);
+  const {
+    setupProfile,
+    openProfile,
+    resumeProfileTask,
+    stopControlTask,
+    reloadProfiles
+  } = useProfileActions({
+    api,
+    status,
+    requestTargets,
+    taskProfileId,
+    resumeBusyTaskId,
+    profileSummary,
+    refresh,
+    notify,
+    setBusy,
+    setError,
+    setRequestSendErrors,
+    setRequestSendEvidence,
+    setTaskProfileId,
+    setResumeBusyTaskId,
+    setProfileTaskLabels,
+    setWorkerUpdateConfirmOpen
+  });
 
-  async function copyLink() {
-    if (!status?.mcpLink) return;
-    await api.copyText(status.mcpLink);
-    notify("Đã copy link MCP");
-  }
+  const { copyLink, rotateLink, control } = createManagerRuntimeActions({
+    api,
+    status,
+    conversationTitleOverridesRef,
+    setStatus,
+    setBusy,
+    setError,
+    notify
+  });
 
-  async function rotateLink() {
-    setBusy("rotate");
-    setError("");
-    try {
-      const result = await api.rotateLink();
-      if (!result.cancelled) {
-        setStatus((current) => applyConversationTitleOverrides(mergeRuntimeStatus(current, result), conversationTitleOverridesRef.current));
-        await api.copyText(result.mcpLink);
-        notify("Đã tạo và copy link mới");
-      }
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function control(action) {
-    setBusy(action);
-    setError("");
-    try {
-      const nextStatus = await api.controlServer(action);
-      setStatus((current) => applyConversationTitleOverrides(mergeRuntimeStatus(current, nextStatus), conversationTitleOverridesRef.current));
-      notify(action === "restart" ? "CodexPro đã restart" : "CodexPro đã khởi động");
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function addProject() {
-    const root = await api.chooseProject();
-    if (!root) return;
-    setBusy("add");
-    try {
-      setProjects(await api.addProject(root));
-      notify("Đã thêm dự án");
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function inspect(project) {
-    setBusy(project.root);
-    setError("");
-    try {
-      const result = await api.inspectProject(project.root);
-      setInspection({ project, result });
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  function projectRootForProfile(profile) {
-    const workspaceProjects = projects;
-    const requested = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
-    if (requested === ALL_ALLOWED_WORKSPACES) return ALL_ALLOWED_WORKSPACES;
-    const exact = workspaceProjects.find((project) => project.root.toLowerCase() === requested.toLowerCase());
-    if (exact) return exact.root;
-    const currentWorkspace = String(profile.current_workspace_root || "");
-    return workspaceProjects.find((project) => project.root.toLowerCase() === currentWorkspace.toLowerCase())?.root
-      || workspaceProjects.find((project) => project.active)?.root
-      || workspaceProjects[0]?.root
-      || "";
-  }
-
-  function selectProjectForProfile(profileId, root) {
-    setRequestProjectRoots((current) => ({ ...current, [profileId]: root }));
-    setManagerSettings((current) => ({ ...current, repoSelections: { ...(current.repoSelections || {}), [profileId]: root } }));
-    void api.saveManagerSettings({ repoSelections: { [profileId]: root } })
-      .then(applyManagerSettings)
-      .catch((err) => setRequestSendErrors((current) => ({ ...current, [profileId]: err?.message || String(err) })));
-  }
-
-  function changeProjectForProfile(profile, root) {
-    const profileId = profile.profile_id;
-    const previousRoot = projectRootForProfile(profile);
-    selectProjectForProfile(profileId, root);
-    if (!projectSelectionChanged(previousRoot, root)) return;
-
-    requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: NEW_CHAT_TARGET };
-    setRequestTargets((current) => ({ ...current, [profileId]: NEW_CHAT_TARGET }));
-    setRequestResponses((current) => ({
-      ...current,
-      [profileId]: {
-        visible: true,
-        loading: false,
-        error: "",
-        conversationId: NEW_CHAT_TARGET,
-        text: "",
-        messages: [],
-        busy: false
-      }
-    }));
-    setRequestSendErrors((current) => ({ ...current, [profileId]: "" }));
-    setRequestSendEvidence((current) => ({ ...current, [profileId]: null }));
-    setRenameChat(null);
-    responseScrollLocked.current.delete(profileId);
-    responseScrollPositions.current.delete(profileId);
-    notify("Đã đổi dự án · tin nhắn tiếp theo sẽ mở chat mới");
-  }
-
-  async function setupProfile(profile) {
-    setBusy(`profile:${profile.profile_id}`);
-    setError("");
-    try {
-      const result = await api.setupProfile(profile.profile_id);
-      notify(result.message || "CodexPro READY");
-      await refresh(false);
-    } catch (err) {
-      const setupError = err?.message || String(err);
-      logRendererDiagnostic(api, "error", "profile", `UI setup profile thất bại: ${setupError}`, {
-        action: "setup-profile-renderer-error",
-        profile_id: profile.profile_id,
-        extension_version: String(profile.extension_version || ""),
-        connector_installed: Boolean(profile.connector_installed),
-        connector_profile_bound: profile.connector_profile_bound !== false,
-        connector_message: String(profile.connector_message || ""),
-        tab_candidates: (profile.conversation_tabs || []).slice(0, 20).map((tab) => ({
-          id: String(tab?.id || ""),
-          url: String(tab?.url || "").slice(0, 300),
-          title: String(tab?.title || "").slice(0, 160),
-          active: Boolean(tab?.active),
-          busy: Boolean(tab?.busy),
-          network_state: String(tab?.network_state || "")
-        })),
-        error: err
-      });
-      setError(setupError.replace(/\s*\[CODEXPRO_SETUP_EVIDENCE\s+[\s\S]*$/, ""));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  function responseCacheKey(profileId, conversationId) {
-    return `${profileId}:${conversationId}`;
-  }
-
-  function rememberResponseCacheEntry(key, cached) {
-    responseMemoryCache.current.delete(key);
-    responseMemoryCache.current.set(key, cached || null);
-    trimMapEntries(responseMemoryCache.current, 30);
-    return cached || null;
-  }
-
-  function getResponseCacheEntry(profileId, conversationId) {
-    const key = responseCacheKey(profileId, conversationId);
-    if (responseMemoryCache.current.has(key)) return Promise.resolve(responseMemoryCache.current.get(key));
-    const existing = responseCacheLoads.current.get(key);
-    if (existing) return existing;
-    const pending = api.getChatResponseCache({ profileId, conversationId })
-      .catch(() => null)
-      .then((cached) => rememberResponseCacheEntry(key, cached))
-      .finally(() => {
-        if (responseCacheLoads.current.get(key) === pending) responseCacheLoads.current.delete(key);
-      });
-    responseCacheLoads.current.set(key, pending);
-    return pending;
-  }
-
-  function prefetchProfileResponseCaches(profile) {
-    if (!profile?.connected) return;
-    for (const chat of profileRequestChats(profile)) {
-      const conversationId = String(chat?.id || "");
-      if (/^[A-Za-z0-9-]{8,160}$/.test(conversationId)) void getResponseCacheEntry(profile.profile_id, conversationId);
-    }
-  }
-
-  function profileConversationTab(profile, conversationId) {
-    return (profile?.conversation_tabs || []).find((tab) => String(tab?.url || "").includes(`/c/${conversationId}`)) || null;
-  }
-
-  function cachedResponseIsFresh(profile, conversationId, cached) {
-    if (!cached?.messages?.length && !cached?.text) return false;
-    if (cached?.responseReady !== true) return false;
-    if (transcriptAwaitingAssistant(materializeTranscriptMessages(cached, conversationId))) return false;
-    const tab = profileConversationTab(profile, conversationId);
-    if (!tab) return false;
-    const networkState = String(tab.network_state || (tab.busy ? "generating" : "idle"));
-    if (tab.busy || tab.settling || networkState === "generating") return false;
-    const completedAt = String(tab.network_last_completed_at || "");
-    return !completedAt || completedAt === String(cached.networkCompletedAt || "");
-  }
-
-  function persistResponseCache(profileId, response) {
-    const conversationId = String(response?.conversationId || "");
-    const messages = cacheableTranscriptMessages(response?.messages);
-    const text = String(response?.text || "").trim();
-    const networkState = String(response?.networkState || "");
-    const logicalTrackingState = logicalTaskTracking(response);
-    if (!/^[A-Za-z0-9-]{8,160}$/.test(conversationId) || (!messages.length && !text)) return;
-    const key = responseCacheKey(profileId, conversationId);
-    const signature = JSON.stringify([
-      String(response?.networkCompletedAt || ""),
-      networkState,
-      Boolean(response?.responseReady),
-      String(response?.responseSource || ""),
-      Boolean(response?.truncated),
-      Number(response?.messageCount) || 0,
-      Number(response?.totalMessageCount) || 0,
-      logicalTrackingState.logicalTaskCount,
-      logicalTrackingState.completedLogicalTaskIds.join("|"),
-      String(response?.repoTaskId || ""),
-      String(response?.logicalTaskStatus || ""),
-      String(response?.activityStartedAt || ""),
-      Boolean(response?.fastMessageLimitQualified),
-      text,
-      messages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain), Boolean(message?.provisional), message?.endTurn])
-    ]);
-    const cacheEntry = {
-      profileId,
-      conversationId,
-      messages,
-      text,
-      truncated: Boolean(response?.truncated),
-      networkCompletedAt: String(response?.networkCompletedAt || ""),
-      networkState,
-      responseReady: Boolean(response?.responseReady),
-      responseSource: String(response?.responseSource || ""),
-      messageCount: Number(response?.messageCount) || 0,
-      totalMessageCount: Number(response?.totalMessageCount) || 0,
-      logicalTaskCount: logicalTrackingState.logicalTaskCount,
-      completedLogicalTaskIds: logicalTrackingState.completedLogicalTaskIds,
-      repoTaskId: String(response?.repoTaskId || ""),
-      logicalTaskStatus: String(response?.logicalTaskStatus || ""),
-      activityStartedAt: String(response?.activityStartedAt || ""),
-      fastMessageLimitQualified: Boolean(response?.fastMessageLimitQualified),
-      updatedAt: String(response?.updatedAt || new Date().toISOString())
-    };
-    rememberResponseCacheEntry(key, cacheEntry);
-    if (responseCacheSaveSignatures.current.get(key) === signature) return;
-    responseCacheSaveSignatures.current.set(key, signature);
-    void api.saveChatResponseCache(cacheEntry).catch(() => {
-      if (responseCacheSaveSignatures.current.get(key) === signature) responseCacheSaveSignatures.current.delete(key);
-    });
-  }
-
-  async function hydrateCachedResponse(profile, conversationId) {
-    const key = responseCacheKey(profile.profile_id, conversationId);
-    const cached = responseMemoryCache.current.has(key)
-      ? responseMemoryCache.current.get(key)
-      : await getResponseCacheEntry(profile.profile_id, conversationId);
-    const cacheFresh = cachedResponseIsFresh(profile, conversationId, cached);
-      if (cached) {
-        const tab = profileConversationTab(profile, conversationId);
-        const networkState = String(tab?.network_state || cached.networkState || "idle");
-        const terminalUnverified = cached.responseReady !== true && !tab?.busy && !tab?.settling && isTerminalChatNetworkState(networkState);
-        const rawCachedMessages = trimRecentTranscriptMessages(cached.messages);
-        const cacheableMessages = cacheableTranscriptMessages(cached.messages);
-        const cachedMessages = terminalUnverified
-          ? discardProvisionalAssistantAfterLatestUser(cacheableMessages, { includeUnverified: true })
-          : cacheableMessages;
-        const cachedText = terminalUnverified
-          ? String([...cachedMessages].reverse().find((message) => message?.role === "assistant")?.text || "")
-          : String(cached.text || "").trim();
-        if (!terminalUnverified && rawCachedMessages.length === cachedMessages.length) {
-          responseCacheSaveSignatures.current.set(key, JSON.stringify([
-            String(cached.networkCompletedAt || ""),
-            String(cached.networkState || ""),
-            Boolean(cached.responseReady),
-            String(cached.responseSource || ""),
-            Boolean(cached.truncated),
-            Number(cached.messageCount) || 0,
-            Number(cached.totalMessageCount) || 0,
-            Number(cached.logicalTaskCount) || 0,
-            (cached.completedLogicalTaskIds || []).join("|"),
-            String(cached.repoTaskId || ""),
-            String(cached.logicalTaskStatus || ""),
-            String(cached.activityStartedAt || ""),
-            Boolean(cached.fastMessageLimitQualified),
-            cachedText,
-            cachedMessages.map((message) => [message?.id, message?.role, message?.text, Boolean(message?.truncated), message?.submissionState, message?.createdAt, Boolean(message?.uncertain), Boolean(message?.provisional), message?.endTurn])
-          ]));
-        } else {
-          responseCacheSaveSignatures.current.delete(key);
-        }
-        setRequestResponses((current) => {
-          const selectedTargetNow = String(requestTargetsRef.current[profile.profile_id] || "");
-          if (selectedTargetNow && selectedTargetNow !== conversationId) return current;
-          const previous = current[profile.profile_id] || {};
-          const previousIsNewer = previous.conversationId === conversationId
-            && Date.parse(String(previous.updatedAt || "")) > Date.parse(String(cached.updatedAt || ""));
-          if (previousIsNewer) return current;
-          return {
-            ...current,
-            [profile.profile_id]: {
-              ...previous,
-              ...cached,
-              visible: true,
-              loading: false,
-              transcriptLoading: !cacheFresh,
-              error: "",
-              conversationId,
-              text: cachedText,
-              messages: cachedMessages,
-              busy: Boolean(tab?.busy || tab?.settling || networkState === "generating"),
-              networkState,
-              networkCompletedAt: String(tab?.network_last_completed_at || cached.networkCompletedAt || ""),
-              cached: true
-            }
-          };
-        });
-      }
-      const selectedTargetNow = String(requestTargetsRef.current[profile.profile_id] || "");
-      if (selectedTargetNow && selectedTargetNow !== conversationId) return;
-      if (!cacheFresh) {
-        const cachedHasContent = Boolean(cached?.messages?.length || String(cached?.text || "").trim());
-        const fastResult = await loadResponse(profile, conversationId, true, false);
-        const fastHasContent = Boolean(
-          fastResult?.network_stream_available && fastResult?.network_stream_in_progress === true
-          && (String(fastResult?.text || "").trim() || fastResult?.messages?.length || String(fastResult?.network_stream_activity_text || "").trim())
-        );
-        if (!fastHasContent && completedResponseNeedsDomFallback(fastResult)) {
-          window.setTimeout(() => void loadResponse(profile, conversationId, true, true, false, false), cachedHasContent ? 250 : 0);
-        }
-    }
-  }
-
-  function openChat(profile) {
-    const taskConversationId = taskConversationIdForProfile(profile);
-    const conversations = profileRequestChats(profile, taskConversationId);
-    const pinnedConversationId = String(requestTargetsRef.current[profile.profile_id] || "");
-    const activeTab = (profile.conversation_tabs || []).find((tab) => tab.active);
-    const activeConversationId = conversationIdFromTab(activeTab);
-    const activeTabReady = Boolean(activeConversationId && !activeTab?.busy && !activeTab?.settling && String(activeTab?.network_state || "") !== "generating");
-    const conversationId = String(taskConversationId || (activeTabReady ? activeConversationId : pinnedConversationId || activeConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET));
-    const selectionReason = taskConversationId
-      ? (String(profile?.current_task_conversation_id || "").trim() === taskConversationId ? "open_task_bound_conversation" : "open_task_inferred_conversation")
-      : activeTabReady
-        ? (pinnedConversationId && pinnedConversationId !== activeConversationId ? "open_active_idle_tab_overrode_pinned" : "open_active_idle_tab")
-        : pinnedConversationId ? "reopen_pinned_selection" : "initial_open";
-    if (conversationId) {
-      requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: conversationId };
-      requestTargetReasons.current.set(profile.profile_id, selectionReason);
-      setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
-    }
-    const resolvedTaskTab = (profile.conversation_tabs || []).find((tab) => conversationIdFromTab(tab) === taskConversationId);
-    const taskTabDiffersFromChromeActive = Boolean(taskConversationId && activeConversationId && taskConversationId !== activeConversationId);
-    logRendererDiagnostic(api, taskTabDiffersFromChromeActive ? "warn" : "info", "chat", taskTabDiffersFromChromeActive
-      ? `Task ${profile.current_task_title || profile.current_task_id || profile.profile_id} nằm ở tab khác tab Chrome đang active`
-      : `Mở composer ${profile.profile_id} tại ${conversationId}`, {
-      action: "open-chat-target-selection",
-      profile_id: profile.profile_id,
-      task_id: String(profile?.current_task_id || ""),
-      task_title: String(profile?.current_task_title || ""),
-      task_bound_conversation_id: String(profile?.current_task_conversation_id || ""),
-      task_resolved_conversation_id: taskConversationId,
-      task_resolved_title: String(resolvedTaskTab?.title || "").slice(0, 160),
-      task_tab_differs_from_chrome_active: taskTabDiffersFromChromeActive,
-      from_conversation_id: pinnedConversationId,
-      to_conversation_id: conversationId,
-      selection_reason: selectionReason,
-      active_target_id: String(activeTab?.id || ""),
-      active_conversation_id: activeConversationId,
-      active_title: String(activeTab?.title || "").slice(0, 160),
-      active_tab_ready: activeTabReady,
-      active_tab_busy: Boolean(activeTab?.busy),
-      active_tab_settling: Boolean(activeTab?.settling),
-      active_network_state: String(activeTab?.network_state || ""),
-      draft_length: String(requestDraftsRef.current[profile.profile_id] || "").length,
-      tab_candidates: (profile.conversation_tabs || []).slice(0, 20).map((tab) => ({ id: String(tab?.id || ""), conversation_id: conversationIdFromTab(tab), active: Boolean(tab?.active), busy: Boolean(tab?.busy), settling: Boolean(tab?.settling), network_state: String(tab?.network_state || ""), title: String(tab?.title || "").slice(0, 160) }))
-    });
-    const projectRoot = projectRootForProfile(profile);
-    const rememberedRoot = String(requestProjectRoots[profile.profile_id] || managerSettings.repoSelections?.[profile.profile_id] || "");
-    if (projectRoot && projectRoot.toLowerCase() !== rememberedRoot.toLowerCase()) selectProjectForProfile(profile.profile_id, projectRoot);
-    else if (projectRoot) setRequestProjectRoots((current) => ({ ...current, [profile.profile_id]: projectRoot }));
-    cancelResponseAutoResume(profile.profile_id, responseScrollResumeTimers.current);
-    responseScrollLocked.current.delete(profile.profile_id);
-    responseScrollPositions.current.delete(profile.profile_id);
-    responseTurnAnchors.current.delete(profile.profile_id);
-    setChatProfileId(profile.profile_id);
-    window.requestAnimationFrame(() => {
-      positionOpenChatViewport(profile.profile_id, "open-chat:initial");
-      window.setTimeout(() => positionOpenChatViewport(profile.profile_id, "open-chat:initial-settle"), 180);
-    });
-    if (profile.connected && conversationId && conversationId !== NEW_CHAT_TARGET) {
-      setRequestResponses((current) => {
-        const previous = current[profile.profile_id] || {};
-        const sameConversation = previous.conversationId === conversationId;
-        const activeTurn = sameConversation && Boolean(previous.loading || previous.busy || previous.networkStreamInProgress || previous.canonicalBusy);
-        return { ...current, [profile.profile_id]: { ...(sameConversation ? previous : {}), visible: true, loading: activeTurn ? Boolean(previous.loading) : false, transcriptLoading: !activeTurn, error: "", conversationId, messages: sameConversation ? trimRecentTranscriptMessages(previous.messages) : [] } };
-      });
-      void hydrateCachedResponse(profile, conversationId).finally(() => {
-        window.requestAnimationFrame(() => {
-          positionOpenChatViewport(profile.profile_id, "open-chat:hydrated");
-          window.setTimeout(() => positionOpenChatViewport(profile.profile_id, "open-chat:hydrated-settle"), 180);
-        });
-      });
-    }
-  }
-
-  function startNewChat(profile) {
-    setRenameChat(null);
-    responseTurnAnchors.current.delete(profile.profile_id);
-    requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: NEW_CHAT_TARGET };
-    requestTargetReasons.current.set(profile.profile_id, "user_new_chat");
-    setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
-    requestDraftsRef.current[profile.profile_id] = "";
-    setRequestDraftResetVersions((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || 0) + 1 }));
-    setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
-    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-    setRequestResponses((current) => ({ ...current, [profile.profile_id]: { visible: true, loading: false, error: "", conversationId: NEW_CHAT_TARGET, text: "", busy: false } }));
-  }
-
-  function selectRequestConversation(profile, conversationId) {
-    const profileId = profile.profile_id;
-    const previousTarget = String(requestTargetsRef.current[profileId] || "");
-    const nextTarget = String(conversationId || "");
-    if (!nextTarget || nextTarget === previousTarget) return;
-    setRenameChat(null);
-    requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: nextTarget };
-    requestTargetReasons.current.set(profileId, "user_selected_conversation");
-    setRequestTargets((current) => ({ ...current, [profileId]: nextTarget }));
-    setRequestResponses((current) => ({ ...current, [profileId]: { visible: true, loading: false, transcriptLoading: true, error: "", conversationId: nextTarget, text: "", messages: [] } }));
-    void hydrateCachedResponse(profile, nextTarget);
-  }
-
-  function beginRenameSelectedChat(profile, conversationId, currentTitle) {
-    if (!conversationId || conversationId === NEW_CHAT_TARGET || busy) return;
-    setRenameChat({ profileId: profile.profile_id, conversationId, originalTitle: currentTitle || "", title: currentTitle || "" });
-    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-  }
-
-  async function saveRenamedChat(profile) {
-    if (!renameChat || renameChat.profileId !== profile.profile_id || busy) return;
-    const { conversationId, originalTitle } = renameChat;
-    const title = String(renameChat.title || "").trim();
-    if (!title) {
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Tên đoạn chat không được để trống." }));
-      return;
-    }
-    if (title.length > 120) {
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Tên đoạn chat được tối đa 120 ký tự." }));
-      return;
-    }
-    if (title === originalTitle) {
-      setRenameChat(null);
-      return;
-    }
-    setBusy(`rename-chat:${profile.profile_id}`);
-    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-    try {
-      await api.renameProfileChat({ profileId: profile.profile_id, conversationId, title });
-      conversationTitleOverridesRef.current = { ...conversationTitleOverridesRef.current, [`${profile.profile_id}:${conversationId}`]: title };
-      setStatus((current) => applyConversationTitleOverrides(current, conversationTitleOverridesRef.current));
-      setRenameChat(null);
-      notify(`Đã đổi tên thành “${title}”`);
-      window.setTimeout(() => void refresh(false), 2500);
-    } catch (err) {
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: err?.message || String(err) }));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function openProfile(profile, options = {}) {
-    const tabs = profile.conversation_tabs || [];
-    const activeTab = profileChromeTarget(profile);
-    const conversationOf = (tab) => String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-    const activeConversationId = conversationOf(activeTab);
-    const conversations = profileRequestChats(profile);
-    const defaultTarget = activeConversationId || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || "";
-    const requestedConversationId = String(requestTargets[profile.profile_id] || "");
-    const conversationId = options.focusOnly ? activeConversationId : String(requestedConversationId || defaultTarget);
-    const selectedTab = tabs.find((tab) => conversationOf(tab) === conversationId);
-    const targetTab = selectedTab || activeTab;
-    const selectedConversation = conversations.find((chat) => String(chat.id) === conversationId);
-    const selectionReason = options.focusOnly ? "focus_only_active_tab" : selectedTab ? "selected_conversation_tab" : activeTab ? "active_tab_fallback" : "missing_target_tab";
-    const selectionDiagnostic = {
-      action: "profile-tab-open-selection",
-      profile_id: profile.profile_id,
-      focus_only: Boolean(options.focusOnly),
-      selection_reason: selectionReason,
-      requested_conversation_id: requestedConversationId,
-      default_conversation_id: String(defaultTarget || ""),
-      selected_conversation_id: String(conversationId || ""),
-      active_target_id: String(activeTab?.id || ""),
-      active_conversation_id: activeConversationId,
-      selected_target_id: String(selectedTab?.id || ""),
-      target_id: String(targetTab?.id || ""),
-      target_conversation_id: conversationOf(targetTab),
-      target_title: String(selectedConversation?.title || targetTab?.title || profile.active_chat_title || ""),
-      tab_candidates: tabs.slice(0, 20).map((tab) => ({ id: String(tab?.id || ""), conversation_id: conversationOf(tab), active: Boolean(tab?.active), window_id: String(tab?.windowId ?? tab?.window_id ?? ""), title: String(tab?.title || "").slice(0, 160), url: String(tab?.url || "").slice(0, 300) }))
-    };
-    logRendererDiagnostic(api, "info", "profile", `Manager chọn tab ${selectionDiagnostic.target_id || "không xác định"} để mở profile ${profile.profile_id}`, selectionDiagnostic);
-    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-    setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: null }));
-    setBusy(`open-profile:${profile.profile_id}`);
-    setError("");
-    try {
-      const result = await api.openProfileChat({
-        profileId: profile.profile_id,
-        conversationId,
-        targetId: targetTab?.id,
-        targetConversationId: conversationOf(targetTab),
-        title: selectedConversation?.title || targetTab?.title || profile.active_chat_title || "",
-        selectionReason,
-        activeTargetId: activeTab?.id,
-        activeConversationId
-      });
-      logRendererDiagnostic(api, "info", "profile", `Chrome xác nhận mở tab ${String(result?.activation?.target_id || result?.target_id || "không xác định")}`, { ...selectionDiagnostic, action: "profile-tab-open-result", result_profile_id: String(result?.profile_id || ""), result_conversation_id: String(result?.conversation_id || ""), result_target_id: String(result?.target_id || ""), activation_target_id: String(result?.activation?.target_id || ""), activation_window_id: String(result?.activation?.window_id || ""), activation_window_focused: Boolean(result?.activation?.window_focused), activation_acknowledgement_delayed: Boolean(result?.activation_acknowledgement_delayed), navigation_target_id: String(result?.navigation?.target_id || ""), navigation_url: String(result?.navigation?.url || ""), window_focus: result?.window_focus || null });
-    } catch (err) {
-      logRendererDiagnostic(api, "error", "profile", `Mở tab profile thất bại: ${err?.message || String(err)}`, { ...selectionDiagnostic, action: "profile-tab-open-error", error: err });
-      setError(err?.message || String(err));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function resumeProfileTask(job) {
-    const taskId = String(job?.job_id || job?.jobId || "").trim();
-    const profile = (status?.browserProfiles || []).find((item) => item.profile_id === taskProfileId);
-    if (!profile || !taskId || resumeBusyTaskId) return;
-    if (!profileWorkerIsIdleForTaskResume(profile)) {
-      setError("Worker đang bận. Chỉ có thể tiếp tục task khi worker trở về trạng thái ĐANG RẢNH.");
-      return;
-    }
-    setResumeBusyTaskId(taskId);
-    setError("");
-    try {
-      const result = await api.resumeProfileTask({ profileId: profile.profile_id, taskId });
-      setTaskProfileId("");
-      setProfileTaskLabels((current) => {
-        const next = { ...current, [profile.profile_id]: String(job?.title || current[profile.profile_id] || "Task CodexPro") };
-        saveProfileTaskLabels(next);
-        return next;
-      });
-      notify(result?.repo_task_id ? `Đang tiếp tục ${String(job?.title || "task")}` : "Đã gửi yêu cầu tiếp tục task");
-      await refresh(false);
-    } catch (resumeError) {
-      setError(resumeError?.message || String(resumeError));
-      await refresh(false).catch(() => undefined);
-    } finally {
-      setResumeBusyTaskId("");
-    }
-  }
-
-  async function recoveryContinuationSnapshot(profile, conversationId, targetTab) {
-    const profileId = String(profile?.profile_id || "");
-    const liveResponse = requestResponsesRef.current[profileId] || {};
-    const liveMatches = String(liveResponse?.conversationId || "") === conversationId;
-    const liveMessages = liveMatches ? cacheableTranscriptMessages(materializeTranscriptMessages(liveResponse, conversationId)) : [];
-    const cached = liveMessages.length ? null : await api.getChatResponseCache({ profileId, conversationId }).catch(() => null);
-    const cachedMessages = trimRecentTranscriptMessages(cached?.messages);
-    const messages = trimRecentTranscriptMessages(liveMessages.length ? liveMessages : cachedMessages);
-    const selectedConversation = profileRequestChats(profile).find((chat) => String(chat.id) === conversationId);
-    const projectRoot = String(liveResponse?.repoTaskRequest?.projectRoot || requestProjectRoots[profileId] || projectRootForProfile(profile) || "");
-    return {
-      ...(cached || {}),
-      ...(liveMatches ? liveResponse : {}),
-      title: selectedConversation?.title || targetTab?.title || profile?.active_chat_title || "",
-      messages,
-      projectRoot,
-      repoTaskScope: String(liveResponse?.repoTaskScope || ""),
-      repoTaskRequest: liveResponse?.repoTaskRequest || null,
-      continuation_reason: "recovery"
-    };
-  }
-
-  async function recoverProfileTab(profile, options = {}) {
-    const tabs = profile.conversation_tabs || [];
-    const conversationOf = (tab) => String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-    const selectedConversationId = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
-    const requestedConversationId = String(options.conversationId || selectedConversationId || "");
-    const selectedTab = tabs.find((tab) => conversationOf(tab) === requestedConversationId);
-    const exactTargetTab = options.targetTab && conversationOf(options.targetTab) === requestedConversationId ? options.targetTab : selectedTab;
-    const targetTab = exactTargetTab || tabs.find((tab) => tab.active) || tabs[0];
-    const conversationId = requestedConversationId || conversationOf(exactTargetTab);
-    const selectedConversation = profileRequestChats(profile).find((chat) => String(chat.id) === conversationId);
-    const title = selectedConversation?.title || exactTargetTab?.title || profile.active_chat_title || "";
-    const silent = options.silent === true;
-    if (!conversationId) {
-      const message = "Kh\u00f4ng x\u00e1c \u0111\u1ecbnh \u0111\u01b0\u1ee3c h\u1ed9i tho\u1ea1i c\u0169 c\u1ea7n kh\u00f4i ph\u1ee5c.";
-      if (!silent) setError(message);
-      logRendererDiagnostic(api, "error", "profile", message, { action: "recover-profile-missing-target", profile_id: profile.profile_id });
-      return null;
-    }
-    const snapshot = await recoveryContinuationSnapshot(profile, conversationId, exactTargetTab || targetTab);
-    if (/^cpt_[a-f0-9]{24}$/.test(String(options.taskId || ""))) snapshot.repoTaskId = String(options.taskId);
-    if (!silent) setBusy(`recover-profile:${profile.profile_id}`);
-    if (!silent) setError("");
-    try {
-      let recoveryReason = String(options.recoveryReason || "").slice(0, 600);
-      if (!options.forceContinuation && exactTargetTab?.id) {
-        try {
-        const restored = await api.recoverProfileChat({
-          profileId: profile.profile_id,
-          conversationId,
-          targetId: exactTargetTab.id,
-          title,
-          silent,
-          newChat: false
-        });
-        requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: conversationId };
-        setRequestTargets((current) => ({ ...current, [profile.profile_id]: conversationId }));
-        logRendererDiagnostic(api, "info", "profile", "Recovered original ChatGPT conversation", { action: "recover-profile-same-conversation", profile_id: profile.profile_id, conversation_id: conversationId, old_target_id: String(exactTargetTab.id), result_target_id: String(restored?.target_id || ""), automatic: Boolean(options.automatic) });
-        if (!silent) notify("\u0110\u00e3 kh\u00f4i ph\u1ee5c \u0111\u00fang h\u1ed9i tho\u1ea1i c\u0169");
-        window.setTimeout(() => void refresh(false), 900);
-        return { mode: "same_conversation", conversationId, result: restored };
-        } catch (restoreError) {
-          recoveryReason = String(restoreError?.message || restoreError || "Original renderer could not be recovered.").slice(0, 600);
-        }
-      }
-      if (!recoveryReason) recoveryReason = exactTargetTab?.id
-        ? "Original conversation did not recover after the bounded attempt."
-        : "Original conversation no longer has an owned Chrome tab.";
-      logRendererDiagnostic(api, "warn", "profile", `Original conversation recovery failed; creating continuation chat: ${recoveryReason}`, { action: "recover-profile-rollover-start", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(exactTargetTab?.id || ""), automatic: Boolean(options.automatic), hard_failure: Boolean(options.hardFailure) });
-      const newConversationId = await rolloverFullConversation(profile, conversationId, {
-        ...snapshot,
-        title,
-        continuation_reason: "recovery",
-        recovery_reason: recoveryReason,
-        silent
-      });
-      if (!newConversationId) throw new Error(`Original chat recovery failed and continuation chat was not created. ${recoveryReason}`);
-      if (exactTargetTab?.id) {
-        await api.recoverProfileChat({
-          profileId: profile.profile_id,
-          conversationId,
-          targetId: exactTargetTab.id,
-          title,
-          silent: true,
-          discardOnly: true
-        }).catch((discardError) => {
-          logRendererDiagnostic(api, "warn", "profile", `Continuation created but old tab could not be closed: ${discardError?.message || String(discardError)}`, { action: "recover-profile-discard-old-tab-failed", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(exactTargetTab.id), error: discardError });
-        });
-      }
-      logRendererDiagnostic(api, "info", "profile", "Moved cached context from unrecoverable tab to continuation chat", { action: "recover-profile-rollover-done", profile_id: profile.profile_id, abandoned_conversation_id: conversationId, conversation_id: newConversationId, automatic: Boolean(options.automatic) });
-      if (!silent) notify("Tab c\u0169 kh\u00f4ng kh\u00f4i ph\u1ee5c \u0111\u01b0\u1ee3c \u00b7 \u0111\u00e3 chuy\u1ec3n sang chat ti\u1ebfp n\u1ed1i");
-      window.setTimeout(() => void refresh(false), 900);
-      return { mode: "continuation", conversationId: newConversationId };
-    } catch (err) {
-      const message = err?.message || String(err);
-      logRendererDiagnostic(api, "error", "profile", `Chat recovery failed: ${message}`, { action: "recover-profile-failed", profile_id: profile.profile_id, conversation_id: conversationId, target_id: String(exactTargetTab?.id || ""), automatic: Boolean(options.automatic), error: err });
-      if (!silent) setError(message);
-      return null;
-    } finally {
-      if (!silent) setBusy("");
-    }
-  }
-  async function continueTaskFromCheckpoint(profile, taskId, options = {}) {
-    const profileId = String(profile?.profile_id || "").trim();
-    const normalizedTaskId = String(taskId || "").trim();
-    const conversationId = String(options?.conversationId || "").trim();
-    const targetTab = options?.targetTab || null;
-    const silent = options?.silent === true;
-    const automatic = options?.automatic === true;
-    const recoveryReason = String(options?.recoveryReason || "Task bị treo; tiếp tục từ checkpoint gần nhất.").slice(0, 600);
-    if (!profileId || !/^cpt_[a-f0-9]{24}$/.test(normalizedTaskId)) return null;
-    if (!silent) setBusy(`checkpoint-recovery:${profileId}`);
-    if (!silent) setError("");
-    try {
-      const resumed = await api.resumeProfileTask({ profileId, taskId: normalizedTaskId, hangRecovery: true, recoveryReason });
-      if (String(resumed?.repo_task_id || "") !== normalizedTaskId) throw new Error("Task ID đổi khi phục hồi từ checkpoint; đã dừng để tránh tạo task mới.");
-      const newConversationId = String(resumed?.conversation_id || "").trim();
-      if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("Chat phục hồi chưa trả conversation id hợp lệ.");
-      requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: newConversationId };
-      setRequestTargets((current) => ({ ...current, [profileId]: newConversationId }));
-      setChatProfileId(profileId);
-      setRequestSendErrors((current) => ({ ...current, [profileId]: "" }));
-      setRequestResponses((current) => {
-        const previous = current[profileId] || {};
-        return {
-          ...current,
-          [profileId]: {
-            ...previous,
-            visible: true,
-            loading: true,
-            error: "",
-            conversationId: newConversationId,
-            text: "",
-            messages: [],
-            busy: true,
-            submissionState: "submitted",
-            sendUncertain: false,
-            rolloverStatus: "done",
-            rolloverReason: "checkpoint_recovery",
-            rolloverFromConversationId: conversationId,
-            rolloverNotice: "Task treo đã được chuyển sang chat mới từ checkpoint gần nhất.",
-            activityStartedAt: String(resumed?.repo_task_dispatched_at || new Date().toISOString()),
-            repoTaskId: String(resumed?.repo_task_id || normalizedTaskId),
-            repoTaskDispatchedAt: String(resumed?.repo_task_dispatched_at || ""),
-            repoTaskScope: String(resumed?.repo_task_scope || previous?.repoTaskScope || ""),
-            logicalTaskStatus: String(resumed?.worker_job_status || previous?.logicalTaskStatus || "running"),
-            repoTaskStatus: "waiting",
-            repoTaskVerified: false
-          }
-        };
-      });
-      if (targetTab?.id) {
-        await api.recoverProfileChat({ profileId, conversationId, targetId: targetTab.id, silent: true, discardOnly: true }).catch((discardError) => {
-          logRendererDiagnostic(api, "warn", "profile", `Checkpoint continuation created but stale tab could not be closed: ${discardError?.message || String(discardError)}`, { action: "checkpoint-recovery-discard-old-tab-failed", profile_id: profileId, task_id: normalizedTaskId, conversation_id: conversationId, target_id: String(targetTab.id), error: discardError });
-        });
-      }
-      logRendererDiagnostic(api, "info", "profile", "Continued hung task from canonical checkpoint in a new chat", { action: "checkpoint-recovery-done", profile_id: profileId, task_id: normalizedTaskId, previous_conversation_id: conversationId, conversation_id: newConversationId, target_id: String(targetTab?.id || ""), checkpoint_count: Number(resumed?.resumed_checkpoint_count || 0), automatic });
-      if (!silent) notify("Đã tiếp tục task từ checkpoint gần nhất trong chat mới");
-      window.setTimeout(() => void refresh(false), 900);
-      return { mode: "checkpoint_continuation", conversationId: newConversationId, result: resumed };
-    } catch (err) {
-      const message = err?.message || String(err);
-      logRendererDiagnostic(api, "error", "profile", `Checkpoint recovery failed: ${message}`, { action: "checkpoint-recovery-failed", profile_id: profileId, task_id: normalizedTaskId, conversation_id: conversationId, target_id: String(targetTab?.id || ""), automatic, error: err });
-      if (!silent) setError(message);
-      return null;
-    } finally {
-      if (!silent) setBusy("");
-    }
-  }
-
-  async function continueTaskAfterHang(incident) {
-    const profileId = String(incident?.profile_id || "");
-    const taskId = String(incident?.task_id || "");
-    const conversationId = String(incident?.conversation_id || "");
-    const profile = (status?.browserProfiles || []).find((item) => String(item?.profile_id || "") === profileId);
-    if (!profile) {
-      setError("Không còn tìm thấy Chrome profile của task bị treo.");
-      return null;
-    }
-    if (!/^cpt_[a-f0-9]{24}$/.test(taskId)) {
-      setError("Task bị treo chưa có Task ID hợp lệ để tiếp tục an toàn.");
-      return null;
-    }
-    const targetTab = (profile.conversation_tabs || []).find((tab) => Number(tab?.id) === Number(incident?.tab_id));
-    const sourceLabel = incident?.source === "openai" ? "OpenAI/ChatGPT" : incident?.source === "stalled" ? "task không tiến triển" : "mạng";
-    const statusLabel = Number(incident?.status_code || 0) ? ` HTTP ${Number(incident.status_code)}` : "";
-    return await continueTaskFromCheckpoint(profile, taskId, {
-      conversationId,
-      targetTab,
-      recoveryReason: `Control Center xác nhận lỗi ${sourceLabel}${statusLabel} làm task treo. Tiếp tục đúng Task ID hiện tại từ checkpoint, không dùng conversation cũ.`
-    });
-  }
-
-  async function stopControlTask(task) {
-    const profile = task?.profile;
-    const tab = task?.tab;
-    if (!profile?.profile_id || !tab?.id) return;
-    const conversationId = String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
-    setBusy(`stop-task:${profile.profile_id}`);
-    setError("");
-    try {
-      const result = await api.stopProfileTask({
-        profileId: profile.profile_id,
-        conversationId,
-        targetId: tab.id,
-        taskId: String(profile.current_task_id || "")
-      });
-      notify(result?.stopped ? "Đã dừng task ChatGPT" : "Task đã ngừng trước khi nhận lệnh dừng");
-      window.setTimeout(() => void refresh(false), 700);
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setBusy("");
-    }
-  }
-  async function reloadProfiles() {
-    if (!profileSummary.reload) return;
-    setWorkerUpdateConfirmOpen(false);
-    setBusy("reload-profiles");
-    setError("");
-    try {
-      const result = await api.reloadProfiles();
-      if (result.count) {
-        notify(`Đã update thành công ${result.count} worker lên ${result.version}${result.deferred ? ` · bỏ qua ${result.deferred} worker đang làm việc` : ""}`);
-      } else if (result.deferred) {
-        notify(`${result.deferred} worker đang làm việc · chưa update để tránh gián đoạn`);
-      } else if (result.mode === "runtime_unavailable") {
-        notify("MCP tạm thời không phản hồi · sẽ tự update worker khi kết nối phục hồi");
-      } else {
-        notify(`Worker extension đã ở bản ${WORKER_EXTENSION_VERSION}`);
-      }
-      window.setTimeout(() => void refresh(false), result.mode === "bootstrap_reload" || result.mode === "mixed_update" ? 8000 : 3500);
-    } catch (err) {
-      setError(err?.message || String(err));
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function sendRequest(profile, draftOverride = null) {
-    const conversations = profileRequestChats(profile);
-    const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
-    const requestedConversationId = String(requestTargets[profile.profile_id] ?? defaultTarget ?? NEW_CHAT_TARGET);
-    const requestedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${requestedConversationId}`));
-    const requestedConversation = conversations.find((chat) => String(chat.id) === requestedConversationId);
-    const forcedNewChat = Boolean(requestedTab?.long_task_watchdog_hung || requestedConversation?.long_task_watchdog_hung);
-    const conversationId = forcedNewChat ? NEW_CHAT_TARGET : requestedConversationId;
-    const newChat = conversationId === NEW_CHAT_TARGET;
-    const text = String(draftOverride !== null ? draftOverride : (requestDraftsRef.current[profile.profile_id] || "")).trim();
-    const attachments = requestFiles[profile.profile_id] || [];
-    const projectRoot = projectRootForProfile(profile);
-    const currentResponse = requestResponses[profile.profile_id] || {};
-    if (forcedNewChat) {
-      requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: NEW_CHAT_TARGET };
-      requestTargetReasons.current.set(profile.profile_id, "long_task_watchdog_hung_send_guard");
-      setRequestTargets((current) => ({ ...current, [profile.profile_id]: NEW_CHAT_TARGET }));
-      logRendererDiagnostic(api, "warn", "chat", "Không gửi task mới vào conversation đã bị watchdog đánh dấu treo", { action: "long-task-watchdog-force-new-chat", profile_id: profile.profile_id, abandoned_conversation_id: requestedConversationId, target_id: String(requestedTab?.id || "") });
-    }
-    if (!text && !attachments.length) return false;
-    if (!projectRoot) {
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "Chưa có workspace nào được chọn." }));
-      return false;
-    }
-    if (!newChat) {
-      const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${conversationId}`));
-      const networkState = String(selectedTab?.network_state || currentResponse?.networkState || (selectedTab?.busy ? "generating" : "idle"));
-      const selectedRecoveringNetworkAbort = isRecoverableAbortedChatNetworkFailure({
-        networkState,
-        networkError: currentResponse?.networkError || selectedTab?.network_error || "",
-        networkCompletedAt: currentResponse?.networkCompletedAt || selectedTab?.network_last_completed_at || "",
-        responseReady: Boolean(currentResponse?.responseReady)
-      });
-      const turnReady = !selectedRecoveringNetworkAbort && canAcceptNextChatMessage({
-        networkState,
-        networkCompletedAt: currentResponse?.networkCompletedAt || selectedTab?.network_last_completed_at || "",
-        tabBusy: selectedTab?.busy,
-        tabSettling: selectedTab?.settling,
-        responseCurrent: currentResponse?.conversationId === conversationId,
-        responseBusy: currentResponse?.busy,
-        responseReady: currentResponse?.responseReady,
-        responseLoading: currentResponse?.loading || currentResponse?.transcriptLoading,
-        responseIncomplete: currentResponse?.incomplete,
-        awaitingAssistant: currentResponse?.conversationId === conversationId && transcriptAwaitingAssistant(materializeTranscriptMessages(currentResponse, conversationId)),
-        finalityPending: currentResponse?.finalityPending,
-        canonicalBusy: currentResponse?.canonicalBusy,
-        streamBusy: currentResponse?.networkStreamInProgress
-      });
-      if (selectedRecoveringNetworkAbort) {
-        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "ChatGPT đang xác minh lại một lượt bị hủy transport. Chờ xác minh xong để tránh gửi trùng vào trạng thái chưa chắc chắn." }));
-        return false;
-      }
-    }
-    const rolloverNetworkState = String(requestedTab?.network_state || currentResponse?.networkState || "").toLowerCase();
-    const rolloverTaskInProgress = Boolean(requestedTab?.busy || requestedTab?.settling || ["generating", "pending", "streaming"].includes(rolloverNetworkState) || currentResponse?.busy || currentResponse?.loading || currentResponse?.transcriptLoading || currentResponse?.incomplete || currentResponse?.finalityPending || currentResponse?.canonicalBusy || currentResponse?.networkStreamInProgress || currentResponse?.awaitingAssistant);
-    const rolloverSource = { ...currentResponse, taskInProgress: rolloverTaskInProgress };
-    const logicalAdjustment = !newChat ? activeLogicalTaskAdjustment({
-      profileId: profile.profile_id,
-      conversationId,
-      taskInProgress: rolloverTaskInProgress,
-      response: currentResponse,
-      profile,
-      jobs: status?.workerJobs
-    }) : null;
-    const rolloverMessageLimit = conversationMessageLimit(rolloverSource);
-    if (!newChat && currentResponse?.conversationId === conversationId && shouldRolloverConversation(rolloverSource, rolloverMessageLimit)) {
-      const observedCompletedTaskCount = conversationCompletedTaskCount(rolloverSource);
-      const observedTotalMessageCount = conversationTotalMessageCount(currentResponse);
-      const cleanMessages = materializeTranscriptMessages(currentResponse, conversationId).filter((item) => !item?.pending);
-      const rolloverMessages = text
-        ? trimRecentTranscriptMessages([...cleanMessages, { id: `rollover-user-${Date.now()}`, role: "user", text, submissionState: "submitted", createdAt: new Date().toISOString() }])
-        : trimRecentTranscriptMessages(cleanMessages);
-      setBusy(`request:${profile.profile_id}`);
-      setError("");
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-      try {
-        const newConversationId = await rolloverFullConversation(profile, conversationId, {
-          ...currentResponse,
-          title: conversations.find((chat) => chat.id === conversationId)?.title || profile.active_chat_title || "",
-          messages: rolloverMessages,
-          continuation_reason: "message_limit",
-          conversation_limit_reached: true,
-          conversation_limit_message: `Đoạn chat đã hoàn thành ${rolloverMessageLimit} task; yêu cầu mới được chuyển sang tab tiếp theo.`,
-          projectRoot,
-          rollover_attachments: attachments
-        });
-        if (!newConversationId) return false;
-        setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
-        logRendererDiagnostic(api, "info", "chat", "Automatically moved a completed-task-limit conversation to a new ChatGPT tab", {
-          action: "conversation-message-limit-rollover",
-          profile_id: profile.profile_id,
-          previous_conversation_id: conversationId,
-          conversation_id: newConversationId,
-          message_limit: rolloverMessageLimit,
-          message_count: observedCompletedTaskCount,
-          completed_task_count: observedCompletedTaskCount,
-          total_message_count: observedTotalMessageCount,
-          activity_started_at: String(currentResponse?.activityStartedAt || "")
-        });
-        return true;
-      } finally {
-        setBusy("");
-      }
-    }
-    responseScrollLocked.current.delete(profile.profile_id);
-    if (text) {
-      responseTurnAnchors.current.set(profile.profile_id, {
-        conversationId,
-        fingerprint: responseAuditTextFingerprint(text),
-        createdAt: Date.now()
-      });
-    } else {
-      responseTurnAnchors.current.delete(profile.profile_id);
-    }
-    setBusy(`request:${profile.profile_id}`);
-    setError("");
-    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-    setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: null }));
-    const requestSubmittedAt = new Date().toISOString();
-    const clearKey = `${profile.profile_id}:${conversationId}`;
-    setClearedResponseTargets((current) => {
-      if (!current[clearKey]) return current;
-      const { [clearKey]: _cleared, ...next } = current;
-      return next;
-    });
-    if (!newChat && text) {
-      setRequestResponses((current) => {
-        const previous = current[profile.profile_id] || {};
-        const previousMessages = materializeTranscriptMessages(previous, conversationId);
-        return {
-          ...current,
-          [profile.profile_id]: {
-            ...previous,
-            visible: true,
-            loading: true,
-            error: "",
-            conversationId,
-            messages: trimRecentTranscriptMessages([...previousMessages, {
-              id: `optimistic-user-${Date.now()}`,
-              role: "user",
-              text,
-              pending: true,
-              submissionState: "pending",
-              createdAt: requestSubmittedAt
-            }])
-          }
-        };
-      });
-    }
-    try {
-      const restoreSubmittedInputs = () => {
-        setRequestFiles((current) => {
-          if (!attachments.length || (current[profile.profile_id] || []).length) return current;
-          return { ...current, [profile.profile_id]: attachments };
-        });
-      };
-      setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
-      const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
-      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, allowBusyFollowup: !newChat, taskMode: logicalAdjustment ? "adjustment" : "new", previousTaskId: logicalAdjustment?.taskId || "", scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
-      setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence(result) }));
-      const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
-      const generationState = String(result?.generation_state || result?.network_state || "idle");
-      const resolvedConversationId = String(result?.conversation_id || conversationId);
-      const activeTurnAnchor = responseTurnAnchors.current.get(profile.profile_id);
-      if (activeTurnAnchor) responseTurnAnchors.current.set(profile.profile_id, { ...activeTurnAnchor, conversationId: resolvedConversationId });
-      if (submissionState === "failed") {
-        throw new Error(String(result?.error || "ChatGPT không chuẩn bị được tin nhắn để gửi."));
-      }
-      if (submissionState === "uncertain") {
-        setRequestResponses((current) => {
-          const previous = current[profile.profile_id] || {};
-          const previousMessages = previous.conversationId === conversationId && Array.isArray(previous.messages) ? previous.messages : [];
-          const messages = text
-            ? previousMessages.map((message) => message?.role === "user" && message?.pending && message?.text === text ? { ...message, pending: false, uncertain: true, submissionState: "uncertain" } : message)
-            : previousMessages;
-          return {
-            ...current,
-            [profile.profile_id]: {
-              ...previous,
-              visible: true,
-              loading: false,
-              error: "",
-              conversationId,
-              messages,
-              submissionState: "uncertain",
-              sendUncertain: true
-            }
-          };
-        });
-        const technicalReason = String(result?.error || "Chưa thấy network ACK.").replace(/^SEND_UNCERTAIN:\s*/i, "");
-        const submitPath = String(result?.submitted_by || result?.submit_path || "pre-submit");
-        const generationEndpoint = String(result?.network_generation_endpoint || "");
-        const uncertainMessage = `Chưa xác định được tin nhắn đã gửi hay chưa. Path: ${submitPath}.${generationEndpoint ? ` Endpoint: ${generationEndpoint}.` : ""} ${technicalReason}`;
-        logRendererDiagnostic(api, "warn", "network", uncertainMessage, { action: "send-uncertain", profile_id: profile.profile_id, conversation_id: conversationId, submission_state: submissionState, submitted_by: submitPath, generation_endpoint: generationEndpoint });
-        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: uncertainMessage }));
-        restoreSubmittedInputs();
-        notify("Trạng thái gửi chưa chắc chắn · CodexPro không tự gửi lại");
-        window.setTimeout(() => void refresh(false), 500);
-        return false;
-      }
-      if (newChat && resolvedConversationId && resolvedConversationId !== NEW_CHAT_TARGET) {
-        requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: resolvedConversationId };
-        requestTargetReasons.current.set(profile.profile_id, "new_chat_created");
-        setRequestTargets((current) => ({ ...current, [profile.profile_id]: resolvedConversationId }));
-      }
-      setRequestResponses((current) => {
-        const previous = current[profile.profile_id] || {};
-        const sameConversation = previous.conversationId === resolvedConversationId;
-        const tracking = logicalTaskTracking(sameConversation ? previous : {});
-        const repoTaskId = String(result?.repo_task_id || "");
-        const adjustmentAccepted = result?.repo_task_adjustment === true
-          && sameConversation
-          && repoTaskId === String(previous.repoTaskId || "");
-        const previousMessages = materializeTranscriptMessages(previous, resolvedConversationId);
-        const matchingPendingIndex = text ? previousMessages.findIndex((message) => message?.role === "user" && message?.pending && message?.text === text) : -1;
-        let optimisticMessages = previousMessages;
-        if (text && matchingPendingIndex >= 0) {
-          optimisticMessages = previousMessages.map((message, index) => index === matchingPendingIndex ? { ...message, pending: false, uncertain: false, submissionState: "submitted" } : message);
-        } else if (text) {
-          optimisticMessages = trimRecentTranscriptMessages([...previousMessages, { id: `optimistic-user-${Date.now()}`, role: "user", text, pending: false, uncertain: false, submissionState: "submitted", createdAt: requestSubmittedAt }]);
-        }
-        return {
-          ...current,
-          [profile.profile_id]: {
-            ...previous,
-            visible: true,
-            loading: generationState === "generating",
-            error: "",
-            conversationId: resolvedConversationId,
-            activityStartedAt: previous.conversationId === resolvedConversationId
-              ? String(previous.activityStartedAt || "")
-              : (newChat ? requestSubmittedAt : ""),
-            fastMessageLimitQualified: previous.conversationId === resolvedConversationId
-              ? Boolean(previous.fastMessageLimitQualified)
-              : false,
-            messages: optimisticMessages,
-            submissionState: "submitted",
-            sendUncertain: false,
-            networkState: generationState,
-            networkError: String(result?.network_error || previous.networkError || ""),
-            networkStatusCode: Number(result?.network_status_code) || Number(previous.networkStatusCode) || 0,
-            logicalTaskCount: tracking.logicalTaskCount,
-            completedLogicalTaskIds: tracking.completedLogicalTaskIds,
-            logicalTaskStatus: String(result?.worker_job_status || (adjustmentAccepted ? previous.logicalTaskStatus : "prepared")),
-            repoTaskAdjustment: adjustmentAccepted,
-            repoTaskId,
-            repoTaskDispatchedAt: String(result?.repo_task_dispatched_at || ""),
-            repoTaskScope: String(result?.repo_task_scope || (allAllowedScope ? "all_allowed" : "workspace")),
-            repoTaskRetryCount: adjustmentAccepted ? Number(previous.repoTaskRetryCount) || 0 : Number(result?.repo_task_retry_count) || 0,
-            repoTaskRolloverCount: adjustmentAccepted ? Number(previous.repoTaskRolloverCount) || 0 : Number(result?.repo_task_rollover_count) || 0,
-            repoTaskStatus: adjustmentAccepted ? String(previous.repoTaskStatus || "waiting") : "waiting",
-            repoTaskVerified: adjustmentAccepted ? Boolean(previous.repoTaskVerified) : false,
-            repoTaskRequest: adjustmentAccepted ? previous.repoTaskRequest : { text, attachments, projectRoot, scope: allAllowedScope ? "all_allowed" : "workspace" }
-          }
-        };
-      });
-      if (generationState === "failed") {
-        logRendererDiagnostic(api, "error", "network", `AI gặp lỗi network${result?.network_error ? `: ${result.network_error}` : ""}`, { action: "generation-failed", profile_id: profile.profile_id, conversation_id: resolvedConversationId, network_status_code: result?.network_status_code, network_error: result?.network_error });
-        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Tin nhắn đã gửi nhưng AI gặp lỗi network${result?.network_error ? `: ${result.network_error}` : ""}.` }));
-        notify("Tin nhắn đã gửi · AI gặp lỗi network");
-      } else if (result?.repo_task_adjustment === true) {
-        notify("Đã gửi điều chỉnh vào task hiện tại");
-      } else {
-        notify("Đã gửi tin nhắn thành công");
-      }
-      window.setTimeout(() => void refresh(false), 500);
-      return true;
-    } catch (err) {
-      const message = err?.message || String(err);
-      logRendererDiagnostic(api, "error", "chat", `Gửi yêu cầu thất bại: ${message}`, { action: "send-request", profile_id: profile.profile_id, conversation_id: conversationId, project_root: projectRoot, error: err });
-      setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence({}, err) }));
-      const conversationLimitReached = !newChat && message.includes("CONVERSATION_LIMIT_REACHED:");
-      if (conversationLimitReached) {
-        const previous = requestResponses[profile.profile_id] || {};
-        const cleanMessages = Array.isArray(previous.messages) ? previous.messages.filter((item) => !item?.pending) : [];
-        const rolloverMessages = text ? trimRecentTranscriptMessages([...cleanMessages, { id: `rollover-user-${Date.now()}`, role: "user", text, submissionState: "submitted", createdAt: new Date().toISOString() }]) : trimRecentTranscriptMessages(cleanMessages);
-        const newConversationId = await rolloverFullConversation(profile, conversationId, {
-          ...previous,
-          title: conversations.find((chat) => chat.id === conversationId)?.title || profile.active_chat_title || "",
-          messages: rolloverMessages,
-          conversation_limit_reached: true,
-          conversation_limit_message: message.replace(/^.*CONVERSATION_LIMIT_REACHED:\s*/s, "").trim() || "ChatGPT báo đoạn chat đã đạt giới hạn độ dài.",
-          projectRoot,
-          rollover_attachments: attachments
-        });
-        if (newConversationId) {
-          return true;
-        }
-      }
-      responseTurnAnchors.current.delete(profile.profile_id);
-      setRequestFiles((current) => {
-        if (!attachments.length || (current[profile.profile_id] || []).length) return current;
-        return { ...current, [profile.profile_id]: attachments };
-      });
-      if (!newChat && text) {
-        setRequestResponses((current) => {
-          const previous = current[profile.profile_id] || {};
-          const messages = Array.isArray(previous.messages) ? previous.messages.filter((item) => !(item?.role === "user" && item?.pending && item?.text === text)) : [];
-          return { ...current, [profile.profile_id]: { ...previous, loading: false, messages } };
-        });
-      }
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: conversationLimitReached ? "Chat đã đầy và chưa chuyển được sang chat mới." : message }));
-      if (/heartbeat|offline|did not reconnect|không còn được CodexPro nhận diện/i.test(message)) {
-        window.setTimeout(() => void refreshStatus(), 0);
-      }
-      return false;
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function rolloverFullConversation(profile, conversationId, result) {
-    const profileId = profile.profile_id;
-    const continuationReason = String(result?.continuation_reason || "limit");
-    const recoveryContinuation = continuationReason === "recovery";
-    const activeTaskId = /^cpt_[a-f0-9]{24}$/.test(String(result?.repoTaskId || profile.current_task_id || ""))
-      ? String(result?.repoTaskId || profile.current_task_id)
-      : "";
-    const checkpointContinuation = Boolean(activeTaskId && (recoveryContinuation || continuationReason === "limit"));
-    const key = `${profileId}:${conversationId}:${continuationReason}`;
-    const previousAttempt = conversationRollovers.current.get(key);
-    if (previousAttempt?.status === "creating" || previousAttempt?.status === "done") return previousAttempt?.conversationId || null;
-    if (previousAttempt?.status === "failed" && Date.now() - Number(previousAttempt.at || 0) < 10000) return null;
-
-    const creatingNotice = recoveryContinuation
-      ? "Tab c\u0169 kh\u00f4ng th\u1ec3 kh\u00f4i ph\u1ee5c an to\u00e0n. CodexPro \u0111ang t\u1ea1o chat ti\u1ebfp n\u1ed1i v\u00e0 chuy\u1ec3n b\u1ed1i c\u1ea3nh g\u1ea7n nh\u1ea5t \u0111\u1ec3 b\u1ea1n ti\u1ebfp t\u1ee5c d\u1ef1 \u00e1n."
-      : "\u0110o\u1ea1n chat \u0111\u00e3 \u0111\u1ea7y. CodexPro \u0111ang t\u1ef1 t\u1ea1o chat m\u1edbi v\u00e0 chuy\u1ec3n b\u1ed1i c\u1ea3nh g\u1ea7n nh\u1ea5t \u0111\u1ec3 b\u1ea1n ti\u1ebfp t\u1ee5c d\u1ef1 \u00e1n.";
-    const doneNotice = recoveryContinuation
-      ? "Tab c\u0169 kh\u00f4ng th\u1ec3 kh\u00f4i ph\u1ee5c. CodexPro \u0111\u00e3 t\u1ea1o chat ti\u1ebfp n\u1ed1i v\u00e0 chuy\u1ec3n b\u1ed1i c\u1ea3nh g\u1ea7n nh\u1ea5t. B\u1ea1n c\u00f3 th\u1ec3 ti\u1ebfp t\u1ee5c d\u1ef1 \u00e1n ngay t\u1ea1i \u0111\u00e2y."
-      : "Chat c\u0169 \u0111\u00e3 \u0111\u1ea1t gi\u1edbi h\u1ea1n. CodexPro \u0111\u00e3 t\u1ef1 t\u1ea1o chat m\u1edbi v\u00e0 chuy\u1ec3n b\u1ed1i c\u1ea3nh g\u1ea7n nh\u1ea5t. B\u1ea1n c\u00f3 th\u1ec3 ti\u1ebfp t\u1ee5c d\u1ef1 \u00e1n ngay t\u1ea1i \u0111\u00e2y.";
-    const failedNotice = recoveryContinuation
-      ? "Tab c\u0169 kh\u00f4ng th\u1ec3 kh\u00f4i ph\u1ee5c v\u00e0 CodexPro ch\u01b0a t\u1ea1o \u0111\u01b0\u1ee3c chat ti\u1ebfp n\u1ed1i t\u1ef1 \u0111\u1ed9ng."
-      : "ChatGPT \u0111\u00e3 b\u00e1o \u0111o\u1ea1n chat n\u00e0y \u0111\u1ea1t gi\u1edbi h\u1ea1n nh\u01b0ng CodexPro ch\u01b0a t\u1ea1o \u0111\u01b0\u1ee3c chat m\u1edbi t\u1ef1 \u0111\u1ed9ng.";
-
-    conversationRollovers.current.set(key, { status: "creating", at: Date.now() });
-    setRequestResponses((current) => {
-      const previous = current[profileId] || {};
-      if (previous.conversationId !== conversationId) return current;
-      return {
-        ...current,
-        [profileId]: {
-          ...previous,
-          conversationLimitReached: recoveryContinuation ? false : true,
-          conversationLimitMessage: recoveryContinuation ? "" : (result?.conversation_limit_message || "ChatGPT b\u00e1o \u0111o\u1ea1n chat \u0111\u00e3 \u0111\u1ea1t gi\u1edbi h\u1ea1n \u0111\u1ed9 d\u00e0i."),
-          rolloverStatus: "creating",
-          rolloverReason: continuationReason,
-          rolloverNotice: creatingNotice
-        }
-      };
-    });
-
-    try {
-      const handoffText = buildConversationRolloverPrompt(result);
-      const rolloverProjectRoot = result?.projectRoot || projectRootForProfile(profile);
-      const rolloverWorkspaceExpanded = result?.repoTaskScope === "all_allowed" && result?.repoTaskRequest?.scope === "workspace" && rolloverProjectRoot !== ALL_ALLOWED_WORKSPACES;
-      const rolloverAllAllowed = !rolloverWorkspaceExpanded && (result?.repo_task_scope === "all_allowed" || result?.repoTaskScope === "all_allowed" || rolloverProjectRoot === ALL_ALLOWED_WORKSPACES);
-      const rolloverStartedAt = new Date().toISOString();
-      const created = checkpointContinuation
-        ? await api.resumeProfileTask({
-            profileId,
-            taskId: activeTaskId,
-            hangRecovery: true,
-            recoveryReason: String(result?.recovery_reason || result?.conversation_limit_message || "Task cần chuyển sang chat mới để tiếp tục an toàn.").slice(0, 600)
-          })
-        : await api.sendProfileRequest({
-            profileId,
-            conversationId: "",
-            newChat: true,
-            scope: rolloverAllAllowed ? "all_allowed" : "workspace",
-            projectRoot: rolloverAllAllowed ? "" : rolloverProjectRoot,
-            workspaceCandidates: rolloverAllAllowed ? projects.map((project) => project.root) : [],
-            text: handoffText,
-            attachments: Array.isArray(result?.rollover_attachments) ? result.rollover_attachments : [],
-            previousTaskId: "",
-            taskMode: "new",
-            oneShotRecovery: recoveryContinuation
-          });
-      if (String(created?.submission_state || "") === "uncertain") throw new Error("Chat tiếp nối có trạng thái gửi không chắc chắn; đã dừng để tránh duplicate.");
-      if (checkpointContinuation && String(created?.repo_task_id || "") !== activeTaskId) throw new Error("Manager đã đổi Task ID khi chuyển chat; đã dừng để tránh tạo task FIFO mới.");
-      const newConversationId = String(created?.conversation_id || "").trim();
-      if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT ch\u01b0a tr\u1ea3 conversation id cho chat ti\u1ebfp n\u1ed1i.");
-
-      conversationRollovers.current.set(key, { status: "done", at: Date.now(), conversationId: newConversationId });
-      requestTargetsRef.current = { ...requestTargetsRef.current, [profileId]: newConversationId };
-      setRequestTargets((current) => ({ ...current, [profileId]: newConversationId }));
-      setChatProfileId(profileId);
-      setRenameChat(null);
-      setRequestSendErrors((current) => ({ ...current, [profileId]: "" }));
-      setRequestResponses((current) => ({
-        ...current,
-        [profileId]: {
-          visible: true,
-          loading: true,
-          error: "",
-          conversationId: newConversationId,
-          text: "",
-          messages: [],
-          busy: true,
-          submissionState: "submitted",
-          sendUncertain: false,
-          conversationLimitReached: false,
-          rolloverStatus: "done",
-          rolloverReason: continuationReason,
-          rolloverFromConversationId: conversationId,
-          activityStartedAt: rolloverStartedAt,
-          rolloverNotice: doneNotice,
-          repoTaskId: String(created?.repo_task_id || activeTaskId),
-          repoTaskDispatchedAt: String(created?.repo_task_dispatched_at || ""),
-          repoTaskScope: String(created?.repo_task_scope || result?.repoTaskScope || ""),
-          logicalTaskStatus: String(created?.worker_job_status || result?.logicalTaskStatus || "running"),
-          repoTaskStatus: "waiting",
-          repoTaskVerified: false,
-          repoTaskRequest: result?.repoTaskRequest || null
-        }
-      }));
-      if (!result?.silent) {
-        notify(recoveryContinuation
-          ? "\u0110\u00e3 chuy\u1ec3n sang chat ti\u1ebfp n\u1ed1i v\u00e0 gi\u1eef b\u1ed1i c\u1ea3nh c\u00f4ng vi\u1ec7c"
-          : "Chat c\u0169 \u0111\u00e3 \u0111\u1ea7y \u00b7 CodexPro \u0111\u00e3 t\u1ef1 t\u1ea1o chat m\u1edbi \u0111\u1ec3 ti\u1ebfp t\u1ee5c d\u1ef1 \u00e1n");
-      }
-      window.setTimeout(() => void refresh(false), 500);
-      return newConversationId;
-    } catch (err) {
-      const message = err?.message || String(err);
-      logRendererDiagnostic(api, "error", "chat", `Continuation chat creation failed: ${message}`, { action: "conversation-rollover", profile_id: profileId, conversation_id: conversationId, continuation_reason: continuationReason, error: err });
-      conversationRollovers.current.set(key, { status: "failed", at: Date.now() });
-      setRequestResponses((current) => {
-        const previous = current[profileId] || {};
-        if (previous.conversationId !== conversationId) return current;
-        return {
-          ...current,
-          [profileId]: {
-            ...previous,
-            loading: false,
-            rolloverStatus: "failed",
-            rolloverReason: continuationReason,
-            rolloverNotice: failedNotice,
-            error: `Kh\u00f4ng t\u1ea1o \u0111\u01b0\u1ee3c chat ti\u1ebfp n\u1ed1i: ${message}`
-          }
-        };
-      });
-      setRequestSendErrors((current) => ({ ...current, [profileId]: recoveryContinuation
-        ? `Kh\u00f4ng kh\u00f4i ph\u1ee5c \u0111\u01b0\u1ee3c chat c\u0169 v\u00e0 ch\u01b0a t\u1ea1o \u0111\u01b0\u1ee3c chat ti\u1ebfp n\u1ed1i: ${message}`
-        : `Chat \u0111\u00e3 \u0111\u1ea7y. Kh\u00f4ng t\u1ea1o \u0111\u01b0\u1ee3c chat m\u1edbi t\u1ef1 \u0111\u1ed9ng: ${message}` }));
-      return null;
-    }
-  }
-  async function verifyRepoTaskUse(profile, conversationId, response, networkCompletedAt) {
-    const taskId = String(response?.repoTaskId || "");
-    if (!taskId || response?.conversationId !== conversationId) return;
-    const taskDispatchedAt = String(response?.repoTaskDispatchedAt || "");
-    const verificationKey = `${taskId}:${taskDispatchedAt}:${networkCompletedAt}`;
-    const verificationState = repoTaskVerificationReads.current.get(verificationKey);
-    if (verificationState === "running" || verificationState === "done" || Number(verificationState) > Date.now()) return;
-    repoTaskVerificationReads.current.set(verificationKey, "running");
-    setRequestResponses((current) => {
-      const previous = current[profile.profile_id] || {};
-      return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "checking" } } : current;
-    });
-    try {
-      const proof = await api.getRepoTaskStatus({ taskId, profileId: profile.profile_id, conversationId });
-      if (proof?.verified) {
-        repoTaskVerificationReads.current.set(verificationKey, "done");
-        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-        setRequestResponses((current) => {
-          const previous = current[profile.profile_id] || {};
-          return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskScope: String(proof?.scope || previous.repoTaskScope || "workspace"), repoTaskStatus: "verified", repoTaskVerified: true, repoTaskProof: proof } } : current;
-        });
-        return;
-      }
-      const retryCount = Number(response?.repoTaskRetryCount) || 0;
-      const rolloverCount = Number(response?.repoTaskRolloverCount) || 0;
-      const original = response?.repoTaskRequest;
-      const originalScope = original?.scope === "all_allowed" || original?.projectRoot === ALL_ALLOWED_WORKSPACES ? "all_allowed" : "workspace";
-      if (retryCount >= 1 || !original?.projectRoot) {
-        if (retryCount >= 1 && rolloverCount < 1 && original?.projectRoot) {
-          setRequestResponses((current) => {
-            const previous = current[profile.profile_id] || {};
-            return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "rolling-over", loading: true } } : current;
-          });
-          notify("Chat cũ thiếu task title 2 lần · đang tạo chat mới");
-          const created = await api.sendProfileRequest({
-            profileId: profile.profile_id,
-            conversationId: "",
-            newChat: true,
-            scope: originalScope,
-            projectRoot: originalScope === "all_allowed" ? "" : original.projectRoot,
-            workspaceCandidates: originalScope === "all_allowed" ? projects.map((project) => project.root) : [],
-            text: original.text,
-            attachments: Array.isArray(original.attachments) ? original.attachments : [],
-            toolRetry: false,
-            toolRolloverCount: rolloverCount + 1,
-            previousTaskId: taskId
-          });
-          if (String(created?.submission_state || "") === "uncertain") throw new Error("Chat mới có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
-          if (String(created?.repo_task_id || "") !== taskId) throw new Error("Manager đã đổi Task ID khi tạo chat mới; đã dừng để tránh REPO_TASK_MISMATCH.");
-          const newConversationId = String(created?.conversation_id || "").trim();
-          if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT chưa trả conversation id cho chat mới bắt buộc dùng CodexPro.");
-          requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: newConversationId };
-          setRequestTargets((current) => ({ ...current, [profile.profile_id]: newConversationId }));
-          setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-          setRequestResponses((current) => ({
-            ...current,
-            [profile.profile_id]: {
-              visible: true,
-              loading: true,
-              error: "",
-              conversationId: newConversationId,
-              messages: [],
-              submissionState: "submitted",
-              sendUncertain: false,
-              networkState: String(created?.generation_state || created?.network_state || "generating"),
-              repoTaskId: String(created?.repo_task_id || ""),
-              repoTaskDispatchedAt: String(created?.repo_task_dispatched_at || ""),
-              repoTaskScope: String(created?.repo_task_scope || originalScope),
-              logicalTaskStatus: String(created?.worker_job_status || "prepared"),
-              repoTaskRetryCount: 0,
-              repoTaskRolloverCount: rolloverCount + 1,
-              repoTaskStatus: "waiting",
-              repoTaskVerified: false,
-              repoTaskRequest: original
-            }
-          }));
-          repoTaskVerificationReads.current.set(verificationKey, "done");
-          logRendererDiagnostic(api, "warn", "tool", "ChatGPT thiếu task title; Manager đã tạo chat mới và giữ nguyên Task ID", { action: "repo-task-title-rollover", profile_id: profile.profile_id, previous_conversation_id: conversationId, conversation_id: newConversationId, previous_task_id: taskId, rollover_task_id: String(created?.repo_task_id || ""), task_id_reused: created?.repo_task_id_reused === true, repo_task_dispatched_at: String(created?.repo_task_dispatched_at || "") });
-          notify("Đã tạo chat mới · @CodexPro được gọi lại đúng một lần");
-          window.setTimeout(() => void refresh(false), 500);
-          return;
-        }
-        const message = "ChatGPT đã trả lời nhưng không trả task title qua CodexPro sau 2 lần. Phản hồi này không được công nhận.";
-        logRendererDiagnostic(api, "error", "tool", message, { action: "repo-task-title-missing", profile_id: profile.profile_id, conversation_id: conversationId, task_id: taskId, retry_count: retryCount, rollover_count: rolloverCount, proof });
-        setRequestResponses((current) => {
-          const previous = current[profile.profile_id] || {};
-          return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "failed", repoTaskVerified: false } } : current;
-        });
-        repoTaskVerificationReads.current.set(verificationKey, "done");
-        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: message }));
-        notify("ChatGPT thiếu task title · đã chặn phản hồi");
-        return;
-      }
-      setRequestResponses((current) => {
-        const previous = current[profile.profile_id] || {};
-        return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "retrying", loading: true } } : current;
-      });
-      const retried = await api.sendProfileRequest({
-        profileId: profile.profile_id,
-        conversationId,
-        newChat: false,
-        scope: originalScope,
-        projectRoot: originalScope === "all_allowed" ? "" : original.projectRoot,
-        workspaceCandidates: originalScope === "all_allowed" ? projects.map((project) => project.root) : [],
-        text: original.text,
-        attachments: Array.isArray(original.attachments) ? original.attachments : [],
-        toolRetry: true,
-        toolRolloverCount: rolloverCount,
-        previousTaskId: taskId
-      });
-      if (String(retried?.submission_state || "") === "uncertain") throw new Error("Lần bắt buộc gọi CodexPro có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
-      if (String(retried?.repo_task_id || "") !== taskId) throw new Error("Manager đã đổi Task ID khi gửi lại; đã dừng để tránh REPO_TASK_MISMATCH.");
-      repoTaskVerificationReads.current.set(verificationKey, "done");
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-      setRequestResponses((current) => {
-        const previous = current[profile.profile_id] || {};
-        return previous.repoTaskId === taskId ? {
-          ...current,
-          [profile.profile_id]: {
-            ...previous,
-            repoTaskId: String(retried?.repo_task_id || ""),
-            repoTaskDispatchedAt: String(retried?.repo_task_dispatched_at || ""),
-            repoTaskScope: String(retried?.repo_task_scope || originalScope),
-            logicalTaskStatus: String(retried?.worker_job_status || "prepared"),
-            repoTaskRetryCount: 1,
-            repoTaskRolloverCount: rolloverCount,
-            repoTaskStatus: "waiting",
-            repoTaskVerified: false,
-            loading: true,
-            networkState: String(retried?.generation_state || retried?.network_state || "generating")
-          }
-        } : current;
-      });
-      notify("ChatGPT chưa trả task title · đang tự gửi lại bắt buộc");
-      logRendererDiagnostic(api, "warn", "tool", "ChatGPT thiếu task title; Manager đã gửi lại một lần và giữ nguyên Task ID", { action: "repo-task-title-retry", profile_id: profile.profile_id, conversation_id: conversationId, previous_task_id: taskId, retry_task_id: String(retried?.repo_task_id || ""), task_id_reused: retried?.repo_task_id_reused === true, repo_task_dispatched_at: String(retried?.repo_task_dispatched_at || "") });
-      window.setTimeout(() => void refresh(false), 500);
-    } catch (err) {
-      const message = err?.message || String(err);
-      if (isRetryableChatTurnBusyError(err)) {
-        repoTaskVerificationReads.current.set(verificationKey, Date.now() + REPO_TASK_VERIFICATION_RETRY_MS);
-        setRequestResponses((current) => {
-          const previous = current[profile.profile_id] || {};
-          return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "waiting", loading: false } } : current;
-        });
-        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-        window.setTimeout(() => void refresh(false), REPO_TASK_VERIFICATION_RETRY_MS + 50);
-        return;
-      }
-      repoTaskVerificationReads.current.set(verificationKey, "done");
-      logRendererDiagnostic(api, "error", "tool", `Không xác minh được tool call CodexPro: ${message}`, { action: "repo-task-verification", profile_id: profile.profile_id, conversation_id: conversationId, task_id: taskId, error: err });
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Không xác minh được tool call CodexPro: ${message}` }));
-    }
-  }
-
-  async function loadResponse(profile, explicitConversationId, silent = false, readDom = false, recoverStaleDom = false, canonicalOnly = false) {
-    const pinnedTarget = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
-    const conversations = profileRequestChats(profile, pinnedTarget);
-    const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
-    const conversationId = String(explicitConversationId || requestTargets[profile.profile_id] || defaultTarget || "");
-    const fetchKey = responseCacheKey(profile.profile_id, conversationId);
-    const responseTargetStillCurrent = () => {
-      const currentTarget = String(requestTargetsRef.current[profile.profile_id] || "");
-      return !currentTarget || currentTarget === conversationId;
-    };
-    if (!conversationId || conversationId === NEW_CHAT_TARGET || responseFetches.current.has(fetchKey)) return null;
-    responseFetches.current.add(fetchKey);
-    if (!silent) {
-      setRequestResponses((current) => responseTargetStillCurrent()
-        ? { ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }
-        : current);
-    }
-    try {
-      const activeResponse = requestResponsesRef.current[profile.profile_id] || {};
-      const responseTaskId = activeResponse.conversationId === conversationId ? String(activeResponse.repoTaskId || "") : "";
-      const result = await api.getProfileResponse({
-        profileId: profile.profile_id,
-        conversationId,
-        taskId: responseTaskId,
-        readDom,
-        recoverStaleDom,
-        canonicalOnly,
-        priority: profile.profile_id === chatProfileId ? "interactive" : "background"
-      });
-      const responseProfileId = String(result?.response_profile_id || result?.profile_id || "").trim();
-      const responseConversationId = String(result?.response_conversation_id || result?.conversation_id || "").trim()
-        || String(result?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1]
-        || "";
-      if (responseProfileId !== profile.profile_id || responseConversationId !== conversationId) {
-        throw new Error(`RESPONSE_OWNERSHIP_MISMATCH: expected ${profile.profile_id}:${conversationId}, received ${responseProfileId || "(missing-profile)"}:${responseConversationId || "(missing-conversation)"}.`);
-      }
-      if (!responseTargetStillCurrent()) return null;
-      const domAvailable = result.dom_available !== false;
-      const canonicalAvailable = result.canonical_available === true;
-      const canonicalRateLimited = result.canonical_rate_limited === true;
-      const contentAvailable = domAvailable || canonicalAvailable;
-      const networkStreamPayloadAvailable = Boolean(result.network_stream_available && (result.text || result.messages?.length || result.network_stream_activity_text));
-      const responseAudit = result.response_audit && typeof result.response_audit === "object" ? result.response_audit : null;
-      const needsDomFallback = completedResponseNeedsDomFallback(result);
-      const responseAuditFetchMode = canonicalOnly ? "canonical_only" : readDom ? (recoverStaleDom ? "dom_recovery" : "dom") : "network_only";
-      const responseAuditKey = responseAudit ? JSON.stringify([responseAuditFetchMode, responseAudit]) : "";
-      setRequestResponses((current) => {
-        if (!responseTargetStillCurrent()) return current;
-        const previous = current[profile.profile_id] || {};
-        const sameConversation = previous.conversationId === conversationId;
-        const networkStreamCurrentGeneration = networkStreamPayloadAvailable && isNetworkStreamCurrentGeneration({
-          networkStartedAt: result.network_last_started_at || previous.networkStartedAt,
-          streamUpdatedAt: result.network_stream_updated_at
-        });
-        const nextNetworkState = String(result.network_state || previous.networkState || (result.busy ? "generating" : "idle"));
-        const networkTerminal = isTerminalChatNetworkState(nextNetworkState);
-        const networkStreamInProgress = Boolean(networkStreamCurrentGeneration && result.network_stream_in_progress);
-        const networkStreamCompleted = Boolean(networkStreamCurrentGeneration && result.network_stream_completed === true && !result.network_stream_error);
-        const networkStreamAvailable = Boolean(networkStreamCurrentGeneration && (!networkTerminal || networkStreamInProgress || networkStreamCompleted));
-        const domResponseVerified = Boolean(result.response_ready === true && domAvailable && result.dom_busy !== true && result.network_stream_in_progress !== true);
-        const canonicalBusyFromSource = Object.prototype.hasOwnProperty.call(result, "canonical_busy")
-          ? Boolean(result.canonical_busy)
-          : Boolean(sameConversation && previous.canonicalBusy);
-        const canonicalBusy = domResponseVerified ? false : canonicalBusyFromSource;
-        const incomingMessages = Array.isArray(result.messages)
-          ? trimRecentTranscriptMessages(result.messages.map((message, index) => ({
-              id: String(message?.id || `${message?.role || "message"}-${index}`),
-              role: message?.role === "user" ? "user" : "assistant",
-              text: message?.role === "user" ? visibleUserMessageText(message?.text) : String(message?.text || ""),
-              images: message?.role === "assistant" && Array.isArray(message?.images) ? message.images.slice(0, 4).map((image, imageIndex) => ({ id: String(image?.id || `${message?.id || "assistant"}-image-${imageIndex}`), name: String(image?.name || "Ảnh tạo bởi ChatGPT"), alt: String(image?.alt || "Ảnh tạo bởi ChatGPT"), mimeType: String(image?.mime_type || image?.mimeType || "image/jpeg"), width: Number(image?.width) || 0, height: Number(image?.height) || 0, sourceWidth: Number(image?.source_width) || Number(image?.sourceWidth) || 0, sourceHeight: Number(image?.source_height) || Number(image?.sourceHeight) || 0, size: Number(image?.size) || 0, dataUrl: String(image?.data_url || image?.dataUrl || "") })).filter((image) => image.dataUrl.startsWith("data:image/")) : [],
-              truncated: Boolean(message?.truncated),
-              provisional: message?.role === "assistant" && (message?.provisional === true || message?.end_turn === false),
-              endTurn: message?.role === "assistant" ? (message?.end_turn === true ? true : message?.end_turn === false ? false : null) : null
-            })).filter((message) => message.text || message.images?.length))
-          : [];
-        let nextMessages = sameConversation ? materializeTranscriptMessages(previous, conversationId) : [];
-        if (contentAvailable) nextMessages = replaceCanonicalTranscript(nextMessages, incomingMessages);
-        else if (networkStreamAvailable) nextMessages = mergeNetworkStreamTranscript(nextMessages, {
-          conversationId,
-          text: result.text,
-            truncated: result.truncated
-        });
-        const terminalAwaitingFinal = Boolean(networkTerminal && !networkStreamInProgress && !canonicalBusy && result.response_ready !== true);
-        if (terminalAwaitingFinal) {
-          nextMessages = discardProvisionalAssistantAfterLatestUser(nextMessages, { includeUnverified: true });
-        }
-        const nextAssistantText = String([...nextMessages].reverse().find((message) => message?.role === "assistant")?.text || "").trim();
-        const rawResponseReady = Boolean(!canonicalBusy && result.response_ready && !networkStreamInProgress);
-        const incomingResponseSource = terminalAwaitingFinal ? "network_state" : String(result.response_source || previous.responseSource || "");
-        const latestUserIndex = nextMessages.findLastIndex((message) => message?.role === "user");
-        const latestUserMessage = latestUserIndex >= 0 ? nextMessages[latestUserIndex] : null;
-        const latestAssistantAfterUser = latestUserIndex >= 0
-          ? nextMessages.slice(latestUserIndex + 1).findLast((message) => message?.role === "assistant")
-          : [...nextMessages].reverse().find((message) => message?.role === "assistant");
-        const finalitySignature = latestAssistantAfterUser
-          ? JSON.stringify([
-              latestUserIndex,
-              String(latestUserMessage?.id || ""),
-              responseAuditTextFingerprint(latestUserMessage?.text || ""),
-              String(latestAssistantAfterUser.id || ""),
-              responseAuditTextFingerprint(latestAssistantAfterUser.text || ""),
-              (latestAssistantAfterUser.images || []).map((image) => String(image?.id || image?.dataUrl || "")).join("|")
-            ])
-          : "";
-        const finalityKey = `${profile.profile_id}:${conversationId}`;
-        const finality = confirmChatResponseFinality(responseFinalCandidates.current.get(finalityKey), {
-          ready: rawResponseReady,
-          source: incomingResponseSource,
-          signature: finalitySignature
-        });
-        if (finality.candidate) responseFinalCandidates.current.set(finalityKey, finality.candidate);
-        else responseFinalCandidates.current.delete(finalityKey);
-        const responseReady = Boolean(rawResponseReady && finality.confirmed);
-        const finalityPending = Boolean(rawResponseReady && !finality.confirmed);
-        const nextTotalMessageCount = contentAvailable
-          ? Number(result.total_message_count) || Number(result.message_count) || nextMessages.length
-          : Number(previous.totalMessageCount) || 0;
-        const activityStartedAt = sameConversation ? String(previous.activityStartedAt || "") : "";
-        const logicalTaskStatus = String(result.worker_job_status || (sameConversation ? previous.logicalTaskStatus : "") || "").toLowerCase();
-        const logicalTrackingState = responseReady
-          ? recordCompletedLogicalTask(sameConversation ? previous : {}, responseTaskId, logicalTaskStatus)
-          : logicalTaskTracking(sameConversation ? previous : {});
-        const fastMessageLimitQualified = Boolean(sameConversation && shouldQualifyFastMessageLimit({
-          ...previous,
-          ...logicalTrackingState,
-          totalMessageCount: nextTotalMessageCount,
-          activityStartedAt
-        }));
-        return {
-          ...current,
-          [profile.profile_id]: {
-            ...(sameConversation ? previous : {}),
-            visible: true,
-            loading: false,
-            transcriptLoading: Boolean(previous.transcriptLoading && needsDomFallback),
-            error: "",
-            conversationId,
-            text: terminalAwaitingFinal
-              ? nextAssistantText
-              : contentAvailable || networkStreamAvailable
-                ? nextAssistantText || mergeProgressiveResponseText(sameConversation ? previous.text : "", result.text)
-                : (sameConversation ? previous.text || "" : ""),
-            messages: nextMessages,
-            busy: Boolean(canonicalBusy || networkStreamInProgress || (!networkTerminal && result.busy)),
-            canonicalBusy,
-            truncated: contentAvailable || networkStreamAvailable ? Boolean(result.truncated) : Boolean(previous.truncated),
-            incomplete: canonicalBusy ? true : networkTerminal ? false : contentAvailable || networkStreamAvailable ? Boolean(result.incomplete) : false,
-            incompleteReason: canonicalBusy ? "canonical_generation_in_progress" : networkTerminal ? "" : contentAvailable || networkStreamAvailable ? (result.incomplete_reason || "") : "",
-            conversationLimitReached: Boolean(previous.conversationLimitReached),
-            conversationLimitMessage: previous.conversationLimitMessage || "",
-            domAvailable,
-            domSkipped: Boolean(result.dom_skipped),
-            canonicalAvailable,
-            canonicalRateLimited,
-            canonicalRateLimitCount: canonicalRateLimited ? Math.max(1, Number(result.canonical_rate_limit_count) || 1) : 0,
-            canonicalRetryAt: canonicalRateLimited ? String(result.canonical_retry_at || "") : "",
-            networkStreamAvailable,
-            networkStreamEndpoint: String(result.network_stream_endpoint || previous.networkStreamEndpoint || ""),
-            networkStreamEventCount: Number(result.network_stream_event_count) || Number(previous.networkStreamEventCount) || 0,
-            networkStreamActivityText: networkStreamAvailable ? String(result.network_stream_activity_text || "") : "",
-            networkStreamInProgress,
-            networkStreamUpdatedAt: String(result.network_stream_updated_at || previous.networkStreamUpdatedAt || ""),
-            networkStreamError: String(result.network_stream_error || ""),
-            contentNeedsRefresh: networkStreamInProgress
-              ? false
-              : result.dom_skipped
-              ? String(result.network_state || previous.networkState || "") === "completed"
-              : contentAvailable
-                ? false
-                : Boolean(previous.contentNeedsRefresh),
-            domError: result.dom_error || "",
-            networkState: nextNetworkState,
-            networkSource: String(result.network_source || previous.networkSource || ""),
-            networkStartedAt: result.network_last_started_at || previous.networkStartedAt || "",
-            networkCompletedAt: result.network_last_completed_at || previous.networkCompletedAt || "",
-            networkStatusCode: Number(result.network_status_code) || Number(previous.networkStatusCode) || 0,
-            networkError: String(result.network_error || previous.networkError || ""),
-            networkDurationMs: Number(result.network_duration_ms) || Number(previous.networkDurationMs) || 0,
-            responseReady,
-            finalityPending,
-            finalityReason: finality.reason,
-            nonRetryable: false,
-            responseSource: incomingResponseSource,
-            responseAudit,
-            responseAuditFetchMode,
-            responseAuditKey,
-            messageCount: contentAvailable || networkStreamAvailable ? Number(result.message_count) || nextMessages.length : Number(previous.messageCount) || 0,
-            totalMessageCount: nextTotalMessageCount,
-            logicalTaskCount: logicalTrackingState.logicalTaskCount,
-            completedLogicalTaskIds: logicalTrackingState.completedLogicalTaskIds,
-            logicalTaskStatus,
-            activityStartedAt,
-            fastMessageLimitQualified,
-            awaitingAssistant: transcriptAwaitingAssistant(nextMessages),
-            updatedAt: result.updated_at || new Date().toISOString()
-          }
-        };
-      });
-      return result;
-    } catch (err) {
-      const message = err?.message || String(err);
-      const outsideRecentWindow = isConversationOutsideRecentWindowError(message);
-      const activeTaskId = String(profile?.current_task_id || "");
-      const activeTask = (status?.workerJobs || []).find((job) => (
-        String(job?.job_id || job?.jobId || "") === activeTaskId
-        && ["prepared", "running"].includes(String(job?.status || ""))
-      ));
-      const requestedConversationOwnsActiveTask = Boolean(
-        activeTask
-        && String(profile?.current_task_conversation_id || "") === conversationId
-      );
-      const fallbackConversationId = outsideRecentWindow && !requestedConversationOwnsActiveTask
-        ? nextValidConversationTarget(profile, conversationId)
-        : "";
-      logRendererDiagnostic(api, "error", "chat", `Đọc phản hồi thất bại: ${message}`, { action: "load-response", profile_id: profile.profile_id, conversation_id: conversationId, read_dom: readDom, recover_stale_dom: recoverStaleDom, canonical_only: canonicalOnly, silent, error: err });
-      if (fallbackConversationId) {
-        requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: fallbackConversationId };
-        requestTargetReasons.current.set(profile.profile_id, "stale_conversation_fallback");
-        setRequestTargets((current) => ({ ...current, [profile.profile_id]: fallbackConversationId }));
-        setRequestResponses((current) => ({
-          ...current,
-          [profile.profile_id]: { visible: true, loading: false, transcriptLoading: true, error: "", conversationId: fallbackConversationId, text: "", messages: [], nonRetryable: false }
-        }));
-        window.setTimeout(() => void hydrateCachedResponse(profile, fallbackConversationId), 0);
-        return null;
-      }
-      setRequestResponses((current) => responseTargetStillCurrent()
-        ? { ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: false, transcriptLoading: false, error: message, conversationId, nonRetryable: outsideRecentWindow } }
-        : current);
-      if (!silent && responseTargetStillCurrent()) setError(message);
-      return null;
-    } finally {
-      responseFetches.current.delete(fetchKey);
-    }
-  }
-
-  function addRequestAttachments(profileId, selected) {
-    const current = requestFiles[profileId] || [];
-    const merged = [...current, ...selected].filter((file, index, files) => files.findIndex((candidate) => candidate.path === file.path) === index);
-    if (merged.length > 4) throw new Error("Mỗi yêu cầu được đính kèm tối đa 4 file.");
-    if (merged.some((file) => file.size > 8 * 1024 * 1024)) throw new Error("Mỗi file được tối đa 8 MB.");
-    if (merged.reduce((total, file) => total + file.size, 0) > 10 * 1024 * 1024) throw new Error("Tổng file đính kèm được tối đa 10 MB.");
-    setRequestFiles((files) => ({ ...files, [profileId]: merged }));
-  }
-
-  async function chooseRequestAttachments(profileId) {
-    setError("");
-    try {
-      const selected = await api.chooseRequestFiles();
-      if (!selected.length) return;
-      addRequestAttachments(profileId, selected);
-    } catch (err) {
-      const message = err?.message || String(err);
-      logRendererDiagnostic(api, "error", "chat", `Xử lý file đính kèm thất bại: ${message}`, { action: "choose-request-attachments", profile_id: profileId, error: err });
-      setError(message);
-    }
-  }
-
-  async function openAttachmentPreview(file) {
-    setAttachmentPreview({ loading: true, name: file.name, size: file.size, mimeType: file.mimeType, path: file.path });
-    try {
-      const preview = await api.getRequestFilePreview(file.path);
-      setAttachmentPreview({ ...preview, loading: false, path: file.path });
-    } catch (err) {
-      logRendererDiagnostic(api, "error", "chat", `Đọc preview file thất bại: ${err?.message || String(err)}`, { action: "open-attachment-preview", file_name: file.name, file_size: file.size, mime_type: file.mimeType, error: err });
-      setAttachmentPreview({
-        loading: false,
-        name: file.name,
-        size: file.size,
-        mimeType: file.mimeType,
-        path: file.path,
-        kind: "error",
-        error: err?.message || String(err)
-      });
-    }
-  }
-  async function pasteRequestImage(profileId, event) {
-    const items = Array.from(event.clipboardData?.items || []);
-    const files = Array.from(event.clipboardData?.files || []);
-    const hasImage = items.some((item) => String(item.type || "").startsWith("image/")) || files.some((file) => String(file.type || "").startsWith("image/"));
-    if (!hasImage) return;
-    event.preventDefault();
-    setRequestSendErrors((current) => ({ ...current, [profileId]: "" }));
-    try {
-      const image = await api.captureClipboardImage();
-      if (!image) throw new Error("Không đọc được ảnh từ clipboard.");
-      addRequestAttachments(profileId, [image]);
-      notify("Đã dán ảnh từ clipboard");
-    } catch (err) {
-      const message = err?.message || String(err);
-      logRendererDiagnostic(api, "error", "chat", `Dán ảnh clipboard thất bại: ${message}`, { action: "paste-request-image", profile_id: profileId, error: err });
-      setRequestSendErrors((current) => ({ ...current, [profileId]: message }));
-    }
-  }
-
-  async function continueIncompleteResponse(profile, conversationId) {
-    if (!conversationId || busy) return;
-    setBusy(`continue:${profile.profile_id}`);
-    setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-    try {
-      const continueProjectRoot = projectRootForProfile(profile);
-      const continueAllAllowed = continueProjectRoot === ALL_ALLOWED_WORKSPACES;
-      await api.sendProfileRequest({
-        profileId: profile.profile_id,
-        conversationId,
-        scope: continueAllAllowed ? "all_allowed" : "workspace",
-        projectRoot: continueAllAllowed ? "" : continueProjectRoot,
-        workspaceCandidates: continueAllAllowed ? projects.map((project) => project.root) : [],
-        text: "Tiếp tục từ đúng chỗ phản hồi vừa bị ngắt. Không lặp lại phần trước; hoàn thành câu trả lời còn dang dở.",
-        attachments: []
-      });
-      setRequestResponses((current) => ({ ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), loading: true, incomplete: false } }));
-      notify("Đã yêu cầu ChatGPT tiếp tục phần bị ngắt");
-      window.setTimeout(() => void refresh(false), 500);
-    } catch (err) {
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: err?.message || String(err) }));
-    } finally {
-      setBusy("");
-    }
-  }
+  const {
+    openChat,
+    selectRequestConversation,
+    chooseRequestAttachments,
+    openAttachmentPreview,
+    pasteRequestImage,
+    continueIncompleteResponse
+  } = createChatUiActions({
+    api,
+    busy,
+    projects,
+    managerSettings,
+    requestProjectRoots,
+    requestFiles,
+    requestDraftsRef,
+    requestTargetsRef,
+    requestTargetReasons,
+    responseTurnAnchors,
+    setRequestTargets,
+    setRequestProjectRoots,
+    setRequestDraftResetVersions,
+    setRequestFiles,
+    setRequestResponses,
+    setRequestSendErrors,
+    setAttachmentPreview,
+    setChatProfileId,
+    setBusy,
+    setError,
+    projectRootForProfile,
+    selectProjectForProfile,
+    resetChatViewport,
+    positionOpenChatViewport,
+    hydrateCachedResponse,
+    refresh,
+    notify
+  });
 
   function renderChatModal() {
     const profile = (status?.browserProfiles || []).find((item) => item.profile_id === chatProfileId);
     if (!profile) return null;
-    const pinnedTarget = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
-    const conversations = profileRequestChats(profile, pinnedTarget);
-    const workspaceProjects = projects;
-    const selectedProjectRoot = projectRootForProfile(profile);
-    const selectedTarget = String(requestTargets[profile.profile_id] || conversations.find((chat) => chat.active)?.id || conversations[0]?.id || NEW_CHAT_TARGET);
-    const isNewChat = selectedTarget === NEW_CHAT_TARGET;
-    const sending = busy === `request:${profile.profile_id}`;
-    const initialDraft = requestDraftsRef.current[profile.profile_id] || "";
-    const attachments = requestFiles[profile.profile_id] || [];
-    const response = requestResponses[profile.profile_id];
-    const sendError = requestSendErrors[profile.profile_id] || "";
-    const sendEvidence = requestSendEvidence[profile.profile_id] || null;
-    const responseCurrent = response?.conversationId === selectedTarget;
-    const clearedKey = `${profile.profile_id}:${selectedTarget}`;
-    const selectedResponseText = responseSelection.key === clearedKey ? responseSelection.text : "";
-    const responseCleared = Boolean(clearedResponseTargets[clearedKey]);
-    const responseMessages = responseCurrent && Array.isArray(response?.messages) ? response.messages : [];
-    const rawLiveNetworkToolActivity = responseCurrent && response?.networkStreamInProgress ? String(response?.networkStreamActivityText || "").trim() : "";
-    const liveNetworkToolActivity = codexProToolActivityLabel(rawLiveNetworkToolActivity) ? GENERIC_TOOL_ACTIVITY_TEXT : rawLiveNetworkToolActivity;
-    const compactResponseMessages = compactToolActivityMessages(responseMessages, { collapseArgumentPayloads: codexProToolActivityLabel(rawLiveNetworkToolActivity) });
-    const displayResponseMessages = liveNetworkToolActivity
-      ? [...compactResponseMessages.filter((message) => !message?.toolActivity), { id: "codexpro-live-tool-activity", role: "assistant", text: liveNetworkToolActivity, truncated: false, toolActivity: true }]
-      : compactResponseMessages;
-    const fallbackToolActivity = toolActivityFromText(response?.text);
-    const fallbackResponseMessage = fallbackToolActivity
-      ? { id: "codexpro-live-tool-activity", role: "assistant", text: fallbackToolActivity, truncated: false, toolActivity: true }
-      : { id: "latest-assistant", role: "assistant", text: response?.text || "", truncated: response?.truncated };
-    const hasResponseContent = !responseCleared && Boolean(fallbackResponseMessage.text || displayResponseMessages.length);
-
-    const responseVerifiedComplete = Boolean(responseCurrent && response?.responseReady && hasResponseContent);
-    const selectedTab = (profile.conversation_tabs || []).find((tab) => String(tab.url || "").includes(`/c/${selectedTarget}`));
-    const selectedActivityText = String((responseCurrent && response?.networkStreamActivityText) || selectedTab?.activity_text || "").trim();
-    const selectedNetworkState = String(selectedTab?.network_state || (responseCurrent ? response?.networkState : "") || (selectedTab?.busy ? "generating" : "idle"));
-    const selectedNetworkCompleted = selectedNetworkState === "completed";
-    const selectedNetworkFailed = selectedNetworkState === "failed";
-    const selectedNetworkError = String((responseCurrent && response?.networkError) || selectedTab?.network_error || "");
-    const selectedRecoveringNetworkAbort = isRecoverableAbortedChatNetworkFailure({
-      networkState: selectedNetworkState,
-      networkError: selectedNetworkError,
-      networkCompletedAt: (responseCurrent && response?.networkCompletedAt) || selectedTab?.network_last_completed_at || "",
-      responseReady: responseVerifiedComplete
-    });
-    const selectedBusy = selectedRecoveringNetworkAbort || shouldShowChatBusy({
-      networkState: selectedNetworkState,
-      tabBusy: selectedTab?.busy,
-      responseCurrent,
-      responseBusy: response?.busy,
-      responseReady: responseVerifiedComplete,
-      responseLoading: response?.loading || response?.transcriptLoading,
-      streamBusy: responseCurrent && response?.networkStreamInProgress,
-      canonicalBusy: responseCurrent && response?.canonicalBusy
-    });
-    const selectedSettling = !(responseCurrent && response?.networkStreamInProgress) && shouldShowChatSettling({
-      networkState: selectedNetworkState,
-      networkCompletedAt: (responseCurrent && response?.networkCompletedAt) || selectedTab?.network_last_completed_at || "",
-      tabSettling: selectedTab?.settling,
-      responseCurrent,
-      responseIncomplete: response?.incomplete,
-      responseReady: responseVerifiedComplete,
-      awaitingAssistant: responseCurrent && transcriptAwaitingAssistant(materializeTranscriptMessages(response, selectedTarget)),
-      finalityPending: responseCurrent && response?.finalityPending
-    });
-    const responseBorderActive = selectedBusy || selectedSettling;
-    const responseTurnActive = selectedRecoveringNetworkAbort || Boolean(sending || selectedBusy || selectedSettling || (responseCurrent && (response?.busy || response?.loading)));
-    const latestTurnProvisionalAssistant = latestTurnHasProvisionalAssistant(displayResponseMessages);
-    const showSyntheticThinking = Boolean(responseTurnActive && !(response?.networkStreamAvailable && hasResponseContent) && !latestTurnProvisionalAssistant);
-    const turnReady = !selectedRecoveringNetworkAbort && canAcceptNextChatMessage({
-      networkState: selectedNetworkState,
-      networkCompletedAt: (responseCurrent && response?.networkCompletedAt) || selectedTab?.network_last_completed_at || "",
-      tabBusy: selectedTab?.busy,
-      tabSettling: selectedTab?.settling,
-      responseCurrent,
-      responseBusy: response?.busy,
-      responseReady: responseVerifiedComplete,
-      responseLoading: response?.loading || response?.transcriptLoading,
-      responseIncomplete: response?.incomplete,
-      awaitingAssistant: responseCurrent && transcriptAwaitingAssistant(materializeTranscriptMessages(response, selectedTarget)),
-      finalityPending: responseCurrent && response?.finalityPending,
-      canonicalBusy: responseCurrent && response?.canonicalBusy,
-      streamBusy: responseCurrent && response?.networkStreamInProgress
-    });
-    const domUnavailable = Boolean(responseCurrent && response?.domAvailable === false && !response?.domSkipped);
-    const contentNeedsRefresh = Boolean(responseCurrent && response?.contentNeedsRefresh);
-    const rolloverCreating = Boolean(responseCurrent && response?.rolloverStatus === "creating");
-    const otherBusyTab = (profile.conversation_tabs || []).some((tab) => (!selectedTab || tab.id !== selectedTab.id) && (tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating"));
-    const selectedResponseClearsProfileBusy = Boolean(responseVerifiedComplete && !selectedBusy && !selectedSettling && !otherBusyTab);
-    const canSendBase = !sending && profile.connected && Boolean(selectedProjectRoot) && !selectedRecoveringNetworkAbort && !rolloverCreating && (isNewChat || conversations.length > 0);
-    const working = profile.connected && ((profile.activity === "working" && !selectedResponseClearsProfileBusy) || selectedBusy || selectedSettling || rolloverCreating);
-    const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
-    const showRolloverNotice = Boolean(responseCurrent && !responseCleared && response?.rolloverNotice);
-    const showRepoTaskNotice = Boolean(responseCurrent && !responseCleared && response?.repoTaskId && (response.repoTaskStatus === "verified" || response.repoTaskStatus === "failed"));
-    const showNetworkNotice = Boolean(responseCurrent && !responseCleared && !isNewChat && !responseVerifiedComplete && (selectedNetworkFailed || selectedRecoveringNetworkAbort));
-    const hasResponseNotice = showRolloverNotice || showRepoTaskNotice || showNetworkNotice;
-    const responseHeadline = responseCleared
-      ? "Chat đã được dọn"
-      : isNewChat
-      ? "Chat mới"
-      : responseCurrent && response?.transcriptLoading
-        ? "Đang tải tin nhắn"
-      : selectedRecoveringNetworkAbort
-        ? "AI vẫn đang xử lý · đang xác minh sau khi transport bị hủy"
-        : selectedBusy || selectedSettling
-        ? "CodexPro đang xử lý…"
-        : selectedNetworkFailed && responseVerifiedComplete
-          ? "AI đã phản hồi xong · canonical xác nhận"
-          : selectedNetworkFailed
-            ? "Request AI kết thúc với lỗi network"
-            : selectedNetworkCompleted && domUnavailable
-            ? "AI đã phản hồi xong · Chrome UI đang treo"
-            : selectedNetworkCompleted && contentNeedsRefresh
-              ? "AI đã phản hồi xong · nội dung chưa đọc"
-              : selectedNetworkCompleted
-                ? "AI đã phản hồi xong · network xác nhận"
-              : responseCurrent && response?.incomplete
-                ? "Phản hồi có vẻ bị ngắt"
-                : "Chờ tín hiệu network";
-
     return (
-      <div className="modal-backdrop chat-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setChatProfileId("")}>
-        <div className="modal chat-modal" ref={chatModalRef} onWheelCapture={(event) => holdOpenChatAutoScroll(profile.profile_id, event.deltaY)} onTouchMoveCapture={() => holdOpenChatAutoScroll(profile.profile_id, -1)}>
-          <div className="modal-head chat-modal-head">
-            <div className="chat-modal-profile">
-              <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
-              <div>
-                <p className="eyebrow">CHATGPT · {profile.label}</p>
-                <div className="profile-title"><strong>{profile.email || profile.label}</strong>{selectedSettling ? <span className="badge profile-settling">ĐANG HOÀN TẤT</span> : working ? <WorkingBadge /> : profile.connected ? <span className="badge connected">ĐANG RẢNH</span> : <span className="badge profile-hung">MẤT KẾT NỐI</span>}</div>
-                <code>{profile.profile_id}</code>
-              </div>
-            </div>
-            <button type="button" aria-label="Đóng chat" onClick={() => setChatProfileId("")}><span aria-hidden="true">×</span></button>
-          </div>
-
-          <article className={`request-card chat-popup-card ${profile.connected ? "is-online" : "is-offline"}`}>
-            <label className="request-label">Chọn repo và đường dẫn</label>
-            <ProjectDropdown value={selectedProjectRoot} projects={workspaceProjects} onChange={(root) => changeProjectForProfile(profile, root)} disabled={!profile.connected || sending || (!isNewChat && !turnReady) || rolloverCreating} />
-            {!workspaceProjects.length && selectedProjectRoot !== ALL_ALLOWED_WORKSPACES && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
-            {managerSettings.showChatConversationSelector !== false && (
-              <>
-                <label className="request-label">Đoạn chat <small>giữ nguyên lựa chọn khi làm mới</small></label>
-                <ChatDropdown value={selectedTarget} conversations={conversations} onChange={(id) => selectRequestConversation(profile, id)} disabled={!profile.connected || !conversations.length || sending} />
-              </>
-            )}
-            <label className="request-label request-section-label">Tin nhắn gần nhất</label>
-            <div className={`chat-response is-inline ${responseBorderActive ? "is-streaming" : sending ? "is-sending" : ""} ${responseCurrent && response?.incomplete ? "is-incomplete" : ""}`} ref={chatResponseRef} data-layout-conversation-id={selectedTarget} data-layout-sending={sending ? "1" : "0"} data-layout-busy={selectedBusy ? "1" : "0"} data-layout-transcript-loading={responseCurrent && response?.transcriptLoading ? "1" : "0"} data-layout-settling={selectedSettling ? "1" : "0"} data-layout-stream={response?.networkStreamInProgress ? "1" : "0"} data-layout-has-content={hasResponseContent ? "1" : "0"} data-layout-network-state={selectedNetworkState} data-layout-message-count={displayResponseMessages.length}>
-              <div className="chat-response-head">
-                <div><span className="response-status-dot" /><strong title={responseHeadline}>{responseHeadline}</strong>{sending && <span className="chat-response-send-state"><span>Đang gửi tin nhắn</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span>}{!sending && !isNewChat && responseCurrent && response?.updatedAt && <small>{new Date(response.updatedAt).toLocaleTimeString("vi-VN")}</small>}</div>
-                <div className="response-head-actions">
-                  {responseCurrent && !responseCleared && !isNewChat && !selectedBusy && (contentNeedsRefresh || domUnavailable) && <button type="button" onClick={() => void loadResponse(profile, selectedTarget, false, true)} disabled={Boolean(busy)}>Đọc nội dung</button>}
-                  {responseCurrent && !responseCleared && response?.incomplete && !selectedBusy && <button type="button" className="continue-response" onClick={() => void continueIncompleteResponse(profile, selectedTarget)} disabled={Boolean(busy)}>Tiếp tục</button>}
-                  {selectedResponseText && <button type="button" onClick={async () => { await api.copyText(selectedResponseText); notify("Đã copy đoạn được chọn"); }}>Copy đoạn</button>}
-                  {responseCurrent && response?.text && !responseCleared && <button type="button" onClick={async () => { await api.copyText(response.text); notify("Đã copy toàn bộ phản hồi mới nhất"); }}>Copy hết</button>}
-                  {responseCurrent && hasResponseContent && !selectedBusy && <button type="button" onClick={() => { setClearedResponseTargets((current) => ({ ...current, [clearedKey]: true })); notify("Đã dọn chat trong Manager"); }}>Clear</button>}
-                </div>
-              </div>
-              {hasResponseNotice && (
-                <div className="chat-response-notices" aria-live="polite">
-                  {showRolloverNotice && (
-                    <div className={`conversation-rollover-notice is-${response.rolloverStatus || "done"}`}>
-                      <strong>{response.rolloverStatus === "creating" ? "Chat đã đầy · đang chuyển sang chat mới" : response.rolloverStatus === "failed" ? "Chat đã đầy · chuyển chat tự động thất bại" : "Đã chuyển sang chat mới"}</strong>
-                      <span>{response.rolloverNotice}</span>
-                    </div>
-                  )}
-                  {showRepoTaskNotice && (
-                    <div className={`network-response-notice is-${response.repoTaskStatus === "verified" ? "completed" : response.repoTaskStatus === "failed" ? "failed" : "generating"}`}>
-                      <strong>{response.repoTaskStatus === "verified" ? (response.repoTaskProof?.task_kind === "code" ? "CodexPro: Rules + CodexGraph đã xác minh" : "CodexPro: đã ghi nhận task title") : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT thiếu title · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ task title"}</strong>
-                      <span>{response.repoTaskStatus === "verified" ? repoTaskEvidenceSummary(response.repoTaskProof) : response.repoTaskStatus === "failed" ? "ChatGPT không trả task title qua CodexPro nên Manager không công nhận phản hồi này." : "Mọi task phải có title; chỉ task CODE mới tải Rules và CodexGraph."}</span>
-                    </div>
-                  )}
-                  {showNetworkNotice && (
-                    <div className={`network-response-notice is-${selectedNetworkState}`}>
-                      <strong>{selectedRecoveringNetworkAbort ? "Network: transport cũ bị hủy · đang xác minh" : selectedBusy ? "Network: AI đang xử lý" : "Network: request thất bại"}</strong>
-                      <span>{selectedRecoveringNetworkAbort ? "Chrome đã hủy transport cũ nhưng ChatGPT có thể vẫn tiếp tục ở backend. CodexPro đang kiểm tra transcript canonical trước khi kết luận lỗi." : selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-              {/* Trạng thái gửi nằm ngay trên thanh trạng thái phản hồi. */}
-              {responseCleared ? <div className="response-empty">Chat đã được dọn.</div> : !profile.connected ? <div className="response-empty">Extension đang mất heartbeat nên chưa thể cập nhật.</div> : isNewChat ? <div className="response-empty">Chat mới chưa được tạo trên ChatGPT. Gửi tin nhắn đầu tiên để tạo conversation mới trong nền.</div> : responseCurrent && response?.transcriptLoading ? <div className="response-empty is-transcript-loading"><span className="thinking-state latest-response-typing"><span>Đang tải tin nhắn</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span></div> : selectedRecoveringNetworkAbort && !hasResponseContent ? <div className="response-empty"><span className="typing-dots"><i /><i /><i /></span> Đang xác minh phản hồi sau khi Chrome hủy transport cũ…</div> : selectedNetworkFailed && !hasResponseContent ? <div className="response-error">Request AI đã kết thúc với lỗi network. CodexPro không cần DOM để phát hiện lỗi này.</div> : selectedNetworkCompleted && domUnavailable && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>Chrome renderer không phản hồi nên chưa đọc được nội dung từ giao diện. Trạng thái hoàn tất được xác nhận trực tiếp từ network.</span></div> : selectedNetworkCompleted && !hasResponseContent ? <div className="response-empty network-complete-empty"><strong>AI đã phản hồi xong.</strong><span>{contentNeedsRefresh ? "CodexPro chưa đụng DOM để đọc nội dung. Bấm “Đọc nội dung” khi bạn cần xem transcript." : "Network đã xác nhận hoàn tất. Bấm “Đọc nội dung” nếu bạn cần tải transcript từ giao diện."}</span></div> : !responseCurrent || response?.loading && !hasResponseContent ? <div className="response-empty is-transcript-loading"><span className="thinking-state latest-response-typing"><span>Đang tải tin nhắn</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></span></div> : response?.error ? <div className="response-error">{response.error}</div> : hasResponseContent ? (
-                <div className="latest-response chat-transcript" ref={(element) => { if (element) responseBodyRefs.current.set(profile.profile_id, element); else responseBodyRefs.current.delete(profile.profile_id); }} onWheel={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, event.deltaY)} onTouchMove={(event) => holdResponseAutoScroll(profile.profile_id, event.currentTarget, -1)} onScroll={(event) => pauseResponseAutoScroll(profile.profile_id, event.currentTarget)}>
-                  {(displayResponseMessages.length ? displayResponseMessages : [fallbackResponseMessage]).map((message, messageIndex, allMessages) => {
-                    const isLastAssistant = message.role === "assistant" && !allMessages.slice(messageIndex + 1).some((candidate) => candidate.role === "assistant");
-                    const showLiveStreamTail = Boolean(responseTurnActive && isLastAssistant && (response?.networkStreamAvailable || message.provisional === true || message.endTurn === false));
-                    const inlineLiveStatus = Boolean(showLiveStreamTail && !message.images?.length && String(message.text || "").length <= 80 && !/[\r\n]/.test(String(message.text || "")));
-                    const responseSpaceClass = !isLastAssistant ? "" : showSyntheticThinking ? "is-response-cage" : "is-response-runway";
-                    if (message.toolActivity) {
-                      return <div className="chat-transcript-message is-tool-activity" key={message.id} data-message-id={message.id}><div className="tool-activity-live"><span className="tool-activity-text">{message.text}</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></div></div>;
-                    }
-                    return (
-                      <div className={`chat-transcript-message is-${message.role} ${responseSpaceClass}`} key={message.id} data-message-id={message.id} data-audit-role={message.role} data-audit-fingerprint={responseAuditTextFingerprint(message.text)} data-audit-length={String(message.text || "").length}>
-                        <div className="chat-message-avatar">{message.role === "user" ? "B" : "✦"}</div>
-                        <div className={`latest-response-content ${inlineLiveStatus ? "is-inline-live-status" : ""}`} onPointerUp={message.role === "assistant" ? (event) => captureResponseSelection(clearedKey, event.currentTarget) : undefined}>
-                          <span className="chat-message-role">{message.role === "user" ? "Bạn" : "ChatGPT"}{message.pending ? " · đang gửi" : message.uncertain ? " · chưa xác định đã gửi" : ""}</span>
-                          {message.role === "assistant" ? <>
-                            {message.text && <React.Suspense fallback={<div className="chat-message-text response-rich-text response-rich-loading">{message.text}</div>}><ResponseText text={message.text} truncated={message.truncated} streaming={showLiveStreamTail} /></React.Suspense>}
-                            {Boolean(message.images?.length) && <div className={`chat-message-images ${message.images.length === 1 ? "is-single" : "is-grid"}`}>{message.images.map((image, imageIndex) => <button type="button" className="chat-generated-image" key={image.id || `${message.id}-image-${imageIndex}`} title="Mở ảnh" aria-label={`Mở ${image.alt || image.name || "ảnh tạo bởi ChatGPT"}`} onClick={() => setAttachmentPreview({ loading: false, name: image.name || "Ảnh tạo bởi ChatGPT", size: Number(image.size) || 0, mimeType: image.mimeType || "image/jpeg", kind: "image", dataUrl: image.dataUrl, generated: true })}><img src={image.dataUrl} alt={image.alt || image.name || "Ảnh tạo bởi ChatGPT"} /></button>)}</div>}
-                            {showLiveStreamTail && <span className="live-stream-tail" aria-label="ChatGPT đang tiếp tục phản hồi"><span className="typing-dots"><i /><i /><i /></span></span>}
-                            {message.text && turnReady && (
-                              <div className="chat-message-actions">
-                                <button type="button" className="chat-message-copy" title="Copy response" aria-label="Copy phản hồi" onClick={async () => { await api.copyText(message.text); notify("Đã copy phản hồi"); }}>
-                                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg>
-                                </button>
-                              </div>
-                            )}
-                          </> : <div className="chat-message-text user-message-text">{message.text}</div>}
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {showSyntheticThinking && <div className="chat-transcript-message is-assistant is-typing is-response-runway"><div className="chat-message-avatar">✦</div><div className="latest-response-content"><span className="chat-message-role">ChatGPT</span><span className="thinking-state latest-response-typing"><span>Thinking</span><span className="typing-dots"><i /><i /><i /></span></span></div></div>}
-                </div>
-              ) : <div className="response-empty">Đoạn chat này chưa có tin nhắn.</div>}
-            </div>
-
-            <ChatRequestComposer
-              profileId={profile.profile_id}
-              initialDraft={initialDraft}
-              draftResetVersion={requestDraftResetVersions[profile.profile_id] || 0}
-              attachments={attachments}
-              placeholder={rolloverCreating ? "Chat cũ đã đầy · đang tạo chat mới để tiếp tục dự án…" : "Nhập file hoặc tin nhắn"}
-              disabled={!profile.connected || rolloverCreating}
-              attachmentDisabled={!profile.connected || sending || rolloverCreating}
-              canSendBase={canSendBase}
-              sending={sending}
-              rolloverCreating={rolloverCreating}
-              selectedBusy={selectedBusy}
-              selectedSettling={selectedSettling}
-              isNewChat={isNewChat}
-              sendError={sendError}
-              sendEvidence={sendEvidence}
-              canOpenChrome={!busy && profile.connected && !isNewChat && Boolean(profile.conversation_tabs?.length)}
-              onPaste={(event) => { if (!sending) void pasteRequestImage(profile.profile_id, event); }}
-              onChooseAttachments={() => void chooseRequestAttachments(profile.profile_id)}
-              onOpenAttachmentPreview={(file) => openAttachmentPreview(file)}
-              onRemoveAttachment={(filePath) => setRequestFiles((current) => ({ ...current, [profile.profile_id]: (current[profile.profile_id] || []).filter((item) => item.path !== filePath) }))}
-              onClearSendError={() => setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }))}
-              onDraftSnapshot={(nextDraft) => { requestDraftsRef.current[profile.profile_id] = nextDraft; }}
-              onDraftActivityChange={(active) => {
-                if (active) responseComposerActive.current.set(profile.profile_id, true);
-                else responseComposerActive.current.delete(profile.profile_id);
-              }}
-              onClose={() => setChatProfileId("")}
-              onOpenChrome={() => openProfile(profile)}
-              onSend={(nextDraft) => sendRequest(profile, nextDraft)}
-            />
-          </article>
-        </div>
-      </div>
+      <ChatModal
+        profile={profile}
+        settings={managerSettings}
+        projects={projects}
+        busy={busy}
+        state={{ requestTargets, requestDraftResetVersions, requestFiles, requestResponses, requestSendErrors, requestSendEvidence, responseSelection, clearedResponseTargets }}
+        refs={{ requestTargetsRef, requestDraftsRef, chatModalRef, chatResponseRef, responseBodyRefs, responseComposerActive }}
+        actions={{
+          projectRootForProfile,
+          changeProjectForProfile,
+          selectRequestConversation,
+          loadResponse,
+          continueIncompleteResponse,
+          copyText: api.copyText,
+          notify,
+          clearResponse: (clearedKey) => { setClearedResponseTargets((current) => ({ ...current, [clearedKey]: true })); notify("Đã dọn chat trong Manager"); },
+          captureResponseSelection,
+          openGeneratedImage: (image) => setAttachmentPreview({ loading: false, name: image.name || "Ảnh tạo bởi ChatGPT", size: Number(image.size) || 0, mimeType: image.mimeType || "image/jpeg", kind: "image", dataUrl: image.dataUrl, generated: true }),
+          holdOpenChatAutoScroll,
+          holdResponseAutoScroll,
+          pauseResponseAutoScroll,
+          pasteRequestImage,
+          chooseRequestAttachments,
+          openAttachmentPreview,
+          removeAttachment: (profileId, filePath) => setRequestFiles((current) => ({ ...current, [profileId]: (current[profileId] || []).filter((item) => item.path !== filePath) })),
+          clearSendError: (profileId) => setRequestSendErrors((current) => ({ ...current, [profileId]: "" })),
+          close: () => setChatProfileId(""),
+          openProfile,
+          sendRequest
+        }}
+      />
     );
   }
 
@@ -4431,213 +712,40 @@ function App() {
           </div>
         </section>
 
-        <section id="profiles">
-          <div className="section-head">
-            <div>
-              <p className="eyebrow">CONNECTED WORKERS</p>
-              <h2>Worker đã kết nối</h2>
-              <p className="section-note">Hãy kết nối API worker và Chrome profile của bạn</p>
-            </div>
-          </div>
-          {status?.workerSnapshotStale && (
-            <div className="worker-snapshot-warning" role="status">
-              {status.workerSnapshotStaleReason === "empty-grace"
-                ? "Đang xác minh kết nối worker; tạm giữ trạng thái gần nhất."
-                : "MCP tạm thời không phản hồi, worker sẽ tự cập nhật khi kết nối phục hồi."}
-            </div>
-          )}
-          <div className={`profile-list is-${managerSettings.profileLayout === "cards" ? "card" : "row"}-layout working-border-${managerSettings.workingBorderStyle}`}>
-            {!(status?.workers || []).some((worker) => worker.worker_type === "api") && !visibleBrowserProfiles.length && (
-              <div className="empty">Chưa có worker nào kết nối. Hãy lưu API worker hoặc Load unpacked extension CodexPro trong Chrome profile cần dùng.</div>
-            )}
-            <ApiWorkerCards
-              workers={(status?.workers || []).filter((worker) => worker.worker_type === "api")}
-              customImages={managerSettings.workerImageDataUrls}
-              onRun={setApiJobWorker}
-              onStop={async (workerId) => {
-                try { await api.stopWorkerTask({ workerId }); await refresh(false); notify("Đã dừng API worker"); }
-                catch (workerError) { reportApiWorkerError(workerError); }
-              }}
-            />
-            {[...visibleBrowserProfiles]
-              .sort((left, right) => {
-                const rank = (profile) => {
-                  if (!profile.connected) return 3;
-                  const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
-                  const activeTab = tabs.find((tab) => tab.active) || tabs[0];
-                  if (activeTab?.settling === true || profile.activity === "settling") return 1;
-                  if (activeTab?.busy === false || (!activeTab && profile.activity === "idle")) return 0;
-                  if (activeTab?.busy === true || profile.activity === "working") return 1;
-                  return 2;
-                };
-                const rankDiff = rank(left) - rank(right);
-                if (rankDiff) return rankDiff;
-                return String(left.profile_id || "").localeCompare(String(right.profile_id || ""));
-              })
-              .map((profile) => {
-              const ready = extensionReady(profile.extension_version);
-              const profileBusy = busy === `profile:${profile.profile_id}` || autoMigratingProfileId === profile.profile_id;
-              const profileChecking = checkingProfiles.includes(profile.profile_id);
-              const hung = !profile.connected;
-              const settling = profile.connected && profile.activity === "settling";
-              const working = profile.connected && profile.activity === "working";
-              const profileTabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
-              const liveTab = profileTabs.find((tab) => tab.active) || profileTabs.find((tab) => tab.busy || tab.settling) || profileTabs[0];
-              const tabFailureState = profileTabFailureState({ connected: profile.connected, working, settling, tab: liveTab });
-              const rendererUnresponsive = tabFailureState.rendererUnresponsive;
-              const liveActivityText = working || settling ? String(liveTab?.activity_text || "").trim() : "";
-              const connectorInstalled = Boolean(profile.connector_installed && profile.connector_profile_bound !== false);
-              const connectorUpdateRequired = Boolean(profile.connector_update_required);
-              const connectorMessage = connectorInstalled ? "CodexPro READY" : profile.connector_message;
-              const idle = profile.connected && profile.activity === "idle" && (connectorInstalled || !ready);
-              const noChatGpt = profile.connected && profile.activity === "no_chatgpt";
-              const noBrowserTabs = noChatGpt && Number(profile.tab_count || 0) === 0;
-              const chatGptTabCount = Math.max(0, Number(profile.chatgpt_tab_count) || 0);
-              const workerState = hung ? "hung" : working || settling ? "working" : "idle";
-              const taskRecoveryState = String(profile.task_recovery_state || "").trim();
-              const taskRecoveryMessage = String(profile.task_recovery_message || "").trim();
-              const profileBorderState = profileCardBorderState({
-                connected: profile.connected,
-                working,
-                settling,
-                rendererUnresponsive,
-                networkState: String(liveTab?.network_state || ""),
-                rendererError: String(liveTab?.renderer_error || ""),
-                connectionInterrupted: Boolean(liveTab?.connection_interrupted)
-              });
-              const chromeAction = profileChromeActionState({ profile, busy, rendererUnresponsive: tabFailureState.recoveryRequired });
-              const workspaceRoot = String(profile.current_workspace_root || "").trim();
-              const profileProject = workspaceRoot ? projects.find((project) => String(project.root || "").toLowerCase() === workspaceRoot.toLowerCase()) : null;
-              const profileRepoLabel = String(profile.current_workspace_repo || profileProject?.githubRepo || profileProject?.name || "").trim();
-              const profileTaskSummary = profileTaskSummaryState({ profile, cachedTitle: profileTaskLabels[profile.profile_id], working, settling });
-              const profileTaskLabel = profileTaskSummary.title;
-              const profileJobCount = profileTaskJobsForWorker(status?.workerJobs, profile.profile_id, profile.current_task_id).length;
-              const profileRepository = profileRepoLabel ? {
-                label: profileRepoLabel,
-                title: profileProject?.remoteUrl || workspaceRoot || profileRepoLabel
-              } : null;
-              return (
-                <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`} key={profile.profile_id}>
-                  <span className="worker-active-border" aria-hidden="true" />
-                  <WorkerIcon state={workerState} customImages={managerSettings.workerImageDataUrls} />
-                  <div className="profile-main">
-                    <div className="profile-title">
-                      <strong>{profile.email || profile.label}</strong>
-                      {profile.active && <span className="badge">ACTIVE</span>}
-                      {hung && <span className="badge profile-hung">MẤT KẾT NỐI</span>}
-                      {settling && <span className="badge profile-settling">ĐANG HOÀN TẤT</span>}
-                      {working && <WorkingBadge />}
-                      {idle && <span className="badge connected">ĐANG RẢNH</span>}
-                      {noBrowserTabs && <span className="badge profile-missing">CHROME CHẠY NỀN</span>}
-                      {noChatGpt && !noBrowserTabs && <span className="badge profile-missing">CHƯA MỞ CHATGPT</span>}
-                      {connectorUpdateRequired && <span className="badge profile-missing">CẦN CẬP NHẬT CONNECTOR</span>}
-                      {!connectorInstalled && !connectorUpdateRequired && !profileChecking && !idle && !working && !settling && !noChatGpt && <span className="badge profile-missing">CHƯA CÓ CODEXPRO</span>}
-                      {profile.connected && profileRepository?.label && <span className="active-repo-chip" title={profileRepository.title}>{profileRepository.label}</span>}
-                    </div>
-                    {(working || settling) && <WorkerRunningDuration startedAt={profile.busy_since || liveTab?.network_last_started_at} />}
-                    <div className="profile-meta">
-                      <span><Dot ok={profile.connected} />{profile.connected ? "Extension online" : "Mất heartbeat extension"}</span>
-                      <span>v{profile.extension_version || "cũ"}</span>
-                      <span>{chatGptTabCount} tab</span>
-                      {connectorMessage && <span className={connectorInstalled ? "ready-text" : "profile-warning"}>{connectorMessage}</span>}
-                    </div>
-                    {profileTaskLabel && (
-                      <div className="profile-task-summary" title={profileTaskLabel}>
-                        <span>{profileTaskSummary.label}</span>
-                        <strong>{profileTaskLabel}</strong>
-                      </div>
-                    )}
-                    {taskRecoveryMessage && (
-                      <div className={`profile-task-recovery is-${taskRecoveryState || "info"}`} role="status" aria-live="polite">
-                        {taskRecoveryMessage}
-                      </div>
-                    )}
-                    {(working || settling) && <div className="profile-live-activity" role="status" aria-live="polite"><span className="profile-live-activity-text">{liveActivityText || (settling ? "ChatGPT đang hoàn tất tác vụ" : "ChatGPT đang xử lý")}</span><span className="typing-dots" aria-hidden="true"><i /><i /><i /></span></div>}
-                  </div>
-                  <div className="profile-actions">
-                    <button className="button secondary profile-task-button" type="button" onClick={() => setTaskProfileId(profile.profile_id)} title="Xem task của worker này"><span>Task</span>{profileJobCount > 0 && <b>{profileJobCount}</b>}</button>
-                    {profile.connected && !ready && <span className="update-needed">Có worker {WORKER_EXTENSION_VERSION} mới</span>}
-                    {profileChecking && <span className="checking-profile">Đang kiểm tra ChatGPT…</span>}
-                    <div className="profile-action-buttons">
-                      <button
-                        className="button primary profile-chat chat-galaxy-button"
-                        onClick={() => openChat(profile)}
-                        disabled={!profile.connected || !connectorInstalled}
-                        title={profileRequestChats(profile).length ? "Mở khung chat của profile" : "Nhập task; CodexPro sẽ tự mở tab ChatGPT khi gửi"}
-                      >
-                        <ChatGalaxyButtonContent />
-                      </button>
-                      <button
-                        className="button secondary open-profile"
-                        onClick={() => rendererUnresponsive ? recoverProfileTab(profile) : openProfile(profile, { focusOnly: true })}
-                        disabled={chromeAction.disabled}
-                        title={chromeAction.title}
-                      >
-                        {busy === `recover-profile:${profile.profile_id}` ? "Đang khôi phục…" : busy === `open-profile:${profile.profile_id}` ? "Đang chuyển…" : chromeAction.label}
-                      </button>
-                    </div>
-                    {connectorInstalled ? (
-                      <span className={`already-connected ${connectorUpdateRequired ? "is-update-required" : working || settling ? "is-working" : idle ? "is-idle" : "is-default"}`}>✓ Đã thêm CodexPro</span>
-                    ) : (
-                      <button
-                        className="button primary profile-setup"
-                        onClick={() => setupProfile(profile)}
-                        disabled={Boolean(busy) || Boolean(autoMigratingProfileId) || profileChecking || !profile.connected || !ready}
-                      >
-                        {profileBusy ? (connectorUpdateRequired ? "Đang cập nhật + test…" : "Đang thêm + test…") : (connectorUpdateRequired ? "Cập nhật CodexPro" : "Thêm CodexPro")}
-                      </button>
-                    )}
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        </section>
+        <BrowserProfilesSection
+          status={status}
+          visibleProfiles={visibleBrowserProfiles}
+          settings={managerSettings}
+          projects={projects}
+          taskLabels={profileTaskLabels}
+          busy={busy}
+          autoMigratingProfileId={autoMigratingProfileId}
+          checkingProfiles={checkingProfiles}
+          onApiRun={setApiJobWorker}
+          onApiStop={async (workerId) => {
+            try { await api.stopWorkerTask({ workerId }); await refresh(false); notify("Đã dừng API worker"); }
+            catch (workerError) { reportApiWorkerError(workerError); }
+          }}
+          onOpenTask={setTaskProfileId}
+          onOpenChat={openChat}
+          onRecoverProfile={(profile) => recoverProfileTab(profile)}
+          onOpenProfile={(profile) => openProfile(profile, { focusOnly: true })}
+          onSetupProfile={setupProfile}
+        />
 
-        <section id="projects">
-          <div className="section-head">
-            <div><p className="eyebrow">WORKSPACES</p><h2>Repo và dự án</h2><p className="section-note">Tự quét Git repo trên Desktop, Documents, Downloads và toàn bộ ổ/thư mục đã cấp quyền cho CodexPro.</p></div>
-            <button className="button secondary" onClick={addProject} disabled={Boolean(busy)}>+ Thêm dự án</button>
-          </div>
-          <div className="project-list">
-            {projects.length === 0 && <div className="empty">Chưa tìm thấy dự án CodexPro.</div>}
-            {visibleProjects.map((project) => (
-              <article className="project" key={project.root}>
-                <div className="repo-icon">{project.name.slice(0, 1).toUpperCase()}</div>
-                <div className="project-main">
-                  <div className="project-title"><strong>{project.name}</strong>{project.active ? <span className="badge">ĐANG CHẠY</span> : project.inUse ? <span className="badge">ĐANG CODE</span> : null}</div>
-                  <code>{project.root}</code>
-                  <div className="project-meta">
-                    {project.repoFullName && <span>{project.repoFullName}</span>}
-                    {formatRepoActivity(project) && <span className="recent-activity">{formatRepoActivity(project)}</span>}
-                    <span>{project.source}</span>
-                    <span>{project.isGit ? `nhánh ${project.branch}` : "không phải Git repo"}</span>
-                    {project.isGit && (
-                      <span className={project.changes || project.behind || project.ahead ? "changed" : "clean"} title={project.commit?.subject || ""}>
-                        Local: {project.commit?.hash || "—"} · Remote: {project.remoteCommitHash || "—"} · {project.behind ? `Máy đang chậm ${project.behind} commit` : project.ahead ? `Máy đang trước ${project.ahead} commit` : "Máy đã đồng bộ"} · {project.changes ? `${project.changes} file chưa commit` : "Không có file chưa commit"}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div className="project-actions">
-                  <button onClick={() => inspect(project)} disabled={Boolean(busy)}>{busy === project.root ? "Đang kiểm tra..." : "Kiểm tra qua MCP"}</button>
-                  <button onClick={() => api.openFolder(project.root)}>Mở thư mục</button>
-                  {!project.active && project.source === "Đã thêm" && <button className="remove" title="Bỏ khỏi danh sách" onClick={async () => setProjects(await api.removeProject(project.root))}>×</button>}
-                </div>
-              </article>
-            ))}
-          </div>
-          {projects.length > PROJECTS_PER_PAGE && (
-            <nav className="project-pagination" aria-label="Phân trang repo và dự án">
-              <span>{projectPage * PROJECTS_PER_PAGE + 1}–{Math.min((projectPage + 1) * PROJECTS_PER_PAGE, projects.length)} / {projects.length} repo</span>
-              <div>
-                <button type="button" onClick={() => setProjectPage((page) => Math.max(0, page - 1))} disabled={projectPage === 0}>‹ Trước</button>
-                <strong>Trang {projectPage + 1} / {projectPageCount}</strong>
-                <button type="button" onClick={() => setProjectPage((page) => Math.min(projectPageCount - 1, page + 1))} disabled={projectPage >= projectPageCount - 1}>Sau ›</button>
-              </div>
-            </nav>
-          )}
-        </section>
+        <ProjectsSection
+          projects={projects}
+          visibleProjects={visibleProjects}
+          busy={busy}
+          page={projectPage}
+          pageCount={projectPageCount}
+          pageSize={PROJECTS_PER_PAGE}
+          onAdd={addProject}
+          onInspect={inspect}
+          onOpenFolder={(root) => api.openFolder(root)}
+          onRemove={async (root) => setProjects(await api.removeProject(root))}
+          onPageChange={setProjectPage}
+        />
         </div>
 
         <div className="control-page" hidden={activePage !== "control"}>

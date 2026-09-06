@@ -44,7 +44,7 @@ function Fixture() {
         open={workerOpen}
         reloadCount={3}
         deferredUpdateCount={2}
-        workerVersion="0.5.121"
+        workerVersion="0.5.122"
         onClose={() => setWorkerOpen(false)}
         onConfirm={() => { setConfirmed(true); setWorkerOpen(false); }}
       />
