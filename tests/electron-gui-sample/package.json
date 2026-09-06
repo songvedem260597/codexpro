@@ -1,10 +1,10 @@
 {
-  "name": "codexpro-actions-monitor",
+  "name": "github-actions-monitor",
   "version": "1.0.0",
   "private": true,
   "main": "main.js",
   "scripts": {
-    "package:win": "electron-packager . CodexProActionsMonitor --platform=win32 --arch=x64 --out=dist --overwrite"
+    "package:win": "electron-packager . GitHubActionsMonitor --platform=win32 --arch=x64 --out=dist --overwrite"
   },
   "devDependencies": {
     "@electron/packager": "latest",
