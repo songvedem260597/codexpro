@@ -84,6 +84,7 @@ ipcMain.handle('actions:jobs', async (_event, input = {}) => {
   const token = tokenFromInput(input.token);
   const result = await githubJson(`/repos/${repo}/actions/runs/${runId}/jobs?per_page=100`, token);
   return {
+    authenticated: Boolean(token),
     rateLimit: result.rateLimit,
     jobs: (result.data.jobs || []).map((job) => ({
       id: job.id,
