@@ -4138,6 +4138,7 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
       conversation_id: String(value?.conversation_id || ""),
       request_id: String(value?.request_id || value?.generation_request_id || ""),
       repo_task_id: String(value?.repo_task_id || ""),
+      attempt_id: String(value?.attempt_id || ""),
       submission_state: String(value?.submission_state || ""),
       submitted_by: String(value?.submitted_by || ""),
       generation_state: String(value?.generation_state || value?.network_state || ""),
