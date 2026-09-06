@@ -12,6 +12,7 @@ assert.match(mainSource, /import \{ createDiagnosticIpcRegistrar \} from "\.\/ip
 assert.match(mainSource, /import \{ registerWorkerIpcHandlers \} from "\.\/ipc\/worker-ipc\.mjs";/, "main must import the extracted worker IPC registrar");
 assert.match(mainSource, /const \{ handle: diagnosticIpcHandle, allowed: diagnosticAllowed \} = createDiagnosticIpcRegistrar\(\{ ipcMain, diagnostic \}\);/, "main must create the diagnostic IPC handler and shared diagnostic throttle from the extracted service");
 assert.match(mainSource, /registerWorkerIpcHandlers\(\{[\s\S]*?diagnosticIpcHandle,[\s\S]*?runtimeStatus,[\s\S]*?workerPluginRegistry,[\s\S]*?apiWorkerStore,[\s\S]*?createProviderForApiWorker[\s\S]*?\}\);/, "main must wire worker IPC dependencies explicitly");
+assert.equal((mainSource.match(/registerWorkerIpcHandlers\(/g) || []).length, 1, "main must register the extracted worker IPC group exactly once");
 assert.doesNotMatch(mainSource, /function diagnosticIpcHandle\(/, "diagnostic IPC implementation must stay out of main.mjs");
 assert.doesNotMatch(mainSource, /function diagnosticProjection\(/, "diagnostic projection implementation must stay out of main.mjs");
 assert.doesNotMatch(mainSource, /diagnosticIpcHandle\("codexpro:(?:status|workers|worker-send|worker-read|worker-stop|api-worker-configs|list-api-worker-models|save-api-worker|delete-api-worker|test-api-worker)"/, "worker/API-worker IPC registrations must stay out of main.mjs");
