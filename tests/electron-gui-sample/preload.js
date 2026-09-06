@@ -30,9 +30,9 @@ contextBridge.exposeInMainWorld('actionsMonitor', {
   openUrl: (url) => ipcRenderer.invoke('actions:open-url', url)
 });
 
-function makeSpinner(className = 'github-actions-monitor-spinner') {
+function makeSpinner() {
   const spinner = document.createElement('span');
-  spinner.className = className;
+  spinner.className = 'github-actions-monitor-spinner';
   spinner.setAttribute('aria-hidden', 'true');
   return spinner;
 }
@@ -88,6 +88,7 @@ function installStyles() {
       cursor: default; box-shadow: none;
     }
     .runner-toggle-button.busy { opacity: .72; cursor: wait; }
+    .runner-toggle-button:disabled { opacity: .54; cursor: not-allowed; filter: saturate(.55); box-shadow: none; }
     .runner-status-chip {
       height: 42px; min-height: 42px; display: inline-flex; align-items: center; gap: 6px; box-sizing: border-box;
       padding: 0 12px; border-radius: 999px; border: 1px solid #294563; color: #94a9c5;
@@ -191,7 +192,9 @@ function installLiveSteps() {
     const row = document.querySelector('.run.selected[data-id]');
     if (!row) return null;
     const runId = Number(row.dataset.id);
-    return Number.isSafeInteger(runId) && runId > 0 ? { runId, active: Boolean(row.querySelector('.status-pill.in_progress')) } : null;
+    return Number.isSafeInteger(runId) && runId > 0
+      ? { runId, active: Boolean(row.querySelector('.status-pill.in_progress')) }
+      : null;
   }
 
   function updateClocks() {
@@ -243,7 +246,8 @@ function installLiveSteps() {
         banner = document.createElement('div');
         banner.className = 'live-step-banner';
         const steps = card.querySelector('.steps');
-        if (steps) card.insertBefore(banner, steps); else card.appendChild(banner);
+        if (steps) card.insertBefore(banner, steps);
+        else card.appendChild(banner);
       }
       const label = document.createElement('span');
       label.className = 'live-step-label';
@@ -300,7 +304,7 @@ function installRunnerControls() {
   const repoWrap = repoInput?.closest('.repo-wrap');
   if (!controls || !repoInput || !tokenInput || !refreshButton || !repoWrap) return;
 
-  tokenInput.placeholder = 'GitHub token (bắt buộc)';
+  tokenInput.placeholder = 'GitHub token (cho API/runner mới)';
 
   const picker = document.createElement('select');
   picker.id = 'repoPicker';
@@ -313,10 +317,11 @@ function installRunnerControls() {
   loadButton.type = 'button';
   loadButton.className = 'runner-load-button';
   loadButton.textContent = '↻ Repos';
+  loadButton.title = 'Cần GitHub token để tải danh sách repository';
 
   const status = document.createElement('span');
   status.className = 'runner-status-chip';
-  status.textContent = 'NHẬP TOKEN';
+  status.textContent = 'CHECKING';
 
   const runnerButton = document.createElement('button');
   runnerButton.type = 'button';
@@ -329,7 +334,16 @@ function installRunnerControls() {
   controls.insertBefore(status, refreshButton);
   controls.insertBefore(runnerButton, refreshButton);
 
-  let runnerState = { configured: false, managed: false, external: false, running: false, online: false, busy: false };
+  let runnerState = {
+    configured: false,
+    managed: false,
+    external: false,
+    local: false,
+    running: false,
+    online: false,
+    busy: false,
+    requiresToken: false
+  };
   let operationBusy = false;
   let timer = null;
 
@@ -367,54 +381,80 @@ function installRunnerControls() {
   function renderRunnerState(next = {}) {
     runnerState = { ...runnerState, ...next };
     status.className = 'runner-status-chip';
-    if (!token()) {
-      status.textContent = 'NHẬP TOKEN';
-      runnerButton.className = 'runner-toggle-button start';
-      runnerButton.textContent = '▶ Start Runner';
-      runnerButton.disabled = true;
-      return;
-    }
-    if (runnerState.busy) {
+
+    const running = Boolean(runnerState.online || runnerState.running);
+    if (runnerState.busy && running) {
       status.classList.add('busy');
       status.textContent = 'RUNNER BUSY';
-    } else if (runnerState.online || runnerState.running) {
+    } else if (running) {
       status.classList.add('online');
-      status.textContent = runnerState.external ? 'RUNNER CONNECTED' : 'RUNNER ONLINE';
+      status.textContent = 'RUNNER IDLE';
     } else if (runnerState.error) {
       status.classList.add('error');
       status.textContent = 'RUNNER ERROR';
+    } else if (runnerState.configured) {
+      status.textContent = 'RUNNER OFFLINE';
+    } else if (!token() && runnerState.requiresToken) {
+      status.textContent = 'NHẬP TOKEN';
+    } else if (!token()) {
+      status.textContent = 'NO LOCAL RUNNER';
     } else {
-      status.textContent = runnerState.configured ? 'RUNNER OFFLINE' : 'NO RUNNER';
+      status.textContent = 'NO RUNNER';
     }
-    const running = Boolean(runnerState.online || runnerState.running);
+
     const externalRunning = Boolean(runnerState.external && running);
     if (externalRunning) {
       runnerButton.className = 'runner-toggle-button connected';
-      runnerButton.textContent = '✓ Đã kết nối';
+      runnerButton.textContent = '✓ Connected';
       runnerButton.disabled = true;
+    } else if (running) {
+      runnerButton.className = `runner-toggle-button stop${operationBusy ? ' busy' : ''}`;
+      runnerButton.textContent = operationBusy ? 'Stopping…' : '■ Stop Runner';
+      runnerButton.disabled = operationBusy;
     } else {
-      runnerButton.className = `runner-toggle-button ${running ? 'stop' : 'start'}${operationBusy ? ' busy' : ''}`;
-      runnerButton.textContent = operationBusy ? (running ? 'Stopping…' : 'Starting…') : (running ? '■ Stop Runner' : '▶ Start Runner');
-      runnerButton.disabled = operationBusy || !selectedRepo();
+      const canStartLocal = Boolean(runnerState.local && runnerState.configured);
+      const canCreate = Boolean(token());
+      runnerButton.className = `runner-toggle-button start${operationBusy ? ' busy' : ''}`;
+      runnerButton.textContent = operationBusy ? 'Starting…' : '▶ Start Runner';
+      runnerButton.disabled = operationBusy || !selectedRepo() || (!canStartLocal && !canCreate);
+      runnerButton.title = !canStartLocal && !canCreate
+        ? 'Nhập GitHub token để tạo runner mới.'
+        : (canStartLocal ? 'Runner đã cấu hình trên máy; có thể start không cần token.' : 'Tạo và start runner cho repository này.');
     }
-    status.title = runnerState.runnerName ? `Runner: ${runnerState.runnerName}` : '';
+
+    const parts = [];
+    if (runnerState.runnerName) parts.push(`Runner: ${runnerState.runnerName}`);
+    if (runnerState.root) parts.push(`Local: ${runnerState.root}`);
+    if (runnerState.local) parts.push('Đã phát hiện runner local');
+    status.title = parts.join(' · ');
   }
 
   async function refreshRunnerStatus() {
     const repo = selectedRepo();
-    if (!repo || !token()) return renderRunnerState({ configured: false, running: false, online: false, busy: false });
+    if (!repo) return;
     try {
       const result = await ipcRenderer.invoke('runner:status', { repo, token: token() });
       renderRunnerState({ ...result, error: result.remoteError || '' });
     } catch (error) {
-      renderRunnerState({ configured: false, running: false, online: false, busy: false, error: error?.message || String(error) });
+      renderRunnerState({
+        configured: false,
+        managed: false,
+        external: false,
+        local: false,
+        running: false,
+        online: false,
+        busy: false,
+        error: error?.message || String(error)
+      });
     }
   }
 
   async function loadRepos() {
     if (!token()) {
-      status.className = 'runner-status-chip error';
-      status.textContent = 'NHẬP TOKEN';
+      if (!(runnerState.online || runnerState.running)) {
+        status.className = 'runner-status-chip error';
+        status.textContent = 'NHẬP TOKEN';
+      }
       tokenInput.focus();
       return;
     }
@@ -438,49 +478,94 @@ function installRunnerControls() {
 
   async function toggleRunner() {
     const repo = selectedRepo();
-    const auth = token();
-    if (!repo || !auth || operationBusy) return;
-    if (runnerState.external && (runnerState.online || runnerState.running)) return;
+    if (!repo || operationBusy) return;
+    const running = Boolean(runnerState.online || runnerState.running);
+    if (runnerState.external && running) return;
+
+    const canStartLocal = Boolean(runnerState.local && runnerState.configured);
+    if (!running && !token() && !canStartLocal) {
+      tokenInput.focus();
+      return;
+    }
+
     operationBusy = true;
     renderRunnerState();
     try {
-      if (runnerState.online || runnerState.running) {
-        await ipcRenderer.invoke('runner:stop', { repo, token: auth });
-        renderRunnerState({ configured: true, managed: true, external: false, running: false, online: false, busy: false, error: '' });
+      if (running) {
+        await ipcRenderer.invoke('runner:stop', { repo, token: token() });
+        renderRunnerState({
+          configured: true,
+          managed: true,
+          external: false,
+          local: true,
+          running: false,
+          online: false,
+          busy: false,
+          error: ''
+        });
       } else {
         status.className = 'runner-status-chip busy';
         status.textContent = 'STARTING';
-        const result = await ipcRenderer.invoke('runner:start', { repo, token: auth });
-        renderRunnerState({ configured: true, managed: result.managed !== false, external: Boolean(result.external), running: true, online: Boolean(result.online), busy: Boolean(result.busy), runnerName: result.runnerName, error: '' });
+        const result = await ipcRenderer.invoke('runner:start', { repo, token: token() });
+        renderRunnerState({
+          configured: true,
+          managed: result.managed !== false,
+          external: Boolean(result.external),
+          local: Boolean(result.local),
+          running: true,
+          online: result.online !== false,
+          busy: Boolean(result.busy),
+          runnerName: result.runnerName,
+          root: result.root || runnerState.root,
+          error: ''
+        });
       }
     } catch (error) {
-      renderRunnerState({ configured: false, managed: false, external: false, running: false, online: false, busy: false, error: error?.message || String(error) });
+      renderRunnerState({ error: error?.message || String(error) });
     } finally {
       operationBusy = false;
       renderRunnerState();
-      setTimeout(refreshRunnerStatus, 1500);
+      setTimeout(refreshRunnerStatus, 1200);
     }
   }
 
   picker.addEventListener('change', () => {
     setPickerValue(picker.value);
-    renderRunnerState({ configured: false, managed: false, external: false, running: false, online: false, busy: false, error: '' });
+    renderRunnerState({
+      configured: false,
+      managed: false,
+      external: false,
+      local: false,
+      running: false,
+      online: false,
+      busy: false,
+      requiresToken: false,
+      error: ''
+    });
     refreshRunnerStatus();
     if (token()) refreshButton.click();
   });
   loadButton.addEventListener('click', loadRepos);
   runnerButton.addEventListener('click', toggleRunner);
-  tokenInput.addEventListener('change', () => token() ? loadRepos() : renderRunnerState());
+  tokenInput.addEventListener('input', () => {
+    if (!token()) refreshRunnerStatus();
+  });
+  tokenInput.addEventListener('change', () => {
+    if (token()) loadRepos();
+    else refreshRunnerStatus();
+  });
   tokenInput.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      loadRepos();
+      if (token()) loadRepos();
+      else refreshRunnerStatus();
     }
   });
 
   setPickerValue(repoInput.value);
   renderRunnerState();
-  timer = setInterval(refreshRunnerStatus, 10000);
+  setTimeout(refreshRunnerStatus, 120);
+  timer = setInterval(refreshRunnerStatus, 5000);
   window.addEventListener('beforeunload', () => clearInterval(timer), { once: true });
 }
 

@@ -143,14 +143,91 @@ function runnerTemplateCandidates() {
   return [...new Set(candidates)];
 }
 
+function configuredRunnerCandidates() {
+  const candidates = [...runnerTemplateCandidates()];
+  const managedRoot = path.join(monitorDataRoot(), 'runners');
+  try {
+    for (const entry of fs.readdirSync(managedRoot, { withFileTypes: true })) {
+      if (entry.isDirectory()) candidates.push(path.join(managedRoot, entry.name));
+    }
+  } catch {}
+  return [...new Set(candidates.map((item) => path.resolve(item)))];
+}
+
 function findRunnerTemplate() {
   for (const candidate of runnerTemplateCandidates()) {
-    if (
-      fs.existsSync(path.join(candidate, 'config.cmd')) &&
-      fs.existsSync(path.join(candidate, 'run.cmd'))
-    ) return candidate;
+    if (fs.existsSync(path.join(candidate, 'config.cmd')) && fs.existsSync(path.join(candidate, 'run.cmd'))) {
+      return candidate;
+    }
   }
   throw new Error('Không tìm thấy GitHub Actions runner template trên máy.');
+}
+
+function readConfiguredRunner(root) {
+  try {
+    const file = path.join(root, '.runner');
+    if (!fs.existsSync(file)) return null;
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const runnerNameValue = String(data.agentName || data.AgentName || data.name || '').trim();
+    const githubUrl = String(data.gitHubUrl || data.GitHubUrl || data.githubUrl || '').trim();
+    let repo = '';
+    const match = githubUrl.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/?$/i);
+    if (match) repo = match[1].replace(/\.git$/i, '');
+    return {
+      root: path.resolve(root),
+      runnerName: runnerNameValue || path.basename(root),
+      repo,
+      githubUrl
+    };
+  } catch {
+    return null;
+  }
+}
+
+function findLocalConfiguredRunner(repo) {
+  const expected = normalizeRepo(repo).toLowerCase();
+  const repoName = expected.split('/')[1];
+  for (const root of configuredRunnerCandidates()) {
+    const configured = readConfiguredRunner(root);
+    if (!configured) continue;
+    if (configured.repo && configured.repo.toLowerCase() === expected) return configured;
+
+    // Old runner versions may not persist gitHubUrl. Only use the conventional
+    // actions-runner-<repo> folder as a narrow local fallback.
+    if (!configured.repo && path.basename(root).toLowerCase() === `actions-runner-${repoName}`) {
+      return configured;
+    }
+  }
+  return null;
+}
+
+function inspectLocalRunnerProcess(root) {
+  if (process.platform !== 'win32') return { running: false, busy: false, listenerPid: null };
+  const escaped = String(path.resolve(root)).replace(/'/g, "''");
+  const script = [
+    `$root = '${escaped}'`,
+    "$prefix = $root.TrimEnd('\\') + '\\'",
+    '$items = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {',
+    "  ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) -or",
+    "  ($_.CommandLine -and $_.CommandLine.IndexOf($prefix, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)",
+    '})',
+    "$listener = @($items | Where-Object { $_.Name -match '^Runner\\.Listener(\\.exe)?$' })",
+    "$worker = @($items | Where-Object { $_.Name -match '^Runner\\.Worker(\\.exe)?$' })",
+    '$listenerPid = if ($listener.Count -gt 0) { $listener[0].ProcessId } else { 0 }',
+    '[Console]::Out.Write((($listener.Count -gt 0).ToString().ToLower()) + "|" + (($worker.Count -gt 0).ToString().ToLower()) + "|" + $listenerPid)'
+  ].join('; ');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    windowsHide: true,
+    encoding: 'utf8',
+    timeout: 10000
+  });
+  if (result.error || result.status !== 0) return { running: false, busy: false, listenerPid: null };
+  const [runningText, busyText, pidText] = String(result.stdout || '').trim().split('|');
+  return {
+    running: runningText === 'true',
+    busy: busyText === 'true',
+    listenerPid: Number(pidText) || null
+  };
 }
 
 function copyRunnerTemplate(source, destination) {
@@ -177,7 +254,7 @@ function commandQuote(value) {
   return `"${String(value).replace(/"/g, '""')}"`;
 }
 
-function configureRunner(repo, token) {
+function configureRunner(repo) {
   if (process.platform !== 'win32') throw new Error('Start Runner hiện chỉ hỗ trợ Windows.');
   const root = runnerRoot(repo);
   const source = findRunnerTemplate();
@@ -277,11 +354,7 @@ async function findRemoteRunner(repo, token, name) {
 ipcMain.handle('actions:repos', async (_event, input = {}) => {
   const token = requireToken(input.token);
   const result = await listAccessibleRepos(token);
-  return {
-    authenticated: true,
-    rateLimit: result.rateLimit,
-    repos: result.repos
-  };
+  return { authenticated: true, rateLimit: result.rateLimit, repos: result.repos };
 });
 
 ipcMain.handle('actions:list', async (_event, input = {}) => {
@@ -348,82 +421,153 @@ ipcMain.handle('runner:status', async (_event, input = {}) => {
   const repo = normalizeRepo(input.repo);
   const token = tokenFromInput(input.token);
   const meta = readRunnerMeta(repo);
+  const local = findLocalConfiguredRunner(repo);
 
-  if (!meta) {
-    if (!token) {
-      return {
-        configured: false,
-        managed: false,
-        external: false,
-        requiresToken: true,
-        running: false,
-        online: false,
-        busy: false,
-        repo
-      };
+  if (local) {
+    const localProcess = inspectLocalRunnerProcess(local.root);
+    let remote = null;
+    let remoteError = '';
+    if (token && local.runnerName) {
+      try {
+        remote = await findRemoteRunner(repo, token, local.runnerName);
+      } catch (error) {
+        remoteError = error.message || String(error);
+      }
     }
-
-    try {
-      const runners = await listRemoteRunners(repo, token);
-      const onlineRunners = runners.filter((runner) => runner.status === 'online');
-      const active = onlineRunners.find((runner) => runner.busy) || onlineRunners[0] || runners[0] || null;
-      return {
-        configured: runners.length > 0,
-        managed: false,
-        external: runners.length > 0,
-        requiresToken: false,
-        running: onlineRunners.length > 0,
-        online: onlineRunners.length > 0,
-        busy: onlineRunners.some((runner) => Boolean(runner.busy)),
-        repo,
-        runnerName: active?.name || '',
-        runnerCount: runners.length,
-        remoteError: ''
-      };
-    } catch (error) {
-      return {
-        configured: false,
-        managed: false,
-        external: false,
-        requiresToken: false,
-        running: false,
-        online: false,
-        busy: false,
-        repo,
-        remoteError: error.message || String(error)
-      };
-    }
+    const online = remote ? remote.status === 'online' : localProcess.running;
+    const busy = remote ? Boolean(remote.busy) : localProcess.busy;
+    const managed = Boolean(meta && path.resolve(meta.root || runnerRoot(repo)) === path.resolve(local.root));
+    return {
+      configured: true,
+      managed,
+      external: !managed,
+      local: true,
+      requiresToken: false,
+      running: online || localProcess.running,
+      online,
+      busy,
+      repo,
+      runnerName: local.runnerName,
+      root: local.root,
+      pid: localProcess.listenerPid,
+      remoteError
+    };
   }
 
-  let remote = null;
-  let remoteError = '';
-  if (token) {
-    try {
-      remote = await findRemoteRunner(repo, token, meta.runnerName);
-    } catch (error) {
-      remoteError = error.message || String(error);
+  if (meta) {
+    let remote = null;
+    let remoteError = '';
+    if (token) {
+      try {
+        remote = await findRemoteRunner(repo, token, meta.runnerName);
+      } catch (error) {
+        remoteError = error.message || String(error);
+      }
     }
+    const processState = inspectLocalRunnerProcess(meta.root || runnerRoot(repo));
+    const tracked = trackedRunner(repo);
+    const online = remote ? remote.status === 'online' : processState.running;
+    return {
+      configured: true,
+      managed: true,
+      external: false,
+      local: true,
+      requiresToken: false,
+      running: online || processState.running || Boolean(tracked),
+      online,
+      busy: remote ? Boolean(remote.busy) : processState.busy,
+      repo,
+      runnerName: meta.runnerName,
+      root: meta.root,
+      pid: processState.listenerPid || tracked?.pid || null,
+      remoteError
+    };
   }
-  const tracked = trackedRunner(repo);
-  const online = remote?.status === 'online';
-  return {
-    configured: true,
-    managed: true,
-    external: false,
-    requiresToken: false,
-    running: online || Boolean(tracked),
-    online,
-    busy: Boolean(remote?.busy),
-    repo,
-    runnerName: meta.runnerName,
-    root: meta.root,
-    pid: tracked?.pid || null,
-    remoteError
-  };
+
+  if (!token) {
+    return {
+      configured: false,
+      managed: false,
+      external: false,
+      local: false,
+      requiresToken: true,
+      running: false,
+      online: false,
+      busy: false,
+      repo
+    };
+  }
+
+  try {
+    const runners = await listRemoteRunners(repo, token);
+    const onlineRunners = runners.filter((runner) => runner.status === 'online');
+    const active = onlineRunners.find((runner) => runner.busy) || onlineRunners[0] || runners[0] || null;
+    return {
+      configured: runners.length > 0,
+      managed: false,
+      external: runners.length > 0,
+      local: false,
+      requiresToken: false,
+      running: onlineRunners.length > 0,
+      online: onlineRunners.length > 0,
+      busy: onlineRunners.some((runner) => Boolean(runner.busy)),
+      repo,
+      runnerName: active?.name || '',
+      runnerCount: runners.length,
+      remoteError: ''
+    };
+  } catch (error) {
+    return {
+      configured: false,
+      managed: false,
+      external: false,
+      local: false,
+      requiresToken: false,
+      running: false,
+      online: false,
+      busy: false,
+      repo,
+      remoteError: error.message || String(error)
+    };
+  }
 });
 
 ipcMain.handle('runner:start', async (_event, input = {}) => {
   const repo = normalizeRepo(input.repo);
+  const local = findLocalConfiguredRunner(repo);
+
+  // A runner that is already configured locally can be started without a PAT.
+  if (local) {
+    const processState = inspectLocalRunnerProcess(local.root);
+    if (processState.running) {
+      return {
+        ok: true,
+        alreadyRunning: true,
+        repo,
+        runnerName: local.runnerName,
+        online: true,
+        busy: processState.busy,
+        managed: false,
+        external: true,
+        local: true
+      };
+    }
+    const pid = launchRunnerProcess(repo, local.root, local.runnerName);
+    return {
+      ok: true,
+      alreadyRunning: false,
+      repo,
+      runnerName: local.runnerName,
+      pid,
+      root: local.root,
+      online: true,
+      busy: false,
+      managed: false,
+      external: true,
+      local: true
+    };
+  }
+
   const token = requireToken(input.token);
   const name = runnerName(repo);
   const currentMeta = readRunnerMeta(repo);
@@ -440,7 +584,8 @@ ipcMain.handle('runner:start', async (_event, input = {}) => {
           online: true,
           busy: Boolean(currentRemote.busy),
           managed: true,
-          external: false
+          external: false,
+          local: true
         };
       }
     } catch {}
@@ -457,7 +602,8 @@ ipcMain.handle('runner:start', async (_event, input = {}) => {
           online: true,
           busy: Boolean(online.busy),
           managed: false,
-          external: true
+          external: true,
+          local: false
         };
       }
     } catch {}
@@ -465,9 +611,8 @@ ipcMain.handle('runner:start', async (_event, input = {}) => {
 
   const existingRoot = runnerRoot(repo);
   stopRunnerProcesses(existingRoot);
-
   const registrationToken = await obtainRegistrationToken(repo, token);
-  const prepared = configureRunner(repo, token);
+  const prepared = configureRunner(repo);
   runRunnerConfiguration(prepared.root, repo, registrationToken, name);
   writeRunnerMeta(repo, {
     repo,
@@ -485,8 +630,11 @@ ipcMain.handle('runner:start', async (_event, input = {}) => {
     runnerName: name,
     pid,
     root: prepared.root,
+    online: true,
+    busy: false,
     managed: true,
-    external: false
+    external: false,
+    local: true
   };
 });
 
