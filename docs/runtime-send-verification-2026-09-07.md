@@ -10,3 +10,5 @@ Task: `cpt_927a09ace8247fac65c56b6d` — Sửa lỗi gửi thực tế
 - Manager-originated E2E task: `cpt_6202d08e0045b7e3df546e2b`; worker bootstrapped, completed, and finalized 100%; exact response `MANAGER-E2E-02143-OK`; network completed HTTP 200.
 
 This note records post-commit runtime verification only; it does not change runtime behavior.
+
+Finalization gate note: focused send regression is rerun after this documentation-only update and before the final verification commit.
