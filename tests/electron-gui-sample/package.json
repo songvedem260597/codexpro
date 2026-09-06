@@ -2,7 +2,7 @@
   "name": "github-actions-monitor",
   "version": "1.0.0",
   "private": true,
-  "main": "main-auto-runner.js",
+  "main": "main-ui-fix.js",
   "scripts": {
     "build:icon": "node make-icon.cjs",
     "package:win": "npm run build:icon && electron-packager . GitHubActionsMonitor --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico"
