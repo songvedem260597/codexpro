@@ -494,7 +494,14 @@ function shellExecutable(): string {
 
 function shellArgs(command: string): string[] {
   if (process.platform === "win32") {
-    const encoded = Buffer.from(command, "utf16le").toString("base64");
+    // PowerShell treats a quoted executable path as a string expression unless
+    // it is invoked with the call operator. Keep callers cross-platform by
+    // normalizing commands such as "C:\\Program Files\\node.exe" -e ...
+    // immediately before PowerShell encodes and executes them.
+    const powershellCommand = /^\s*(?:"[^"\r\n]+\.(?:exe|cmd|bat|com)"|'[^'\r\n]+\.(?:exe|cmd|bat|com)')(?:\s|$)/i.test(command)
+      ? `& ${command}`
+      : command;
+    const encoded = Buffer.from(powershellCommand, "utf16le").toString("base64");
     return ["/d", "/s", "/c", `powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ${encoded}`];
   }
   return ["-lc", command];
