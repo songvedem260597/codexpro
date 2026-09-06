@@ -1,0 +1,46 @@
+name: Install Local Source Reader
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/local-source-readonly
+    paths:
+      - .github/workflows/install-local-source-reader.yml
+
+jobs:
+  install:
+    name: Install read-only extension on local PC
+    runs-on: self-hosted
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout extension branch
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: feature/local-source-readonly
+
+      - name: Copy extension to fixed local folder
+        shell: powershell
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE 'tools\local-source-reader'
+          $target = Join-Path $env:USERPROFILE 'CodexProLocalSourceReader'
+
+          if (-not (Test-Path (Join-Path $source 'manifest.json'))) {
+            throw "Extension manifest not found at $source"
+          }
+
+          if (Test-Path $target) {
+            Remove-Item -Path $target -Recurse -Force
+          }
+          New-Item -Path $target -ItemType Directory -Force | Out-Null
+          Copy-Item -Path (Join-Path $source '*') -Destination $target -Recurse -Force
+
+          $manifest = Join-Path $target 'manifest.json'
+          $content = Join-Path $target 'content.js'
+          if (-not (Test-Path $manifest)) { throw 'Installed manifest.json missing.' }
+          if (-not (Test-Path $content)) { throw 'Installed content.js missing.' }
+
+          Write-Host "LOCAL_SOURCE_READER_INSTALL=PASS"
+          Write-Host "LOCAL_SOURCE_READER_PATH=$target"
+          Write-Host "LOCAL_SOURCE_READER_USERPROFILE=$env:USERPROFILE"
