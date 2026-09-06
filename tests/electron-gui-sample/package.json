@@ -1,0 +1,13 @@
+{
+  "name": "codexpro-electron-gui-sample",
+  "version": "1.0.0",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "package:win": "electron-packager . CodexProElectronTest --platform=win32 --arch=x64 --out=dist --overwrite"
+  },
+  "devDependencies": {
+    "@electron/packager": "latest",
+    "electron": "latest"
+  }
+}
