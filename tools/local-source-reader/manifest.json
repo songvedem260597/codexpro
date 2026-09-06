@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "CodexPro Local Source Reader",
+  "version": "0.1.0",
+  "description": "Read a local source tree once, read-only, and attach it to ChatGPT as one snapshot file.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ]
+}
