@@ -33,6 +33,9 @@ const expectedWorkerChannels = [
 ];
 for (const channel of expectedWorkerChannels) {
   assert.ok(workerSource.includes(`"${channel}"`), `worker IPC module must own ${channel}`);
+  if (channel === expectedWorkerChannels.at(-1)) {
+    assert.equal((workerSource.match(/diagnosticIpcHandle\("codexpro:/g) || []).length, expectedWorkerChannels.length, "worker IPC module must register each extracted channel exactly once");
+  }
 }
 
 const rawIpcHandlers = new Map();
