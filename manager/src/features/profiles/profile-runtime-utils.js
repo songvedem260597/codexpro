@@ -1,4 +1,4 @@
-export const WORKER_EXTENSION_VERSION = "0.5.122";
+export const WORKER_EXTENSION_VERSION = "0.5.123";
 
 export function extensionReady(version) {
   const parts = String(version || "").split(".").map(Number);

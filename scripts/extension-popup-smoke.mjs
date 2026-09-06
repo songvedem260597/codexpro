@@ -9,7 +9,7 @@ const [popupHtml, popupJs, worker, bridge, manifestText, managerBackend, manager
   fs.readFile(new URL("../src/browserExtensionBridge.ts", import.meta.url), "utf8"),
   fs.readFile(new URL("../chrome-extension/manifest.json", import.meta.url), "utf8"),
   fs.readFile(new URL("../manager/electron/main.mjs", import.meta.url), "utf8"),
-  fs.readFile(new URL("../manager/src/main.jsx", import.meta.url), "utf8")
+  fs.readFile(new URL("../manager/src/features/profiles/profile-runtime-utils.js", import.meta.url), "utf8")
 ]);
 
 const manifest = JSON.parse(manifestText);

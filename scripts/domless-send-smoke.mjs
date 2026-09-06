@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import './debugger-session-smoke.mjs';
+import './prepare-injection-smoke.mjs';
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
