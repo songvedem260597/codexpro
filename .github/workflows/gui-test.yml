@@ -41,9 +41,12 @@ jobs:
       - name: Install monitor locally
         shell: powershell
         run: |
-          $source = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample\dist\GitHubActionsMonitor-win32-x64'
+          $sample = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample'
+          $source = Join-Path $sample 'dist\GitHubActionsMonitor-win32-x64'
+          $sourceIcon = Join-Path $sample 'assets\icon.ico'
           $installDir = Join-Path $env:LOCALAPPDATA 'GitHubActionsMonitor'
           $exe = Join-Path $installDir 'GitHubActionsMonitor.exe'
+          $installedIcon = Join-Path $installDir 'GitHubActionsMonitor.ico'
 
           Get-Process GitHubActionsMonitor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Get-Process CodexProActionsMonitor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -52,6 +55,7 @@ jobs:
           Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $installDir | Out-Null
           Copy-Item -Path (Join-Path $source '*') -Destination $installDir -Recurse -Force
+          Copy-Item -Path $sourceIcon -Destination $installedIcon -Force
 
           $desktop = [Environment]::GetFolderPath('Desktop')
           Remove-Item (Join-Path $desktop 'CodexPro Actions Monitor.lnk') -Force -ErrorAction SilentlyContinue
@@ -62,11 +66,17 @@ jobs:
           $shortcut.TargetPath = $exe
           $shortcut.WorkingDirectory = $installDir
           $shortcut.Description = 'Monitor GitHub Actions across repositories'
-          $shortcut.IconLocation = "$exe,0"
+          $shortcut.IconLocation = "$installedIcon,0"
           $shortcut.Save()
 
+          $iconRefresh = Join-Path $env:SystemRoot 'System32\ie4uinit.exe'
+          if (Test-Path $iconRefresh) {
+            Start-Process -FilePath $iconRefresh -ArgumentList '-show' -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+          }
+
           if (-not (Test-Path $exe)) { throw 'Installed monitor executable was not found.' }
-          Write-Host 'MONITOR_INSTALL installed=PASS shortcut=PASS icon=EXE'
+          if (-not (Test-Path $installedIcon)) { throw 'Installed monitor icon was not found.' }
+          Write-Host 'MONITOR_INSTALL installed=PASS shortcut=PASS shortcut_icon=ICO refresh=PASS'
 
       - name: Launch installed monitor
         shell: powershell
