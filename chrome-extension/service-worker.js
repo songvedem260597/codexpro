@@ -1041,7 +1041,7 @@ function probeChatActivityPage() {
     if(!rect||rect.width<=0||rect.height<=0||style.display==='none'||style.visibility==='hidden')return false;
     if(node.closest?.('[data-message-author-role="assistant"],[data-message-author-role="user"]'))return false;
     const text=String(node.innerText||node.textContent||'').replace(/\u200b/g,' ').trim();
-    return text.length>0&&text.length<=160&&/^error in message stream(?:\s*(?:retry|try again|thử lại))?$/i.test(text);
+    return text.length>0&&text.length<=160&&/^(?:error in message stream|lỗi trong luồng tin nhắn)(?:\s*(?:retry|try again|thử lại))?$/i.test(text.normalize('NFC').replace(/\s+/g,' '));
   });
   const legacyInterrupted=connectionInterrupted||messageDeliveryTimedOut;
   const recoveryRequired=legacyInterrupted||messageStreamError;
@@ -1832,7 +1832,7 @@ async function readChatResponsePage() {
     if(!rect||rect.width<=0||rect.height<=0||style.display==='none'||style.visibility==='hidden')return false;
     if(node.closest?.('[data-message-author-role="assistant"],[data-message-author-role="user"]'))return false;
     const text=String(node.innerText||node.textContent||'').replace(/\u200b/g,' ').trim();
-    return text.length>0&&text.length<=160&&/^error in message stream(?:\s*(?:retry|try again|thử lại))?$/i.test(text);
+    return text.length>0&&text.length<=160&&/^(?:error in message stream|lỗi trong luồng tin nhắn)(?:\s*(?:retry|try again|thử lại))?$/i.test(text.normalize('NFC').replace(/\s+/g,' '));
   });
   const legacyInterrupted=connectionInterrupted||messageDeliveryTimedOut;
   const recoveryRequired=legacyInterrupted||messageStreamError;

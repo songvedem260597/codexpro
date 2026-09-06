@@ -299,11 +299,11 @@ export function useChatRecovery({
     for (const profile of profiles) {
       if (!profile?.connected) continue;
       const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
-      const messageStreamTab = tabs.find((tab) => !tab?.long_task_watchdog_hung && tab?.message_stream_error);
+      const messageStreamTab = tabs.find((tab) => !tab?.long_task_watchdog_hung && tab?.message_stream_error && Boolean(profile?.current_task_conversation_id) && (String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "") === String(profile.current_task_conversation_id));
       if (messageStreamTab?.id) {
-        const conversationId = String(messageStreamTab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+        const conversationId = String(profile?.current_task_conversation_id || "");
         const taskId = String(profile?.current_task_id || "");
-        if (!conversationId) continue;
+        if (!conversationId || !messageStreamTab?.id || !/^cpt_[a-f0-9]{24}$/.test(taskId)) continue;
         const taskJob = /^cpt_[a-f0-9]{24}$/.test(taskId)
           ? jobs.find((job) => String(job?.job_id || job?.jobId || "") === taskId && String(job?.worker_id || job?.workerId || "") === String(profile.profile_id || ""))
           : null;
@@ -312,6 +312,8 @@ export function useChatRecovery({
           logRendererDiagnostic(api, "info", "chat", "Bỏ qua Error in message stream vì task hiện tại đã terminal", { action: "message-stream-error-terminal-task-skip", profile_id: profile.profile_id, task_id: taskId, conversation_id: conversationId, worker_job_status: String(taskJob?.status || "") });
           continue;
         }
+        // Never turn an unverified error banner into a new task or resume another owner.
+        if (!taskJob || String(taskJob.status || "").toLowerCase() !== "running") continue;
         const key = `message-stream:${profile.profile_id}:${conversationId}:${taskId || "no-task"}`;
         const previous = Number(operationsRecoveryTimes.current.get(key) || 0);
         if (Date.now() - previous < 120_000) continue;
