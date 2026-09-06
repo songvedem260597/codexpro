@@ -264,9 +264,13 @@ function stopRunnerProcesses(root) {
   });
 }
 
-async function findRemoteRunner(repo, token, name) {
+async function listRemoteRunners(repo, token) {
   const result = await githubJson(`/repos/${repo}/actions/runners?per_page=100`, token);
-  const runners = Array.isArray(result.data?.runners) ? result.data.runners : [];
+  return Array.isArray(result.data?.runners) ? result.data.runners : [];
+}
+
+async function findRemoteRunner(repo, token, name) {
+  const runners = await listRemoteRunners(repo, token);
   return runners.find((runner) => runner.name === name) || null;
 }
 
@@ -344,8 +348,51 @@ ipcMain.handle('runner:status', async (_event, input = {}) => {
   const repo = normalizeRepo(input.repo);
   const token = tokenFromInput(input.token);
   const meta = readRunnerMeta(repo);
+
   if (!meta) {
-    return { configured: false, running: false, online: false, busy: false, repo };
+    if (!token) {
+      return {
+        configured: false,
+        managed: false,
+        external: false,
+        requiresToken: true,
+        running: false,
+        online: false,
+        busy: false,
+        repo
+      };
+    }
+
+    try {
+      const runners = await listRemoteRunners(repo, token);
+      const onlineRunners = runners.filter((runner) => runner.status === 'online');
+      const active = onlineRunners.find((runner) => runner.busy) || onlineRunners[0] || runners[0] || null;
+      return {
+        configured: runners.length > 0,
+        managed: false,
+        external: runners.length > 0,
+        requiresToken: false,
+        running: onlineRunners.length > 0,
+        online: onlineRunners.length > 0,
+        busy: onlineRunners.some((runner) => Boolean(runner.busy)),
+        repo,
+        runnerName: active?.name || '',
+        runnerCount: runners.length,
+        remoteError: ''
+      };
+    } catch (error) {
+      return {
+        configured: false,
+        managed: false,
+        external: false,
+        requiresToken: false,
+        running: false,
+        online: false,
+        busy: false,
+        repo,
+        remoteError: error.message || String(error)
+      };
+    }
   }
 
   let remote = null;
@@ -361,6 +408,9 @@ ipcMain.handle('runner:status', async (_event, input = {}) => {
   const online = remote?.status === 'online';
   return {
     configured: true,
+    managed: true,
+    external: false,
+    requiresToken: false,
     running: online || Boolean(tracked),
     online,
     busy: Boolean(remote?.busy),
@@ -388,7 +438,26 @@ ipcMain.handle('runner:start', async (_event, input = {}) => {
           repo,
           runnerName: currentMeta.runnerName,
           online: true,
-          busy: Boolean(currentRemote.busy)
+          busy: Boolean(currentRemote.busy),
+          managed: true,
+          external: false
+        };
+      }
+    } catch {}
+  } else {
+    try {
+      const existing = await listRemoteRunners(repo, token);
+      const online = existing.find((runner) => runner.status === 'online');
+      if (online) {
+        return {
+          ok: true,
+          alreadyRunning: true,
+          repo,
+          runnerName: online.name,
+          online: true,
+          busy: Boolean(online.busy),
+          managed: false,
+          external: true
         };
       }
     } catch {}
@@ -415,7 +484,9 @@ ipcMain.handle('runner:start', async (_event, input = {}) => {
     repo,
     runnerName: name,
     pid,
-    root: prepared.root
+    root: prepared.root,
+    managed: true,
+    external: false
   };
 });
 
