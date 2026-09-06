@@ -1,0 +1,37 @@
+name: Launch Win App Local
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - win
+    paths:
+      - .github/workflows/launch-win-app-local.yml
+
+jobs:
+  launch-win-app:
+    name: Launch CodexPro Manager on local PC
+    runs-on: self-hosted
+    timeout-minutes: 5
+
+    steps:
+      - name: Launch detached app
+        shell: powershell
+        run: |
+          $exe = Join-Path $env:LOCALAPPDATA 'CodexProWinBuild\win-unpacked\CodexPro Manager.exe'
+          if (-not (Test-Path $exe)) { throw "Built app not found: $exe" }
+
+          Get-Process | Where-Object {
+            try { $_.Path -eq $exe } catch { $false }
+          } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+          $env:RUNNER_TRACKING_ID = ''
+          Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe)
+          Start-Sleep -Seconds 5
+
+          $running = Get-Process | Where-Object {
+            try { $_.Path -eq $exe } catch { $false }
+          } | Select-Object -First 1
+          if (-not $running) { throw 'CodexPro Manager did not stay running.' }
+
+          Write-Host "CODEXPRO_WIN_LAUNCH status=PASS pid=$($running.Id) exe=$exe"
