@@ -37,7 +37,9 @@ import { ALL_ALLOWED_WORKSPACES, createManagerSettingsStore } from "./manager-se
 import { createManagerChatCache } from "./manager-chat-cache.mjs";
 import { createManagerChatDiagnostics } from "./manager-chat-diagnostics.mjs";
 import { createDiagnosticIpcRegistrar } from "./ipc/diagnostic-ipc.mjs";
+import { registerDiagnosticLogIpcHandlers } from "./ipc/diagnostic-log-ipc.mjs";
 import { registerSettingsIpcHandlers } from "./ipc/settings-ipc.mjs";
+import { registerUtilityIpcHandlers } from "./ipc/utility-ipc.mjs";
 import { registerWorkerIpcHandlers } from "./ipc/worker-ipc.mjs";
 import {
   captureClipboardImage,
@@ -3959,10 +3961,7 @@ diagnosticIpcHandle("codexpro:control", {
   failureMessage: "Không điều khiển được server",
   details: (action) => ({ requested_action: String(action || "") })
 }, (_event, action) => controlServer(action));
-ipcMain.handle("codexpro:copy", (_event, text) => {
-  clipboard.writeText(String(text || ""));
-  return true;
-});
+registerUtilityIpcHandlers({ ipcMain, clipboard, showNotification: showManagerNotification });
 ipcMain.on("codexpro:log-chat-layout", (_event, payload) => appendManagerChatLayoutLog(payload));
 ipcMain.on("codexpro:log-chat-response-audit", (_event, payload) => {
   appendManagerChatResponseAuditLog(payload);
@@ -3975,13 +3974,8 @@ ipcMain.on("codexpro:log-diagnostic", (_event, payload) => diagnostic(
   payload?.message || "Renderer diagnostic event",
   { ...(payload?.details && typeof payload.details === "object" ? payload.details : {}), action: payload?.action || payload?.details?.action || "" }
 ));
-ipcMain.handle("codexpro:get-diagnostic-logs", (_event, options) => readDiagnosticLogs(codexProHome, options || {}));
-ipcMain.handle("codexpro:clear-diagnostic-logs", () => clearDiagnosticLogs(codexProHome));
-ipcMain.handle("codexpro:prune-diagnostic-logs", () => pruneDiagnosticLogs(codexProHome));
+registerDiagnosticLogIpcHandlers({ ipcMain, codexProHome, readDiagnosticLogs, clearDiagnosticLogs, pruneDiagnosticLogs });
 diagnosticIpcHandle("codexpro:operations-performance", { category: "performance", action: "operations-performance", slowMs: 2_500 }, (_event, pids) => collectOperationsPerformance(Array.isArray(pids) ? pids : []));
-ipcMain.handle("codexpro:notify", (_event, payload) => {
-  return showManagerNotification(payload);
-});
 diagnosticIpcHandle("codexpro:rotate-link", {
   category: "settings",
   action: "rotate-mcp-link",
