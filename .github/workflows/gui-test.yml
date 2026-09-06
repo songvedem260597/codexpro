@@ -2,28 +2,54 @@ name: GUI Test
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - ci/self-hosted-runner
 
 jobs:
   gui:
     name: GUI Test on local PC
     runs-on: self-hosted
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.0
 
+      - name: Setup Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: 20
+
+      - name: Build Electron test exe
+        shell: powershell
+        run: |
+          $sample = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample'
+          Push-Location $sample
+          npm install --no-audit --no-fund
+          npm run package:win
+          $exe = (Resolve-Path '.\dist\CodexProElectronTest-win32-x64\CodexProElectronTest.exe').Path
+          Pop-Location
+          $marker = Join-Path $env:RUNNER_TEMP 'codexpro-electron-test-ready.txt'
+          Remove-Item $marker -Force -ErrorAction SilentlyContinue
+          "CODEXPRO_GUI_ELECTRON_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CODEXPRO_ELECTRON_TEST_MARKER=$marker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "ELECTRON_BUILD exe_ready=$([bool](Test-Path $exe))"
+
       - name: Run GUI probe
         shell: powershell
         run: .\scripts\gui-probe.ps1
 
-      - name: Verify GUI is usable
+      - name: Verify Electron app really opened
         shell: powershell
         run: |
           $report = Get-Content "$env:RUNNER_TEMP\codexpro-gui-probe\report.json" -Raw | ConvertFrom-Json
           if (-not $report.interactive_desktop) { throw 'Runner is not attached to the logged-in Windows desktop.' }
           if (-not $report.chrome_launch_ok) { throw 'Chrome could not be launched visibly by the runner.' }
-          if ($report.electron_target_configured -and -not $report.electron_launch_ok) { throw 'Configured Electron app could not be launched.' }
+          if (-not $report.electron_target_configured) { throw 'Packaged Electron exe was not configured.' }
+          if (-not $report.electron_launch_ok) { throw 'Packaged Electron exe did not launch.' }
+          if (-not (Test-Path $env:CODEXPRO_ELECTRON_TEST_MARKER)) { throw 'Electron window never reached ready-to-show.' }
+          Write-Host 'ELECTRON_TEST packaged_exe=PASS window_ready=PASS'
 
       - name: Upload GUI evidence privately
         if: always() && github.event.repository.private == true
@@ -37,4 +63,8 @@ jobs:
       - name: Clean GUI files
         if: always()
         shell: powershell
-        run: Remove-Item -Recurse -Force "$env:RUNNER_TEMP\codexpro-gui-probe" -ErrorAction SilentlyContinue
+        run: |
+          Remove-Item -Recurse -Force "$env:RUNNER_TEMP\codexpro-gui-probe" -ErrorAction SilentlyContinue
+          Remove-Item -Force "$env:RUNNER_TEMP\codexpro-electron-test-ready.txt" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\tests\electron-gui-sample\node_modules" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\tests\electron-gui-sample\dist" -ErrorAction SilentlyContinue
