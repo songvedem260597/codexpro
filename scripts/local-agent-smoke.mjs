@@ -85,6 +85,7 @@ try {
 
   const planPath = path.join(bridge, 'current-plan.md');
   await fs.writeFile(planPath, 'First watched plan\n', 'utf8');
+  await fs.rm(statePath, { force: true });
   const watcher = spawn(process.execPath, [
     'scripts/local-agent.mjs',
     '--root', root,
