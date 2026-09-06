@@ -1,4 +1,4 @@
-name: Build Win App Local
+name: Build Win TEST App Local
 
 on:
   workflow_dispatch:
@@ -9,8 +9,8 @@ on:
       - .github/workflows/build-win-local.yml
 
 jobs:
-  build-win-app:
-    name: Build CodexPro Windows app on local PC
+  build-win-test-app:
+    name: Build CodexPro Manager WIN TEST on local PC
     runs-on: self-hosted
     timeout-minutes: 30
 
@@ -23,7 +23,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6.4.0
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install root dependencies
         run: npm ci
@@ -37,7 +37,7 @@ jobs:
       - name: Build Windows installer
         run: npm --prefix manager run dist
 
-      - name: Copy build and launch app
+      - name: Prepare isolated WIN TEST build and launch
         shell: powershell
         run: |
           $release = Join-Path $env:GITHUB_WORKSPACE 'manager\release'
@@ -47,20 +47,60 @@ jobs:
           $sourceExe = Join-Path $release 'win-unpacked\CodexPro Manager.exe'
           if (-not (Test-Path $sourceExe)) { throw 'Unpacked CodexPro Manager executable was not created.' }
 
-          $dest = Join-Path $env:LOCALAPPDATA 'CodexProWinBuild'
-          Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          Copy-Item -Recurse -Force (Join-Path $release 'win-unpacked') (Join-Path $dest 'win-unpacked')
-          Copy-Item -Force $installer.FullName (Join-Path $dest $installer.Name)
+          $testRoot = Join-Path $env:LOCALAPPDATA 'CodexProWinTest'
+          $oldTestExe = Join-Path $env:LOCALAPPDATA 'CodexProWinBuild\win-unpacked\CodexPro Manager.exe'
 
-          Get-Process | Where-Object { $_.ProcessName -like 'CodexPro*' } | Stop-Process -Force -ErrorAction SilentlyContinue
-          $launchExe = Join-Path $dest 'win-unpacked\CodexPro Manager.exe'
-          Start-Process -FilePath $launchExe
+          # Stop only old preview/test copies. Never stop the installed CodexPro Manager.
+          Get-Process | Where-Object {
+            try {
+              $_.Path -eq $oldTestExe -or ($_.Path -and $_.Path.StartsWith($testRoot, [System.StringComparison]::OrdinalIgnoreCase))
+            } catch { $false }
+          } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+          Remove-Item -Recurse -Force $testRoot -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
+          Copy-Item -Recurse -Force (Join-Path $release 'win-unpacked') (Join-Path $testRoot 'win-unpacked')
+
+          $testExeOriginal = Join-Path $testRoot 'win-unpacked\CodexPro Manager.exe'
+          $testExe = Join-Path $testRoot 'win-unpacked\CodexPro Manager WIN TEST.exe'
+          Rename-Item -Path $testExeOriginal -NewName 'CodexPro Manager WIN TEST.exe'
+
+          $testInstallerName = $installer.Name -replace '^CodexPro-Manager-Setup-', 'CodexPro-Manager-WIN-TEST-Setup-'
+          $testInstaller = Join-Path $testRoot $testInstallerName
+          Copy-Item -Force $installer.FullName $testInstaller
+
+          $desktop = [Environment]::GetFolderPath('Desktop')
+          $shortcutPath = Join-Path $desktop 'CodexPro Manager WIN TEST.lnk'
+          $shell = New-Object -ComObject WScript.Shell
+          $shortcut = $shell.CreateShortcut($shortcutPath)
+          $shortcut.TargetPath = $testExe
+          $shortcut.WorkingDirectory = Split-Path $testExe
+          $shortcut.IconLocation = "$testExe,0"
+          $shortcut.Description = 'Isolated WIN TEST build of CodexPro Manager'
+          $shortcut.Save()
+
+          $env:CODEXPRO_HOME = Join-Path $testRoot 'profile-home'
+          $env:RUNNER_TRACKING_ID = ''
+          Start-Process -FilePath $testExe -WorkingDirectory (Split-Path $testExe)
           Start-Sleep -Seconds 5
 
           $running = Get-Process | Where-Object {
-            try { $_.Path -eq $launchExe } catch { $false }
-          } | Select-Object -First 1
-          if (-not $running) { throw 'CodexPro Manager did not stay running.' }
+            try { $_.Path -eq $testExe } catch { $false }
+          }
+          if (-not $running) { throw 'CodexPro Manager WIN TEST did not stay running.' }
 
-          Write-Host "CODEXPRO_WIN_APP status=PASS installer=$($installer.Name) exe=$launchExe"
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class CodexProWinTestWindow {
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+            public static extern bool SetWindowText(IntPtr hWnd, string text);
+          }
+          '@
+
+          $windowProcess = $running | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+          if ($windowProcess) {
+            [CodexProWinTestWindow]::SetWindowText($windowProcess.MainWindowHandle, 'CodexPro Manager - WIN TEST') | Out-Null
+          }
+
+          Write-Host "CODEXPRO_WIN_TEST status=PASS installer=$testInstaller exe=$testExe data=$env:CODEXPRO_HOME shortcut=$shortcutPath"
