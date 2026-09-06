@@ -21,7 +21,7 @@ async function githubJson(endpoint, token) {
   const headers = {
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
-    'User-Agent': 'CodexPro-Actions-Monitor'
+    'User-Agent': 'GitHub-Actions-Monitor'
   };
   if (token) headers.Authorization = `Bearer ${token}`;
 
@@ -122,7 +122,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     backgroundColor: '#07111f',
-    title: 'CodexPro GitHub Actions Monitor',
+    title: 'GitHub Actions Monitor',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
