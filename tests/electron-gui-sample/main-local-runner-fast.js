@@ -133,8 +133,28 @@ function runnerConsoleRendererScript() {
   const style = document.createElement('style');
   style.id = 'github-actions-monitor-runner-console-fast-style';
   style.textContent = `
-    .app { grid-template-rows: auto auto minmax(0,1fr) 210px !important; }
-    .runner-console-panel { min-height:0; border-top:1px solid rgba(63,91,126,.55); background:#050d17; display:flex; flex-direction:column; }
+    html, body { height:100% !important; min-height:0 !important; overflow:hidden !important; }
+    .app {
+      height:100vh !important;
+      min-height:0 !important;
+      overflow:hidden !important;
+      grid-template-rows:auto auto minmax(0,1fr) 210px !important;
+    }
+    .layout { min-height:0 !important; overflow:hidden !important; }
+    .runs, .details { min-height:0 !important; overflow:auto !important; }
+    .runner-console-panel {
+      grid-row:4;
+      width:100%;
+      min-width:0;
+      min-height:0;
+      overflow:hidden;
+      border-top:1px solid rgba(63,91,126,.55);
+      background:#050d17;
+      display:flex;
+      flex-direction:column;
+      position:relative;
+      z-index:8;
+    }
     .runner-console-head { height:42px; flex:0 0 42px; padding:0 16px; display:flex; align-items:center; gap:11px; border-bottom:1px solid rgba(63,91,126,.36); background:#081321; }
     .runner-console-title { font-weight:850; font-size:13px; color:#eaf3ff; }
     .runner-console-runner { color:#8fa7c6; font-size:12px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
