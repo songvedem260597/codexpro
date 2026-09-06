@@ -35,10 +35,11 @@ jobs:
       - name: Install monitor locally
         shell: powershell
         run: |
-          $source = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample\dist\CodexProActionsMonitor-win32-x64'
-          $installDir = Join-Path $env:LOCALAPPDATA 'CodexProActionsMonitor'
-          $exe = Join-Path $installDir 'CodexProActionsMonitor.exe'
+          $source = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample\dist\GitHubActionsMonitor-win32-x64'
+          $installDir = Join-Path $env:LOCALAPPDATA 'GitHubActionsMonitor'
+          $exe = Join-Path $installDir 'GitHubActionsMonitor.exe'
 
+          Get-Process GitHubActionsMonitor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Get-Process CodexProActionsMonitor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           Start-Sleep -Milliseconds 500
 
@@ -47,12 +48,13 @@ jobs:
           Copy-Item -Path (Join-Path $source '*') -Destination $installDir -Recurse -Force
 
           $desktop = [Environment]::GetFolderPath('Desktop')
-          $shortcutPath = Join-Path $desktop 'CodexPro Actions Monitor.lnk'
+          Remove-Item (Join-Path $desktop 'CodexPro Actions Monitor.lnk') -Force -ErrorAction SilentlyContinue
+          $shortcutPath = Join-Path $desktop 'GitHub Actions Monitor.lnk'
           $wshell = New-Object -ComObject WScript.Shell
           $shortcut = $wshell.CreateShortcut($shortcutPath)
           $shortcut.TargetPath = $exe
           $shortcut.WorkingDirectory = $installDir
-          $shortcut.Description = 'Monitor GitHub Actions for CodexPro'
+          $shortcut.Description = 'Monitor GitHub Actions across repositories'
           $shortcut.Save()
 
           if (-not (Test-Path $exe)) { throw 'Installed monitor executable was not found.' }
@@ -61,9 +63,9 @@ jobs:
       - name: Launch installed monitor
         shell: powershell
         run: |
-          $installDir = Join-Path $env:LOCALAPPDATA 'CodexProActionsMonitor'
-          $exe = Join-Path $installDir 'CodexProActionsMonitor.exe'
-          $marker = Join-Path $env:RUNNER_TEMP 'codexpro-actions-monitor-ready.txt'
+          $installDir = Join-Path $env:LOCALAPPDATA 'GitHubActionsMonitor'
+          $exe = Join-Path $installDir 'GitHubActionsMonitor.exe'
+          $marker = Join-Path $env:RUNNER_TEMP 'github-actions-monitor-ready.txt'
           Remove-Item $marker -Force -ErrorAction SilentlyContinue
           $env:CODEXPRO_ELECTRON_TEST_MARKER = $marker
           Start-Process -FilePath $exe -WorkingDirectory $installDir
@@ -83,6 +85,6 @@ jobs:
         if: always()
         shell: powershell
         run: |
-          Remove-Item -Force "$env:RUNNER_TEMP\codexpro-actions-monitor-ready.txt" -ErrorAction SilentlyContinue
+          Remove-Item -Force "$env:RUNNER_TEMP\github-actions-monitor-ready.txt" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\tests\electron-gui-sample\node_modules" -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\tests\electron-gui-sample\dist" -ErrorAction SilentlyContinue
