@@ -1,5 +1,6 @@
 param(
-  [string]$OutputDir = "$env:RUNNER_TEMP\codexpro-gui-probe"
+  [string]$OutputDir = "$env:RUNNER_TEMP\codexpro-gui-probe",
+  [string]$ElectronExe = $env:CODEXPRO_GUI_ELECTRON_EXE
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,14 +37,18 @@ $chrome = Find-Chrome
 $electronBefore = Get-ElectronLikeProcessCount
 $chromeBefore = @(Get-Process chrome -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
 $newChromeIds = @()
+$newElectronIds = @()
 $screenshotCreated = $false
 $chromeLaunchOk = $false
+$electronTargetConfigured = [bool]($ElectronExe -and (Test-Path $ElectronExe))
+$electronLaunchOk = $false
 
 try {
   if ($chrome) {
     $profileDir = Join-Path $OutputDir 'chrome-profile'
     New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
-    $page = 'data:text/html,<html><body style="font-family:sans-serif"><h1>CodexPro GUI probe</h1><p>Chrome launched from the self-hosted runner.</p></body></html>'
+    $docsPath = (Resolve-Path (Join-Path $PSScriptRoot '..\docs\index.html')).Path
+    $page = ([Uri]$docsPath).AbsoluteUri
     Start-Process -FilePath $chrome -ArgumentList @(
       '--new-window',
       '--no-first-run',
@@ -56,6 +61,16 @@ try {
     $chromeAfter = @(Get-Process chrome -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
     $newChromeIds = @($chromeAfter | Where-Object { $_ -notin $chromeBefore })
     $chromeLaunchOk = $newChromeIds.Count -gt 0
+  }
+
+  if ($electronTargetConfigured) {
+    $electronName = [System.IO.Path]::GetFileNameWithoutExtension($ElectronExe)
+    $electronBeforeIds = @(Get-Process -Name $electronName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+    Start-Process -FilePath $ElectronExe | Out-Null
+    Start-Sleep -Seconds 5
+    $electronAfterIds = @(Get-Process -Name $electronName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+    $newElectronIds = @($electronAfterIds | Where-Object { $_ -notin $electronBeforeIds })
+    $electronLaunchOk = $newElectronIds.Count -gt 0
   }
 
   if ($interactiveDesktop) {
@@ -83,6 +98,8 @@ try {
     chrome_found = [bool]$chrome
     chrome_launch_ok = $chromeLaunchOk
     chrome_test_processes = $newChromeIds.Count
+    electron_target_configured = $electronTargetConfigured
+    electron_launch_ok = $electronLaunchOk
     electron_like_processes_before = $electronBefore
     electron_like_processes_after = $electronAfter
     screenshot_created = $screenshotCreated
@@ -92,6 +109,7 @@ try {
 
   Write-Host "GUI_PROBE interactive_desktop=$interactiveDesktop"
   Write-Host "GUI_PROBE chrome_found=$([bool]$chrome) chrome_launch_ok=$chromeLaunchOk"
+  Write-Host "GUI_PROBE electron_target_configured=$electronTargetConfigured electron_launch_ok=$electronLaunchOk"
   Write-Host "GUI_PROBE electron_like_processes=$electronAfter"
   Write-Host "GUI_PROBE screenshot_created=$screenshotCreated"
 
@@ -103,6 +121,9 @@ try {
   }
 } finally {
   foreach ($id in $newChromeIds) {
+    try { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue } catch {}
+  }
+  foreach ($id in $newElectronIds) {
     try { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue } catch {}
   }
   $profileDir = Join-Path $OutputDir 'chrome-profile'
