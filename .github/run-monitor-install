@@ -1,2 +1,2 @@
-install CodexPro Actions Monitor on local runner
-version: live-task-durations
+install GitHub Actions Monitor on local runner
+version: generic-multi-repo-status-ui
