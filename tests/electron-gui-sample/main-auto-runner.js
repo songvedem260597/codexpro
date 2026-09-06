@@ -1,13 +1,77 @@
-const { app } = require('electron');
+const { app, BrowserWindow, ipcMain, safeStorage } = require('electron');
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const DEFAULT_REPO = 'songvedem260597/codexpro';
 const DEFAULT_RUNNER_NAME = 'codexpro-pc';
+const REMEMBER_TOKEN_CHANNELS = new Set(['actions:repos', 'actions:list', 'actions:jobs', 'runner:start']);
 let watchdogTimer = null;
 let starting = false;
 let lastHiddenStart = null;
+
+function tokenStorePath() {
+  return path.join(app.getPath('userData'), 'github-token.enc');
+}
+
+function saveRememberedToken(token) {
+  const value = String(token || '').trim();
+  if (!value || !safeStorage.isEncryptionAvailable()) return false;
+  try {
+    const encrypted = safeStorage.encryptString(value);
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    fs.writeFileSync(tokenStorePath(), encrypted.toString('base64'), { encoding: 'utf8', mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readRememberedToken() {
+  if (!safeStorage.isEncryptionAvailable()) return '';
+  try {
+    const encoded = fs.readFileSync(tokenStorePath(), 'utf8').trim();
+    if (!encoded) return '';
+    return safeStorage.decryptString(Buffer.from(encoded, 'base64'));
+  } catch {
+    return '';
+  }
+}
+
+function installTokenRemembering() {
+  const originalHandle = ipcMain.handle.bind(ipcMain);
+  ipcMain.handle = (channel, listener) => originalHandle(channel, async (event, ...args) => {
+    const result = await listener(event, ...args);
+    if (REMEMBER_TOKEN_CHANNELS.has(channel)) {
+      const token = String(args?.[0]?.token || '').trim();
+      if (token) saveRememberedToken(token);
+    }
+    return result;
+  });
+}
+
+function injectRememberedToken(win) {
+  if (!win || win.isDestroyed()) return;
+  const token = readRememberedToken();
+  if (!token) return;
+  const script = `(() => {
+    const input = document.getElementById('token');
+    if (!input || String(input.value || '').trim()) return false;
+    input.value = ${JSON.stringify(token)};
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    setTimeout(() => input.dispatchEvent(new Event('change', { bubbles: true })), 80);
+    return true;
+  })()`;
+  win.webContents.executeJavaScript(script, true).catch(() => {});
+}
+
+installTokenRemembering();
+
+app.on('browser-window-created', (_event, win) => {
+  win.webContents.on('did-finish-load', () => {
+    setTimeout(() => injectRememberedToken(win), 350);
+  });
+});
 
 function runnerCandidates() {
   const candidates = [];
