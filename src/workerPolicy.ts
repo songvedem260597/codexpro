@@ -312,6 +312,20 @@ export function readWorkerJob(jobId: string): WorkerJobRecord | undefined {
   return reconcileWorkerJobRecordWithWorkspace(readWorkerJobFile(jobId));
 }
 
+export function workerJobHasLegacyStaleCancellation(record: WorkerJobRecord | undefined): boolean {
+  if (!record || record.status !== "cancelled" || record.kind !== "code" || !record.root
+    || !record.startedAt || !record.finishedAt || record.completionConfirmed || record.summary || record.error) return false;
+  // Fail closed on explicit terminal actions, including an old reconciliation
+  // followed by a deliberate cancel. Missing/truncated provenance is not proof.
+  if (record.events.some(item => item.type === "finalized")) return false;
+  const terminal = record.events.filter(item => item.type === "workspace_status_reconciled").at(-1);
+  if (terminal?.details?.status !== "cancelled" || terminal.details.workspace_finished_at !== record.finishedAt) return false;
+  const task = readWorkspaceCoordination(record.root).tasks[record.jobId];
+  if (!task || task.status !== "running" || task.finishedAt || workerOwnerKey(task.workerId) !== workerOwnerKey(record.workerId)) return false;
+  const elapsed = Date.parse(record.finishedAt) - Date.parse(task.updatedAt || task.startedAt);
+  return Number.isFinite(elapsed) && elapsed > 6 * 60 * 60 * 1000;
+}
+
 export function listWorkerJobs(options: { statuses?: WorkerJobStatus[]; limit?: number } = {}): WorkerJobRecord[] {
   const limit = Math.max(1, Math.min(200, Math.floor(Number(options.limit) || 50)));
   const statuses = new Set((Array.isArray(options.statuses) ? options.statuses : [])
@@ -651,6 +665,7 @@ export async function resumeWorkerJob(input: {
   workspaceId: string;
   scope: WorkerJobScope;
   resumeKey: string;
+  recoverStaleCancellation?: boolean;
   rulesHash?: string;
   rulesPath?: string;
   agentsFiles?: string[];
@@ -663,7 +678,8 @@ export async function resumeWorkerJob(input: {
   let rulesChanged = false;
   const record = await updateWorkerJob(input.jobId, (current) => {
     if (!current) throw new Error("Worker job was not prepared.");
-    if (current.status !== "running") throw new Error(`WORKER_JOB_RESUME_NOT_RUNNING: task status is ${current.status}.`);
+    const recoveringStale = input.recoverStaleCancellation === true && workerJobHasLegacyStaleCancellation(current);
+    if (current.status !== "running" && !recoveringStale) throw new Error(`WORKER_JOB_RESUME_NOT_RUNNING: task status is ${current.status}.`);
     if (workerOwnerKey(current.workerId) !== workerOwnerKey(input.workerId)) throw new Error("WORKER_JOB_RESUME_OWNER_MISMATCH: worker job owner mismatch.");
     if (current.kind !== "code") throw new Error(`WORKER_JOB_RESUME_KIND_MISMATCH: task kind is ${current.kind || "unknown"}.`);
     if (current.scope !== input.scope) throw new Error("WORKER_JOB_RESUME_SCOPE_MISMATCH: task scope changed.");
@@ -679,9 +695,14 @@ export async function resumeWorkerJob(input: {
     if (!resumeKey) throw new Error("WORKER_JOB_RESUME_KEY_REQUIRED: resume key is required.");
     deduplicated = current.events.some((item) => item.type === "resumed" && clean(item.details?.resume_key, 160) === resumeKey);
     rulesChanged = Boolean(current.rulesHash && input.rulesHash && current.rulesHash !== input.rulesHash);
+    const recoveryEvents = recoveringStale ? [...current.events, event("stale_cancellation_recovered", {
+      reason: "legacy_six_hour_reconciliation", previous_status: current.status,
+      previous_finished_at: current.finishedAt, resume_key: resumeKey,
+      worker_id: input.workerId, workspace_id: input.workspaceId
+    })] : current.events;
     const nextEvents = deduplicated
       ? current.events
-      : [...current.events, event("resumed", {
+      : [...recoveryEvents, event("resumed", {
           resume_key: resumeKey,
           worker_id: input.workerId,
           root: input.root,
@@ -691,6 +712,7 @@ export async function resumeWorkerJob(input: {
 
     return {
       ...current,
+      ...(recoveringStale ? { status: "running" as const, finishedAt: undefined } : {}),
       workerId: input.workerId,
       root: input.root,
       workspaceId: input.workspaceId,

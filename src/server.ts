@@ -25,9 +25,9 @@ import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileTaskBinding, getBrowserExtensionProfileWorkspaceBinding, getBrowserExtensionTaskOwners, listBrowserExtensionProfiles, rebindBrowserExtensionProfileTaskConversation, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
-import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, resumeWorkerJob, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
+import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, resumeWorkerJob, workerJobHasLegacyStaleCancellation, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
 import { classifiedWorkerJobPublicRecord, createWorkerJobToolDefinitions } from "./workerJobTools.js";
-import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, verifyWorkspaceTaskResume, type WorkspaceTaskContext } from "./workspaceCoordination.js";
+import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, verifyWorkspaceTaskResume, withVerifiedWorkspaceTaskResume, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const CODEXPRO_GLOBAL_RULES_FILE = "CODEXPRO.md";
@@ -2247,7 +2247,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       description: "Restore the in-memory gate for the exact already-running CodexPro task after an MCP/runtime restart without preparing a new task, opening a chat, or replaying prior actions.",
       inputSchema: {
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/),
-        profile_id: z.string().regex(WORKER_PROFILE_ID_PATTERN).optional()
+        profile_id: z.string().regex(WORKER_PROFILE_ID_PATTERN).optional(),
+        recover_stale_cancellation: z.boolean().optional().describe("Explicitly recover a proven legacy timeout reconciliation only when raw coordination remains running. Never revives deliberately finalized tasks.")
       },
       annotations: { ...HANDOFF_WRITE_ANNOTATIONS, idempotentHint: true }
     },
@@ -2270,13 +2271,23 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
 
       const durableBefore = readWorkerJob(taskId);
-      if (!durableBefore || durableBefore.status !== "running" || durableBefore.kind !== "code") {
+      const canResume = (job: WorkerJobRecord | undefined) => job?.kind === "code" && (job.status === "running"
+        || (args.recover_stale_cancellation === true && workerJobHasLegacyStaleCancellation(job)));
+      if (!durableBefore || !canResume(durableBefore)) {
         throw new CodexProError(`REPO_TASK_RESUME_NOT_RUNNING: ${taskId} is not an active running code task.`, {
           code: "REPO_TASK_RESUME_NOT_RUNNING",
           details: { task_id: taskId, status: durableBefore?.status || "missing", kind: durableBefore?.kind || null }
         });
       }
       const normalizeWorkerOwner = (value: string) => String(value || "").trim().replace(/^browser:/, "");
+      const assertResumeStillCurrent = () => {
+        const current = readWorkerJob(taskId);
+        const binding = getBrowserExtensionProfileTaskBinding(profileId);
+        if (!current || current.status !== "running" || normalizeWorkerOwner(current.workerId) !== normalizeWorkerOwner(profileId)
+          || (binding?.taskId && binding.taskId !== taskId)) {
+          throw new CodexProError("REPO_TASK_RESUME_CHANGED: task or owner changed before gate publication.", { code: "REPO_TASK_RESUME_CHANGED", details: { task_id: taskId, status: current?.status } });
+        }
+      };
       if (normalizeWorkerOwner(durableBefore.workerId) !== normalizeWorkerOwner(profileId)) {
         throw new CodexProError("REPO_TASK_RESUME_OWNER_MISMATCH: durable worker ownership does not match this profile.", {
           code: "REPO_TASK_RESUME_OWNER_MISMATCH",
@@ -2317,7 +2328,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       const existingActive = activeRepoTaskByProfile.get(profileId);
       const existingExpected = expectedRepoTask(profileId);
       const latestRules = readGlobalRulesSnapshotSync();
-      if (existingActive
+      if (durableBefore.status === "running" && existingActive
         && existingExpected
         && existingActive.taskId === taskId
         && existingExpected.taskId === taskId
@@ -2325,7 +2336,11 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         && existingExpected.scope === durableScope
         && sameResolvedRoot(existingActive.root, durableBefore.root)
         && existingActive.globalRulesSha256 === latestRules.sha256) {
+        const context = { taskId, root: durableBefore.root, workerId: profileId };
+        const verified = await verifyWorkspaceTaskResume(context);
+        await withVerifiedWorkspaceTaskResume(context, verified, async () => assertResumeStillCurrent());
         const worktree = repoTaskWorktree(existingActive);
+        assertResumeStillCurrent();
         activeRepoTaskByServer.set(server as object, existingActive);
         return textResult(`# Repo Task Gate Ready\n\nTask: ${taskId}\nProfile: ${profileId}\n\nThe existing task gate is already valid; no task action was replayed.`, {
           resumed: true,
@@ -2363,7 +2378,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       if (!resumePromise) {
         resumePromise = (async () => {
           const durableJob = readWorkerJob(taskId);
-          if (!durableJob || durableJob.status !== "running" || durableJob.kind !== "code") {
+          if (!durableJob || !canResume(durableJob)) {
             throw new CodexProError(`REPO_TASK_RESUME_NOT_RUNNING: ${taskId} stopped before recovery completed.`, {
               code: "REPO_TASK_RESUME_NOT_RUNNING",
               details: { task_id: taskId, status: durableJob?.status || "missing" }
@@ -2394,13 +2409,14 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             includeDiff: false
           });
           const agentsSha256 = createHash("sha256").update(codexContext.text).digest("hex");
-          const resumedJob = await resumeWorkerJob({
+          const resumedJob = await withVerifiedWorkspaceTaskResume({ taskId, root: workspace.root, workerId: profileId }, coordinationTask, () => resumeWorkerJob({
             jobId: taskId,
             workerId: profileId,
             root: workspace.root,
             workspaceId: workspace.id,
             scope,
             resumeKey: `${repoTaskRuntimeResumeKey}:${profileId}:${taskId}`,
+            recoverStaleCancellation: args.recover_stale_cancellation === true,
             rulesHash: globalRules.sha256,
             rulesPath: globalRules.path,
             agentsFiles: codexContext.agentsFiles,
@@ -2408,7 +2424,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             codexGraphActive: true,
             codexGraphSymbolCount: codexGraph.coverage.symbolCount,
             codexGraphRelationshipCount: codexGraph.coverage.relationshipCount
-          });
+          }));
           const proof: RepoTaskProof = {
             taskId,
             taskTitle: durableJob.title,
@@ -2426,6 +2442,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             agentsSha256,
             codexGraph
           };
+          assertResumeStillCurrent();
           rememberRepoTaskProof(proof);
           rememberExpectedRepoTask(profileId, { taskId, root: workspace.root, scope });
           const activeTask: ActiveRepoTask = {
@@ -2493,6 +2510,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         worktreeRoot: recovered.worktreeRoot,
         worktreeBranch: recovered.worktreeBranch
       };
+      assertResumeStillCurrent();
       activeRepoTaskByProfile.set(profileId, activeTask);
       activeRepoTaskByServer.set(server as object, activeTask);
       return textResult(`# Repo Task Resumed\n\nTask: ${taskId}\nProfile: ${profileId}\nWorktree: ${recovered.worktreeRoot}\n\nThe existing task gate was restored without replaying prior task actions.`, {

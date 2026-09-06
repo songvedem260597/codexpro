@@ -12,7 +12,6 @@ const LOCK_RETRY_MS = 25;
 const LOCK_ATTEMPTS = 200;
 const STALE_LOCK_MS = 30_000;
 const STALE_INTEGRATION_LEASE_MS = 10 * 60 * 1000;
-const STALE_TASK_MS = 6 * 60 * 60 * 1000;
 const INTEGRATION_QUEUE_WAIT_MS = 2 * 60 * 1000;
 const INTEGRATION_QUEUE_POLL_MS = 50;
 
@@ -342,24 +341,15 @@ async function acquireStateLock(root: string): Promise<() => Promise<void>> {
 
 function cleanupStaleState(state: WorkspaceCoordinationState): void {
   const now = Date.now();
-  const staleTaskIds = new Set<string>();
-  for (const task of Object.values(state.tasks)) {
-    if (task.status !== "running") continue;
-    const updated = Date.parse(task.updatedAt || task.startedAt);
-    if (Number.isFinite(updated) && now - updated > STALE_TASK_MS) {
-      task.status = "cancelled";
-      task.finishedAt = nowIso();
-      task.updatedAt = task.finishedAt;
-      staleTaskIds.add(task.taskId);
-    }
-  }
+  // Inactivity is not cancellation. A disconnected/blocked worker may still
+  // own unfinished source. Only an explicit lifecycle transition ends a task.
   for (const [claimPath, claim] of Object.entries(state.claims)) {
     const task = state.tasks[claim.taskId];
-    if (!task || task.status !== "running" || staleTaskIds.has(claim.taskId)) delete state.claims[claimPath];
+    if (!task || task.status !== "running") delete state.claims[claimPath];
   }
   state.integrationQueue = state.integrationQueue.filter((entry) => {
     const task = state.tasks[entry.taskId];
-    return Boolean(task && task.status === "running" && !staleTaskIds.has(entry.taskId));
+    return Boolean(task && task.status === "running");
   });
   if (state.integrationLease) {
     const leaseTask = state.tasks[state.integrationLease.taskId];
@@ -505,6 +495,54 @@ export async function verifyWorkspaceTaskResume(context: WorkspaceTaskContext): 
     });
   }
   return { ...task, worktreeRoot: canonicalRoot(recordedWorktree) };
+}
+
+// Git verification happens before locking; no long-running subprocess may
+// outlive the coordination lock lease. Recheck ownership before durable resume.
+export async function withVerifiedWorkspaceTaskResume<T>(
+  context: WorkspaceTaskContext,
+  verified: WorkspaceTaskRecord,
+  resume: () => Promise<T>
+): Promise<T> {
+  const root = canonicalRoot(context.root);
+  const release = await acquireStateLock(root);
+  try {
+    const state = readState(root);
+    const current = state.tasks[context.taskId];
+    if (!current || current.status !== "running" || current.finishedAt
+      || JSON.stringify({ ...current, worktreeRoot: canonicalRoot(current.worktreeRoot || root) }) !== JSON.stringify(verified)) {
+      throw new CodexProError("WORKSPACE_TASK_RESUME_CHANGED: task changed during resume verification; retry after checking its owner.", { code: "WORKSPACE_TASK_RESUME_CHANGED" });
+    }
+    const normalizeOwner = (value: string) => value.replace(/^browser:/, "");
+    const overlap = (left: string, right: string) => {
+      const relative = path.relative(canonicalRoot(left), canonicalRoot(right));
+      return !relative || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+    };
+    for (const other of Object.values(state.tasks)) {
+      if (other.taskId === current.taskId || other.status !== "running") continue;
+      const otherRoot = other.worktreeRoot || root;
+      if (normalizeOwner(other.workerId) === normalizeOwner(current.workerId)
+        || overlap(current.worktreeRoot!, otherRoot) || overlap(otherRoot, current.worktreeRoot!)) {
+        throw new CodexProError("WORKSPACE_TASK_RESUME_WRITER_CONFLICT: another active task may write this worktree or owns this worker.", { code: "WORKSPACE_TASK_RESUME_WRITER_CONFLICT", details: { other_task_id: other.taskId } });
+      }
+    }
+    for (const relPath of uniquePaths([...current.claimedPaths, ...current.touchedPaths])) {
+      if (claimOwner(state, relPath) !== current.taskId) {
+        throw new CodexProError("WORKSPACE_TASK_RESUME_CLAIM_CONFLICT: source claim is missing or belongs to another task.", { code: "WORKSPACE_TASK_RESUME_CLAIM_CONFLICT", details: { path: relPath } });
+      }
+    }
+    const integrationTask = state.integrationLease && state.tasks[state.integrationLease.taskId];
+    const acquiredAt = Date.parse(state.integrationLease?.acquiredAt || "");
+    if (state.integrationLease && integrationTask?.status === "running"
+      && (!Number.isFinite(acquiredAt) || Date.now() - acquiredAt <= STALE_INTEGRATION_LEASE_MS)) {
+      throw new CodexProError("WORKSPACE_TASK_RESUME_INTEGRATION_BUSY: finish the active integration before resuming.", { code: "WORKSPACE_TASK_RESUME_INTEGRATION_BUSY" });
+    }
+    // Do not rewrite coordination or reclaim paths: preserve the raw running
+    // record as evidence. The worker transition is conditional and atomic.
+    return await resume();
+  } finally {
+    await release();
+  }
 }
 
 export async function registerWorkspaceTask(context: WorkspaceTaskContext): Promise<WorkspaceTaskRecord> {

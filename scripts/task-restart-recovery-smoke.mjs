@@ -94,6 +94,8 @@ const port = await getFreePort();
 const token = createHash('sha256').update('running restart recovery smoke').digest('hex');
 const profileId = 'restart-running-profile';
 const taskId = 'cpt_343434343434343434343434';
+const recoverLegacy = process.argv.includes('--legacy-stale');
+const resumeArgs = { task_id: taskId, profile_id: profileId, recover_stale_cancellation: recoverLegacy };
 const env = {
   ...process.env,
   CODEXPRO_ROOT: fixtureRoot,
@@ -157,6 +159,14 @@ try {
   const before = await callTool(worker, 'worker_job_status', { task_id: taskId });
   const startedAt = String(before.structuredContent.job?.started_at || '');
   const progressSequence = Number(before.structuredContent.job?.progress_sequence || 0);
+  const coordinationFile = path.join(codexProHome, 'workspace-coordination', (await fs.readdir(path.join(codexProHome, 'workspace-coordination'))).find(name => name.endsWith('.json')));
+  const jobFile = path.join(codexProHome, 'worker-jobs', `${taskId}.json`);
+  const oldAt = new Date(Date.now() - 14 * 60 * 60 * 1000).toISOString();
+  const coordinationBefore = JSON.parse(await fs.readFile(coordinationFile, 'utf8'));
+  coordinationBefore.tasks[taskId].updatedAt = oldAt;
+  await fs.writeFile(coordinationFile, JSON.stringify(coordinationBefore));
+  const idleStatus = await callTool(worker, 'worker_job_status', { task_id: taskId });
+  if (idleStatus.structuredContent.job?.status !== 'running') throw new Error('idle task was cancelled merely by reading status after six hours');
   await worker.close();
   worker = undefined;
 
@@ -168,22 +178,32 @@ try {
 
   child.kill('SIGTERM');
   await waitForExit(child);
+  // Reproduce the exact legacy split-state bug without mutating real user data.
+  if (recoverLegacy) {
+    const legacyJob = JSON.parse(await fs.readFile(jobFile, 'utf8'));
+    const cancelledAt = new Date().toISOString();
+    legacyJob.status = 'cancelled';
+    legacyJob.finishedAt = cancelledAt;
+    legacyJob.events.push({ at: cancelledAt, type: 'workspace_status_reconciled', details: { status: 'cancelled', workspace_finished_at: cancelledAt } });
+    await fs.writeFile(jobFile, JSON.stringify(legacyJob));
+  }
   await fs.rm(path.join(codexProHome, 'browser-profile-tasks.json'), { force: true });
   await fs.writeFile(path.join(codexProHome, 'CODEXPRO.md'), '# Recovery smoke rules changed after restart\n- revalidate task state\n', 'utf8');
   child = startServer();
   await waitForListening(child);
 
   wrongOwner = await createClient('running-restart-wrong-owner', 'restart-running-wrong-owner');
-  await expectToolErrorCode(wrongOwner, 'resume_repo_task', { task_id: taskId, profile_id: 'restart-running-wrong-owner' }, 'REPO_TASK_RESUME_OWNER_MISMATCH');
+  await expectToolErrorCode(wrongOwner, 'resume_repo_task', { task_id: taskId, profile_id: 'restart-running-wrong-owner', recover_stale_cancellation: true }, 'REPO_TASK_RESUME_OWNER_MISMATCH');
   await wrongOwner.close();
   wrongOwner = undefined;
 
   worker = await createClient('running-restart-after-server-restart', profileId);
   await expectToolErrorCode(worker, 'read', { path: 'unfinished.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
+  if (recoverLegacy) await expectToolErrorCode(worker, 'resume_repo_task', { task_id: taskId, profile_id: profileId }, 'REPO_TASK_RESUME_NOT_RUNNING');
   const hiddenWorktreeRoot = `${worktreeRoot}-temporarily-missing`;
   await fs.rename(worktreeRoot, hiddenWorktreeRoot);
   try {
-    await expectToolErrorCode(worker, 'resume_repo_task', { task_id: taskId, profile_id: profileId }, 'WORKSPACE_TASK_WORKTREE_MISSING');
+    await expectToolErrorCode(worker, 'resume_repo_task', { task_id: taskId, profile_id: profileId, recover_stale_cancellation: true }, 'WORKSPACE_TASK_WORKTREE_MISSING');
   } finally {
     await fs.rename(hiddenWorktreeRoot, worktreeRoot);
   }
@@ -199,7 +219,7 @@ try {
   child = startServer();
   await waitForListening(child);
   worker = await createClient('running-restart-revoked-root', profileId);
-  const revoked = await worker.callTool({ name: 'resume_repo_task', arguments: { task_id: taskId, profile_id: profileId } });
+  const revoked = await worker.callTool({ name: 'resume_repo_task', arguments: { task_id: taskId, profile_id: profileId, recover_stale_cancellation: true } });
   const revokedMessage = String(revoked?.content?.find?.((part) => part.type === 'text')?.text || '');
   if (!revoked?.isError || !revokedMessage.includes('outside allowed roots')) {
     throw new Error(`resume did not fail closed after workspace permission was revoked: ${JSON.stringify(revoked?.structuredContent)}`);
@@ -215,9 +235,45 @@ try {
 
   worker = await createClient('running-restart-final-recovery', profileId);
   workerSibling = await createClient('running-restart-concurrent-recovery', profileId);
+  async function rejectFixtureMutation(file, mutate, code) {
+    const original = await fs.readFile(file, 'utf8');
+    const changed = JSON.parse(original);
+    mutate(changed);
+    const fixture = JSON.stringify(changed);
+    await fs.writeFile(file, fixture);
+    try {
+      await expectToolErrorCode(worker, 'resume_repo_task', resumeArgs, code);
+      if (await fs.readFile(file, 'utf8') !== fixture) throw new Error('rejected recovery mutated durable fixture');
+      await expectToolErrorCode(worker, 'read', { path: 'unfinished.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
+    } finally {
+      await fs.writeFile(file, original);
+    }
+  }
+  if (recoverLegacy) {
+    for (const mutate of [
+      job => { job.events = []; },
+      job => { job.finishedAt = oldAt; },
+      job => { job.status = 'completed'; },
+      job => { job.status = 'failed'; },
+      job => { job.events.push({ at: new Date().toISOString(), type: 'finalized', details: { outcome: 'cancelled' } }); }
+    ]) await rejectFixtureMutation(jobFile, mutate, 'REPO_TASK_RESUME_NOT_RUNNING');
+    await rejectFixtureMutation(coordinationFile, state => { state.tasks[taskId].status = 'cancelled'; }, 'REPO_TASK_RESUME_NOT_RUNNING');
+  }
+  await rejectFixtureMutation(coordinationFile, state => { delete state.claims['unfinished.txt']; }, 'WORKSPACE_TASK_RESUME_CLAIM_CONFLICT');
+  await rejectFixtureMutation(coordinationFile, state => { state.claims['unfinished.txt'].taskId = 'cpt_565656565656565656565656'; }, 'WORKSPACE_TASK_RESUME_CLAIM_CONFLICT');
+  await rejectFixtureMutation(coordinationFile, state => {
+    const otherId = 'cpt_565656565656565656565656';
+    state.tasks[otherId] = { ...state.tasks[taskId], taskId: otherId, workerId: 'other-worker' };
+  }, 'WORKSPACE_TASK_RESUME_WRITER_CONFLICT');
+  await rejectFixtureMutation(coordinationFile, state => {
+    state.integrationLease = { taskId, acquiredAt: new Date().toISOString() };
+  }, 'WORKSPACE_TASK_RESUME_INTEGRATION_BUSY');
+  const orphanLeaseState = JSON.parse(await fs.readFile(coordinationFile, 'utf8'));
+  orphanLeaseState.integrationLease = { taskId, acquiredAt: oldAt };
+  await fs.writeFile(coordinationFile, JSON.stringify(orphanLeaseState));
   const [resumed, concurrentResumed] = await Promise.all([
-    callTool(worker, 'resume_repo_task', { task_id: taskId, profile_id: profileId }),
-    callTool(workerSibling, 'resume_repo_task', { task_id: taskId, profile_id: profileId })
+    callTool(worker, 'resume_repo_task', resumeArgs),
+    callTool(workerSibling, 'resume_repo_task', resumeArgs)
   ]);
   for (const result of [resumed, concurrentResumed]) {
     if (result.structuredContent.resumed !== true || result.structuredContent.gate_active !== true) {
@@ -237,8 +293,21 @@ try {
   if (!String(recoveredRead.structuredContent.text || '').includes('unfinished-diff')) throw new Error('recovered gate did not reopen exact worktree');
   const after = await callTool(worker, 'worker_job_status', { task_id: taskId });
   const job = after.structuredContent.job;
+  if (job?.status !== 'running') throw new Error('legacy stale cancellation was not recovered');
+  const persistedJob = JSON.parse(await fs.readFile(jobFile, 'utf8'));
+  if (persistedJob.events.filter(event => event.type === 'stale_cancellation_recovered').length !== (recoverLegacy ? 1 : 0)) throw new Error('concurrent recovery must record exactly one legacy recovery event');
+  if (JSON.stringify(JSON.parse(await fs.readFile(coordinationFile, 'utf8')).claims) !== JSON.stringify(coordinationBefore.claims)) throw new Error('recovery changed source claims');
   if (String(job?.started_at || '') !== startedAt) throw new Error('resume reset task started_at');
   if (Number(job?.progress_sequence || 0) !== progressSequence) throw new Error('resume duplicated/reset progress history');
+  const claimsBeforeRepeat = await fs.readFile(coordinationFile, 'utf8');
+  const missingClaim = JSON.parse(claimsBeforeRepeat);
+  delete missingClaim.claims['unfinished.txt'];
+  await fs.writeFile(coordinationFile, JSON.stringify(missingClaim));
+  try {
+    await expectToolErrorCode(worker, 'resume_repo_task', resumeArgs, 'WORKSPACE_TASK_RESUME_CLAIM_CONFLICT');
+  } finally {
+    await fs.writeFile(coordinationFile, claimsBeforeRepeat);
+  }
   if (job?.checklist?.[1]?.status !== 'in_progress') throw new Error('resume lost durable checklist state');
   if (await fs.readFile(path.join(worktreeRoot, 'unfinished.txt'), 'utf8') !== 'unfinished-diff\n') throw new Error('worktree diff changed during recovery');
   await fs.access(path.join(taskRoot, 'unfinished.txt')).then(() => { throw new Error('recovery leaked unfinished diff into primary repo'); }, () => {});
@@ -250,8 +319,9 @@ try {
   });
   if (cancelled.structuredContent.job?.status !== 'cancelled') throw new Error('fixture task did not reach terminal state');
   await expectToolErrorCode(worker, 'resume_repo_task', { task_id: taskId, profile_id: profileId }, 'REPO_TASK_RESUME_NOT_RUNNING');
+  await expectToolErrorCode(worker, 'resume_repo_task', { task_id: taskId, profile_id: profileId, recover_stale_cancellation: true }, 'REPO_TASK_RESUME_NOT_RUNNING');
 
-  console.log('✓ Running task restart recovery smoke test passed');
+  console.log(`✓ Running task restart recovery smoke test passed (${recoverLegacy ? 'legacy stale cancellation' : 'normal running'})`);
 } finally {
   if (wrongOwner) await wrongOwner.close().catch(() => {});
   if (workerSibling) await workerSibling.close().catch(() => {});
@@ -261,4 +331,11 @@ try {
     child.kill('SIGTERM');
     await waitForExit(child).catch(() => {});
   }
+}
+
+if (!recoverLegacy) {
+  const result = spawnSync(process.execPath, ['scripts/task-restart-recovery-smoke.mjs', '--legacy-stale'], {
+    cwd: process.cwd(), stdio: 'inherit', windowsHide: true
+  });
+  if (result.status !== 0) process.exitCode = result.status ?? 1;
 }
