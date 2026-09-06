@@ -22,18 +22,16 @@ bashSource = bashSource.replace(oldEncodedLine, newEncodedBlock);
 await fs.writeFile(bashPath, bashSource, 'utf8');
 
 let ciSource = await fs.readFile(ciPath, 'utf8');
-const windowsSkipComment = `      # scripts/stress.mjs currently builds a shell command that PowerShell parses
-      # differently on Windows. Linux/macOS keep full stress coverage while the
-      # Windows jobs still verify install/build/smoke/package without producing
-      # a false red workflow for that quoting-only test harness issue.
-`;
-ciSource = ciSource.replace(windowsSkipComment, '');
-const skipLine = "        if: runner.os != 'Windows'\n";
-const skipCount = ciSource.split(skipLine).length - 1;
-if (skipCount !== 2) {
-  throw new Error(`Expected exactly two Windows Stress Test skip lines, found ${skipCount}.`);
+ciSource = ciSource.replace(
+  /\s*# scripts\/stress\.mjs currently builds a shell command that PowerShell parses\r?\n\s*# differently on Windows\. Linux\/macOS keep full stress coverage while the\r?\n\s*# Windows jobs still verify install\/build\/smoke\/package without producing\r?\n\s*# a false red workflow for that quoting-only test harness issue\.\r?\n/g,
+  '\n'
+);
+const skipPattern = /^\s*if: runner\.os != 'Windows'\r?$/gm;
+const skipMatches = ciSource.match(skipPattern) || [];
+if (skipMatches.length !== 2) {
+  throw new Error(`Expected exactly two Windows Stress Test skip lines, found ${skipMatches.length}.`);
 }
-ciSource = ciSource.replaceAll(skipLine, '');
+ciSource = ciSource.replace(skipPattern, '');
 await fs.writeFile(ciPath, ciSource, 'utf8');
 
 for (const file of [
