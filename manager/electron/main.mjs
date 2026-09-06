@@ -37,6 +37,7 @@ import { createTaskHangTracker } from "./task-hang-tracker.mjs";
 import { createVisualWatchdogService } from "./visual-watchdog.mjs";
 import { ALL_ALLOWED_WORKSPACES, createManagerSettingsStore } from "./manager-settings-store.mjs";
 import { createManagerChatCache } from "./manager-chat-cache.mjs";
+import { createChatResponseCacheQuitCoordinator } from "./chat-response-cache-quit.mjs";
 import { createManagerChatDiagnostics } from "./manager-chat-diagnostics.mjs";
 import { createDiagnosticIpcRegistrar } from "./ipc/diagnostic-ipc.mjs";
 import { registerDiagnosticLogIpcHandlers } from "./ipc/diagnostic-log-ipc.mjs";
@@ -247,7 +248,52 @@ const {
   resetAppBackground,
   resetManagerSettings
 } = createManagerSettingsStore({ home: codexProHome, mimeTypeForFile });
-const { read: readManagerChatCache, get: getManagerChatCacheEntry, save: saveManagerChatCacheEntry } = createManagerChatCache({ home: codexProHome });
+let managerChatCacheMetricsLoggedAt = 0;
+const managerChatCache = createManagerChatCache({
+  home: codexProHome,
+  onMetrics: (metrics) => {
+    const at = Date.now();
+    const reason = String(metrics?.reason || "");
+    const important = reason === "write-failed" || reason === "flush-timeout" || at - managerChatCacheMetricsLoggedAt >= 2000;
+    if (!important) return;
+    managerChatCacheMetricsLoggedAt = at;
+    diagnostic(reason === "write-failed" || reason === "flush-timeout" ? "warn" : "info", "manager", "chat-cache", "Response cache file metrics", {
+      action: "response-cache-file-metrics",
+      reason,
+      save_received: Number(metrics?.saveRequestsReceived) || 0,
+      save_coalesced: Number(metrics?.saveRequestsCoalesced) || 0,
+      save_completed: Number(metrics?.saveRequestsCompleted) || 0,
+      save_failed: Number(metrics?.saveRequestsFailed) || 0,
+      pending: Number(metrics?.pending) || 0,
+      in_flight: Number(metrics?.inFlight) || 0,
+      payload_bytes: Number(metrics?.lastPayloadBytes) || 0,
+      file_bytes: Number(metrics?.lastFileBytes) || 0,
+      serialize_ms: Number(metrics?.lastSerializeMs) || 0,
+      write_ms: Number(metrics?.lastWriteMs) || 0,
+      event_loop_lag_ms: Number(metrics?.lastEventLoopLagMs) || 0
+    });
+  }
+});
+const {
+  read: readManagerChatCache,
+  get: getManagerChatCacheEntry,
+  save: saveManagerChatCacheEntry,
+  flush: flushManagerChatCache,
+  metrics: getManagerChatCacheMetrics,
+  hasPending: managerChatCacheHasPending
+} = managerChatCache;
+const managerChatCacheQuitCoordinator = createChatResponseCacheQuitCoordinator({
+  listRenderers: () => BrowserWindow.getAllWindows()
+    .filter((win) => win && !win.isDestroyed() && win.webContents && !win.webContents.isDestroyed())
+    .map((win) => win.webContents),
+  sendFlushRequest: (webContents, payload) => webContents.send("codexpro:flush-chat-response-cache", payload),
+  flushMainCache: ({ timeoutMs }) => flushManagerChatCache({ timeoutMs })
+});
+ipcMain.on("codexpro:chat-response-cache-flush-ack", (event, payload) => {
+  managerChatCacheQuitCoordinator.acknowledge(event.sender?.id, payload);
+});
+let managerChatCacheQuitFlushStarted = false;
+let managerChatCacheQuitFlushComplete = false;
 const { appendManagerChatLayoutLog, appendManagerChatResponseAuditLog, recordChatResponseAuditDiagnostic } = createManagerChatDiagnostics({ home: codexProHome, diagnostic });
 const apiWorkerStore = createApiWorkerStore({ home: codexProHome, safeStorage });
 workerPluginRegistry.register(createApiWorkerPlugin({
@@ -681,6 +727,26 @@ function createWindow() {
     }
   });
   win.removeMenu();
+  let managerChatCacheWindowCloseFlushStarted = false;
+  let managerChatCacheWindowCloseFlushComplete = false;
+  win.on("close", (event) => {
+    if (managerChatCacheQuitFlushComplete || managerChatCacheWindowCloseFlushComplete) return;
+    event.preventDefault();
+    if (managerChatCacheWindowCloseFlushStarted) return;
+    managerChatCacheWindowCloseFlushStarted = true;
+    void managerChatCacheQuitCoordinator.flushBeforeQuit({
+      rendererTimeoutMs: 1000,
+      mainTimeoutMs: 1200
+    }).catch((error) => {
+      diagnostic("warn", "manager", "chat-cache", "Flush response cache trước khi đóng cửa sổ thất bại", {
+        action: "response-cache-window-close-flush-error",
+        error
+      });
+    }).finally(() => {
+      managerChatCacheWindowCloseFlushComplete = true;
+      if (!win.isDestroyed()) win.close();
+    });
+  });
   let unresponsiveAt = 0;
   win.on("unresponsive", () => {
     unresponsiveAt = Date.now();
@@ -4282,6 +4348,7 @@ diagnosticIpcHandle("codexpro:get-profile-response", {
 }, (_event, payload) => getProfileResponse(payload));
 diagnosticIpcHandle("codexpro:get-chat-response-cache", { category: "chat", action: "get-chat-response-cache", failureMessage: "Đọc cache phản hồi thất bại", details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || "") }) }, (_event, payload) => getManagerChatCacheEntry(payload));
 diagnosticIpcHandle("codexpro:save-chat-response-cache", { category: "chat", action: "save-chat-response-cache", failureMessage: "Lưu cache phản hồi thất bại", details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || ""), message_count: Array.isArray(payload?.messages) ? payload.messages.length : 0 }) }, (_event, payload) => saveManagerChatCacheEntry(payload));
+diagnosticIpcHandle("codexpro:get-chat-response-cache-metrics", { category: "chat", action: "get-chat-response-cache-metrics", failureMessage: "Đọc số đo cache phản hồi thất bại" }, () => getManagerChatCacheMetrics());
 diagnosticIpcHandle("codexpro:get-repo-task-status", {
   category: "tool",
   action: "get-repo-task-status",
@@ -4541,9 +4608,47 @@ if (!hasSingleInstanceLock) {
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
   });
-  app.on("before-quit", () => {
+  app.on("before-quit", (event) => {
     returnToManagerShortcutRegistration?.unregister();
     returnToManagerShortcutRegistration = null;
     diagnostic("info", "electron", "runtime", "CodexPro Manager đang thoát", { action: "manager-before-quit" });
+    if (managerChatCacheQuitFlushComplete) return;
+    event.preventDefault();
+    if (managerChatCacheQuitFlushStarted) return;
+    managerChatCacheQuitFlushStarted = true;
+    const before = getManagerChatCacheMetrics();
+    diagnostic("info", "manager", "chat-cache", "Bắt đầu flush response cache trước khi thoát", {
+      action: "response-cache-before-quit-flush-start",
+      pending: Number(before?.pending) || 0,
+      in_flight: Number(before?.inFlight) || 0,
+      has_pending: managerChatCacheHasPending()
+    });
+    void managerChatCacheQuitCoordinator.flushBeforeQuit({
+      rendererTimeoutMs: 1000,
+      mainTimeoutMs: 1200
+    }).then((result) => {
+      const after = getManagerChatCacheMetrics();
+      diagnostic(result?.flushed ? "info" : "warn", "manager", "chat-cache", result?.flushed
+        ? "Flush response cache trước khi thoát hoàn tất"
+        : "Flush response cache trước khi thoát chưa hoàn tất", {
+        action: result?.flushed ? "response-cache-before-quit-flush-complete" : "response-cache-before-quit-flush-incomplete",
+        renderer_expected: Number(result?.renderer?.expected) || 0,
+        renderer_acknowledged: Number(result?.renderer?.acknowledged) || 0,
+        renderer_send_failed: Number(result?.renderer?.failedToSend) || 0,
+        renderer_timed_out: Boolean(result?.renderer?.timedOut),
+        main_flushed: Boolean(result?.main?.flushed),
+        main_timed_out: Boolean(result?.main?.timedOut),
+        pending: Number(after?.pending) || 0,
+        in_flight: Number(after?.inFlight) || 0
+      });
+    }).catch((error) => {
+      diagnostic("warn", "manager", "chat-cache", "Flush response cache trước khi thoát thất bại", {
+        action: "response-cache-before-quit-flush-error",
+        error
+      });
+    }).finally(() => {
+      managerChatCacheQuitFlushComplete = true;
+      app.quit();
+    });
   });
 }

@@ -11,6 +11,7 @@ import {
 } from "../chat-transcript.js";
 import { logicalTaskTracking } from "../conversation-message-limit.js";
 import { trimMapEntries } from "../performance-retention.js";
+import { createResponseCacheSaveQueue } from "../chat-response-cache-save-queue.js";
 
 function profileConversationTab(profile, conversationId) {
   return (profile?.conversation_tabs || []).find((tab) => String(tab?.url || "").includes(`/c/${conversationId}`)) || null;
@@ -20,6 +21,42 @@ export function useChatResponseCache({ api, requestTargetsRef, setRequestRespons
   const responseCacheLoads = useRef(new Map());
   const responseMemoryCache = useRef(new Map());
   const responseCacheSaveSignatures = useRef(new Map());
+  const responseCacheSaveMetricsLoggedAt = useRef(0);
+  const apiRef = useRef(api);
+  const responseCacheSaveQueue = useRef(null);
+  apiRef.current = api;
+  if (!responseCacheSaveQueue.current) {
+    responseCacheSaveQueue.current = createResponseCacheSaveQueue({
+      save: (entry) => apiRef.current.saveChatResponseCache(entry),
+      onMetrics: (metrics) => {
+        const at = Date.now();
+        const shouldLog = String(metrics.reason || "").startsWith("flush:")
+          || Number(metrics.failed) > 0
+          || at - responseCacheSaveMetricsLoggedAt.current >= 2000;
+        if (!shouldLog || typeof apiRef.current.logDiagnostic !== "function") return;
+        responseCacheSaveMetricsLoggedAt.current = at;
+        apiRef.current.logDiagnostic({
+          level: Number(metrics.failed) > 0 ? "warn" : "info",
+          source: "renderer",
+          category: "chat-cache",
+          action: "response-cache-save-queue",
+          message: "Response cache save queue metrics",
+          details: {
+            reason: String(metrics.reason || ""),
+            save_received: Number(metrics.received) || 0,
+            save_coalesced: Number(metrics.coalesced) || 0,
+            save_completed: Number(metrics.completed) || 0,
+            save_failed: Number(metrics.failed) || 0,
+            pending: Number(metrics.pending) || 0,
+            in_flight: Number(metrics.inFlight) || 0,
+            payload_bytes: Number(metrics.lastPayloadBytes) || 0,
+            last_save_ms: Number(metrics.lastSaveMs) || 0,
+            max_save_ms: Number(metrics.maxSaveMs) || 0
+          }
+        });
+      }
+    });
+  }
 
   const responseCacheKey = useCallback((profileId, conversationId) => `${profileId}:${conversationId}`, []);
 
@@ -113,10 +150,19 @@ export function useChatResponseCache({ api, requestTargetsRef, setRequestRespons
     rememberResponseCacheEntry(key, cacheEntry);
     if (responseCacheSaveSignatures.current.get(key) === signature) return;
     responseCacheSaveSignatures.current.set(key, signature);
-    void api.saveChatResponseCache(cacheEntry).catch(() => {
-      if (responseCacheSaveSignatures.current.get(key) === signature) responseCacheSaveSignatures.current.delete(key);
+    const finalSnapshot = Boolean(response?.responseReady) && isTerminalChatNetworkState(networkState);
+    responseCacheSaveQueue.current.enqueue(key, cacheEntry, {
+      immediate: finalSnapshot,
+      onError: () => {
+        if (responseCacheSaveSignatures.current.get(key) === signature) responseCacheSaveSignatures.current.delete(key);
+      }
     });
+    if (finalSnapshot) void responseCacheSaveQueue.current.flush({ reason: "response-final", timeoutMs: 1500 });
   }, [api, rememberResponseCacheEntry, responseCacheKey]);
+
+  const flushResponseCache = useCallback((reason = "chat-change") => {
+    return responseCacheSaveQueue.current.flush({ reason, timeoutMs: 1500 });
+  }, []);
 
   const hydrateCachedResponse = useCallback(async (profile, conversationId) => {
     const key = responseCacheKey(profile.profile_id, conversationId);
@@ -201,16 +247,41 @@ export function useChatResponseCache({ api, requestTargetsRef, setRequestRespons
   }, [cachedResponseIsFresh, getResponseCacheEntry, loadResponse, requestTargetsRef, responseCacheKey, setRequestResponses]);
 
   useEffect(() => {
+    if (typeof api?.onChatResponseCacheFlushRequest !== "function" || typeof api?.ackChatResponseCacheFlush !== "function") return undefined;
+    return api.onChatResponseCacheFlushRequest((payload) => {
+      const requestId = String(payload?.requestId || "");
+      if (!requestId) return;
+      void flushResponseCache("app-before-quit").then((result) => {
+        api.ackChatResponseCacheFlush({
+          requestId,
+          flushed: Boolean(result?.flushed),
+          timedOut: Boolean(result?.timedOut),
+          pending: Number(result?.pending) || 0,
+          inFlight: Number(result?.inFlight) || 0
+        });
+      }).catch(() => {
+        api.ackChatResponseCacheFlush({ requestId, flushed: false, timedOut: false, failed: true });
+      });
+    });
+  }, [api, flushResponseCache]);
+  useEffect(() => {
     const sweep = () => trimMapEntries(responseCacheSaveSignatures.current, 96);
     sweep();
     const timer = window.setInterval(sweep, 60_000);
-    return () => window.clearInterval(timer);
-  }, []);
+    const flushOnPageHide = () => { void flushResponseCache("renderer-pagehide"); };
+    window.addEventListener("pagehide", flushOnPageHide);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("pagehide", flushOnPageHide);
+      void flushResponseCache("renderer-unmount");
+    };
+  }, [flushResponseCache]);
 
   return {
     responseCacheKey,
     prefetchProfileResponseCaches,
     persistResponseCache,
+    flushResponseCache,
     hydrateCachedResponse
   };
 }

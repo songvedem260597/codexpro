@@ -25,6 +25,7 @@ export function useChatSession({
   prefetchProfileResponseCaches,
   hydrateCachedResponse,
   persistResponseCache,
+  flushResponseCache,
   loadResponse,
   verifyRepoTaskUse,
   notify,
@@ -265,6 +266,11 @@ export function useChatSession({
     const response = requestResponses[chatProfileId];
     persistResponseCache(chatProfileId, response);
   }, [chatProfileId, requestResponses]);
+
+  useEffect(() => {
+    if (!chatProfileId) return undefined;
+    return () => { void flushResponseCache("chat-change-or-close"); };
+  }, [chatProfileId, openChatResponse?.conversationId, flushResponseCache]);
 
   useEffect(() => {
     if (!chatProfileId || !openChatResponse?.responseAudit || typeof api.logChatResponseAudit !== "function") return undefined;

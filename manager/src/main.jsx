@@ -223,6 +223,7 @@ function App() {
   const {
     prefetchProfileResponseCaches,
     persistResponseCache,
+    flushResponseCache,
     hydrateCachedResponse
   } = useChatResponseCache({
     api,
@@ -377,6 +378,7 @@ function App() {
     prefetchProfileResponseCaches,
     hydrateCachedResponse,
     persistResponseCache,
+    flushResponseCache,
     loadResponse,
     verifyRepoTaskUse,
     notify,
