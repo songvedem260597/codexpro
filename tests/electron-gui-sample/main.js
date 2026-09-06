@@ -116,6 +116,7 @@ ipcMain.handle('actions:open-url', async (_event, value) => {
 });
 
 function createWindow() {
+  const iconPath = path.join(__dirname, 'assets', 'icon.ico');
   const win = new BrowserWindow({
     width: 1240,
     height: 780,
@@ -123,6 +124,7 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: '#07111f',
     title: 'GitHub Actions Monitor',
+    icon: iconPath,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -143,6 +145,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (process.platform === 'win32') app.setAppUserModelId('GitHub.Actions.Monitor');
   Menu.setApplicationMenu(null);
   createWindow();
   app.on('activate', () => {

@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Build monitor
+      - name: Build monitor with icon
         shell: powershell
         run: |
           $sample = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample'
@@ -31,6 +31,12 @@ jobs:
           npm install --no-audit --no-fund
           npm run package:win
           Pop-Location
+
+          $icon = Join-Path $sample 'assets\icon.ico'
+          $exe = Join-Path $sample 'dist\GitHubActionsMonitor-win32-x64\GitHubActionsMonitor.exe'
+          if (-not (Test-Path $icon)) { throw 'Generated icon.ico was not found.' }
+          if (-not (Test-Path $exe)) { throw 'Packaged monitor executable was not found.' }
+          Write-Host 'MONITOR_BUILD icon=PASS exe=PASS'
 
       - name: Install monitor locally
         shell: powershell
@@ -49,16 +55,18 @@ jobs:
 
           $desktop = [Environment]::GetFolderPath('Desktop')
           Remove-Item (Join-Path $desktop 'CodexPro Actions Monitor.lnk') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $desktop 'GitHub Actions Monitor.lnk') -Force -ErrorAction SilentlyContinue
           $shortcutPath = Join-Path $desktop 'GitHub Actions Monitor.lnk'
           $wshell = New-Object -ComObject WScript.Shell
           $shortcut = $wshell.CreateShortcut($shortcutPath)
           $shortcut.TargetPath = $exe
           $shortcut.WorkingDirectory = $installDir
           $shortcut.Description = 'Monitor GitHub Actions across repositories'
+          $shortcut.IconLocation = "$exe,0"
           $shortcut.Save()
 
           if (-not (Test-Path $exe)) { throw 'Installed monitor executable was not found.' }
-          Write-Host 'MONITOR_INSTALL installed=PASS shortcut=PASS'
+          Write-Host 'MONITOR_INSTALL installed=PASS shortcut=PASS icon=EXE'
 
       - name: Launch installed monitor
         shell: powershell

@@ -4,7 +4,8 @@
   "private": true,
   "main": "main.js",
   "scripts": {
-    "package:win": "electron-packager . GitHubActionsMonitor --platform=win32 --arch=x64 --out=dist --overwrite"
+    "build:icon": "node make-icon.cjs",
+    "package:win": "npm run build:icon && electron-packager . GitHubActionsMonitor --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico"
   },
   "devDependencies": {
     "@electron/packager": "latest",
