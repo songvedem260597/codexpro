@@ -10,15 +10,14 @@ function installStableDetails(win) {
     if (typeof originalSelectRun !== 'function') return false;
 
     let lastRunId = null;
-    let lastSignature = '';
+    let lastStateSignature = '';
 
     window.selectRun = async function stableSelectRun(run) {
       const runId = Number(run?.id || 0);
-      const signature = [
+      const stateSignature = [
         runId,
         String(run?.status || ''),
-        String(run?.conclusion || ''),
-        String(run?.updatedAt || '')
+        String(run?.conclusion || '')
       ].join('|');
 
       const hasRenderedDetails = Boolean(
@@ -27,14 +26,15 @@ function installStableDetails(win) {
       );
 
       const sameRun = runId > 0 && runId === lastRunId;
-      const unchanged = sameRun && signature === lastSignature;
+      const sameState = sameRun && stateSignature === lastStateSignature;
 
-      // Auto refresh calls selectRun again for the currently selected run.
-      // Keep the existing DOM when nothing changed so the panel never flashes.
-      if (unchanged && hasRenderedDetails) return;
+      // Auto refresh calls selectRun again every 10s. Keep the existing DOM
+      // while the selected run stays in the same state. Live steps are patched
+      // in place by preload.js, so no full Jobs/Steps rebuild is needed.
+      if (sameState && hasRenderedDetails) return;
 
       lastRunId = runId;
-      lastSignature = signature;
+      lastStateSignature = stateSignature;
       return originalSelectRun(run);
     };
 
