@@ -9,9 +9,9 @@ function usage() {
   console.log(`CodexPro local agent runner
 
 Usage:
-  codexpro-local-agent --task "fix the failing tests"
-  codexpro-local-agent --task-file .ai-bridge/current-plan.md
-  codexpro-local-agent --watch --yes
+  npm run agent -- --task "fix the failing tests"
+  npm run agent -- --task-file .ai-bridge/current-plan.md
+  npm run agent -- --watch --yes
 
 Options:
   --root <dir>             Workspace root. Default: current directory.
@@ -122,18 +122,22 @@ function resolveCodexCommand(value) {
   return requested;
 }
 
-function quoteCmd(value) {
-  const text = String(value).replace(/"/g, '""');
-  return `"${text}"`;
+function quoteWindowsCmdArg(value) {
+  const text = String(value).replace(/\r?\n/g, ' ').replace(/%/g, '%%');
+  if (!text) return '""';
+  return `"${text.replace(/"/g, '""')}"`;
 }
 
 function spawnSpec(command, args) {
   if (process.platform === 'win32' && /\.(?:cmd|bat)$/i.test(command)) {
-    const comspec = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
-    const commandLine = [quoteCmd(command), ...args.map(quoteCmd)].join(' ');
-    return { command: comspec, args: ['/d', '/s', '/c', commandLine] };
+    const commandLine = `"${[quoteWindowsCmdArg(command), ...args.map(quoteWindowsCmdArg)].join(' ')}"`;
+    return {
+      command: process.env.ComSpec || 'cmd.exe',
+      args: ['/d', '/q', '/v:off', '/s', '/c', commandLine],
+      windowsVerbatimArguments: true
+    };
   }
-  return { command, args };
+  return { command, args, windowsVerbatimArguments: false };
 }
 
 function terminateTree(child) {
@@ -157,6 +161,8 @@ function runProcess(command, args, options) {
       env: process.env,
       windowsHide: true,
       detached: process.platform !== 'win32',
+      shell: false,
+      windowsVerbatimArguments: spec.windowsVerbatimArguments,
       stdio: ['ignore', 'pipe', 'pipe']
     });
     let stdout = '';
