@@ -60,6 +60,44 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Build Electron test exe
+        shell: powershell
+        run: |
+          $sample = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample'
+          Push-Location $sample
+          npm install --no-audit --no-fund
+          npm run package:win
+          $exe = (Resolve-Path '.\dist\CodexProElectronTest-win32-x64\CodexProElectronTest.exe').Path
+          Pop-Location
+          $marker = Join-Path $env:RUNNER_TEMP 'codexpro-electron-test-ready.txt'
+          Remove-Item $marker -Force -ErrorAction SilentlyContinue
+          "CODEXPRO_GUI_ELECTRON_EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CODEXPRO_ELECTRON_TEST_MARKER=$marker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "ELECTRON_BUILD exe_ready=$([bool](Test-Path $exe))"
+
+      - name: Launch Electron test exe
+        shell: powershell
+        run: .\scripts\gui-probe.ps1
+
+      - name: Verify Electron test exe
+        shell: powershell
+        run: |
+          $report = Get-Content "$env:RUNNER_TEMP\codexpro-gui-probe\report.json" -Raw | ConvertFrom-Json
+          if (-not $report.interactive_desktop) { throw 'Runner is not attached to desktop.' }
+          if (-not $report.electron_target_configured) { throw 'Electron exe was not configured.' }
+          if (-not $report.electron_launch_ok) { throw 'Electron exe did not launch.' }
+          if (-not (Test-Path $env:CODEXPRO_ELECTRON_TEST_MARKER)) { throw 'Electron window never became ready.' }
+          Write-Host 'ELECTRON_TEST packaged_exe=PASS window_ready=PASS'
+
+      - name: Clean Electron GUI test
+        if: always()
+        shell: powershell
+        run: |
+          Remove-Item -Recurse -Force "$env:RUNNER_TEMP\codexpro-gui-probe" -ErrorAction SilentlyContinue
+          Remove-Item -Force "$env:RUNNER_TEMP\codexpro-electron-test-ready.txt" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\tests\electron-gui-sample\node_modules" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\tests\electron-gui-sample\dist" -ErrorAction SilentlyContinue
+
       - name: Install
         run: npm ci
 
