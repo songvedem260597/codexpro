@@ -56,6 +56,8 @@
     .meta { color: var(--muted); margin-top: 3px; font-size: 12px; display: flex; gap: 9px; flex-wrap: wrap; }
     .badge { border: 1px solid var(--line); border-radius: 999px; padding: 2px 7px; color: #b9c9de; }
     .status { text-transform: uppercase; font-size: 10px; letter-spacing: .7px; font-weight: 800; color: var(--muted); padding-top: 3px; }
+    .duration { color: #d7e4f5; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .duration.live { color: var(--blue); font-weight: 750; }
     .details-content { padding: 16px; }
     .empty { color: var(--muted); padding: 28px 18px; text-align: center; }
     .detail-title { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; margin-bottom: 15px; }
@@ -130,6 +132,7 @@
       runs: [],
       selectedId: null,
       timer: null,
+      clockTimer: null,
       loading: false
     };
 
@@ -159,13 +162,15 @@
     }
 
     function elapsed(start, end) {
-      if (!start) return '';
+      if (!start) return '—';
       const ms = Math.max(0, new Date(end || Date.now()).getTime() - new Date(start).getTime());
       const sec = Math.floor(ms / 1000);
-      if (sec < 60) return `${sec}s`;
-      const min = Math.floor(sec / 60);
-      if (min < 60) return `${min}m ${sec % 60}s`;
-      return `${Math.floor(min / 60)}h ${min % 60}m`;
+      const hours = Math.floor(sec / 3600);
+      const minutes = Math.floor((sec % 3600) / 60);
+      const seconds = sec % 60;
+      if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+      if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+      return `${seconds}s`;
     }
 
     function text(tag, className, value) {
@@ -173,6 +178,26 @@
       if (className) el.className = className;
       el.textContent = value ?? '';
       return el;
+    }
+
+    function updateDurationNode(el) {
+      const start = el.dataset.durationStart || '';
+      const end = el.dataset.durationEnd || '';
+      const prefix = el.dataset.durationPrefix || '';
+      el.textContent = `${prefix}${elapsed(start, end || null)}`;
+    }
+
+    function durationNode(start, end, live = false, prefix = '⏱ ') {
+      const el = text('span', `duration${live ? ' live' : ''}`, '');
+      el.dataset.durationStart = start || '';
+      if (end) el.dataset.durationEnd = end;
+      el.dataset.durationPrefix = prefix;
+      updateDurationNode(el);
+      return el;
+    }
+
+    function tickDurations() {
+      document.querySelectorAll('[data-duration-start]').forEach(updateDurationNode);
     }
 
     function renderSummary(rateLimit) {
@@ -210,8 +235,13 @@
           text('span', 'badge', run.branch || '—'),
           text('span', '', run.event),
           text('span', '', run.actor ? `@${run.actor}` : ''),
-          text('span', '', fmtTime(run.startedAt || run.createdAt)),
-          text('span', '', elapsed(run.startedAt || run.createdAt, run.status === 'completed' ? run.updatedAt : null))
+          text('span', '', `Bắt đầu ${fmtTime(run.startedAt || run.createdAt)}`),
+          durationNode(
+            run.startedAt || run.createdAt,
+            run.status === 'completed' ? run.updatedAt : null,
+            run.status === 'in_progress',
+            '⏱ '
+          )
         );
         body.append(meta);
 
@@ -240,7 +270,18 @@
       head.className = 'detail-title';
       const titleWrap = document.createElement('div');
       titleWrap.append(text('h2', '', `${run.name} #${run.runNumber}`));
-      titleWrap.append(text('div', 'small', `${run.branch || '—'} · ${statusKey(run)} · ${elapsed(run.startedAt || run.createdAt, run.status === 'completed' ? run.updatedAt : null)}`));
+      const runMeta = document.createElement('div');
+      runMeta.className = 'small';
+      runMeta.append(
+        text('span', '', `${run.branch || '—'} · ${statusKey(run)} · `),
+        durationNode(
+          run.startedAt || run.createdAt,
+          run.status === 'completed' ? run.updatedAt : null,
+          run.status === 'in_progress',
+          'Thời gian: '
+        )
+      );
+      titleWrap.append(runMeta);
       const open = text('button', '', 'Mở GitHub');
       open.addEventListener('click', () => window.actionsMonitor.openUrl(run.htmlUrl));
       head.append(titleWrap, open);
@@ -259,7 +300,12 @@
         const left = document.createElement('div');
         left.append(text('div', 'job-name', job.name));
         if (job.runnerName) left.append(text('div', 'runner', `Runner: ${job.runnerName}`));
-        const right = text('span', 'small', `${statusKey(job)} · ${elapsed(job.startedAt, job.completedAt)}`);
+        const right = document.createElement('span');
+        right.className = 'small';
+        right.append(
+          text('span', '', `${statusKey(job)} · `),
+          durationNode(job.startedAt, job.completedAt, job.status === 'in_progress', '⏱ ')
+        );
         jobHead.append(left, right);
         card.append(jobHead);
 
@@ -273,7 +319,7 @@
             row.append(
               text('span', `step-symbol ${cls}`, symbol),
               text('span', '', step.name),
-              text('span', 'small', elapsed(step.startedAt, step.completedAt))
+              durationNode(step.startedAt, step.completedAt, step.status === 'in_progress', '⏱ ')
             );
             steps.append(row);
           }
@@ -286,7 +332,7 @@
     function scheduleRefresh() {
       clearTimeout(state.timer);
       const delay = state.token ? 10000 : 60000;
-      $('refreshMode').textContent = state.token ? 'Auto 10s · token mode' : 'Auto 60s · public mode';
+      $('refreshMode').textContent = state.token ? 'Auto 10s · timer 1s' : 'Auto 60s · timer 1s';
       state.timer = setTimeout(refresh, delay);
     }
 
@@ -319,6 +365,7 @@
     $('refresh').addEventListener('click', refresh);
     repoInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') refresh(); });
     tokenInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') refresh(); });
+    state.clockTimer = setInterval(tickDurations, 1000);
     refresh();
   </script>
 </body>
