@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { mergeBrowserExtensionStreamBatch } from "../dist/browserExtensionBridge.js";
 
-const [extensionSource, httpSource, managerMainSource, managerRendererSource] = await Promise.all([
+const [extensionSource, bridgeSource, httpSource, managerMainSource, managerRendererSource] = await Promise.all([
   readFile(new URL("../chrome-extension/service-worker.js", import.meta.url), "utf8"),
+  readFile(new URL("../src/browserExtensionBridge.ts", import.meta.url), "utf8"),
   readFile(new URL("../src/http.ts", import.meta.url), "utf8"),
   readFile(new URL("../manager/electron/main.mjs", import.meta.url), "utf8"),
-  readFile(new URL("../manager/src/main.jsx", import.meta.url), "utf8")
+  readFile(new URL("../manager/src/hooks/use-runtime-status.js", import.meta.url), "utf8")
 ]);
 
 assert.match(extensionSource, /realtimeStreamPushInFlight/, "extension stream uploads must be single-flight");
@@ -15,6 +16,11 @@ assert.match(extensionSource, /REALTIME_STREAM_PUSH_TIMEOUT_MS[\s\S]*?AbortContr
 assert.match(httpSource, /streamBackpressured[\s\S]*?res\.on\("drain"/, "browser SSE must stop flushing while the response is backpressured");
 assert.match(httpSource, /pendingStreamUpdates\s*=\s*new Map/, "browser SSE must retain only the latest pending revision per tab");
 assert.match(managerMainSource, /pendingStreamUpdates\s*=\s*new Map[\s\S]*?codexpro:browser-stream/, "Electron IPC must coalesce browser stream updates before sending them to the renderer");
+assert.match(extensionSource, /if\(now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS\)return null;/, "flight recorder cooldown must cover rate-limit incidents, not only generic CDP incidents");
+assert.doesNotMatch(extensionSource, /if\(reason==='cdp'&&now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS\)/, "429 incidents must not bypass the recorder cooldown");
+assert.match(bridgeSource, /duplicateBrowserRateLimitIncident[\s\S]*?RATE_LIMIT_INCIDENT_DEDUPE_MS/, "browser bridge must defensively deduplicate 429 incidents from old or noisy workers");
+assert.match(managerMainSource, /pendingProfilePayload[\s\S]*?queueProfilePayload[\s\S]*?setTimeout\(flushProfilePayload, 100\)/, "Manager must keep only the newest pending full profile snapshot before Electron IPC");
+assert.match(managerMainSource, /flushProfilePayload[\s\S]*?codexpro:browser-profiles/, "coalesced profile snapshots must still reach the renderer");
 assert.match(managerRendererSource, /pendingBrowserStreamUpdates[\s\S]*?requestAnimationFrame/, "renderer stream state updates must be coalesced to animation frames");
 
 const profileId = "stream-smoke-profile";

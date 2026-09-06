@@ -51,7 +51,7 @@ const TRUSTED_INPUT_TIMEOUT_MS = 10000;
 const DOM_PREPARE_TIMEOUT_MS = 15000;
 const ATTACHMENT_PREPARE_TIMEOUT_MS = 60000;
 const NETWORK_START_TIMEOUT_MS = 30000;
-const SEND_POST_ACK_STABILITY_MS = 650;
+const SEND_CONFIRMED_STABILITY_SOURCE = 'network_ack';
 const CDP_NETWORK_START_TIMEOUT_MS = 15000;
 const RENDERER_SEND_PREFLIGHT_TIMEOUT_MS = 1800;
 const RENDERER_SEND_WAKE_SETTLE_MS = 650;
@@ -2285,7 +2285,7 @@ async function probeCanonicalCompletion(tabId,conversationId,force=false) {
   return false;
 }
 
-async function probeConversationLimitPage() {
+async function probeConversationLimitPage(waitMs=1200) {
   const sleep=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const limitPattern=/(?:you(?:'|’)?ve reached the maximum length for this conversation|maximum length for this conversation|đ(?:ã|a) (?:đạt|chạm|tới).*?(?:độ dài|do dai).*?(?:tối đa|toi da).*?(?:cuộc trò chuyện|đoạn chat))/i;
@@ -2304,7 +2304,10 @@ async function probeConversationLimitPage() {
     }
     return null;
   };
-  const deadline=Date.now()+1200;
+  const boundedWaitMs=Math.max(0,Math.min(1200,Number(waitMs)||0));
+  const immediate=findLimit();
+  if(immediate||boundedWaitMs===0)return immediate||{reached:false,message:'',button_label:''};
+  const deadline=Date.now()+boundedWaitMs;
   while(Date.now()<deadline){
     const found=findLimit();
     if(found)return found;
@@ -2345,10 +2348,10 @@ function stopChatGenerationPage() {
   return {ok:true,stopped:true};
 }
 
-async function probeConversationLimit(tabId) {
+async function probeConversationLimit(tabId,waitMs=1200) {
   try{
     const [injected]=await promiseWithTimeout(
-      chrome.scripting.executeScript({injectImmediately:true,target:{tabId},func:probeConversationLimitPage}),
+      chrome.scripting.executeScript({injectImmediately:true,target:{tabId},func:probeConversationLimitPage,args:[Math.max(0,Math.min(1200,Number(waitMs)||0))]}),
       CONVERSATION_LIMIT_PROBE_TIMEOUT_MS,
       'Chrome renderer không phản hồi khi kiểm tra giới hạn chat.'
     );
@@ -2606,7 +2609,7 @@ async function execute(command) {
       timedSendPhase('network_state_ms',()=>chatRequestState(tab.id,conversationId)),
       timedSendPhase('dom_activity_ms',()=>newChat?Promise.resolve({available:false,busy:false,source:'',activity_text:''}):chatDomActivityState(tab.id,conversationId,{maxAgeMs:750})),
       timedSendPhase('attachment_ownership_ms',()=>chatAttachmentOwnership(tab.id,targetConversationId)),
-      timedSendPhase('conversation_limit_ms',()=>newChat?Promise.resolve({reached:false,message:'',button_label:''}):probeConversationLimit(tab.id))
+      timedSendPhase('conversation_limit_ms',()=>newChat?Promise.resolve({reached:false,message:'',button_label:''}):probeConversationLimit(tab.id,0))
     ]);
     const networkCaptureInstalled=Boolean(networkCaptureProbe?.capture_installed||networkCaptureProbe?.available);
     if(conversationLimit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(conversationLimit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
@@ -2641,13 +2644,7 @@ async function execute(command) {
     const submitStartedAt=Date.now();
     const networkAckStartedAfterMs=submitStartedAt;
     const attemptId=crypto.randomUUID();
-    const stabilizeSubmittedSend=async()=>{
-      const startedAt=Date.now();
-      const availableMs=Math.max(0,remainingCommandMs()-100);
-      const waitMs=Math.min(SEND_POST_ACK_STABILITY_MS,availableMs);
-      if(waitMs>0)await new Promise(resolve=>setTimeout(resolve,waitMs));
-      return {send_stabilized:true,send_stability_wait_ms:Math.max(0,Date.now()-startedAt),followup_while_generating:followupWhileGenerating};
-    };
+    const stabilizeSubmittedSend=async()=>({send_stabilized:true,send_stability_wait_ms:0,send_stability_source:SEND_CONFIRMED_STABILITY_SOURCE,followup_while_generating:followupWhileGenerating});
 
     const prepareTimeoutMs=attachments.length?ATTACHMENT_PREPARE_TIMEOUT_MS:DOM_PREPARE_TIMEOUT_MS;
     let deadlineAt=Math.min(submitStartedAt+prepareTimeoutMs-1500,commandDeadlineAt-1500);
@@ -3834,7 +3831,9 @@ async function getFlightRecorderIncidents() {
 async function persistFlightRecorderIncident(tabId,event,reason='cdp') {
   if(!Number.isInteger(tabId))return null;
   const now=Date.now(),previous=Number(flightRecorderIncidentAtByTab.get(tabId)||0);
-  if(reason==='cdp'&&now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS)return null;
+  // Rate-limit failures can surface through Network, Runtime and Log events for the same request.
+  // Bound all recorder incidents per tab so one 429 cannot fan out into hundreds of writes.
+  if(now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS)return null;
   flightRecorderIncidentAtByTab.set(tabId,now);
   const [profile,tab]=await Promise.all([profileInfo().catch(()=>({id:''})),chrome.tabs.get(tabId).catch(()=>null)]);
   const context=flightRecorderContextByTab.get(tabId)||{};
@@ -4103,14 +4102,15 @@ async function trustedSubmitChatComposerTab(tabId,attemptId,expectedText='') {
   if(!attemptId)throw new Error('Trusted composer attempt không hợp lệ.');
   let blockingModalDismissed=false;
   const settleBlockingModal=async()=>{
-    let quietChecks=0;
+    let sawDismissal=false,quietChecks=0;
     for(let guardAttempt=0;guardAttempt<6;guardAttempt+=1){
       const [result]=await chrome.scripting.executeScript({injectImmediately:true,target:{tabId},func:dismissKnownBlockingChatModalPage,args:[attemptId,expectedText]});
       if(result?.result?.ok!==true)throw new Error(result?.result?.error||'Không xử lý được modal đang chặn composer ChatGPT.');
-      if(result?.result?.dismissed){blockingModalDismissed=true;quietChecks=0;await new Promise(resolve=>setTimeout(resolve,250));continue;}
+      if(result?.result?.dismissed){blockingModalDismissed=true;sawDismissal=true;quietChecks=0;await new Promise(resolve=>setTimeout(resolve,120));continue;}
+      if(!sawDismissal)return;
       quietChecks+=1;
-      if(quietChecks>=3)return;
-      await new Promise(resolve=>setTimeout(resolve,200));
+      if(quietChecks>=2)return;
+      await new Promise(resolve=>setTimeout(resolve,120));
     }
     throw new Error('Modal thanh toán liên tục xuất hiện lại; dừng trước khi phát Enter để tránh trạng thái gửi không chắc chắn.');
   };
@@ -4128,12 +4128,12 @@ async function trustedSubmitChatComposerTab(tabId,attemptId,expectedText='') {
   try{
     await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:true});
     focusEmulationEnabled=true;
-    await new Promise(resolve=>setTimeout(resolve,250));
+    // Focus ownership is verified explicitly below; no fixed healthy-path settle delay.
     await settleBlockingModal();
     const [refocused]=await chrome.scripting.executeScript({injectImmediately:true,target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
     refocusedResult=refocused?.result||null;
     if(refocused?.result?.ok!==true||refocused?.result?.focused!==true&&refocused?.result?.selection_inside!==true)throw new Error(refocused?.result?.error||'Composer mất focus trong background focus emulation lifecycle.');
-    await new Promise(resolve=>setTimeout(resolve,250));
+    // Focus ownership is verified explicitly below; no fixed healthy-path settle delay.
     await settleBlockingModal();
     const [finalFocus]=await chrome.scripting.executeScript({injectImmediately:true,target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
     if(finalFocus?.result?.ok!==true||finalFocus?.result?.focused!==true&&finalFocus?.result?.selection_inside!==true)throw new Error(finalFocus?.result?.error||'Composer mất focus ngay trước trusted Enter dispatch.');

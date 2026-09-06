@@ -198,8 +198,10 @@ const flightRecorderIncidentMessageSource = extractFunction("flightRecorderIncid
 const flightRecorderIncidentMessage = Function(`${flightRecorderIncidentMessageSource}; return flightRecorderIncidentMessage;`)();
 assert.equal(flightRecorderIncidentMessage(rateLimitTrace), "ChatGPT HTTP 429 Too Many Requests: /backend-api/f/conversation", "429 incident messages must be immediately recognizable in logs");
 assert.equal(flightRecorderIncidentMessage(fallbackRateLimitTrace), "ChatGPT HTTP 429 Too Many Requests: /backend-api/conversations/123", "fallback 429 incidents must use the same recognizable diagnostic message");
-assert.match(worker, /flightRecorderEventIsRateLimit\(event\)[\s\S]*?persistFlightRecorderIncident\(tabId,normalizeFlightRecorderRateLimitEvent\(event\),'rate_limit'\)/, "direct and fallback 429 incidents must bypass the generic five-second incident cooldown so intermittent rate limits are not lost");
-assert.match(worker, /if\(reason==='cdp'&&now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS\)return null;/, "the generic five-second incident cooldown must apply only to cdp incidents so intermittent 429 rate limits are not lost");
+assert.match(worker, /flightRecorderEventIsRateLimit\(event\)[\s\S]*?persistFlightRecorderIncident\(tabId,normalizeFlightRecorderRateLimitEvent\(event\),'rate_limit'\)/, "direct and fallback 429 incidents must enter the same bounded recorder pipeline");
+assert.match(worker, /if\(now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS\)return null;/, "the five-second incident cooldown must also cover 429 incidents so a rate-limit storm cannot fan out into hundreds of writes");
+assert.doesNotMatch(worker, /if\(reason==='cdp'&&now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS\)/, "429 incidents must not bypass the recorder cooldown");
+assert.match(bridge, /duplicateBrowserRateLimitIncident[\s\S]*?RATE_LIMIT_INCIDENT_DEDUPE_MS/, "the bridge must defensively deduplicate rate-limit incidents from old or noisy workers");
 assert.match(worker, /slice\(-\(reason==='rate_limit'\?20:120\)\)/, "high-frequency 429 incidents must keep only a compact 20-event context so diagnostics do not amplify the rate-limit storm");
 assert.match(bridge, /chatgpt-rate-limit\.jsonl[\s\S]*?normalizeBrowserRateLimitIncident[\s\S]*?recordBrowserRateLimitIncident/, "the bridge must normalize old-worker console/log 429 fallbacks and persist them to the dedicated JSONL investigation log");
 assert.match(managerMain, /ChatGPT trả về HTTP 429 Too Many Requests[\s\S]*?chatgpt-rate-limit/, "Manager diagnostics must surface each new rate-limit incident with correlation metadata");
@@ -468,7 +470,7 @@ assert.doesNotMatch(strictSubmitAckSource, /sentinel/, "sentinel chat-requiremen
 assert.match(sendBlock, /lateLifecycleEvidence=recentChatPostEvidence\(tab\.id,networkAckStartedAfterMs\)\.filter\(isChatSubmissionAckEvidence\)/, "late send ACK must reject sentinel preparation traffic just like the early ACK path");
 assert.match(sendBlock, /submitted_by:'trusted-enter'/);
 assert.match(sendBlock, /submitted_by:'trusted-click-fallback'/);
-assert.match(sendBlock, /Promise\.all\(\[[\s\S]*?probeConversationLimit\(tab\.id\)[\s\S]*?if\(conversationLimit\.reached\)throw new Error\('CONVERSATION_LIMIT_REACHED:/, "send preflight must detect a full conversation before touching its old composer");
+assert.match(sendBlock, /Promise\.all\(\[[\s\S]*?probeConversationLimit\(tab\.id,0\)[\s\S]*?if\(conversationLimit\.reached\)throw new Error\('CONVERSATION_LIMIT_REACHED:/, "send preflight must perform an immediate full-conversation check before touching its old composer");
 assert.ok(sendBlock.indexOf("if(conversationLimit.reached)") < sendBlock.indexOf("sendChatRequestPage"), "the old conversation must be rejected before any draft or attachment is injected");
 assert.doesNotMatch(sendBlock, /chrome\.tabs\.update\(tab\.id,\{active:true\}\)/, "background send must not activate the target tab");
 assert.doesNotMatch(sendBlock, /restorePreviouslyActiveTab/, "background send must not need to restore tabs because it never activates them");
@@ -500,7 +502,7 @@ assert.match(blockingModalSource, /modal-subscription-failure/, "send recovery m
 assert.match(blockingModalSource, /draftOwned/, "a blocking modal may only be dismissed while the exact CodexPro draft is still owned");
 assert.match(blockingModalSource, /button\[data-testid="close-button"\]/, "blocking modal recovery must use the modal's explicit close control");
 assert.doesNotMatch(blockingModalSource, /plan-upgrade-payment-method|\.click\(\).*Pay now/s, "blocking modal recovery must never activate payment actions");
-assert.match(worker, /quietChecks>=3/, "known modal recovery must require a quiet stability window instead of dispatching immediately after one close");
+assert.match(worker, /sawDismissal[\s\S]*?if\(!sawDismissal\)return;[\s\S]*?quietChecks>=2/, "healthy sends must skip modal quiet waits, while an actually dismissed modal still requires a bounded quiet stability window");
 assert.match(worker, /Modal thanh toán liên tục xuất hiện lại; dừng trước khi phát Enter/, "a repeatedly reopening modal must fail while the send is still definitely unsent");
 assert.match(worker, /TRUSTED_ENTER_PRE_DISPATCH:/, "trusted Enter must distinguish a definitely-unsent pre-dispatch failure");
 assert.match(worker, /TRUSTED_ENTER_DISPATCH_UNCERTAIN:/, "trusted Enter must preserve ambiguity after key dispatch starts");
@@ -636,7 +638,8 @@ assert.match(sendBlock, /if\(followupWhileGenerating\)\{[\s\S]*?followup_stop_ms
 assert.match(sendBlock, /reconcileChatNetworkCompletion\(tab\.id,targetConversationId,'manual_followup_stop'\)/, "stopped follow-ups must reconcile the old network generation before the fresh ACK window begins");
 assert.match(sendBlock, /const submitStartedAt=Date\.now\(\);[\s\S]*?const networkAckStartedAfterMs=submitStartedAt;/, "follow-up ACK detection must start only after steering the old generation so stale network evidence cannot satisfy the new send");
 assert.match(sendBlock, /followup_generation_stopped:Boolean\(stopResult\.stopped\)/, "send telemetry must expose whether the old generation was actually stopped");
-assert.match(sendBlock, /SEND_POST_ACK_STABILITY_MS/, "successful sends must wait through the post-ACK stability window before the profile send lock is released");
+assert.doesNotMatch(sendBlock, /SEND_POST_ACK_STABILITY_MS/, "successful sends must not add a fixed post-ACK delay after authoritative network confirmation");
+assert.match(sendBlock, /send_stability_wait_ms:0[\s\S]*?send_stability_source:SEND_CONFIRMED_STABILITY_SOURCE/, "successful sends must release immediately after the authoritative network ACK while preserving stability telemetry");
 assert.match(sendBlock, /send_stabilized:true[\s\S]*?followup_while_generating:followupWhileGenerating/, "send results must expose the stability gate and whether a live generation was steered");
 assert.match(managerMain, /const profileSendOperations = new Map\(\)/, "Manager must reject concurrent sends for the same profile");
 assert.match(managerMain, /Profile này đang gửi một yêu cầu khác/, "concurrent profile sends must fail explicitly instead of queueing a duplicate");

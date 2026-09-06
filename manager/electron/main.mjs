@@ -559,7 +559,9 @@ function startBrowserProfileEventStream(win) {
   browserProfileStreamControllers.get(win)?.abort();
   const controller = new AbortController();
   const pendingStreamUpdates = new Map();
+  let pendingProfilePayload = null;
   let streamFlushTimer = null;
+  let profileFlushTimer = null;
   const flushStreamUpdates = () => {
     streamFlushTimer = null;
     if (controller.signal.aborted || win.isDestroyed() || win.webContents.isDestroyed()) {
@@ -577,11 +579,31 @@ function startBrowserProfileEventStream(win) {
     }
     if (!streamFlushTimer && pendingStreamUpdates.size) streamFlushTimer = setTimeout(flushStreamUpdates, 50);
   };
+  const flushProfilePayload = () => {
+    profileFlushTimer = null;
+    const payload = pendingProfilePayload;
+    pendingProfilePayload = null;
+    if (!payload || controller.signal.aborted || win.isDestroyed() || win.webContents.isDestroyed()) return;
+    if (Array.isArray(payload?.profiles)) {
+      latestBrowserProfileStream = { connected: true, checkedAt: String(payload.checked_at || ""), profiles: payload.profiles };
+      recordBrowserProfileTransitions(payload.profiles, payload.checked_at);
+    }
+    win.webContents.send("codexpro:browser-profiles", payload);
+  };
+  const queueProfilePayload = (payload) => {
+    // Full profile frames are snapshots. Keep only the newest pending snapshot so
+    // a burst cannot build an unbounded Electron IPC queue behind a busy renderer.
+    pendingProfilePayload = payload;
+    if (!profileFlushTimer) profileFlushTimer = setTimeout(flushProfilePayload, 100);
+  };
   const stopStream = () => {
     controller.abort();
     if (streamFlushTimer) clearTimeout(streamFlushTimer);
+    if (profileFlushTimer) clearTimeout(profileFlushTimer);
     streamFlushTimer = null;
+    profileFlushTimer = null;
     pendingStreamUpdates.clear();
+    pendingProfilePayload = null;
   };
   browserProfileStreamControllers.set(win, controller);
   win.once("closed", stopStream);
@@ -618,11 +640,7 @@ function startBrowserProfileEventStream(win) {
               queueStreamUpdates(payload.updates);
               continue;
             }
-            if (Array.isArray(payload?.profiles)) {
-              latestBrowserProfileStream = { connected: true, checkedAt: String(payload.checked_at || ""), profiles: payload.profiles };
-              recordBrowserProfileTransitions(payload.profiles, payload.checked_at);
-            }
-            if (!win.isDestroyed()) win.webContents.send("codexpro:browser-profiles", payload);
+            if (!win.isDestroyed() && Array.isArray(payload?.profiles)) queueProfilePayload(payload);
           }
         }
       } catch (error) {

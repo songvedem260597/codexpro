@@ -44,6 +44,8 @@ const PROFILE_TASK_EVENT_LOG_MAX_BYTES = 2 * 1024 * 1024;
 const PROFILE_TASK_EVENT_THROTTLE_MS = 30_000;
 const FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES = 8 * 1024 * 1024;
 const MAX_PROFILE_FLIGHT_RECORDER_INCIDENTS = 60;
+const RATE_LIMIT_INCIDENT_DEDUPE_MS = 5_000;
+const RATE_LIMIT_INCIDENT_DEDUPE_MAX = 256;
 
 const PROFILE_REGISTRY_WRITE_INTERVAL_MS = 30_000;
 
@@ -250,6 +252,7 @@ const profileTaskConversationIds = new Map<string, string>();
 const profileTaskUpdatedAt = new Map<string, string>();
 const profilePendingTasks = new Map<string, { taskId: string; root: string; scope: "workspace" | "all_allowed"; preparedAt: number }>();
 const profileTaskEventSignatures = new Map<string, { signature: string; at: number }>();
+const rateLimitIncidentDedupeAt = new Map<string, number>();
 let singleton: BridgeState | undefined;
 
 function browserProfileTaskStatePath(): string {
@@ -413,6 +416,24 @@ function normalizeBrowserRateLimitIncident(incident: BrowserFlightRecorderIncide
     message: `ChatGPT HTTP 429 Too Many Requests${endpoint ? `: ${endpoint}` : ""}`.slice(0, 2000),
     event
   };
+}
+
+function duplicateBrowserRateLimitIncident(profileId: string, incident: BrowserFlightRecorderIncident, now = Date.now()): boolean {
+  if (!browserFlightRecorderIncidentIsRateLimit(incident)) return false;
+  const key = `${String(profileId || incident.profile_id || "")}:${Math.max(0, Number(incident.tab_id) || 0)}:${String(incident.conversation_id || "")}`;
+  const previous = Number(rateLimitIncidentDedupeAt.get(key) || 0);
+  if (previous && now - previous < RATE_LIMIT_INCIDENT_DEDUPE_MS) return true;
+  rateLimitIncidentDedupeAt.set(key, now);
+  const cutoff = now - RATE_LIMIT_INCIDENT_DEDUPE_MS;
+  for (const [entryKey, at] of rateLimitIncidentDedupeAt) {
+    if (at < cutoff) rateLimitIncidentDedupeAt.delete(entryKey);
+  }
+  while (rateLimitIncidentDedupeAt.size > RATE_LIMIT_INCIDENT_DEDUPE_MAX) {
+    const oldestKey = rateLimitIncidentDedupeAt.keys().next().value;
+    if (!oldestKey) break;
+    rateLimitIncidentDedupeAt.delete(oldestKey);
+  }
+  return false;
 }
 
 function recordBrowserRateLimitIncident(incident: BrowserFlightRecorderIncident): void {
@@ -1007,6 +1028,10 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     if (!incident.task_id) incident.task_id = String(profileTaskIds.get(profile.id) || "").slice(0, 160);
     if (!incident.task_title) incident.task_title = String(profileTaskTitles.get(profile.id) || "").slice(0, 300);
     if (!incident.conversation_id) incident.conversation_id = String(profileTaskConversationIds.get(profile.id) || "").slice(0, 180);
+    if (duplicateBrowserRateLimitIncident(profile.id, incident)) {
+      sendJson(req, res, 200, { ok: true, profile_id: profile.id, incident_id: incident.id, deduplicated: true });
+      return;
+    }
     profile.flightRecorderIncidents.push(incident);
     profile.flightRecorderIncidents = profile.flightRecorderIncidents.slice(-MAX_PROFILE_FLIGHT_RECORDER_INCIDENTS);
     recordBrowserFlightRecorderIncident(incident);

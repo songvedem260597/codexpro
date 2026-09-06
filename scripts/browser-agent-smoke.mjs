@@ -361,11 +361,32 @@ const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyW
   readFile(join(root, "src", "http.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionProfileState.ts"), "utf8"),
-  readFile(join(root, "manager", "electron", "main.mjs"), "utf8"),
+  Promise.all([
+    readFile(join(root, "manager", "electron", "main.mjs"), "utf8"),
+    readFile(join(root, "manager", "electron", "ipc", "diagnostic-ipc.mjs"), "utf8"),
+    readFile(join(root, "manager", "electron", "ipc", "settings-ipc.mjs"), "utf8"),
+    readFile(join(root, "manager", "electron", "ipc", "worker-ipc.mjs"), "utf8")
+  ]).then((parts) => parts.join("\n")),
   readFile(join(root, "manager", "electron", "manager-chat-cache.mjs"), "utf8"),
   readFile(join(root, "manager", "electron", "manager-chat-diagnostics.mjs"), "utf8"),
   readFile(join(root, "manager", "electron", "preload.cjs"), "utf8"),
-  readFile(join(root, "manager", "src", "main.jsx"), "utf8"),
+  Promise.all([
+    readFile(join(root, "manager", "src", "hooks", "use-profile-actions.js"), "utf8"),
+    readFile(join(root, "manager", "src", "hooks", "use-project-actions.js"), "utf8"),
+    readFile(join(root, "manager", "src", "hooks", "use-chat-send-actions.js"), "utf8"),
+    readFile(join(root, "manager", "src", "hooks", "use-chat-response-loader.js"), "utf8"),
+    readFile(join(root, "manager", "src", "hooks", "use-chat-response-cache.js"), "utf8"),
+    readFile(join(root, "manager", "src", "hooks", "use-chat-recovery.js"), "utf8"),
+    readFile(join(root, "manager", "src", "hooks", "use-chat-session.js"), "utf8"),
+    readFile(join(root, "manager", "src", "hooks", "use-runtime-status.js"), "utf8"),
+    readFile(join(root, "manager", "src", "hooks", "use-chat-viewport.js"), "utf8"),
+    readFile(join(root, "manager", "src", "features", "chat", "chat-activity.js"), "utf8"),
+    readFile(join(root, "manager", "src", "features", "chat", "chat-conversation-utils.js"), "utf8"),
+    readFile(join(root, "manager", "src", "features", "chat", "chat-ui-actions.js"), "utf8"),
+    readFile(join(root, "manager", "src", "features", "profiles", "browser-profiles-section.jsx"), "utf8"),
+    readFile(join(root, "manager", "src", "features", "chat", "chat-modal.jsx"), "utf8"),
+    readFile(join(root, "manager", "src", "main.jsx"), "utf8")
+  ]).then((parts) => parts.join("\n")),
   readFile(join(root, "manager", "src", "features", "profiles", "worker-update-confirm-modal.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "features", "chat", "chat-request-composer.jsx"), "utf8"),
   readFile(join(root, "manager", "src", "styles.css"), "utf8"),
@@ -509,7 +530,7 @@ assert.match(bridge, /connector_profile_bound:[\s\S]*?connector_update_required:
 assert.match(bridge, /loadBrowserProfileTasks\(\)/, "profile task titles must load when the bridge starts");
 assert.match(bridge, /persistBrowserProfileTasks\(\)/, "AI task titles must persist after begin_repo_task");
 assert.match(bridge, /LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS = 125_000[\s\S]*?action === "audit_long_running_chat"[\s\S]*?LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS/, "the extension bridge must allow the bounded reload, replacement, and probe sequence to finish");
-assert.match(managerUi, /const profileTaskSummary = profileTaskSummaryState\(\{ profile, cachedTitle: profileTaskLabels\[profile\.profile_id\], working, settling \}\);[\s\S]*?const profileTaskLabel = profileTaskSummary\.title;[\s\S]*?<span>\{profileTaskSummary\.label\}<\/span>[\s\S]*?<strong>\{profileTaskLabel\}<\/strong>/, "Manager must retain the last AI task title after completion through the shared profile task summary state");
+assert.match(managerUi, /const profileTaskSummary = profileTaskSummaryState\(\{ profile, cachedTitle: (?:profileTaskLabels|taskLabels)\[profile\.profile_id\], working, settling \}\);[\s\S]*?const profileTaskLabel = profileTaskSummary\.title;[\s\S]*?<span>\{profileTaskSummary\.label\}<\/span>[\s\S]*?<strong>\{profileTaskLabel\}<\/strong>/, "Manager must retain the last AI task title after completion through the shared profile task summary state");
 assert.match(managerMain, /const MANAGER_VERSION = app\.getVersion\(\)/, "MCP client metadata must use the packaged Manager version");
 assert.match(managerUi, /CodexPro Manager \{managerPackage\.version\}/, "Manager footer must use package.json instead of a stale hard-coded version");
 assert.doesNotMatch(managerUi, /CodexPro Manager 0\.2\.\d+/, "Manager UI must not hard-code a release version");
@@ -517,7 +538,7 @@ assert.match(managerDiagnosticView, /function DiagnosticDropdown[\s\S]*?<AppDrop
 assert.match(managerAppDropdown, /aria-haspopup="listbox"[\s\S]*?role="listbox"[\s\S]*?role="option"/, "The shared dropdown must expose accessible listbox semantics");
 assert.doesNotMatch(managerDiagnosticView, /<select\b/, "Diagnostic toolbar must not regress to native select controls");
 assert.match(managerStyles, /\.diagnostic-toolbar \{[^}]*grid-template-columns: minmax\(240px, 1fr\) auto[\s\S]*?\.diagnostic-filter-row \{[^}]*repeat\(5, minmax\(0, 1fr\)\)/, "Diagnostic toolbar must reserve a full row for five unclipped filters");
-assert.match(managerMain, /function diagnosticIpcHandle[\s\S]*?envelopeError[\s\S]*?durationMs >= Number\(options\.slowMs\)[\s\S]*?catch \(error\)/, "Manager IPC diagnostics must capture envelope failures, slow operations, and thrown errors centrally");
+assert.match(managerMain, /createDiagnosticIpcRegistrar[\s\S]*?function handle\(channel, options, handler\)[\s\S]*?envelopeError[\s\S]*?durationMs >= Number\(options\.slowMs\)[\s\S]*?catch \(error\)/, "Manager IPC diagnostics must capture envelope failures, slow operations, and thrown errors centrally through the extracted registrar");
 for (const action of ["control-server", "setup-profile", "recover-profile-chat", "reload-profiles", "save-manager-settings", "send-profile-request", "get-profile-response", "get-repo-task-status", "inspect-project"]) {
   assert.match(managerMain, new RegExp(`action: \\"${action}\\"`), `important Manager action ${action} must be covered by persistent diagnostics`);
 }
@@ -685,7 +706,7 @@ assert.match(managerUi, /longRunningChatWatchdogCandidate[\s\S]*?api\.auditLongR
 assert.match(managerMain, /async function stopProfileTask[\s\S]*?action: "stop_chat_generation"[\s\S]*?15000/, "Manager must route task stop through the bounded MCP command");
 assert.match(managerMain, /codexpro:stop-profile-task[\s\S]*?stopProfileTask\(payload\)/, "Manager IPC must expose task stop to the renderer");
 assert.match(managerPreload, /stopProfileTask: \(payload\) => invoke\("codexpro:stop-profile-task", payload\)/, "preload must expose stopProfileTask");
-assert.match(managerUi, /async function stopControlTask[\s\S]*?api\.stopProfileTask[\s\S]*?onStop=\{\(task\) => void stopControlTask\(task\)\}/, "Control Center must wire task stop from UI to preload");
+assert.match(managerUi, /(?:async function stopControlTask|const stopControlTask = useCallback\(async)[\s\S]*?api\.stopProfileTask[\s\S]*?onStop=\{\(task\) => void stopControlTask\(task\)\}/, "Control Center must wire task stop from UI to preload");
 
 assert.match(server, /steps: z\.array\(z\.object/);
 assert.match(server, /timeout_ms: z\.number\(\)\.int\(\)\.min\(100\)\.max\(60000\)/);
@@ -750,7 +771,7 @@ assert.match(sendProfileRequestSource, /task_kind[\s\S]*?<general hoặc code>[\
 assert.match(sendProfileRequestSource, /Không được mặc định dùng workspace CodexPro hiện tại\/default/, "all_allowed prompt must force the AI to choose the actual target instead of defaulting to CodexPro's current workspace");
 assert.doesNotMatch(sendProfileRequestSource, /root:\\"\$\{initialWorkspaceRoot\.replace\([\s\S]{0,120}?scope:\\"all_allowed/, "all_allowed prompt must not hardcode the Manager default workspace root");
 assert.match(sendProfileRequestSource, /action: "send_chat_request"[\s\S]*?}, 235000\)/, "chat submission must preserve the action timeout after a reconnect wait");
-const managerSendUiSource = managerUi.slice(managerUi.indexOf("async function sendRequest(profile"), managerUi.indexOf("async function rolloverFullConversation"));
+const managerSendUiSource = managerUi.slice(managerUi.indexOf("async function sendRequest(profile"), managerUi.indexOf("async function verifyRepoTaskUse"));
 assert.match(managerSendUiSource, /draftOverride !== null \? draftOverride : \(requestDraftsRef\.current\[profile\.profile_id\][\s\S]*?api\.sendProfileRequest/, "Manager send must read the composer snapshot without subscribing the full chat modal to every keystroke");
 assert.match(managerChatComposer, /const submittedDraft = draft[\s\S]*?const submitted = await onSend\(submittedDraft\);[\s\S]*?if \(submitted && draftRef\.current === submittedDraft\) updateDraft\(""\)/, "the extracted local composer must clear only the exact submitted draft after confirmation and preserve text typed for the next follow-up");
 assert.match(managerSendUiSource, /scope: allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "all_allowed sends must preserve scope and provide known workspace candidates to the backend");
@@ -812,15 +833,15 @@ assert.match(managerMain, /for \(const root of discoveredRoots\) \{[\s\S]*?isInt
 assert.match(managerUi, /api\.onBrowserProfiles/);
 assert.doesNotMatch(managerUi, /REALTIME_POLL_MS = 1000/, "Manager must not poll status every second");
 assert.match(managerUi, /responseScrollLocked/, "manual transcript scrolling must lock auto-scroll");
-assert.match(managerUi, /rendererUnresponsive\s*\?\s*recoverProfileTab\(profile\)\s*:\s*openProfile\(profile, \{ focusOnly: true \}\)/, "the profile card must recover an unresponsive conversation or focus the already-open Chrome tab without navigating it");
+assert.match(managerUi, /onClick=\{\(\) => rendererUnresponsive \? onRecoverProfile\(profile\) : onOpenProfile\(profile\)\}/, "the profile card must route an unresponsive conversation through recovery and otherwise delegate to the current open-profile action");
 assert.match(managerUi, /responseScrollLocked\.current\.get\(chatProfileId\)/, "stream updates must respect the manual scroll lock");
 assert.match(managerUi, /responseScrollLocked\.current\.delete\(profile\.profile_id\)/, "sending a new message must resume auto-scroll");
 assert.match(managerUi, /const positionOpenChatViewport = useCallback\([\s\S]*?maintainResponsePosition\(profileId, cause\)[\s\S]*?modal\.scrollTop = modal\.scrollHeight/, "opening Chat must keep the outer modal at the real bottom without blindly forcing the transcript itself to the bottom");
 assert.match(managerUi, /const openChatTurnActive = useMemo\([\s\S]*?openTab\?\.busy[\s\S]*?networkStreamInProgress[\s\S]*?openChatAwaitingAssistant/, "opening Chat must derive whether the selected response is still active from both tab and transcript evidence");
 assert.match(managerUi, /const restoreOpenResponseTurnAnchor = useCallback\([\s\S]*?chat-transcript-message\.is-user[\s\S]*?responseTurnAnchors\.current\.set/, "reopening an active response must reconstruct its latest-user turn anchor from rendered transcript state");
 assert.match(managerUi, /useLayoutEffect\(\(\) => \{[\s\S]*?openChatTurnActive\) restoreOpenResponseTurnAnchor\(chatProfileId\)[\s\S]*?maintainResponsePosition/, "an active reopened response must restore the turn anchor before positioning the transcript");
-assert.match(managerUi, /function openChat\(profile\)[\s\S]*?responseScrollPositions\.current\.delete\(profile\.profile_id\)[\s\S]*?positionOpenChatViewport\(profile\.profile_id[\s\S]*?hydrateCachedResponse\(profile, conversationId\)\.finally/, "opening Chat must hydrate the cached transcript and re-evaluate the appropriate active-turn or bottom position");
-assert.match(managerUi, /function changeProjectForProfile\(profile, root\)[\s\S]*?requestTargetsRef\.current[\s\S]*?NEW_CHAT_TARGET[\s\S]*?setRequestResponses[\s\S]*?conversationId: NEW_CHAT_TARGET/, "changing project must detach the new task from the previous project's conversation and transcript");
+assert.match(managerUi, /function openChat\(profile\)[\s\S]*?resetChatViewport\(profile\.profile_id\)[\s\S]*?positionOpenChatViewport\(profile\.profile_id[\s\S]*?hydrateCachedResponse\(profile, conversationId\)\.finally/, "opening Chat must reset stale viewport state, hydrate the cached transcript, and re-evaluate the appropriate active-turn or bottom position");
+assert.match(managerUi, /const changeProjectForProfile = useCallback\(\(profile, root\) => \{[\s\S]*?requestTargetsRef\.current[\s\S]*?NEW_CHAT_TARGET[\s\S]*?setRequestResponses[\s\S]*?conversationId: NEW_CHAT_TARGET/, "changing project must detach the new task from the previous project's conversation and transcript");
 assert.match(managerUi, /openChatAwaitingAssistant[\s\S]*?pollLatestResponse[\s\S]*?completedResponseNeedsDomFallback\(canonical\)[\s\S]*?loadResponse\(profile, conversationId, true, true\)/, "Manager must fall back to the live DOM when network completion arrives before canonical contains the newest response");
 assert.match(managerUi, /tab\.connection_interrupted[\s\S]*?connectionRecoveryReads[\s\S]*?loadResponse\(profile, conversationId, true, true, true\)/, "Manager must automatically recover the exact chat when ChatGPT reports an interrupted connection");
 assert.match(worker, /connection_interrupted:Boolean\(domActivity\.connection_interrupted\)/, "profile status must expose interrupted ChatGPT renderers to Manager");
@@ -857,7 +878,7 @@ assert.match(bridge, /conversation_limit_reached:\s*tab\.conversation_limit_reac
 assert.match(worker, /args\.read_dom===false&&args\.canonical_only!==true[\s\S]*?args\.canonical_only===true[\s\S]*?canonical_available:true/, "worker must expose authenticated canonical response reads without querying transcript DOM");
 assert.match(managerMain, /read_dom: payload\?\.canonicalOnly === true \|\| payload\?\.readDom !== false,[\s\S]*?canonical_only: payload\?\.canonicalOnly === true/, "Manager canonical recovery must remain compatible with a server process that has not restarted yet");
 assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?network_last_completed_at/, "Chat reopening must compare the persisted response against the latest network completion before re-reading transcript content");
-assert.match(managerUi, /cachedResponseIsFresh\([\s\S]*?cached\?\.responseReady !== true/, "an unverified cached assistant fragment must never be accepted as the final ChatGPT response");
+assert.match(managerUi, /cachedResponseIsFresh = useCallback\(\(profile, conversationId, cached\) => \{[\s\S]*?cached\?\.responseReady !== true/, "an unverified cached assistant fragment must never be accepted as the final ChatGPT response");
 assert.match(managerUi, /fastResult\?\.network_stream_available && fastResult\?\.network_stream_in_progress === true/, "only a currently running network stream may suppress canonical/DOM recovery");
 assert.match(worker, /function networkStreamCompletedForCurrentGeneration\([\s\S]*?networkState\?\.network_state==='completed'[\s\S]*?networkStream\.in_progress!==true[\s\S]*?networkStreamMatchesCurrentGeneration\(networkState,networkStream\)[\s\S]*?networkStreamCompletedCurrent=networkStreamCompletedForCurrentGeneration/, "worker must retain a terminal current-generation stream even when the capture bridge does not emit an explicit completed flag");
 assert.match(worker, /completedNetworkStreamReady[\s\S]*?mergeCompletedNetworkStreamResponse\(domResult,networkStream\)/, "a completed network stream must replace a shorter partial DOM response before it is returned as final");
@@ -948,7 +969,8 @@ assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-onl
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
 assert.match(worker, /if\(domActivity\.busy&&!allowBusyFollowup\)\{[\s\S]*?probeCanonicalActivity\(tab\.id,targetConversationId,true\)[\s\S]*?canonicalCompleted[\s\S]*?send_preflight_canonical/, "automated send preflight must clear a stale DOM busy guard when canonical proves the previous turn completed while manual follow-ups bypass that guard");
 assert.match(worker, /allowBusyFollowup&&\(requestState\.busy&&requestState\.network_state==='generating'\|\|networkCaptureProbe\?\.in_progress===true\)/, "explicit manual follow-ups must accept either the live request state or an authoritative in-progress network stream");
-assert.match(worker, /SEND_POST_ACK_STABILITY_MS = 650/, "accepted sends must retain a short post-ACK stability gate before another send may start");
+assert.doesNotMatch(worker, /SEND_POST_ACK_STABILITY_MS = 650/, "accepted sends must not add a fixed delay after authoritative network ACK");
+assert.match(worker, /SEND_CONFIRMED_STABILITY_SOURCE = 'network_ack'[\s\S]*?send_stability_wait_ms:0/, "accepted sends must release immediately after authoritative network ACK while keeping stability telemetry");
 assert.equal(manifest.version, "0.5.124");
 assert.doesNotMatch(worker, /function focusNewChatGptTab|forceChatFocus/, "audited tab creation must not add a second ad-hoc focus helper");
 assert.match(worker, /createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\},visualWatchdog\?'send_chat_request_watchdog':'send_chat_request_new',\{visualWatchdog\}\)/, "new-chat sends must explicitly distinguish normal task tabs from the dedicated Watchdog tab");

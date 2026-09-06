@@ -128,7 +128,7 @@ try {
       kind: "Log.entryAdded",
       message: "Failed to load resource: the server responded with a status of 429 ()",
       profile_id: profileId,
-      tab_id: 77,
+      tab_id: 78,
       window_id: 9,
       conversation_id: "12345678-abcd",
       task_id: "",
@@ -152,7 +152,7 @@ try {
       kind: "Runtime.consoleAPICalled",
       message: "RequestError: Too many requests",
       profile_id: profileId,
-      tab_id: 77,
+      tab_id: 79,
       window_id: 9,
       conversation_id: "12345678-abcd",
       task_id: "",
@@ -206,6 +206,24 @@ try {
     }
   });
   assert.equal(rateLimitResponse.incident_id, "flight-recorder-rate-limit", "the bridge must acknowledge the dedicated 429 incident");
+
+  const duplicateRateLimitResponse = await post("/flight-recorder", {
+    profile: { id: profileId, enabled: true, label: "Flight Recorder Smoke", version: "0.0.0-smoke" },
+    incident: {
+      id: "flight-recorder-rate-limit-duplicate",
+      at: new Date(Date.now() + 4).toISOString(),
+      reason: "rate_limit",
+      kind: "Network.responseReceived",
+      message: "ChatGPT HTTP 429 Too Many Requests: /backend-api/f/conversation",
+      profile_id: profileId,
+      tab_id: 77,
+      window_id: 9,
+      conversation_id: "12345678-abcd",
+      event: { event: "Network.responseReceived", status: 429, endpoint: "/backend-api/f/conversation", url: "https://chatgpt.com/backend-api/f/conversation" },
+      events: []
+    }
+  });
+  assert.equal(duplicateRateLimitResponse.deduplicated, true, "duplicate 429 incidents in the same tab/conversation window must be dropped before persistence/fanout");
 
   const profile = bridge.listBrowserExtensionProfiles().find((item) => item.profile_id === profileId);
   assert.ok(profile, "the synthetic profile must remain visible after the incident post");

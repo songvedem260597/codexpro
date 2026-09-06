@@ -6,7 +6,7 @@ import {
 } from "../manager/src/chat-recovery-policy.js";
 
 const worker = readFileSync(new URL("../chrome-extension/service-worker.js", import.meta.url), "utf8");
-const manager = readFileSync(new URL("../manager/src/main.jsx", import.meta.url), "utf8");
+const manager = ["../manager/src/main.jsx", "../manager/src/hooks/use-chat-recovery.js", "../manager/src/hooks/use-chat-send-actions.js"].map((file) => readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
 const managerMain = readFileSync(new URL("../manager/electron/main.mjs", import.meta.url), "utf8");
 const bridge = readFileSync(new URL("../src/browserExtensionBridge.ts", import.meta.url), "utf8");
 const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");

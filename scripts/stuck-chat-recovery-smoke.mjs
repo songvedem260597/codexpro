@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 
 const worker = readFileSync(new URL("../chrome-extension/service-worker.js", import.meta.url), "utf8");
 const managerMain = readFileSync(new URL("../manager/electron/main.mjs", import.meta.url), "utf8");
-const managerUi = readFileSync(new URL("../manager/src/main.jsx", import.meta.url), "utf8");
+const managerUi = ["../manager/src/main.jsx", "../manager/src/hooks/use-chat-recovery.js"].map((file) => readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
 
 const recoveryStart = worker.indexOf("if(action==='recover_chat_tab'){");
 const recoveryEnd = worker.indexOf("if(action==='send_chat_request'){", recoveryStart);
@@ -20,6 +20,6 @@ assert.match(managerMain, /function isMissingChromeTabError[\s\S]*?No tab with i
 assert.match(managerMain, /async function openProfileChat[\s\S]*?const openFreshChat[\s\S]*?action: "open_tab"[\s\S]*?url: "https:\/\/chatgpt\.com\/"/, "Mở Chrome must define a fresh-chat fallback for a stale target");
 assert.match(managerMain, /async function openProfileChat[\s\S]*?isMissingChromeTabError\(error\)[\s\S]*?await openFreshChat\(\)/, "Mở Chrome must use the fresh-chat fallback when its cached target id no longer exists");
 assert.match(managerMain, /async function recoverProfileChatTab[\s\S]*?new_chat: newChat/, "Manager must forward fresh-chat recovery through MCP");
-assert.match(managerUi, /async function recoverProfileTab[\s\S]*?newChat: true[\s\S]*?NEW_CHAT_TARGET/, "the UI must select the fresh-chat composer after recovering a hung profile");
+assert.match(managerUi, /async function recoverProfileTab[\s\S]*?newChat: false[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?continuation_reason: "recovery"/, "the UI must try the owned conversation first, then move unrecoverable state into a continuation chat");
 
 console.log("✓ Stuck ChatGPT tab recovery smoke test passed");
