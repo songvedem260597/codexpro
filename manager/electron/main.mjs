@@ -37,6 +37,7 @@ import { ALL_ALLOWED_WORKSPACES, createManagerSettingsStore } from "./manager-se
 import { createManagerChatCache } from "./manager-chat-cache.mjs";
 import { createManagerChatDiagnostics } from "./manager-chat-diagnostics.mjs";
 import { createDiagnosticIpcRegistrar } from "./ipc/diagnostic-ipc.mjs";
+import { registerSettingsIpcHandlers } from "./ipc/settings-ipc.mjs";
 import { registerWorkerIpcHandlers } from "./ipc/worker-ipc.mjs";
 import {
   captureClipboardImage,
@@ -4106,29 +4107,19 @@ diagnosticIpcHandle("codexpro:reload-profiles", {
   resultDetails: (result) => ({ mode: String(result?.mode || ""), count: Number(result?.count) || 0, failed: Number(result?.failed) || 0, deferred: Number(result?.deferred) || 0, outdated: Number(result?.outdated) || 0, version: String(result?.version || "") }),
   resultDiagnostic: (result) => Number(result?.failed) > 0 ? { level: "error", message: `Reload worker còn ${Number(result.failed)} profile thất bại` } : Number(result?.deferred) > 0 ? { level: "warn", message: `Reload worker bỏ qua ${Number(result.deferred)} profile đang bận` } : null
 }, () => reloadChromeProfiles());
-diagnosticIpcHandle("codexpro:get-manager-settings", { category: "settings", action: "get-manager-settings" }, () => managerSettingsPayload());
-diagnosticIpcHandle("codexpro:save-manager-settings", {
-  category: "settings",
-  action: "save-manager-settings",
-  logSuccess: true,
-  successMessage: "Lưu cài đặt Manager hoàn tất",
-  failureMessage: "Lưu cài đặt Manager thất bại",
-  details: (patch) => ({ changed_keys: Object.keys(patch && typeof patch === "object" ? patch : {}).slice(0, 30) })
-}, (_event, patch) => saveManagerSettingsPatch(patch));
-diagnosticIpcHandle("codexpro:create-worker-image-pack", { category: "settings", action: "create-worker-image-pack", failureMessage: "Tạo bộ ảnh worker thất bại" }, (_event, name) => createWorkerImagePack(name));
-diagnosticIpcHandle("codexpro:select-worker-image-pack", { category: "settings", action: "select-worker-image-pack", failureMessage: "Chọn bộ ảnh worker thất bại" }, (_event, packId) => selectWorkerImagePack(packId));
-diagnosticIpcHandle("codexpro:delete-worker-image-pack", { category: "settings", action: "delete-worker-image-pack", failureMessage: "Xóa bộ ảnh worker thất bại" }, (_event, packId) => deleteWorkerImagePack(packId));
-diagnosticIpcHandle("codexpro:choose-worker-image", { category: "settings", action: "choose-worker-image", failureMessage: "Chọn ảnh worker thất bại", details: (payload) => ({ state: String(payload?.state || "") }) }, (_event, payload) => chooseWorkerImage(payload?.packId, payload?.state));
-diagnosticIpcHandle("codexpro:reset-worker-image", { category: "settings", action: "reset-worker-image", failureMessage: "Khôi phục ảnh worker thất bại", details: (payload) => ({ state: String(payload?.state || "") }) }, (_event, payload) => resetWorkerImage(payload?.packId, payload?.state));
-diagnosticIpcHandle("codexpro:choose-app-background", { category: "settings", action: "choose-app-background", failureMessage: "Chọn hình nền thất bại" }, () => chooseAppBackground());
-diagnosticIpcHandle("codexpro:reset-app-background", { category: "settings", action: "reset-app-background", failureMessage: "Xóa hình nền thất bại" }, () => resetAppBackground());
-diagnosticIpcHandle("codexpro:reset-manager-settings", {
-  category: "settings",
-  action: "reset-manager-settings",
-  logSuccess: true,
-  successMessage: "Khôi phục cài đặt Manager hoàn tất",
-  failureMessage: "Khôi phục cài đặt Manager thất bại"
-}, () => resetManagerSettings());
+registerSettingsIpcHandlers({
+  diagnosticIpcHandle,
+  managerSettingsPayload,
+  saveManagerSettingsPatch,
+  createWorkerImagePack,
+  selectWorkerImagePack,
+  deleteWorkerImagePack,
+  chooseWorkerImage,
+  resetWorkerImage,
+  chooseAppBackground,
+  resetAppBackground,
+  resetManagerSettings
+});
 diagnosticIpcHandle("codexpro:choose-request-files", { category: "chat", action: "choose-request-files", failureMessage: "Chọn file đính kèm thất bại" }, () => chooseRequestFiles());
 diagnosticIpcHandle("codexpro:get-request-file-preview", { category: "chat", action: "get-request-file-preview", failureMessage: "Đọc preview file đính kèm thất bại" }, (_event, filePath) => requestFilePreview(filePath));
 diagnosticIpcHandle("codexpro:capture-clipboard-image", { category: "chat", action: "capture-clipboard-image", failureMessage: "Đọc ảnh clipboard thất bại" }, () => captureClipboardImage());
