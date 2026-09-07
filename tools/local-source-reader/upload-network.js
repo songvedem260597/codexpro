@@ -82,16 +82,27 @@
     const parsed = [];
     let final = null;
     for (const line of String(text || '').split(/\r?\n/)) {
-      if (!line.startsWith('data:')) continue;
-      const raw = line.slice(5).trim();
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const raw = trimmed.startsWith('data:') ? trimmed.slice(5).trim() : trimmed;
       if (!raw || raw === '[DONE]') continue;
       const value = parseJson(raw);
       if (!value) continue;
       parsed.push(value);
       final = value;
     }
-    const success = parsed.some((value) => String(value?.status || '').toLowerCase() === 'success');
-    const failure = parsed.find((value) => /^(?:failed|error|cancelled|canceled)$/i.test(String(value?.status || '')) || value?.error);
+    const success = parsed.some((value) => {
+      const status = String(value?.status || '').toLowerCase();
+      const event = String(value?.event || '').toLowerCase();
+      return status === 'success' || event === 'file.processing.completed';
+    });
+    const failure = parsed.find((value) => {
+      const status = String(value?.status || '').toLowerCase();
+      const event = String(value?.event || '').toLowerCase();
+      return /^(?:failed|error|cancelled|canceled)$/.test(status)
+        || /(?:^|\.)(?:failed|error|cancelled|canceled)$/.test(event)
+        || Boolean(value?.error);
+    });
     return { events: parsed, final, success, failure };
   }
 
