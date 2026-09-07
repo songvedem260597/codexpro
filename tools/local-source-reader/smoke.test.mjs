@@ -43,7 +43,9 @@ assert.ok(
 assert.match(network, /process_upload_stream/, 'network monitor must watch process upload stream');
 assert.match(network, /uploaded\$\//, 'network monitor must watch uploaded finalize path');
 assert.match(network, /explicitStatus === 'success'/, 'legacy finalize must require explicit success');
-assert.match(network, /stream\.success/, 'process stream must require a success SSE event');
+assert.match(network, /stream\.success/, 'process stream must require a success event');
+assert.match(network, /trimmed\.startsWith\('data:'\)/, 'process stream parser must accept both SSE data lines and plain NDJSON lines');
+assert.match(network, /event === 'file\.processing\.completed'/, 'ChatGPT file.processing.completed must count as upload success');
 assert.doesNotMatch(
   network,
   /kind:\s*'confirmed'[^\n]{0,180}createPath/,
