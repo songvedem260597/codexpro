@@ -264,6 +264,7 @@ try {
   git(["fetch", "origin", "main"], registeredG.worktreeRoot);
   const actualMergeBaseG = git(["merge-base", gCommitBeforeRebase, remoteBeforeIntegrationG], registeredG.worktreeRoot);
   assert.equal(actualMergeBaseG, historicalRemoteHeadG, "task G should have a newer actual merge-base than its stored coordination base");
+  assert.notEqual(actualMergeBaseG, staleBaseG, "actual merge-base must supersede the intentionally stale coordination base");
   const staleLocalChangedG = git(["diff", "--name-only", `${staleBaseG}..${gCommitBeforeRebase}`], registeredG.worktreeRoot).split(/\r?\n/).filter(Boolean);
   const staleRemoteChangedG = git(["diff", "--name-only", `${staleBaseG}..${remoteBeforeIntegrationG}`], registeredG.worktreeRoot).split(/\r?\n/).filter(Boolean);
   assert.ok(staleLocalChangedG.includes("a.txt") && staleRemoteChangedG.includes("a.txt"), "the stale base should reproduce the historical false-overlap shape");
