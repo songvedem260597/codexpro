@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GitHub Actions Monitor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --bg-soft: #0a1728;
+      --panel: #0d1b2e;
+      --panel-2: #10233b;
+      --panel-3: #142a46;
+      --line: #223b59;
+      --line-soft: rgba(63, 91, 126, .42);
+      --text: #f3f7ff;
+      --muted: #94a9c5;
+      --blue: #4d9cff;
+      --blue-soft: rgba(77, 156, 255, .13);
+      --green: #40d889;
+      --green-soft: rgba(64, 216, 137, .13);
+      --red: #ff6574;
+      --red-soft: rgba(255, 101, 116, .13);
+      --yellow: #f5c451;
+      --yellow-soft: rgba(245, 196, 81, .13);
+      --purple: #b594ff;
+      --shadow: 0 14px 40px rgba(0, 0, 0, .2);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top left, rgba(38, 104, 180, .10), transparent 30%),
+        linear-gradient(180deg, #081321 0%, var(--bg) 100%);
+      color: var(--text);
+      font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+
+    button, input { font: inherit; }
+    button { color: inherit; }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+    }
+
+    header {
+      padding: 20px 24px 18px;
+      border-bottom: 1px solid var(--line-soft);
+      background: rgba(8, 20, 35, .91);
+      backdrop-filter: blur(16px);
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand { min-width: 245px; }
+    .brand-line { display: flex; gap: 11px; align-items: center; }
+    .brand-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 11px;
+      display: grid;
+      place-items: center;
+      font-weight: 900;
+      font-size: 18px;
+      background: linear-gradient(145deg, #163a64, #0d2440);
+      border: 1px solid #315b88;
+      box-shadow: 0 8px 24px rgba(29, 103, 183, .18);
+    }
+    .brand h1 { margin: 0; font-size: 21px; letter-spacing: -.35px; }
+    .brand p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+
+    .controls {
+      display: flex;
+      gap: 9px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .repo-wrap, .token-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #091727;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      padding-left: 11px;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .repo-wrap:focus-within, .token-wrap:focus-within {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(77, 156, 255, .10);
+    }
+    .input-icon { color: #b9c9df; font-size: 13px; }
+    input {
+      background: transparent;
+      color: var(--text);
+      border: 0;
+      padding: 10px 11px 10px 0;
+      outline: none;
+    }
+    #repo { width: 230px; }
+    #token { width: 178px; }
+    input::placeholder { color: #647b99; }
+
+    button {
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      border-radius: 10px;
+      padding: 10px 14px;
+      cursor: pointer;
+      transition: transform .12s, border-color .12s, background .12s;
+    }
+    button:hover { border-color: #47709c; background: #173050; }
+    button:active { transform: translateY(1px); }
+    button.primary {
+      background: linear-gradient(180deg, #287be5, #1762c4);
+      border-color: #3a8bed;
+      font-weight: 700;
+      box-shadow: 0 8px 20px rgba(28, 111, 212, .23);
+    }
+
+    .summary {
+      padding: 15px 24px;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      gap: 11px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .card {
+      min-height: 86px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 13px 15px;
+      display: grid;
+      grid-template-columns: 38px 1fr;
+      gap: 11px;
+      align-items: center;
+      background: linear-gradient(145deg, rgba(17, 34, 56, .96), rgba(12, 27, 46, .96));
+      box-shadow: 0 8px 24px rgba(0, 0, 0, .10);
+    }
+    .card-icon {
+      width: 38px;
+      height: 38px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      font-size: 18px;
+      font-weight: 900;
+      border: 1px solid currentColor;
+    }
+    .card .label { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; }
+    .card .value { font-size: 26px; font-weight: 800; line-height: 1.05; margin-top: 3px; }
+    .card .hint { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .card.running { border-color: rgba(77, 156, 255, .45); background: linear-gradient(145deg, var(--blue-soft), rgba(13, 27, 46, .98)); }
+    .card.running .card-icon { color: var(--blue); background: var(--blue-soft); }
+    .card.queued-card { border-color: rgba(245, 196, 81, .42); background: linear-gradient(145deg, var(--yellow-soft), rgba(13, 27, 46, .98)); }
+    .card.queued-card .card-icon { color: var(--yellow); background: var(--yellow-soft); }
+    .card.failed { border-color: rgba(255, 101, 116, .43); background: linear-gradient(145deg, var(--red-soft), rgba(13, 27, 46, .98)); }
+    .card.failed .card-icon { color: var(--red); background: var(--red-soft); }
+    .card.success-card { border-color: rgba(64, 216, 137, .43); background: linear-gradient(145deg, var(--green-soft), rgba(13, 27, 46, .98)); }
+    .card.success-card .card-icon { color: var(--green); background: var(--green-soft); }
+    .card.api .card-icon { color: #9db1cc; background: rgba(157, 177, 204, .08); }
+
+    .layout {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: minmax(570px, 1.22fr) minmax(350px, .78fr);
+    }
+    .runs, .details { min-height: 0; overflow: auto; }
+    .runs { border-right: 1px solid var(--line-soft); }
+
+    .section-head {
+      position: sticky;
+      top: 0;
+      z-index: 3;
+      min-height: 46px;
+      padding: 11px 16px;
+      background: rgba(7, 17, 31, .95);
+      border-bottom: 1px solid var(--line-soft);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      backdrop-filter: blur(14px);
+    }
+    .section-head strong { font-size: 13px; letter-spacing: .15px; }
+    .small { color: var(--muted); font-size: 12px; }
+
+    .run {
+      position: relative;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line-soft);
+      display: grid;
+      grid-template-columns: 36px minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      cursor: pointer;
+      transition: background .12s, box-shadow .12s;
+    }
+    .run:hover { background: rgba(16, 34, 57, .72); }
+    .run.selected {
+      background: linear-gradient(90deg, rgba(77, 156, 255, .16), rgba(16, 34, 57, .72));
+      box-shadow: inset 3px 0 0 var(--blue), inset 0 0 0 1px rgba(77, 156, 255, .20);
+    }
+
+    .status-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      font-size: 15px;
+      font-weight: 900;
+      border: 1px solid currentColor;
+    }
+    .status-icon.in_progress { color: var(--blue); background: var(--blue-soft); box-shadow: 0 0 18px rgba(77,156,255,.14); }
+    .status-icon.success { color: var(--green); background: var(--green-soft); }
+    .status-icon.failure, .status-icon.timed_out, .status-icon.startup_failure { color: var(--red); background: var(--red-soft); }
+    .status-icon.cancelled { color: #c28b96; background: rgba(194,139,150,.10); }
+    .status-icon.queued, .status-icon.waiting, .status-icon.pending, .status-icon.requested { color: var(--yellow); background: var(--yellow-soft); }
+
+    .title { font-weight: 730; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .meta { color: var(--muted); margin-top: 5px; font-size: 11px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .badge { border: 1px solid #2f4b6a; background: rgba(17, 36, 60, .78); border-radius: 999px; padding: 2px 8px; color: #bfd0e6; }
+
+    .status-pill {
+      min-width: 92px;
+      text-align: center;
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: .65px;
+      font-weight: 850;
+      border-radius: 999px;
+      padding: 5px 9px;
+      border: 1px solid currentColor;
+      white-space: nowrap;
+    }
+    .status-pill.in_progress { color: #7bb8ff; background: var(--blue-soft); }
+    .status-pill.success { color: #66e4a2; background: var(--green-soft); }
+    .status-pill.failure, .status-pill.timed_out, .status-pill.startup_failure { color: #ff8591; background: var(--red-soft); }
+    .status-pill.cancelled { color: #d2a1aa; background: rgba(194,139,150,.09); }
+    .status-pill.queued, .status-pill.waiting, .status-pill.pending, .status-pill.requested { color: #f7d16e; background: var(--yellow-soft); }
+
+    .duration { color: #d6e3f4; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .duration.live { color: #71b3ff; font-weight: 750; }
+
+    .details-content { padding: 16px; }
+    .empty {
+      color: var(--muted);
+      min-height: 220px;
+      padding: 38px 18px;
+      text-align: center;
+      display: grid;
+      place-content: center;
+      gap: 8px;
+    }
+    .empty::before { content: '☷'; display: block; font-size: 34px; color: #536d8e; }
+
+    .detail-title { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; margin-bottom: 15px; }
+    .detail-title h2 { margin: 0; font-size: 18px; letter-spacing: -.2px; }
+    .detail-state { margin-top: 7px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+    .job {
+      background: linear-gradient(145deg, rgba(15, 32, 53, .98), rgba(11, 25, 43, .98));
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      margin-bottom: 11px;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0,0,0,.08);
+    }
+    .job-head { padding: 12px 13px; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .job-name { font-weight: 720; }
+    .runner { color: var(--purple); font-size: 11px; margin-top: 3px; }
+    .job-state { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+
+    .steps { border-top: 1px solid var(--line-soft); }
+    .step {
+      display: grid;
+      grid-template-columns: 24px 1fr auto;
+      gap: 8px;
+      padding: 8px 11px;
+      color: #cbd8e9;
+      border-bottom: 1px solid rgba(46, 70, 98, .38);
+      font-size: 12px;
+      align-items: center;
+    }
+    .step:last-child { border-bottom: 0; }
+    .step-symbol {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      font-weight: 900;
+      font-size: 11px;
+      border: 1px solid currentColor;
+    }
+    .ok { color: var(--green); background: var(--green-soft); }
+    .bad { color: var(--red); background: var(--red-soft); }
+    .active { color: var(--blue); background: var(--blue-soft); }
+    .queued { color: var(--yellow); background: var(--yellow-soft); }
+
+    #message { color: var(--muted); }
+    #message.error { color: var(--red); }
+    .live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); margin-right: 6px; box-shadow: 0 0 8px rgba(64,216,137,.55); }
+    .pulse { animation: pulse 1.15s ease-in-out infinite; }
+    @keyframes pulse { 50% { opacity: .46; transform: scale(.90); } }
+
+    @media (max-width: 980px) {
+      .summary { grid-template-columns: repeat(3, 1fr); }
+      header { align-items: flex-start; }
+      .controls { max-width: 520px; }
+    }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      .runs { border-right: 0; border-bottom: 1px solid var(--line); max-height: 52vh; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="brand">
+        <div class="brand-line">
+          <div class="brand-icon">↯</div>
+          <div>
+            <h1>GitHub Actions Monitor</h1>
+            <p>Theo dõi workflow của nhiều repository trên một app</p>
+          </div>
+        </div>
+      </div>
+      <div class="controls">
+        <label class="repo-wrap" title="Nhập repository theo dạng owner/repo">
+          <span class="input-icon">◉</span>
+          <input id="repo" list="recentRepos" value="songvedem260597/codexpro" spellcheck="false" aria-label="Repository" placeholder="owner/repository" />
+          <datalist id="recentRepos"></datalist>
+        </label>
+        <label class="token-wrap">
+          <span class="input-icon">⌁</span>
+          <input id="token" type="password" placeholder="GitHub token (tuỳ chọn)" autocomplete="off" aria-label="GitHub token" />
+        </label>
+        <button id="refresh" class="primary">↻ Refresh</button>
+      </div>
+    </header>
+
+    <section class="summary">
+      <div class="card running">
+        <div class="card-icon pulse">↻</div>
+        <div><div class="label">Running</div><div id="runningCount" class="value">0</div><div class="hint">Đang chạy</div></div>
+      </div>
+      <div class="card queued-card">
+        <div class="card-icon">…</div>
+        <div><div class="label">Queued</div><div id="queuedCount" class="value">0</div><div class="hint">Đang chờ</div></div>
+      </div>
+      <div class="card failed">
+        <div class="card-icon">×</div>
+        <div><div class="label">Failed</div><div id="failedCount" class="value">0</div><div class="hint">Thất bại</div></div>
+      </div>
+      <div class="card success-card">
+        <div class="card-icon">✓</div>
+        <div><div class="label">Success</div><div id="successCount" class="value">0</div><div class="hint">Thành công</div></div>
+      </div>
+      <div class="card api">
+        <div class="card-icon">API</div>
+        <div><div class="label">Rate limit</div><div id="apiCount" class="value">—</div><div class="hint">Request còn lại</div></div>
+      </div>
+    </section>
+
+    <main class="layout">
+      <section class="runs">
+        <div class="section-head">
+          <strong>Workflow runs</strong>
+          <span id="message" class="small">Đang tải…</span>
+        </div>
+        <div id="runsList"></div>
+      </section>
+      <section class="details">
+        <div class="section-head">
+          <strong>Jobs / Steps</strong>
+          <span id="refreshMode" class="small"></span>
+        </div>
+        <div id="details" class="details-content"><div class="empty">Chọn một workflow ở bên trái để xem job và step.</div></div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const DEFAULT_REPO = 'songvedem260597/codexpro';
+    const state = {
+      repo: DEFAULT_REPO,
+      token: '',
+      runs: [],
+      selectedId: null,
+      timer: null,
+      clockTimer: null,
+      loading: false
+    };
+
+    const $ = (id) => document.getElementById(id);
+    const repoInput = $('repo');
+    const tokenInput = $('token');
+    const runsList = $('runsList');
+    const details = $('details');
+    const message = $('message');
+
+    function recentRepos() {
+      try {
+        const parsed = JSON.parse(localStorage.getItem('github-actions-monitor.recent-repos') || '[]');
+        return Array.isArray(parsed) ? parsed.filter(Boolean).slice(0, 8) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function renderRecentRepos() {
+      const list = $('recentRepos');
+      list.replaceChildren();
+      for (const repo of recentRepos()) {
+        const option = document.createElement('option');
+        option.value = repo;
+        list.append(option);
+      }
+    }
+
+    function rememberRepo(repo) {
+      if (!repo) return;
+      const next = [repo, ...recentRepos().filter((item) => item !== repo)].slice(0, 8);
+      localStorage.setItem('github-actions-monitor.recent-repos', JSON.stringify(next));
+      localStorage.setItem('github-actions-monitor.last-repo', repo);
+      renderRecentRepos();
+    }
+
+    const lastRepo = localStorage.getItem('github-actions-monitor.last-repo');
+    if (lastRepo) repoInput.value = lastRepo;
+    renderRecentRepos();
+
+    function statusKey(item) {
+      return item.status === 'completed' ? (item.conclusion || 'completed') : item.status;
+    }
+
+    function statusInfo(item) {
+      const key = statusKey(item);
+      if (key === 'success') return { key, label: 'THÀNH CÔNG', symbol: '✓' };
+      if (['failure', 'timed_out', 'startup_failure'].includes(key)) return { key, label: 'THẤT BẠI', symbol: '×' };
+      if (key === 'cancelled') return { key, label: 'ĐÃ HỦY', symbol: '–' };
+      if (key === 'in_progress') return { key, label: 'ĐANG CHẠY', symbol: '↻' };
+      if (['queued', 'waiting', 'pending', 'requested'].includes(key)) return { key, label: 'ĐANG CHỜ', symbol: '…' };
+      return { key: key || 'queued', label: String(key || 'ĐANG CHỜ').replaceAll('_', ' ').toUpperCase(), symbol: '•' };
+    }
+
+    function symbolFor(item) {
+      const info = statusInfo(item);
+      if (info.key === 'success') return [info.symbol, 'ok'];
+      if (['failure', 'cancelled', 'timed_out', 'startup_failure'].includes(info.key)) return [info.symbol, 'bad'];
+      if (info.key === 'in_progress') return [info.symbol, 'active'];
+      return [info.symbol, 'queued'];
+    }
+
+    function fmtTime(value) {
+      if (!value) return '—';
+      const date = new Date(value);
+      return new Intl.DateTimeFormat('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(date);
+    }
+
+    function elapsed(start, end) {
+      if (!start) return '—';
+      const ms = Math.max(0, new Date(end || Date.now()).getTime() - new Date(start).getTime());
+      const sec = Math.floor(ms / 1000);
+      const hours = Math.floor(sec / 3600);
+      const minutes = Math.floor((sec % 3600) / 60);
+      const seconds = sec % 60;
+      if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+      if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+      return `${seconds}s`;
+    }
+
+    function text(tag, className, value) {
+      const el = document.createElement(tag);
+      if (className) el.className = className;
+      el.textContent = value ?? '';
+      return el;
+    }
+
+    function updateDurationNode(el) {
+      const start = el.dataset.durationStart || '';
+      const end = el.dataset.durationEnd || '';
+      const prefix = el.dataset.durationPrefix || '';
+      el.textContent = `${prefix}${elapsed(start, end || null)}`;
+    }
+
+    function durationNode(start, end, live = false, prefix = '⏱ ') {
+      const el = text('span', `duration${live ? ' live' : ''}`, '');
+      el.dataset.durationStart = start || '';
+      if (end) el.dataset.durationEnd = end;
+      el.dataset.durationPrefix = prefix;
+      updateDurationNode(el);
+      return el;
+    }
+
+    function tickDurations() {
+      document.querySelectorAll('[data-duration-start]').forEach(updateDurationNode);
+    }
+
+    function renderSummary(rateLimit) {
+      const active = state.runs.filter((r) => r.status === 'in_progress').length;
+      const queued = state.runs.filter((r) => ['queued', 'waiting', 'pending', 'requested'].includes(r.status)).length;
+      const failed = state.runs.filter((r) => ['failure', 'timed_out', 'startup_failure'].includes(r.conclusion)).length;
+      const success = state.runs.filter((r) => r.conclusion === 'success').length;
+      $('runningCount').textContent = String(active);
+      $('queuedCount').textContent = String(queued);
+      $('failedCount').textContent = String(failed);
+      $('successCount').textContent = String(success);
+      $('apiCount').textContent = rateLimit?.remaining ?? '—';
+    }
+
+    function renderRuns() {
+      runsList.replaceChildren();
+      if (!state.runs.length) {
+        runsList.append(text('div', 'empty', 'Repository này chưa có workflow run.'));
+        return;
+      }
+
+      for (const run of state.runs) {
+        const info = statusInfo(run);
+        const row = document.createElement('div');
+        row.className = `run${run.id === state.selectedId ? ' selected' : ''}`;
+        row.dataset.id = String(run.id);
+
+        const icon = text('span', `status-icon ${info.key}${run.status === 'in_progress' ? ' pulse' : ''}`, info.symbol);
+
+        const body = document.createElement('div');
+        body.append(text('div', 'title', `${run.name} · #${run.runNumber}`));
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.append(
+          text('span', 'badge', run.branch || '—'),
+          text('span', '', run.event),
+          text('span', '', run.actor ? `@${run.actor}` : ''),
+          text('span', '', `Bắt đầu ${fmtTime(run.startedAt || run.createdAt)}`),
+          durationNode(
+            run.startedAt || run.createdAt,
+            run.status === 'completed' ? run.updatedAt : null,
+            run.status === 'in_progress',
+            '⏱ '
+          )
+        );
+        body.append(meta);
+
+        const status = text('div', `status-pill ${info.key}`, info.label);
+        row.append(icon, body, status);
+        row.addEventListener('click', () => selectRun(run));
+        runsList.append(row);
+      }
+    }
+
+    async function selectRun(run) {
+      state.selectedId = run.id;
+      renderRuns();
+      details.replaceChildren(text('div', 'empty', 'Đang tải jobs…'));
+      try {
+        const result = await window.actionsMonitor.listJobs({ repo: state.repo, runId: run.id, token: state.token });
+        renderDetails(run, result.jobs);
+      } catch (error) {
+        details.replaceChildren(text('div', 'empty', `Không tải được jobs: ${error.message || error}`));
+      }
+    }
+
+    function renderDetails(run, jobs) {
+      details.replaceChildren();
+      const info = statusInfo(run);
+      const head = document.createElement('div');
+      head.className = 'detail-title';
+      const titleWrap = document.createElement('div');
+      titleWrap.append(text('h2', '', `${run.name} #${run.runNumber}`));
+      const runMeta = document.createElement('div');
+      runMeta.className = 'detail-state';
+      runMeta.append(
+        text('span', `status-pill ${info.key}`, info.label),
+        text('span', 'small', run.branch || '—'),
+        durationNode(
+          run.startedAt || run.createdAt,
+          run.status === 'completed' ? run.updatedAt : null,
+          run.status === 'in_progress',
+          'Thời gian: '
+        )
+      );
+      titleWrap.append(runMeta);
+      const open = text('button', '', 'Mở GitHub');
+      open.addEventListener('click', () => window.actionsMonitor.openUrl(run.htmlUrl));
+      head.append(titleWrap, open);
+      details.append(head);
+
+      if (!jobs.length) {
+        details.append(text('div', 'empty', 'Workflow chưa có job.'));
+        return;
+      }
+
+      for (const job of jobs) {
+        const jobInfo = statusInfo(job);
+        const card = document.createElement('div');
+        card.className = 'job';
+        const jobHead = document.createElement('div');
+        jobHead.className = 'job-head';
+        const left = document.createElement('div');
+        left.append(text('div', 'job-name', job.name));
+        if (job.runnerName) left.append(text('div', 'runner', `Runner: ${job.runnerName}`));
+        const right = document.createElement('div');
+        right.className = 'job-state';
+        right.append(
+          text('span', `status-pill ${jobInfo.key}`, jobInfo.label),
+          durationNode(job.startedAt, job.completedAt, job.status === 'in_progress', '⏱ ')
+        );
+        jobHead.append(left, right);
+        card.append(jobHead);
+
+        if (job.steps?.length) {
+          const steps = document.createElement('div');
+          steps.className = 'steps';
+          for (const step of job.steps) {
+            const [symbol, cls] = symbolFor(step);
+            const row = document.createElement('div');
+            row.className = 'step';
+            row.append(
+              text('span', `step-symbol ${cls}`, symbol),
+              text('span', '', step.name),
+              durationNode(step.startedAt, step.completedAt, step.status === 'in_progress', '⏱ ')
+            );
+            steps.append(row);
+          }
+          card.append(steps);
+        }
+        details.append(card);
+      }
+    }
+
+    function scheduleRefresh() {
+      clearTimeout(state.timer);
+      const delay = state.token ? 10000 : 60000;
+      $('refreshMode').textContent = state.token ? 'Auto 10s · timer 1s' : 'Auto 60s · timer 1s';
+      state.timer = setTimeout(refresh, delay);
+    }
+
+    async function refresh() {
+      if (state.loading) return;
+      state.loading = true;
+      message.className = 'small';
+      message.textContent = 'Đang cập nhật…';
+      try {
+        state.repo = repoInput.value.trim();
+        state.token = tokenInput.value.trim();
+        const result = await window.actionsMonitor.listRuns({ repo: state.repo, token: state.token });
+        state.repo = result.repo;
+        repoInput.value = result.repo;
+        rememberRepo(result.repo);
+        state.runs = result.runs;
+        renderSummary(result.rateLimit);
+        renderRuns();
+        message.innerHTML = `<span class="live-dot"></span>Cập nhật ${fmtTime(Date.now())}`;
+        if (state.selectedId) {
+          const current = state.runs.find((run) => run.id === state.selectedId);
+          if (current) selectRun(current);
+          else {
+            state.selectedId = null;
+            details.replaceChildren(text('div', 'empty', 'Chọn một workflow ở bên trái để xem job và step.'));
+          }
+        }
+      } catch (error) {
+        message.className = 'small error';
+        message.textContent = error.message || String(error);
+      } finally {
+        state.loading = false;
+        scheduleRefresh();
+      }
+    }
+
+    $('refresh').addEventListener('click', refresh);
+    repoInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') refresh(); });
+    tokenInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') refresh(); });
+    state.clockTimer = setInterval(tickDurations, 1000);
+    refresh();
+  </script>
+</body>
+</html>

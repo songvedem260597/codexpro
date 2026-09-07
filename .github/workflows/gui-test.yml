@@ -1,0 +1,113 @@
+name: Install Actions Monitor
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/self-hosted-runner
+    paths:
+      - .github/run-monitor-install
+
+jobs:
+  install:
+    name: Install GitHub Actions Monitor on local PC
+    runs-on: self-hosted
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: 22
+
+      - name: Headless runner smoke
+        shell: powershell
+        run: node tests\electron-gui-sample\runner-headless-smoke.js
+
+      - name: Build monitor with icon
+        shell: powershell
+        run: |
+          $sample = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample'
+          Push-Location $sample
+          npm install --no-audit --no-fund
+          npm run package:win
+          Pop-Location
+
+          $icon = Join-Path $sample 'assets\icon.ico'
+          $exe = Join-Path $sample 'dist\GitHubActionsMonitor-win32-x64\GitHubActionsMonitor.exe'
+          if (-not (Test-Path $icon)) { throw 'Generated icon.ico was not found.' }
+          if (-not (Test-Path $exe)) { throw 'Packaged monitor executable was not found.' }
+          Write-Host 'MONITOR_BUILD icon=PASS exe=PASS'
+
+      - name: Install monitor locally
+        shell: powershell
+        run: |
+          $sample = Join-Path $env:GITHUB_WORKSPACE 'tests\electron-gui-sample'
+          $source = Join-Path $sample 'dist\GitHubActionsMonitor-win32-x64'
+          $sourceIcon = Join-Path $sample 'assets\icon.ico'
+          $installDir = Join-Path $env:LOCALAPPDATA 'GitHubActionsMonitor'
+          $exe = Join-Path $installDir 'GitHubActionsMonitor.exe'
+          $installedIcon = Join-Path $installDir 'GitHubActionsMonitor.ico'
+
+          Get-Process GitHubActionsMonitor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Get-Process CodexProActionsMonitor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Milliseconds 500
+
+          Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          Copy-Item -Path (Join-Path $source '*') -Destination $installDir -Recurse -Force
+          Copy-Item -Path $sourceIcon -Destination $installedIcon -Force
+
+          $desktop = [Environment]::GetFolderPath('Desktop')
+          Remove-Item (Join-Path $desktop 'CodexPro Actions Monitor.lnk') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $desktop 'GitHub Actions Monitor.lnk') -Force -ErrorAction SilentlyContinue
+          $shortcutPath = Join-Path $desktop 'GitHub Actions Monitor.lnk'
+          $wshell = New-Object -ComObject WScript.Shell
+          $shortcut = $wshell.CreateShortcut($shortcutPath)
+          $shortcut.TargetPath = $exe
+          $shortcut.WorkingDirectory = $installDir
+          $shortcut.Description = 'Monitor GitHub Actions across repositories'
+          $shortcut.IconLocation = "$installedIcon,0"
+          $shortcut.Save()
+
+          $iconRefresh = Join-Path $env:SystemRoot 'System32\ie4uinit.exe'
+          if (Test-Path $iconRefresh) {
+            Start-Process -FilePath $iconRefresh -ArgumentList '-show' -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+          }
+
+          if (-not (Test-Path $exe)) { throw 'Installed monitor executable was not found.' }
+          if (-not (Test-Path $installedIcon)) { throw 'Installed monitor icon was not found.' }
+          Write-Host 'MONITOR_INSTALL installed=PASS shortcut=PASS shortcut_icon=ICO refresh=PASS'
+
+      - name: Launch installed monitor
+        shell: powershell
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA 'GitHubActionsMonitor'
+          $exe = Join-Path $installDir 'GitHubActionsMonitor.exe'
+          $marker = Join-Path $env:RUNNER_TEMP 'github-actions-monitor-ready.txt'
+          Remove-Item $marker -Force -ErrorAction SilentlyContinue
+          $env:CODEXPRO_ELECTRON_TEST_MARKER = $marker
+          $env:RUNNER_TRACKING_ID = ''
+          Start-Process -FilePath $exe -WorkingDirectory $installDir
+
+          $ready = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            if (Test-Path $marker) {
+              $ready = $true
+              break
+            }
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $ready) { throw 'Monitor window did not reach ready-to-show.' }
+          Write-Host 'MONITOR_LAUNCH window_ready=PASS detached=PASS'
+
+      - name: Clean build cache only
+        if: always()
+        shell: powershell
+        run: |
+          Remove-Item -Force "$env:RUNNER_TEMP\github-actions-monitor-ready.txt" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\tests\electron-gui-sample\node_modules" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "$env:GITHUB_WORKSPACE\tests\electron-gui-sample\dist" -ErrorAction SilentlyContinue
