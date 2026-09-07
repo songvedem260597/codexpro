@@ -12,6 +12,32 @@ import {
 const RESPONSE_BOTTOM_THRESHOLD_PX = 18;
 const RESPONSE_MANUAL_SCROLL_RESUME_MS = 5000;
 
+export function syncTurnAnchorPresentation(container, anchored, anchorSpace = "") {
+  if (!container) return false;
+  let changed = false;
+  if (anchored) {
+    if (!container.classList.contains("has-turn-anchor")) {
+      container.classList.add("has-turn-anchor");
+      changed = true;
+    }
+    const nextAnchorSpace = String(anchorSpace || "");
+    if (nextAnchorSpace && container.style.getPropertyValue("--chat-turn-anchor-space") !== nextAnchorSpace) {
+      container.style.setProperty("--chat-turn-anchor-space", nextAnchorSpace);
+      changed = true;
+    }
+    return changed;
+  }
+  if (container.classList.contains("has-turn-anchor")) {
+    container.classList.remove("has-turn-anchor");
+    changed = true;
+  }
+  if (container.style.getPropertyValue("--chat-turn-anchor-space")) {
+    container.style.removeProperty("--chat-turn-anchor-space");
+    changed = true;
+  }
+  return changed;
+}
+
 export function useChatViewport({
   api,
   chatProfileId,
@@ -73,8 +99,7 @@ export function useChatViewport({
   const scrollResponseToBottom = useCallback((profileId, cause = "unspecified") => {
     const container = responseBodyRefs.current.get(profileId);
     if (!container) return;
-    container.classList.remove("has-turn-anchor");
-    container.style.removeProperty("--chat-turn-anchor-space");
+    syncTurnAnchorPresentation(container, false);
     const before = responseScrollMetrics(container);
     container.scrollTop = container.scrollHeight;
     const after = responseScrollMetrics(container);
@@ -98,8 +123,8 @@ export function useChatViewport({
     if (!anchor) return false;
     const anchorRect = anchor.getBoundingClientRect();
     const anchorViewportTop = 56;
-    container.classList.add("has-turn-anchor");
-    container.style.setProperty("--chat-turn-anchor-space", `${Math.max(240, Math.round(container.clientHeight - anchorViewportTop - anchorRect.height + 24))}px`);
+    const anchorSpace = `${Math.max(240, Math.round(container.clientHeight - anchorViewportTop - anchorRect.height + 24))}px`;
+    syncTurnAnchorPresentation(container, true, anchorSpace);
     const before = responseScrollMetrics(container);
     const beforeAnchorTop = Math.round(anchorRect.top - container.getBoundingClientRect().top);
     const after = applyResponseTurnAnchor(container, anchor, 0.42, anchorViewportTop);
@@ -166,8 +191,7 @@ export function useChatViewport({
   const holdResponseAutoScroll = useCallback((profileId, container, deltaY = 0) => {
     if (responseTurnAnchors.current.has(profileId) && deltaY) {
       responseTurnAnchors.current.delete(profileId);
-      container.classList.remove("has-turn-anchor");
-      container.style.removeProperty("--chat-turn-anchor-space");
+      syncTurnAnchorPresentation(container, false);
       responseScrollLocked.current.set(profileId, true);
       responseScrollPositions.current.set(profileId, container.scrollTop);
       scheduleOpenChatAutoResume(profileId);

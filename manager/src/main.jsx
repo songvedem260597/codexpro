@@ -301,6 +301,7 @@ function App() {
   useEffect(() => {
     const sweepRetentionCaches = () => {
       for (const map of [
+        networkStreamPushTimes.current,
         requestTargetReasons.current,
         responseScrollPositions.current,
         responseScrollDiagnostics.current,
