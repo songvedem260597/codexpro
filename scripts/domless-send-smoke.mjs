@@ -666,7 +666,7 @@ assert.match(sendBlock, /reconcileChatNetworkCompletion\(tab\.id,targetConversat
 assert.match(sendBlock, /const submitStartedAt=Date\.now\(\);[\s\S]*?const networkAckStartedAfterMs=submitStartedAt;/, "follow-up ACK detection must start only after steering the old generation so stale network evidence cannot satisfy the new send");
 assert.match(sendBlock, /followup_generation_stopped:Boolean\(stopResult\.stopped\)/, "send telemetry must expose whether the old generation was actually stopped");
 assert.match(sendBlock, /stabilizeSubmittedSendAfterAck/, "successful sends must execute the scoped post-ACK stability helper before releasing the send lock");
-assert.match(postAckStabilizeSource, /const SEND_POST_ACK_STABILITY_MS = 650[\s\S]*?send_stability_source:SEND_CONFIRMED_STABILITY_SOURCE/, "post-ACK helper must keep the 650 ms value in local scope while preserving authoritative ACK telemetry");
+assert.match(postAckStabilizeSource, /const SEND_POST_ACK_STABILITY_MS = 650[\s\S]*?send_stability_source:SEND_CONFIRMED_STABILITY_SOURCE/, "post-ACK regression must keep the 650 ms gate local while preserving authoritative ACK telemetry");
 assert.match(postAckStabilizeSource, /send_stabilized:true[\s\S]*?followup_while_generating:Boolean\(followupWhileGenerating\)/, "send results must expose the stability gate and whether a live generation was steered");
 assert.match(managerMain, /const profileSendOperations = new Map\(\)/, "Manager must reject concurrent sends for the same profile");
 assert.match(managerMain, /Profile này đang gửi một yêu cầu khác/, "concurrent profile sends must fail explicitly instead of queueing a duplicate");
