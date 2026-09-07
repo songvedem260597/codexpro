@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "CodexPro Local Source Reader",
-  "version": "0.3.0",
-  "description": "Upload full or changed local source snapshots, advance baseline only after ChatGPT network confirmation, and keep re-uploadable history.",
+  "version": "0.3.1",
+  "description": "Upload full or changed local source snapshots, advance baseline only after ChatGPT network confirmation, keep re-uploadable history, and persist upload diagnostics.",
   "content_scripts": [
     {
       "matches": [
@@ -10,8 +10,19 @@
         "https://chat.openai.com/*"
       ],
       "js": [
-        "upload-network.js",
-        "content.js"
+        "upload-network.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "content.js",
+        "diagnostics-ui.js"
       ],
       "run_at": "document_idle",
       "world": "MAIN"
