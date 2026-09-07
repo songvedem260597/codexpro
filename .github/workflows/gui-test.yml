@@ -23,6 +23,10 @@ jobs:
         with:
           node-version: 22
 
+      - name: Headless runner smoke
+        shell: powershell
+        run: node tests\electron-gui-sample\runner-headless-smoke.js
+
       - name: Build monitor with icon
         shell: powershell
         run: |
