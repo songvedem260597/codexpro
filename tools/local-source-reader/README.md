@@ -69,9 +69,42 @@ Nếu upload lại một snapshot đã `confirmed`, baseline không thay đổi.
 
 Mỗi project giữ tối đa 12 snapshot gần nhất để tránh IndexedDB tăng vô hạn.
 
+## Log điều tra upload
+
+Từ `0.3.1`, network hook chạy ở `document_start`, trước UI của ChatGPT, để tránh trường hợp app đã giữ reference tới `fetch`/XHR trước khi extension gắn monitor.
+
+Nút **Log** lưu diagnostic trace qua reload bằng `localStorage` key `codexproLocalSourceUploadDiagnosticsV1`. Log ghi tối đa 400 event gần nhất, gồm:
+
+- network request/response liên quan `files`/`upload`;
+- HTTP status và endpoint path;
+- `file_id`, file name/size khi có;
+- trạng thái explicit trong response;
+- thời điểm monitor bắt được create/finalize;
+- `snapshot-wait-start`, `snapshot-match-created`, `snapshot-confirmed`, `snapshot-failed`, `snapshot-timeout`;
+- health của hook: `fetchHookActive`, `xhrOpenHookActive`, `xhrSendHookActive`.
+
+Log **không lưu source file**, cookie, Authorization, signed upload URL hay query token. Các field nhạy cảm được redact trước khi persist/export.
+
+Trong panel **Log** có:
+
+- **Làm mới**;
+- **Sao chép JSON**;
+- **Tải JSON**;
+- **Xóa log**.
+
+Khi upload vẫn không được xác nhận, quy trình điều tra là:
+
+1. Xóa log cũ.
+2. Bấm **Upload Full** một lần.
+3. Chờ tới khi status báo success hoặc timeout.
+4. Mở **Log**.
+5. Bấm **Tải JSON** và gửi file log để kiểm tra endpoint/response thực tế của ChatGPT.
+
+Không nên nới điều kiện baseline chỉ vì attachment chip đã xuất hiện. Dùng log để xác định finalizer thực tế trước rồi mới bổ sung matcher.
+
 ## Persistence sau reload
 
-Baseline được xác nhận lưu dưới key mới `codexproLocalSourceReaderBaselinesV2` trong `localStorage` của ChatGPT. Chỉ metadata/fingerprint được lưu:
+Baseline được xác nhận lưu dưới key `codexproLocalSourceReaderBaselinesV2` trong `localStorage` của ChatGPT. Chỉ metadata/fingerprint được lưu:
 
 - path;
 - SHA-256/hash fallback;
@@ -82,7 +115,7 @@ Baseline được xác nhận lưu dưới key mới `codexproLocalSourceReaderB
 
 Nội dung exact snapshot/history được lưu trong IndexedDB `codexproLocalSourceReaderV2`.
 
-Không tự migrate baseline V1 vì phiên bản cũ từng coi việc attach thành công là đủ để advance baseline. Sau khi nâng extension lên 0.3.0, hãy **Upload Full một lần** để tạo baseline V2 thực sự được ChatGPT network-confirm.
+Không tự migrate baseline V1 vì phiên bản cũ từng coi việc attach thành công là đủ để advance baseline. Sau khi nâng extension lên 0.3.x, hãy **Upload Full một lần** để tạo baseline V2 thực sự được ChatGPT network-confirm.
 
 ## Cách dùng
 
@@ -90,12 +123,13 @@ Không tự migrate baseline V1 vì phiên bản cũ từng coi việc attach th
 2. Bật **Developer mode**.
 3. Chọn **Load unpacked**.
 4. Chọn thư mục `tools/local-source-reader` hoặc thư mục được workflow cài vào `~/CodexProLocalSourceReader`.
-5. Reload extension và reload `https://chatgpt.com`.
+5. Reload extension và **reload hẳn tab `https://chatgpt.com`** để `document_start` hook được cài từ đầu trang.
 6. Lần đầu bấm **Upload Full**, chọn folder project.
 7. Chờ status báo `ChatGPT network SUCCESS` và baseline đã xác nhận.
 8. Sau khi sửa code, bấm **Upload thay đổi**, chọn lại cùng folder.
 9. Nếu xóa attachment hoặc upload lỗi trước confirmation, cứ bấm **Upload thay đổi** lại; diff chưa bị mất.
 10. Muốn lấy snapshot cũ, mở **Lịch sử** và bấm **Upload lại**.
+11. Nếu không thấy network success dù attachment đã upload, mở **Log** và xuất JSON để điều tra.
 
 Extension chỉ attach file, không tự gửi prompt/message.
 
