@@ -1,0 +1,26 @@
+name: Local Source Reader Smoke
+
+on:
+  pull_request:
+    paths:
+      - tools/local-source-reader/**
+      - .github/workflows/local-source-reader-smoke.yml
+  push:
+    branches:
+      - feature/local-source-readonly
+      - fix/local-source-upload-history
+    paths:
+      - tools/local-source-reader/**
+      - .github/workflows/local-source-reader-smoke.yml
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: actions/setup-node@v6.0.0
+        with:
+          node-version: '22'
+      - name: Verify local source upload contracts
+        run: node tools/local-source-reader/smoke.test.mjs
