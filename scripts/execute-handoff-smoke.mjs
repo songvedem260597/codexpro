@@ -4,10 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 
 const codexproSource = await fs.readFile(path.resolve('scripts/codexpro.mjs'), 'utf8');
+const handoffRuntimeSource = await fs.readFile(path.resolve('scripts/handoff-runtime-launcher.mjs'), 'utf8');
 const handoffExecutionSource = await fs.readFile(path.resolve('scripts/handoff-execution.mjs'), 'utf8');
 
-if (!codexproSource.includes("from './handoff-execution.mjs'")) {
-  throw new Error('codexpro CLI must delegate handoff execution to scripts/handoff-execution.mjs');
+if (!codexproSource.includes("from './handoff-runtime-launcher.mjs'")) {
+  throw new Error('codexpro CLI must delegate handoff runtime commands to scripts/handoff-runtime-launcher.mjs');
+}
+if (!handoffRuntimeSource.includes("from './handoff-execution.mjs'")) {
+  throw new Error('handoff runtime launcher must delegate execution core to scripts/handoff-execution.mjs');
 }
 for (const functionName of [
   'contextDirFromArgs',
@@ -27,22 +31,25 @@ for (const functionName of [
   if (declaration.test(codexproSource)) {
     throw new Error(`${functionName} execution logic drifted back into scripts/codexpro.mjs`);
   }
+  if (declaration.test(handoffRuntimeSource)) {
+    throw new Error(`${functionName} execution logic drifted into scripts/handoff-runtime-launcher.mjs`);
+  }
   if (!declaration.test(handoffExecutionSource)) {
     throw new Error(`${functionName} must remain in scripts/handoff-execution.mjs`);
   }
 }
-if (!/createHandoffExecutionCore\([\s\S]*?executeHandoffRequest[\s\S]*?loadHandoffExecution[\s\S]*?runProcessCaptured/.test(codexproSource)) {
-  throw new Error('codexpro CLI must initialize one shared handoff execution core');
+if (!/createHandoffExecutionCore\([\s\S]*?executeHandoffRequest[\s\S]*?loadHandoffExecution[\s\S]*?runProcessCaptured/.test(handoffRuntimeSource)) {
+  throw new Error('handoff runtime launcher must initialize one shared handoff execution core');
 }
-const executeSection = codexproSource.slice(codexproSource.indexOf('async function runExecuteHandoff'), codexproSource.indexOf('function planHash'));
-const watchSection = codexproSource.slice(codexproSource.indexOf('async function runWatchHandoff'), codexproSource.indexOf('function loopArtifactPaths'));
-const loopSection = codexproSource.slice(codexproSource.indexOf('async function runLoopHandoff'), codexproSource.indexOf('async function runDoctor'));
+const executeSection = handoffRuntimeSource.slice(handoffRuntimeSource.indexOf('async function runExecuteHandoff'), handoffRuntimeSource.indexOf('function planHash'));
+const watchSection = handoffRuntimeSource.slice(handoffRuntimeSource.indexOf('async function runWatchHandoff'), handoffRuntimeSource.indexOf('function loopArtifactPaths'));
+const loopSection = handoffRuntimeSource.slice(handoffRuntimeSource.indexOf('async function runLoopHandoff'));
 for (const [label, section] of [['execute-handoff', executeSection], ['watch-handoff', watchSection], ['loop-handoff', loopSection]]) {
   if (!section.includes('executeHandoffRequest(')) {
     throw new Error(`${label} must reuse the shared executeHandoffRequest core`);
   }
 }
-if ((codexproSource.match(/\bexecuteHandoffRequest\(/g) ?? []).length !== 3) {
+if ((handoffRuntimeSource.match(/\bexecuteHandoffRequest\(/g) ?? []).length !== 3) {
   throw new Error('execute/watch/loop must be the only three callers of the shared executeHandoffRequest core');
 }
 
