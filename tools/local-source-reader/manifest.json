@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "CodexPro Local Source Reader",
-  "version": "0.1.0",
-  "description": "Read a local source tree once, read-only, and attach it to ChatGPT as one snapshot file.",
+  "version": "0.2.0",
+  "description": "Attach a full local source baseline once, then attach changed source files only, read-only.",
   "content_scripts": [
     {
       "matches": [
