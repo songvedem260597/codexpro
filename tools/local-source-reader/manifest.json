@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CodexPro Local Source Reader",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Upload full or changed local source snapshots, advance baseline only after ChatGPT network confirmation, keep re-uploadable history, and persist upload diagnostics.",
   "content_scripts": [
     {
