@@ -54,6 +54,7 @@ export interface ExtensionProfileSummary {
   email: string;
   label: string;
   extension_version: string;
+  extension_build_id: string;
   connector_installed: boolean;
   connector_message: string;
   connector_checked_at: string;
@@ -195,6 +196,7 @@ interface ExtensionProfile {
   email: string;
   label: string;
   extensionVersion: string;
+  runtimeBuildId: string;
   connectorInstalled: boolean;
   connectorMessage: string;
   connectorCheckedAt: string;
@@ -766,6 +768,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
     email: "",
     label: "",
     extensionVersion: "",
+    runtimeBuildId: "",
     connectorInstalled: false,
     connectorMessage: "",
     connectorCheckedAt: "",
@@ -786,6 +789,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   profile.email = String(source.email ?? profile.email ?? "").trim().slice(0, 320);
   profile.label = String(source.label ?? profile.label ?? profile.email ?? `Chrome ${id.slice(0, 8)}`).trim().slice(0, 320);
   profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
+  profile.runtimeBuildId = String(source.runtime_build_id ?? profile.runtimeBuildId ?? "").trim().slice(0, 120);
   profile.connectorServerFingerprint = String(source.connector_server_fingerprint ?? profile.connectorServerFingerprint ?? "").trim().slice(0, 128);
   if (source.connector_install && typeof source.connector_install === "object") {
     const incomingInstalled = source.connector_install.ok === true;
@@ -1284,6 +1288,7 @@ export function listBrowserExtensionProfiles(): ExtensionProfileSummary[] {
       email: profile.email,
       label: profile.label,
       extension_version: profile.extensionVersion,
+      extension_build_id: profile.runtimeBuildId,
       connector_installed: connectorInstalled,
       connector_message: connectorMessage,
       connector_checked_at: profile.connectorCheckedAt,

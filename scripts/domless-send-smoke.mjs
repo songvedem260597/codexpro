@@ -15,18 +15,18 @@ const [worker, networkPolicyWorker, responsePolicyWorker, bridge, managerMain] =
   readFile(join(root, "manager", "electron", "main.mjs"), "utf8")
 ]);
 
-function extractFunction(name) {
+function extractFunctionFrom(source, name, label = "source") {
   const marker = `function ${name}(`;
-  const start = worker.indexOf(marker);
-  assert.notEqual(start, -1, `${name} must remain defined in the profile bridge worker`);
-  const bodyStart = worker.indexOf("{", start);
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `${name} must remain defined in ${label}`);
+  const bodyStart = source.indexOf("{", start);
   let depth = 0;
   let quote = "";
   let escaped = false;
   let regex = false;
   let characterClass = false;
-  for (let index = bodyStart; index < worker.length; index += 1) {
-    const character = worker[index];
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const character = source[index];
     if (escaped) {
       escaped = false;
       continue;
@@ -47,8 +47,8 @@ function extractFunction(name) {
       quote = character;
       continue;
     }
-    if (character === "/" && worker[index - 1] !== "*") {
-      const previous = worker.slice(0, index).trimEnd().at(-1) ?? "";
+    if (character === "/" && source[index - 1] !== "*") {
+      const previous = source.slice(0, index).trimEnd().at(-1) ?? "";
       if (["(", "=", ":", "!", "&", "|", ","].includes(previous)) {
         regex = true;
         continue;
@@ -57,10 +57,14 @@ function extractFunction(name) {
     if (character === "{") depth += 1;
     if (character === "}") {
       depth -= 1;
-      if (depth === 0) return worker.slice(start, index + 1);
+      if (depth === 0) return source.slice(start, index + 1);
     }
   }
   assert.fail(`Could not find the end of ${name}`);
+}
+
+function extractFunction(name) {
+  return extractFunctionFrom(worker, name, "the profile bridge worker");
 }
 
 const networkPolicy = Function("globalThis", `${networkPolicyWorker}; return globalThis.CodexProNetworkPolicy;`)({});
@@ -440,6 +444,27 @@ const sendStart = worker.indexOf("if(action==='send_chat_request'){");
 const sendEnd = worker.indexOf("if(action==='rename_chat'){", sendStart);
 assert.ok(sendStart >= 0 && sendEnd > sendStart, "send_chat_request command block must exist");
 const sendBlock = worker.slice(sendStart, sendEnd);
+
+const postAckStabilizeSource = extractFunction("stabilizeSubmittedSendAfterAck");
+const stabilizeSubmittedSendAfterAck = Function(`${postAckStabilizeSource.replace(/^function/, "async function")}; return stabilizeSubmittedSendAfterAck;`)();
+const postAckSleepCalls = [];
+const postAckStabilized = await stabilizeSubmittedSendAfterAck(5_000, true, async (ms) => { postAckSleepCalls.push(ms); });
+assert.deepEqual(postAckSleepCalls, [650], "post-ACK stabilization must execute the real 650 ms gate without relying on a global constant");
+assert.equal(postAckStabilized.send_stabilized, true, "network-ACK completion must return a stabilized send result instead of throwing ReferenceError");
+assert.equal(postAckStabilized.followup_while_generating, true, "post-ACK stabilization must preserve follow-up diagnostics");
+assert.doesNotMatch(postAckStabilizeSource, /trustedSubmit|dispatchKeyEvent|dispatchMouseEvent|sendChatRequestPage/, "post-ACK stabilization must have no path that can submit the request a second time");
+
+const workerExtensionCurrentSource = extractFunctionFrom(managerMain, "workerExtensionCurrent", "the Manager backend");
+const workerExtensionCurrent = Function("WORKER_EXTENSION_VERSION", "WORKER_EXTENSION_BUILD_ID", `${workerExtensionCurrentSource}; return workerExtensionCurrent;`)("0.5.126", "send-post-ack-scope-v1");
+assert.equal(workerExtensionCurrent({ extension_version: "0.5.125", extension_build_id: "old-build" }), false, "older version with old build must remain stale");
+assert.equal(workerExtensionCurrent({ extension_version: "0.5.126" }), false, "same-version runtime with missing build id must be stale");
+assert.equal(workerExtensionCurrent({ extension_version: "0.5.126", extension_build_id: "stale-same-version" }), false, "same-version stale runtime must be rejected when build id differs");
+assert.equal(workerExtensionCurrent({ extension_version: "0.5.126", extension_build_id: "send-post-ack-scope-v1" }), true, "exact version and build id must be accepted without a reload");
+assert.equal(workerExtensionCurrent({ extension_version: "0.5.127", extension_build_id: "future-but-unexpected" }), false, "newer version must not be considered current without the expected build identity");
+assert.equal(workerExtensionCurrent({ extension_version: "0.5.125", extension_build_id: "send-post-ack-scope-v1" }), false, "wrong extension version must remain stale even when build id matches");
+assert.match(managerMain, /const outdated = connectedProfiles\.filter\(\(profile\) => !workerExtensionCurrent\(profile\)\)/, "Manager bulk update must classify build-id mismatches as stale");
+assert.match(managerMain, /profile\?\.connected && workerExtensionCurrent\(profile\)/, "Manager update confirmation must require the exact runtime version and build id heartbeat");
+
 const timeoutCatch = sendBlock.indexOf("}catch(error){");
 const networkRecovery = sendBlock.indexOf("networkAck=await waitForNetworkGeneration(tab.id,networkAckStartedAfterMs", timeoutCatch);
 const acknowledgedReturn = sendBlock.indexOf("if(networkAck)return await resultForNetwork", networkRecovery);

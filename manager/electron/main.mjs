@@ -392,16 +392,9 @@ let repoScanPromise = null;
 const gitSummaryCache = new Map();
 const gitSummaryPromises = new Map();
 
-function versionAtLeast(version, target = WORKER_EXTENSION_VERSION) {
-  const current = String(version || "").split(".").map(Number);
-  const required = String(target || "").split(".").map(Number);
-  const length = Math.max(current.length, required.length);
-  for (let index = 0; index < length; index += 1) {
-    const left = Number.isFinite(current[index]) ? current[index] : 0;
-    const right = Number.isFinite(required[index]) ? required[index] : 0;
-    if (left !== right) return left > right;
-  }
-  return true;
+function workerExtensionCurrent(profile) {
+  return String(profile?.extension_version || "").trim() === WORKER_EXTENSION_VERSION
+    && String(profile?.extension_build_id || "").trim() === WORKER_EXTENSION_BUILD_ID;
 }
 
 
@@ -2605,7 +2598,7 @@ async function setupChatGptProfile(profileId) {
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const profile = status.browserProfiles.find((item) => item.profile_id === id);
   if (!profile?.connected) throw new Error("Chrome profile này đang offline. Hãy mở Chrome và bật extension CodexPro.");
-  if (!versionAtLeast(profile.extension_version)) {
+  if (!workerExtensionCurrent(profile)) {
     throw new Error(`Worker extension của profile này chưa phải bản ${WORKER_EXTENSION_VERSION}. Hãy bấm Update worker extension rồi thử lại.`);
   }
   const token = readToken(status.config.tokenFile);
@@ -3322,7 +3315,7 @@ async function sendProfileRequestUnlocked(payload) {
     (Array.isArray(profile.chatgpt_tabs) && profile.chatgpt_tabs.length)
     || (Array.isArray(profile.conversation_tabs) && profile.conversation_tabs.length)
   );
-  if (!versionAtLeast(profile.extension_version)) {
+  if (!workerExtensionCurrent(profile)) {
     if (sendDebug) console.error(`[manager-send] updating worker ${profile.extension_version || "unknown"} -> ${WORKER_EXTENSION_VERSION}`);
     await localMcpToolInSession(session, "browser_control", {
       action: "reload_extension",
@@ -3333,9 +3326,9 @@ async function sendProfileRequestUnlocked(payload) {
       await new Promise((resolve) => setTimeout(resolve, 500));
       const updateProfiles = await localMcpToolInSession(session, "browser_control", { action: "list_profiles" });
       profile = (Array.isArray(updateProfiles.profiles) ? updateProfiles.profiles : []).find((item) => item.profile_id === profileId);
-      if (profile?.connected && versionAtLeast(profile.extension_version)) break;
+      if (profile?.connected && workerExtensionCurrent(profile)) break;
     }
-    if (!profile?.connected || !versionAtLeast(profile.extension_version)) {
+    if (!profile?.connected || !workerExtensionCurrent(profile)) {
       throw new Error(`Không thể tự update worker extension lên ${WORKER_EXTENSION_VERSION}. Hãy mở chrome://extensions và reload CodexPro.`);
     }
   }

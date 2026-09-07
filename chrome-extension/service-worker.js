@@ -941,13 +941,24 @@ async function tabInventory() {
   }));
 }
 
+async function stabilizeSubmittedSendAfterAck(availableMs,followupWhileGenerating=false,sleepFn=null) {
+  const SEND_POST_ACK_STABILITY_MS = 650;
+  const startedAt=Date.now();
+  const waitMs=Math.min(SEND_POST_ACK_STABILITY_MS,Math.max(0,Number(availableMs)||0));
+  if(waitMs>0){
+    const sleep=typeof sleepFn==='function'?sleepFn:(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
+    await sleep(waitMs);
+  }
+  return {send_stabilized:true,send_stability_wait_ms:Math.max(0,Date.now()-startedAt),followup_while_generating:Boolean(followupWhileGenerating)};
+}
+
 async function profileInfo() {
   const stored = await chrome.storage.local.get(['profileId','active','connectorInstall','connectorServerFingerprint','workerEnabled','workerEnabledUpdatedAt']);
   const profileId = stored.profileId || crypto.randomUUID();
   if (!stored.profileId) await chrome.storage.local.set({profileId});
   let email = '';
   try { email = (await chrome.identity.getProfileUserInfo({accountStatus:'ANY'})).email || ''; } catch {}
-  return {id:profileId,email,label:email || `Chrome ${profileId.slice(0,8)}`,version:chrome.runtime.getManifest().version,connector_install:stored.connectorInstall||null,connector_server_fingerprint:String(stored.connectorServerFingerprint||''),active:Boolean(stored.active),enabled:stored.workerEnabled!==false,worker_enabled_updated_at:Math.max(0,Number(stored.workerEnabledUpdatedAt)||0)};
+  return {id:profileId,email,label:email || `Chrome ${profileId.slice(0,8)}`,version:chrome.runtime.getManifest().version,runtime_build_id:WORKER_RUNTIME_BUILD_ID,connector_install:stored.connectorInstall||null,connector_server_fingerprint:String(stored.connectorServerFingerprint||''),active:Boolean(stored.active),enabled:stored.workerEnabled!==false,worker_enabled_updated_at:Math.max(0,Number(stored.workerEnabledUpdatedAt)||0)};
 }
 
 async function publishPendingWorkerDisable(profile) {
@@ -2449,7 +2460,7 @@ async function execute(command) {
     if(busyTabs.length)throw new Error(`WORKER_BUSY: ${busyTabs.length} ChatGPT tab đang xử lý; hoãn reload extension để không gián đoạn task.`);
     await chrome.alarms.create('codexpro-reconnect',{when:Date.now()+3000});
     setTimeout(()=>chrome.runtime.reload(),1200);
-    return {action,ok:true,reloading:true,version:chrome.runtime.getManifest().version};
+    return {action,ok:true,reloading:true,version:chrome.runtime.getManifest().version,runtime_build_id:WORKER_RUNTIME_BUILD_ID};
   }
   if(action==='check_chatgpt')return {action,...await checkConnectorInstalled()};
   if(action==='setup_chatgpt')return {action,...await installConnector()};
