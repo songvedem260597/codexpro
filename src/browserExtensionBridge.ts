@@ -789,7 +789,7 @@ function profileFromBody(state: BridgeState, body: Record<string, any>): Extensi
   profile.email = String(source.email ?? profile.email ?? "").trim().slice(0, 320);
   profile.label = String(source.label ?? profile.label ?? profile.email ?? `Chrome ${id.slice(0, 8)}`).trim().slice(0, 320);
   profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
-  profile.runtimeBuildId = String(source.runtime_build_id ?? profile.runtimeBuildId ?? "").trim().slice(0, 120);
+  profile.runtimeBuildId = String(source.runtime_build_id ?? "").trim().slice(0, 120);
   profile.connectorServerFingerprint = String(source.connector_server_fingerprint ?? profile.connectorServerFingerprint ?? "").trim().slice(0, 128);
   if (source.connector_install && typeof source.connector_install === "object") {
     const incomingInstalled = source.connector_install.ok === true;

@@ -6,6 +6,34 @@ import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { browserProfileRetentionState } from '../dist/browserExtensionBridge.js';
 
+const EXPECTED_EXTENSION_VERSION = '0.5.126';
+const EXPECTED_RUNTIME_BUILD_ID = 'send-post-ack-scope-v1';
+
+function extractFunctionFrom(source, name, label = 'source') {
+  const start = source.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, `${name} must exist in ${label}`);
+  const braceStart = source.indexOf('{', start);
+  assert.ok(braceStart > start, `${name} must have a body in ${label}`);
+  let depth = 0;
+  for (let index = braceStart; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '{') depth += 1;
+    else if (character === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index + 1);
+    }
+  }
+  throw new Error(`Could not extract ${name} from ${label}`);
+}
+
+const managerMain = readFileSync(path.resolve('manager/electron/main.mjs'), 'utf8');
+const workerExtensionCurrentSource = extractFunctionFrom(managerMain, 'workerExtensionCurrent', 'the Manager backend');
+const workerExtensionCurrent = Function(
+  'WORKER_EXTENSION_VERSION',
+  'WORKER_EXTENSION_BUILD_ID',
+  `${workerExtensionCurrentSource}; return workerExtensionCurrent;`
+)(EXPECTED_EXTENSION_VERSION, EXPECTED_RUNTIME_BUILD_ID);
+
 const now = Date.now();
 assert.equal(browserProfileRetentionState({ lastSeen: now - 2 * 60_000 }, now).connected, true);
 assert.equal(browserProfileRetentionState({ lastSeen: now - 4 * 60_000 }, now).connected, false);
@@ -21,8 +49,8 @@ const mode = process.argv[2];
 const port = Number(process.env.CODEXPRO_BROWSER_EXTENSION_BRIDGE_PORT);
 ensureBrowserExtensionBridge();
 await new Promise(resolve => setTimeout(resolve, 80));
-if (mode === 'register' || mode === 'disable') {
-  const enabled = mode === 'register';
+if (mode.startsWith('register-') || mode === 'disable') {
+  const enabled = mode !== 'disable';
   const response = await fetch('http://127.0.0.1:' + port + '/register', {
     method: 'POST',
     headers: {
@@ -35,7 +63,12 @@ if (mode === 'register' || mode === 'disable') {
         id: 'persist-smoke-profile',
         email: 'persist@example.test',
         label: 'Persist Smoke',
-        version: '0.5.105',
+        version: '0.5.126',
+        ...(mode === 'register-current'
+          ? { runtime_build_id: 'send-post-ack-scope-v1' }
+          : mode === 'register-stale'
+            ? { runtime_build_id: 'stale-build' }
+            : {}),
         enabled,
         worker_enabled_updated_at: Date.now(),
         connector_server_fingerprint: 'fixture-fingerprint'
@@ -51,7 +84,7 @@ if (mode === 'register' || mode === 'disable') {
   });
   if (!response.ok) throw new Error('register failed: ' + response.status + ' ' + await response.text());
   await new Promise(resolve => setTimeout(resolve, 500));
-  console.log(JSON.stringify(await response.json()));
+  console.log(JSON.stringify({ response: await response.json(), profiles: listBrowserExtensionProfiles() }));
 } else if (mode === 'bind-task') {
   setBrowserExtensionProfileTask('persist-smoke-profile', 'cpt_999999999999999999999999', 'Persist active profile task');
   console.log(JSON.stringify({ bound: true }));
@@ -82,12 +115,16 @@ function run(mode, port) {
 
 try {
   const seed = 20_000 + Math.floor(Math.random() * 20_000);
-  run('register', seed);
+  const seededHeartbeat = JSON.parse(run('register-current', seed));
+  const seededProfile = seededHeartbeat.profiles.find(item => item.profile_id === 'persist-smoke-profile');
+  assert.equal(seededProfile?.connected, true, 'seed heartbeat must be live before persistence testing');
+  assert.equal(workerExtensionCurrent(seededProfile), true, 'exact live runtime identity must be current');
   const registry = JSON.parse(readFileSync(path.join(home, 'browser-profiles.json'), 'utf8'));
   assert.equal(registry.version, 1);
   assert.equal(registry.profiles.length, 1);
   assert.equal(registry.profiles[0].id, 'persist-smoke-profile');
-  assert.equal(registry.profiles[0].extensionVersion, '0.5.105');
+  assert.equal(registry.profiles[0].extensionVersion, EXPECTED_EXTENSION_VERSION);
+  assert.equal(registry.profiles[0].runtimeBuildId, EXPECTED_RUNTIME_BUILD_ID, 'persisted runtime build id must remain available as restart diagnostics');
   assert.equal('recentConversations' in registry.profiles[0], false, 'profile registry must not persist ChatGPT conversation ids');
 
   const restored = JSON.parse(run('list', seed + 1));
@@ -95,8 +132,26 @@ try {
   assert.ok(profile, 'persisted browser profile must survive bridge restart');
   assert.equal(profile.connected, false, 'restored profile is visible but disconnected until heartbeat returns');
   assert.equal(profile.active, false);
-  assert.equal(profile.extension_version, '0.5.105');
+  assert.equal(profile.extension_version, EXPECTED_EXTENSION_VERSION);
+  assert.equal(profile.extension_build_id, EXPECTED_RUNTIME_BUILD_ID, 'restored runtime build id may remain visible for diagnostics before a fresh heartbeat');
+  assert.equal(profile.connected && workerExtensionCurrent(profile), false, 'restored metadata must not be classified as a live/current worker before a fresh heartbeat');
   assert.deepEqual(profile.recent_conversations, [], 'restored profile must not resurrect stale ChatGPT conversation ids before the next heartbeat');
+
+  const missingBuildHeartbeat = JSON.parse(run('register-missing', seed + 2));
+  const missingBuildProfile = missingBuildHeartbeat.profiles.find(item => item.profile_id === 'persist-smoke-profile');
+  assert.equal(missingBuildProfile?.connected, true, 'fresh heartbeat without runtime_build_id must still be live');
+  assert.equal(missingBuildProfile?.extension_build_id, '', 'fresh heartbeat without runtime_build_id must clear the persisted runtime build id');
+  assert.equal(workerExtensionCurrent(missingBuildProfile), false, 'missing runtime build id must classify the live worker as stale');
+
+  const currentBuildHeartbeat = JSON.parse(run('register-current', seed + 3));
+  const currentBuildProfile = currentBuildHeartbeat.profiles.find(item => item.profile_id === 'persist-smoke-profile');
+  assert.equal(currentBuildProfile?.extension_build_id, EXPECTED_RUNTIME_BUILD_ID);
+  assert.equal(workerExtensionCurrent(currentBuildProfile), true, 'exact fresh runtime identity must classify current');
+
+  const staleBuildHeartbeat = JSON.parse(run('register-stale', seed + 4));
+  const staleBuildProfile = staleBuildHeartbeat.profiles.find(item => item.profile_id === 'persist-smoke-profile');
+  assert.equal(staleBuildProfile?.extension_build_id, 'stale-build');
+  assert.equal(workerExtensionCurrent(staleBuildProfile), false, 'mismatched fresh runtime build id must classify stale');
 
   const taskId = 'cpt_999999999999999999999999';
   const jobsDir = path.join(home, 'worker-jobs');
