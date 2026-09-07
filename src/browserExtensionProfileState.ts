@@ -9,6 +9,7 @@ export interface BrowserProfilePersistenceRecord {
   email: string;
   label: string;
   extensionVersion: string;
+  runtimeBuildId: string;
   connectorInstalled: boolean;
   connectorMessage: string;
   connectorCheckedAt: string;
@@ -78,6 +79,7 @@ export function browserProfilePersistenceSnapshot(
       email: String(profile.email || "").slice(0, 320),
       label: String(profile.label || "").slice(0, 320),
       extensionVersion: String(profile.extensionVersion || "").slice(0, 32),
+      runtimeBuildId: String(profile.runtimeBuildId || "").slice(0, 120),
       connectorInstalled: profile.connectorInstalled === true,
       connectorMessage: String(profile.connectorMessage || "").slice(0, 500),
       connectorCheckedAt: String(profile.connectorCheckedAt || "").slice(0, 64),

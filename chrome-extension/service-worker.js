@@ -52,6 +52,7 @@ const DOM_PREPARE_TIMEOUT_MS = 15000;
 const ATTACHMENT_PREPARE_TIMEOUT_MS = 60000;
 const NETWORK_START_TIMEOUT_MS = 30000;
 const SEND_CONFIRMED_STABILITY_SOURCE = 'network_ack';
+const WORKER_RUNTIME_BUILD_ID = 'send-post-ack-scope-v1';
 const CDP_NETWORK_START_TIMEOUT_MS = 15000;
 const RENDERER_SEND_PREFLIGHT_TIMEOUT_MS = 1800;
 const RENDERER_SEND_WAKE_SETTLE_MS = 650;
@@ -949,7 +950,7 @@ async function stabilizeSubmittedSendAfterAck(availableMs,followupWhileGeneratin
     const sleep=typeof sleepFn==='function'?sleepFn:(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
     await sleep(waitMs);
   }
-  return {send_stabilized:true,send_stability_wait_ms:Math.max(0,Date.now()-startedAt),followup_while_generating:Boolean(followupWhileGenerating)};
+  return {send_stabilized:true,send_stability_wait_ms:Math.max(0,Date.now()-startedAt),send_stability_source:SEND_CONFIRMED_STABILITY_SOURCE,followup_while_generating:Boolean(followupWhileGenerating)};
 }
 
 async function profileInfo() {
@@ -2661,7 +2662,10 @@ async function execute(command) {
     const submitStartedAt=Date.now();
     const networkAckStartedAfterMs=submitStartedAt;
     const attemptId=crypto.randomUUID();
-    const stabilizeSubmittedSend=async()=>({send_stabilized:true,send_stability_wait_ms:0,send_stability_source:SEND_CONFIRMED_STABILITY_SOURCE,followup_while_generating:followupWhileGenerating});
+    const stabilizeSubmittedSend=async()=>await stabilizeSubmittedSendAfterAck(
+      Math.max(0,remainingCommandMs()-100),
+      followupWhileGenerating
+    );
 
     const prepareTimeoutMs=attachments.length?ATTACHMENT_PREPARE_TIMEOUT_MS:DOM_PREPARE_TIMEOUT_MS;
     let deadlineAt=Math.min(submitStartedAt+prepareTimeoutMs-1500,commandDeadlineAt-1500);

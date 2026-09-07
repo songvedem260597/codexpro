@@ -29,7 +29,7 @@ import { BrowserProfilesSection } from "./features/profiles/browser-profiles-sec
 import { InspectionModal } from "./features/projects/inspection-modal.jsx";
 import { ProjectsSection } from "./features/projects/projects-section.jsx";
 import { createManagerRuntimeActions } from "./features/runtime/manager-runtime-actions.js";
-import { extensionReady, profileSafeForWorkerUpdate, profileVisibleInWorkerList, WORKER_EXTENSION_VERSION } from "./features/profiles/profile-runtime-utils.js";
+import { profileSafeForWorkerUpdate, profileVisibleInWorkerList } from "./features/profiles/profile-runtime-utils.js";
 import { loadProfileTaskLabels, persistProfileTaskLabels } from "./features/tasks/profile-task-labels.js";
 import { FONT_OPTIONS, FONT_ROLE_OPTIONS, FONT_WEIGHT_LABELS, GLOBAL_RULES_TEMPLATE } from "./manager-settings-model.js";
 import { useManagerSettings } from "./hooks/use-manager-settings.js";
@@ -55,6 +55,13 @@ const ControlCenter = React.lazy(() => import("./control-center.jsx").then((modu
 const api = window.codexpro;
 const PROJECTS_PER_PAGE = 8;
 const DEEP_UI_DIAGNOSTICS_ENABLED = new URLSearchParams(window.location.search).get("debugUi") === "1";
+const WORKER_EXTENSION_VERSION = "0.5.126";
+const WORKER_EXTENSION_BUILD_ID = "send-post-ack-scope-v1";
+
+function extensionReady(profile, targetVersion = WORKER_EXTENSION_VERSION) {
+  return String(profile?.extension_version || "").trim() === String(targetVersion || "").trim()
+    && String(profile?.extension_build_id || "").trim() === WORKER_EXTENSION_BUILD_ID;
+}
 
 function App() {
   const [activePage, setActivePage] = useState("overview");
@@ -477,10 +484,10 @@ function App() {
     const profiles = visibleBrowserProfiles.filter((profile) => profile.connected);
     const connectedProfiles = allProfiles.filter((profile) => profile.connected);
     const apiWorkers = (status?.workers || []).filter((worker) => worker.worker_type === "api");
-    const outdated = connectedProfiles.filter((profile) => !extensionReady(profile.extension_version, workerExtensionVersion));
+    const outdated = connectedProfiles.filter((profile) => !extensionReady(profile, workerExtensionVersion));
     return {
       working: profiles.filter((profile) => profile.activity === "working" || profile.activity === "settling").length + apiWorkers.filter((worker) => worker.connected && worker.activity === "working").length,
-      idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile.extension_version, workerExtensionVersion))).length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
+      idle: profiles.filter((profile) => profile.activity === "idle" && (profile.connector_installed || !extensionReady(profile, workerExtensionVersion))).length + apiWorkers.filter((worker) => worker.connected && worker.activity !== "working" && worker.activity !== "failed").length,
       hung: visibleBrowserProfiles.filter((profile) => !profile.connected).length + apiWorkers.filter((worker) => !worker.connected || worker.activity === "failed").length,
       missing: profiles.filter((profile) => profile.activity === "no_chatgpt" && !profile.connector_installed).length,
       reload: outdated.filter(profileSafeForWorkerUpdate).length,
@@ -517,7 +524,7 @@ function App() {
     if (!managerSettings.autoUpdateWorkers || busy || !status?.local?.ok || status?.workerSnapshotStale) return;
     const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
     const hasSafeOutdatedWorker = profiles.some((profile) => {
-      if (!profile?.connected || extensionReady(profile.extension_version, workerExtensionVersion)) return false;
+      if (!profile?.connected || extensionReady(profile, workerExtensionVersion)) return false;
       const tabs = Array.isArray(profile.conversation_tabs) ? profile.conversation_tabs : [];
       const hasBusyTab = tabs.some((tab) => tab?.busy || tab?.settling || String(tab?.network_state || "") === "generating");
       return profile.activity === "idle" && Number(profile.busy_request_count || 0) === 0 && !hasBusyTab;

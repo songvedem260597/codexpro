@@ -328,7 +328,8 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.125";
+const WORKER_EXTENSION_VERSION = "0.5.126";
+const WORKER_EXTENSION_BUILD_ID = "send-post-ack-scope-v1";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -392,8 +393,8 @@ let repoScanPromise = null;
 const gitSummaryCache = new Map();
 const gitSummaryPromises = new Map();
 
-function workerExtensionCurrent(profile) {
-  return String(profile?.extension_version || "").trim() === WORKER_EXTENSION_VERSION
+function workerExtensionCurrent(profile, targetVersion = WORKER_EXTENSION_VERSION) {
+  return String(profile?.extension_version || "").trim() === String(targetVersion || "").trim()
     && String(profile?.extension_build_id || "").trim() === WORKER_EXTENSION_BUILD_ID;
 }
 
@@ -3051,7 +3052,7 @@ async function reloadChromeProfiles() {
   targetVersion = await availableExtensionVersion(status.config.root, WORKER_EXTENSION_VERSION);
   const connectedProfiles = status.browserProfiles.filter((profile) => profile.connected);
   if (!connectedProfiles.length) throw new Error("Không có Chrome profile nào đang kết nối.");
-  const outdated = connectedProfiles.filter((profile) => !versionAtLeast(profile.extension_version, targetVersion));
+  const outdated = connectedProfiles.filter((profile) => !workerExtensionCurrent(profile, targetVersion));
   if (!outdated.length) return { ok: true, mode: "up_to_date", count: 0, failed: 0, deferred: 0, outdated: 0, version: targetVersion };
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
 
@@ -3102,7 +3103,7 @@ async function reloadChromeProfiles() {
       await new Promise((resolve) => setTimeout(resolve, 500));
       const refreshed = await runtimeStatus();
       confirmedIds = new Set(refreshed.browserProfiles
-        .filter((profile) => reloadAcceptedIds.has(profile.profile_id) && profile.connected && versionAtLeast(profile.extension_version, targetVersion))
+        .filter((profile) => reloadAcceptedIds.has(profile.profile_id) && profile.connected && workerExtensionCurrent(profile, targetVersion))
         .map((profile) => profile.profile_id));
       if (confirmedIds.size === reloadAcceptedIds.size) break;
     }

@@ -446,7 +446,7 @@ assert.ok(sendStart >= 0 && sendEnd > sendStart, "send_chat_request command bloc
 const sendBlock = worker.slice(sendStart, sendEnd);
 
 const postAckStabilizeSource = extractFunction("stabilizeSubmittedSendAfterAck");
-const stabilizeSubmittedSendAfterAck = Function(`${postAckStabilizeSource.replace(/^function/, "async function")}; return stabilizeSubmittedSendAfterAck;`)();
+const stabilizeSubmittedSendAfterAck = Function("SEND_CONFIRMED_STABILITY_SOURCE", `${postAckStabilizeSource.replace(/^function/, "async function")}; return stabilizeSubmittedSendAfterAck;`)("network_ack");
 const postAckSleepCalls = [];
 const postAckStabilized = await stabilizeSubmittedSendAfterAck(5_000, true, async (ms) => { postAckSleepCalls.push(ms); });
 assert.deepEqual(postAckSleepCalls, [650], "post-ACK stabilization must execute the real 650 ms gate without relying on a global constant");
@@ -462,8 +462,8 @@ assert.equal(workerExtensionCurrent({ extension_version: "0.5.126", extension_bu
 assert.equal(workerExtensionCurrent({ extension_version: "0.5.126", extension_build_id: "send-post-ack-scope-v1" }), true, "exact version and build id must be accepted without a reload");
 assert.equal(workerExtensionCurrent({ extension_version: "0.5.127", extension_build_id: "future-but-unexpected" }), false, "newer version must not be considered current without the expected build identity");
 assert.equal(workerExtensionCurrent({ extension_version: "0.5.125", extension_build_id: "send-post-ack-scope-v1" }), false, "wrong extension version must remain stale even when build id matches");
-assert.match(managerMain, /const outdated = connectedProfiles\.filter\(\(profile\) => !workerExtensionCurrent\(profile\)\)/, "Manager bulk update must classify build-id mismatches as stale");
-assert.match(managerMain, /profile\?\.connected && workerExtensionCurrent\(profile\)/, "Manager update confirmation must require the exact runtime version and build id heartbeat");
+assert.match(managerMain, /const outdated = connectedProfiles\.filter\(\(profile\) => !workerExtensionCurrent\(profile, targetVersion\)\)/, "Manager bulk update must classify build-id mismatches as stale");
+assert.match(managerMain, /profile\.connected && workerExtensionCurrent\(profile, targetVersion\)/, "Manager update confirmation must require the exact runtime version and build id heartbeat");
 
 const timeoutCatch = sendBlock.indexOf("}catch(error){");
 const networkRecovery = sendBlock.indexOf("networkAck=await waitForNetworkGeneration(tab.id,networkAckStartedAfterMs", timeoutCatch);
@@ -665,9 +665,9 @@ assert.match(sendBlock, /if\(followupWhileGenerating\)\{[\s\S]*?followup_stop_ms
 assert.match(sendBlock, /reconcileChatNetworkCompletion\(tab\.id,targetConversationId,'manual_followup_stop'\)/, "stopped follow-ups must reconcile the old network generation before the fresh ACK window begins");
 assert.match(sendBlock, /const submitStartedAt=Date\.now\(\);[\s\S]*?const networkAckStartedAfterMs=submitStartedAt;/, "follow-up ACK detection must start only after steering the old generation so stale network evidence cannot satisfy the new send");
 assert.match(sendBlock, /followup_generation_stopped:Boolean\(stopResult\.stopped\)/, "send telemetry must expose whether the old generation was actually stopped");
-assert.doesNotMatch(sendBlock, /SEND_POST_ACK_STABILITY_MS/, "successful sends must not add a fixed post-ACK delay after authoritative network confirmation");
-assert.match(sendBlock, /send_stability_wait_ms:0[\s\S]*?send_stability_source:SEND_CONFIRMED_STABILITY_SOURCE/, "successful sends must release immediately after the authoritative network ACK while preserving stability telemetry");
-assert.match(sendBlock, /send_stabilized:true[\s\S]*?followup_while_generating:followupWhileGenerating/, "send results must expose the stability gate and whether a live generation was steered");
+assert.match(sendBlock, /stabilizeSubmittedSendAfterAck/, "successful sends must execute the scoped post-ACK stability helper before releasing the send lock");
+assert.match(postAckStabilizeSource, /const SEND_POST_ACK_STABILITY_MS = 650[\s\S]*?send_stability_source:SEND_CONFIRMED_STABILITY_SOURCE/, "post-ACK helper must keep the 650 ms value in local scope while preserving authoritative ACK telemetry");
+assert.match(postAckStabilizeSource, /send_stabilized:true[\s\S]*?followup_while_generating:Boolean\(followupWhileGenerating\)/, "send results must expose the stability gate and whether a live generation was steered");
 assert.match(managerMain, /const profileSendOperations = new Map\(\)/, "Manager must reject concurrent sends for the same profile");
 assert.match(managerMain, /Profile này đang gửi một yêu cầu khác/, "concurrent profile sends must fail explicitly instead of queueing a duplicate");
 assert.match(managerMain, /title: allowBusyFollowup \? "__codexpro_allow_busy_followup__" : undefined/, "Manager must carry manual busy-followup intent through the legacy-safe title sentinel until stale MCP runtimes restart");
