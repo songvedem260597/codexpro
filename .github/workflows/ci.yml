@@ -26,7 +26,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6.4.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install
@@ -35,6 +35,20 @@ jobs:
       - name: Install Manager
         run: npm --prefix manager ci
 
+      - name: Configure Electron sandbox
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          manager/node_modules/.bin/electron --no-sandbox --version
+          sandbox="$(find manager/node_modules/electron -type f -name chrome-sandbox -print -quit)"
+          if [ -z "$sandbox" ]; then
+            echo "Electron chrome-sandbox was not materialized after the CLI download."
+            exit 1
+          fi
+          sudo chown root:root "$sandbox"
+          sudo chmod 4755 "$sandbox"
+          test "$(stat -c '%a' "$sandbox")" = "4755"
+
       - name: Build
         run: npm run build
 
@@ -42,6 +56,8 @@ jobs:
         run: npm run manager:check
 
       - name: Smoke Test
+        env:
+          TMPDIR: ${{ runner.os == 'macOS' && '/private/tmp' || '' }}
         run: npm run smoke
 
       - name: Stress Test
