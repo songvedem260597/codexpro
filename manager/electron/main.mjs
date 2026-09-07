@@ -3637,12 +3637,17 @@ async function getRepoTaskStatus(payload) {
   return await localMcpTool(base.config, base.token, "repo_task_status", { task_id: taskId }, 15000);
 }
 
-async function getWorkspaceCoordination(root) {
+async function getWorkspaceCoordination(root, taskId = "") {
   const workspaceRoot = String(root || "").trim();
+  const normalizedTaskId = String(taskId || "").trim();
   if (!workspaceRoot) throw new Error("Workspace root không hợp lệ.");
+  if (normalizedTaskId && !/^cpt_[a-f0-9]{24}$/.test(normalizedTaskId)) throw new Error("CodexPro task id không hợp lệ.");
   const base = await readyRuntimeBaseStatus();
   if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
-  return await localMcpTool(base.config, base.token, "workspace_coordination_status", { root: workspaceRoot }, 15000);
+  return await localMcpTool(base.config, base.token, "workspace_coordination_status", {
+    root: workspaceRoot,
+    ...(normalizedTaskId ? { task_id: normalizedTaskId } : {})
+  }, 15000);
 }
 
 async function renameProfileChat(payload) {
@@ -4361,14 +4366,16 @@ diagnosticIpcHandle("codexpro:get-workspace-coordination", {
   action: "get-workspace-coordination",
   slowMs: 5_000,
   failureMessage: "Đọc trạng thái phối hợp workspace thất bại",
-  details: (root) => ({ workspace_root: String(root || "") }),
+  details: (root, taskId) => ({ workspace_root: String(root || ""), task_id: String(taskId || "") }),
   resultDetails: (result) => ({
+    task_id: String(result?.task_id || ""),
+    safe_for_delivery: typeof result?.safe_for_delivery === "boolean" ? result.safe_for_delivery : undefined,
     active_tasks: Number(result?.active_task_count) || 0,
-    claims: Array.isArray(result?.claims) ? result.claims.length : 0,
+    claims: Array.isArray(result?.claims) ? result.claims.length : Number(result?.foreign_claim_count) || 0,
     queued: Array.isArray(result?.integration_queue) ? result.integration_queue.length : 0,
     conflicts: Number(result?.conflict_count) || 0
   })
-}, (_event, root) => getWorkspaceCoordination(root));
+}, (_event, root, taskId) => getWorkspaceCoordination(root, taskId));
 diagnosticIpcHandle("codexpro:list-app-plugins", {
   category: "app-plugin",
   action: "list-app-plugins"

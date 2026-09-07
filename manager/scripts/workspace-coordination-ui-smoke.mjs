@@ -16,8 +16,9 @@ const styles = read("manager/src/workspace-coordination-panel.css");
 const server = read("src/server.ts");
 const coordination = read("src/workspaceCoordination.ts");
 
-assert.match(preload, /getWorkspaceCoordination:\s*\(root\)\s*=>\s*invoke\("codexpro:get-workspace-coordination"/);
+assert.match(preload, /getWorkspaceCoordination:\s*\(root,\s*taskId\s*=\s*""\)\s*=>\s*invoke\("codexpro:get-workspace-coordination",\s*root,\s*taskId\)/);
 assert.match(electronMain, /workspace_coordination_status/);
+assert.match(electronMain, /\.\.\.\(normalizedTaskId\s*\?\s*\{\s*task_id:\s*normalizedTaskId\s*\}\s*:\s*\{\}\)/);
 assert.match(electronMain, /codexpro:get-workspace-coordination/);
 assert.match(control, /api\s*=\s*window\.codexpro/);
 assert.match(control, /WorkspaceCoordinationPanel/);
@@ -33,7 +34,12 @@ assert.match(panel, /Mở worktree/);
 assert.match(styles, /coordination-repo\.has-conflict/);
 assert.match(styles, /coordination-badges span\.is-danger/);
 assert.match(server, /"workspace_coordination_status"/);
+assert.match(server, /task_id:\s*z\.string\(\)\.regex/);
+assert.match(server, /readWorkspaceTaskCoordinationStatus/);
 assert.match(coordination, /export (?:async )?function readWorkspaceCoordinationStatus/);
+assert.match(coordination, /export (?:async )?function readWorkspaceTaskCoordinationStatus/);
+assert.match(coordination, /safe_for_delivery/);
+assert.match(coordination, /overlapping_claims/);
 assert.match(coordination, /stale_paths/);
 assert.match(coordination, /queue_position/);
 

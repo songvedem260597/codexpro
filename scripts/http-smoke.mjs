@@ -325,6 +325,20 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (path.resolve(preBeginCoordination.structuredContent.root) !== path.resolve(taskRoot) || !Array.isArray(preBeginCoordination.structuredContent.tasks)) {
       throw new Error(`workspace coordination status must remain observable before begin_repo_task: ${JSON.stringify(preBeginCoordination.structuredContent)}`);
     }
+    const preBeginTargetedCoordination = await callTool(gated, 'codexpro', {
+      action: 'workspace_coordination_status',
+      args: { root: taskRoot, task_id: 'cpt_010101010101010101010101' }
+    });
+    const targetedCoordination = preBeginTargetedCoordination.structuredContent;
+    if (targetedCoordination.mode !== 'task' || targetedCoordination.found !== false || targetedCoordination.safe_for_delivery !== false) {
+      throw new Error(`targeted workspace coordination status must fail closed for an unknown task: ${JSON.stringify(targetedCoordination)}`);
+    }
+    if (!Array.isArray(targetedCoordination.blocking_reasons) || targetedCoordination.blocking_reasons[0]?.code !== 'TASK_NOT_FOUND') {
+      throw new Error(`targeted workspace coordination status must return a deterministic blocker: ${JSON.stringify(targetedCoordination)}`);
+    }
+    if ('tasks' in targetedCoordination || 'claims' in targetedCoordination) {
+      throw new Error(`targeted workspace coordination status must not dump the full workspace snapshot: ${JSON.stringify(targetedCoordination)}`);
+    }
     await expectToolErrorCode(gated, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
     await expectToolErrorCode(gated, 'begin_repo_task', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa', task_title: 'Verify current repo gate', task_kind: 'code', root: taskRoot, scope: 'workspace' }, 'REPO_TASK_NOT_PREPARED');
 

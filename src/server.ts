@@ -27,7 +27,7 @@ import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, resumeWorkerJob, workerJobHasLegacyStaleCancellation, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
 import { classifiedWorkerJobPublicRecord, createWorkerJobToolDefinitions } from "./workerJobTools.js";
-import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, verifyWorkspaceTaskResume, withVerifiedWorkspaceTaskResume, type WorkspaceTaskContext } from "./workspaceCoordination.js";
+import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, readWorkspaceTaskCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, verifyWorkspaceTaskResume, withVerifiedWorkspaceTaskResume, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const CODEXPRO_GLOBAL_RULES_FILE = "CODEXPRO.md";
@@ -2661,12 +2661,19 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     "workspace_coordination_status",
     {
       title: "Workspace Coordination Status",
-      description: "Read multi-agent workspace ownership, worktree, stale-base, conflict, and integration queue state for a repo.",
-      inputSchema: { root: z.string().min(1).optional() },
+      description: "Read multi-agent workspace ownership, worktree, stale-base, conflict, and integration queue state for a repo. Pass task_id for a bounded authoritative delivery decision for exactly one task.",
+      inputSchema: {
+        root: z.string().min(1).optional(),
+        task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional().describe("Optional exact task id. When present, return compact task coordination state instead of the full workspace overview.")
+      },
       annotations: READ_ONLY_ANNOTATIONS
     },
     async (args) => {
       const workspace = workspaces.openWorkspace(args.root, { select: false });
+      if (args.task_id) {
+        const snapshot = await readWorkspaceTaskCoordinationStatus(workspace.root, args.task_id);
+        return textResult(`# Task Coordination\n\n${args.task_id}: ${snapshot.safe_for_delivery ? "SAFE" : "BLOCKED"} for delivery.`, snapshot);
+      }
       const snapshot = await readWorkspaceCoordinationStatus(workspace.root);
       const activeTasks = snapshot.tasks.filter((task) => task.status === "running").length;
       const conflicts = snapshot.tasks.filter((task) => task.integration_status === "conflict" || task.stale_base).length;

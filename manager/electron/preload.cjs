@@ -79,7 +79,7 @@ contextBridge.exposeInMainWorld("codexpro", {
     payload
   ),
   getRepoTaskStatus: (payload) => invoke("codexpro:get-repo-task-status", payload),
-  getWorkspaceCoordination: (root) => invoke("codexpro:get-workspace-coordination", root),
+  getWorkspaceCoordination: (root, taskId = "") => invoke("codexpro:get-workspace-coordination", root, taskId),
   listAppPlugins: () => invoke("codexpro:list-app-plugins"),
   listAppPluginCatalog: () => invoke("codexpro:list-app-plugin-catalog"),
   analyzeAppPluginRepo: (payload) => invoke("codexpro:analyze-app-plugin-repo", payload),

@@ -14,6 +14,9 @@ const STALE_LOCK_MS = 30_000;
 const STALE_INTEGRATION_LEASE_MS = 10 * 60 * 1000;
 const INTEGRATION_QUEUE_WAIT_MS = 2 * 60 * 1000;
 const INTEGRATION_QUEUE_POLL_MS = 50;
+const TARGETED_STATUS_PATH_LIMIT = 32;
+const TARGETED_STATUS_CLAIM_LIMIT = 32;
+const TARGETED_STATUS_FOREIGN_TASK_LIMIT = 16;
 
 export type WorkspaceTaskStatus = "running" | "completed" | "failed" | "cancelled";
 
@@ -1113,6 +1116,272 @@ export function readWorkspaceCoordination(root: string): WorkspaceCoordinationSt
   const state = readState(root);
   cleanupStaleState(state);
   return state;
+}
+
+export async function readWorkspaceTaskCoordinationStatus(root: string, taskId: string) {
+  const canonical = canonicalRoot(root);
+  const state = readState(canonical);
+  cleanupStaleState(state);
+  const head = await currentHead(canonical);
+  const branch = await currentBranch(canonical);
+  const task = state.tasks[taskId];
+  const queueIndex = state.integrationQueue.findIndex((entry) => entry.taskId === taskId);
+  const queuePosition = queueIndex >= 0 ? queueIndex + 1 : 0;
+  const leaseTaskId = state.integrationLease?.taskId || "";
+  const leaseTask = leaseTaskId ? state.tasks[leaseTaskId] : undefined;
+  const integrationLease = state.integrationLease ? {
+    task_id: leaseTaskId,
+    worker_id: leaseTask?.workerId || "",
+    task_title: leaseTask?.title || "",
+    acquired_at: state.integrationLease.acquiredAt,
+    belongs_to_current_task: leaseTaskId === taskId
+  } : null;
+
+  const queueIndexes = new Set<number>();
+  if (queueIndex >= 0) {
+    queueIndexes.add(0);
+    if (queueIndex > 0) queueIndexes.add(queueIndex - 1);
+    queueIndexes.add(queueIndex);
+  } else if (state.integrationQueue.length && leaseTaskId !== taskId) {
+    queueIndexes.add(0);
+  }
+  const compactQueue = [...queueIndexes]
+    .filter((index) => index >= 0 && index < state.integrationQueue.length)
+    .sort((left, right) => left - right)
+    .map((index) => {
+      const entry = state.integrationQueue[index];
+      const owner = state.tasks[entry.taskId];
+      return {
+        task_id: entry.taskId,
+        worker_id: owner?.workerId || "",
+        task_title: owner?.title || "",
+        branch: entry.branch,
+        enqueued_at: entry.enqueuedAt,
+        position: index + 1,
+        belongs_to_current_task: entry.taskId === taskId
+      };
+    });
+
+  if (!task) {
+    return {
+      mode: "task" as const,
+      version: state.version,
+      root: canonical,
+      updated_at: state.updatedAt,
+      current_head: head,
+      current_branch: branch,
+      task_id: taskId,
+      found: false,
+      task_status: "",
+      task_worker_id: "",
+      task_title: "",
+      task_claimed_paths: [] as string[],
+      task_claimed_path_count: 0,
+      task_claimed_paths_truncated: false,
+      task_touched_paths: [] as string[],
+      task_touched_path_count: 0,
+      task_touched_paths_truncated: false,
+      missing_claims: [] as string[],
+      missing_claim_count: 0,
+      missing_claims_truncated: false,
+      task_worktree_root: "",
+      task_worktree_branch: "",
+      foreign_active_tasks: [] as Array<{ task_id: string; worker_id: string; title: string }>,
+      foreign_active_task_count: 0,
+      foreign_active_tasks_truncated: false,
+      foreign_claims: [] as Array<{ path: string; task_id: string; worker_id: string }>,
+      foreign_claim_count: 0,
+      foreign_claims_truncated: false,
+      overlapping_claims: [] as Array<{ path: string; foreign_task_id: string; foreign_worker_id: string }>,
+      overlapping_claim_count: 0,
+      overlapping_claims_truncated: false,
+      integration_status: "",
+      integration_branch: "",
+      queue_position: queuePosition,
+      integration_queue: compactQueue,
+      integration_queue_total: state.integrationQueue.length,
+      integration_queue_truncated: compactQueue.length < state.integrationQueue.length,
+      integration_lease: integrationLease,
+      stale_base: false,
+      stale_paths: [] as string[],
+      stale_path_count: 0,
+      stale_paths_truncated: false,
+      conflict: false,
+      conflict_count: 0,
+      safe_for_delivery: false,
+      blocking_reasons: [{
+        code: "TASK_NOT_FOUND",
+        message: `Task ${taskId} is not registered in workspace coordination state.`
+      }]
+    };
+  }
+
+  const watchedPaths = uniquePaths([...task.claimedPaths, ...task.touchedPaths]);
+  const watchedKeys = new Set(watchedPaths.map(canonicalPathKey));
+  const stalePaths = task.status === "running" && task.baseHead && head && task.baseHead !== head && watchedPaths.length
+    ? await changedPathsBetween(canonical, task.baseHead, head, watchedPaths)
+    : [];
+  const missingClaimPaths = watchedPaths.filter((relPath) => !state.claims[canonicalPathKey(relPath)]);
+  const foreignClaims = Object.entries(state.claims)
+    .filter(([claimPath, claim]) => claim.taskId !== taskId && watchedKeys.has(canonicalPathKey(claimPath)))
+    .map(([claimPath, claim]) => ({
+      path: claimPath,
+      task_id: claim.taskId,
+      worker_id: state.tasks[claim.taskId]?.workerId || ""
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path) || left.task_id.localeCompare(right.task_id));
+  const overlappingClaims = foreignClaims.map((claim) => ({
+    path: claim.path,
+    foreign_task_id: claim.task_id,
+    foreign_worker_id: claim.worker_id
+  }));
+
+  const relevantForeignTaskIds = new Set<string>();
+  for (const claim of foreignClaims) relevantForeignTaskIds.add(claim.task_id);
+  if (leaseTaskId && leaseTaskId !== taskId) relevantForeignTaskIds.add(leaseTaskId);
+  if (queuePosition > 1) {
+    for (const entry of compactQueue) {
+      if (!entry.belongs_to_current_task && entry.position < queuePosition) relevantForeignTaskIds.add(entry.task_id);
+    }
+  } else if (queuePosition === 0 && state.integrationQueue.length && leaseTaskId !== taskId) {
+    const queueHead = state.integrationQueue[0];
+    if (queueHead?.taskId && queueHead.taskId !== taskId) relevantForeignTaskIds.add(queueHead.taskId);
+  }
+  const allForeignActiveTasks = [...relevantForeignTaskIds]
+    .map((foreignTaskId) => state.tasks[foreignTaskId])
+    .filter((foreignTask): foreignTask is WorkspaceTaskRecord => Boolean(foreignTask && foreignTask.status === "running"))
+    .map((foreignTask) => ({ task_id: foreignTask.taskId, worker_id: foreignTask.workerId, title: foreignTask.title }))
+    .sort((left, right) => left.task_id.localeCompare(right.task_id));
+
+  const blockingReasons: Array<Record<string, unknown>> = [];
+  if (task.status !== "running") {
+    blockingReasons.push({ code: "TASK_NOT_ACTIVE", message: `Task ${task.taskId} is ${task.status}, not running.`, task_status: task.status });
+  }
+  if (!task.workerId) {
+    blockingReasons.push({ code: "TASK_OWNER_MISSING", message: `Task ${task.taskId} has no authoritative worker owner.` });
+  }
+  if (!task.baseHead) {
+    blockingReasons.push({ code: "TASK_BASE_MISSING", message: `Task ${task.taskId} has no recorded base HEAD.` });
+  }
+  if (!head) {
+    blockingReasons.push({ code: "CURRENT_HEAD_UNAVAILABLE", message: "Workspace HEAD could not be resolved." });
+  }
+  if (missingClaimPaths.length) {
+    blockingReasons.push({
+      code: "TASK_CLAIM_MISSING",
+      message: `${missingClaimPaths.length} task-owned path(s) have no authoritative claim record.`,
+      path: missingClaimPaths[0]
+    });
+  }
+  if (foreignClaims.length) {
+    blockingReasons.push({
+      code: "FOREIGN_CLAIM_OVERLAP",
+      message: `${foreignClaims.length} task-owned path(s) are claimed by another active task.`,
+      path: foreignClaims[0].path,
+      foreign_task_id: foreignClaims[0].task_id,
+      foreign_worker_id: foreignClaims[0].worker_id
+    });
+  }
+  if (stalePaths.length) {
+    blockingReasons.push({
+      code: "STALE_BASE",
+      message: `${stalePaths.length} task-owned path(s) changed after the task base HEAD.`,
+      path: stalePaths[0]
+    });
+  }
+  if (task.integrationStatus === "conflict") {
+    blockingReasons.push({ code: "INTEGRATION_CONFLICT", message: `Task ${task.taskId} has an unresolved integration conflict.` });
+  } else if (task.integrationStatus === "failed") {
+    blockingReasons.push({ code: "INTEGRATION_FAILED", message: `Task ${task.taskId} has a failed integration state that must be reconciled before delivery.` });
+  }
+  if (leaseTaskId && leaseTaskId !== taskId) {
+    blockingReasons.push({
+      code: "FOREIGN_INTEGRATION_LEASE",
+      message: `Integration lease belongs to task ${leaseTaskId}.`,
+      foreign_task_id: leaseTaskId,
+      foreign_worker_id: leaseTask?.workerId || ""
+    });
+  }
+  if (leaseTaskId !== taskId) {
+    if (queuePosition > 1) {
+      blockingReasons.push({
+        code: "QUEUE_WAIT",
+        message: `Task ${task.taskId} is integration queue position ${queuePosition} and is not FIFO-eligible yet.`,
+        queue_position: queuePosition,
+        blocking_task_id: state.integrationQueue[0]?.taskId || ""
+      });
+    } else if (queuePosition === 0 && state.integrationQueue.length) {
+      blockingReasons.push({
+        code: "QUEUE_WAIT",
+        message: `Task ${task.taskId} is not queued and an earlier integration request is already waiting.`,
+        queue_position: 0,
+        blocking_task_id: state.integrationQueue[0]?.taskId || ""
+      });
+    }
+  }
+  if (task.integrationStatus === "queued" && queuePosition === 0) {
+    blockingReasons.push({ code: "QUEUE_STATE_INCONSISTENT", message: `Task ${task.taskId} is marked queued but has no integration queue entry.` });
+  }
+  if (task.integrationStatus === "integrating" && leaseTaskId !== taskId) {
+    blockingReasons.push({ code: "LEASE_STATE_INCONSISTENT", message: `Task ${task.taskId} is marked integrating but does not own the integration lease.` });
+  }
+
+  const boundedClaimedPaths = task.claimedPaths.slice(0, TARGETED_STATUS_PATH_LIMIT);
+  const boundedTouchedPaths = task.touchedPaths.slice(0, TARGETED_STATUS_PATH_LIMIT);
+  const boundedMissingClaimPaths = missingClaimPaths.slice(0, TARGETED_STATUS_PATH_LIMIT);
+  const boundedStalePaths = stalePaths.slice(0, TARGETED_STATUS_PATH_LIMIT);
+  const boundedForeignClaims = foreignClaims.slice(0, TARGETED_STATUS_CLAIM_LIMIT);
+  const boundedOverlappingClaims = overlappingClaims.slice(0, TARGETED_STATUS_CLAIM_LIMIT);
+  const boundedForeignTasks = allForeignActiveTasks.slice(0, TARGETED_STATUS_FOREIGN_TASK_LIMIT);
+  const integrationConflict = task.integrationStatus === "conflict";
+  return {
+    mode: "task" as const,
+    version: state.version,
+    root: canonical,
+    updated_at: state.updatedAt,
+    current_head: head,
+    current_branch: branch,
+    task_id: task.taskId,
+    found: true,
+    task_status: task.status,
+    task_worker_id: task.workerId,
+    task_title: task.title,
+    task_claimed_paths: boundedClaimedPaths,
+    task_claimed_path_count: task.claimedPaths.length,
+    task_claimed_paths_truncated: boundedClaimedPaths.length < task.claimedPaths.length,
+    task_touched_paths: boundedTouchedPaths,
+    task_touched_path_count: task.touchedPaths.length,
+    task_touched_paths_truncated: boundedTouchedPaths.length < task.touchedPaths.length,
+    missing_claims: boundedMissingClaimPaths,
+    missing_claim_count: missingClaimPaths.length,
+    missing_claims_truncated: boundedMissingClaimPaths.length < missingClaimPaths.length,
+    task_worktree_root: task.worktreeRoot || "",
+    task_worktree_branch: task.worktreeBranch || "",
+    foreign_active_tasks: boundedForeignTasks,
+    foreign_active_task_count: allForeignActiveTasks.length,
+    foreign_active_tasks_truncated: boundedForeignTasks.length < allForeignActiveTasks.length,
+    foreign_claims: boundedForeignClaims,
+    foreign_claim_count: foreignClaims.length,
+    foreign_claims_truncated: boundedForeignClaims.length < foreignClaims.length,
+    overlapping_claims: boundedOverlappingClaims,
+    overlapping_claim_count: overlappingClaims.length,
+    overlapping_claims_truncated: boundedOverlappingClaims.length < overlappingClaims.length,
+    integration_status: task.integrationStatus || "idle",
+    integration_branch: task.integrationBranch || "",
+    queue_position: queuePosition,
+    integration_queue: compactQueue,
+    integration_queue_total: state.integrationQueue.length,
+    integration_queue_truncated: compactQueue.length < state.integrationQueue.length,
+    integration_lease: integrationLease,
+    stale_base: stalePaths.length > 0,
+    stale_paths: boundedStalePaths,
+    stale_path_count: stalePaths.length,
+    stale_paths_truncated: boundedStalePaths.length < stalePaths.length,
+    conflict: foreignClaims.length > 0 || integrationConflict,
+    conflict_count: foreignClaims.length + (integrationConflict ? 1 : 0),
+    safe_for_delivery: blockingReasons.length === 0,
+    blocking_reasons: blockingReasons
+  };
 }
 
 export async function readWorkspaceCoordinationStatus(root: string) {
