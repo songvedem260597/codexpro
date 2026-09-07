@@ -945,10 +945,16 @@ export async function preflightWorkspacePush(context: WorkspaceTaskContext, bran
       });
     }
     remoteHead = await gitText(gitRoot, ["rev-parse", `refs/remotes/origin/${branch}`]) || remoteHead;
-    const localChanged = await changedPathsBetween(gitRoot, task.baseHead, head);
-    const remoteChanged = await changedPathsBetween(gitRoot, task.baseHead, remoteHead);
+    const actualMergeBase = await gitText(gitRoot, ["merge-base", head, remoteHead]);
+    const comparisonBase = actualMergeBase || task.baseHead;
+    const localChanged = await changedPathsBetween(gitRoot, comparisonBase, head);
+    const remoteChanged = await changedPathsBetween(gitRoot, comparisonBase, remoteHead);
+    const touchedKeys = new Set(task.touchedPaths.map(canonicalPathKey));
+    const localTaskChanged = touchedKeys.size
+      ? localChanged.filter((relPath) => touchedKeys.has(canonicalPathKey(relPath)))
+      : localChanged;
     const remoteKeys = new Set(remoteChanged.map(canonicalPathKey));
-    const overlap = localChanged.filter((relPath) => remoteKeys.has(canonicalPathKey(relPath)));
+    const overlap = localTaskChanged.filter((relPath) => remoteKeys.has(canonicalPathKey(relPath)));
     if (overlap.length) {
       await withState(root, async (state) => {
         const live = requireTask(state, context.taskId);

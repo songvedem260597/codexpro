@@ -31,6 +31,7 @@ const TASK_C = { taskId: "cpt_cccccccccccccccccccccccc", workerId: "worker:c", t
 const TASK_D = { taskId: "cpt_dddddddddddddddddddddddd", workerId: "worker:d", title: "Dirty isolation task", root: repoRoot };
 const TASK_E = { taskId: "cpt_eeeeeeeeeeeeeeeeeeeeeeee", workerId: "worker:e", title: "Reservation task", root: repoRoot };
 const TASK_F = { taskId: "cpt_ffffffffffffffffffffffff", workerId: "worker:f", title: "Completion gate task", root: repoRoot };
+const TASK_G = { taskId: "cpt_111111111111111111111111", workerId: "worker:g", title: "Stale base integration task", root: repoRoot };
 const gitExecutable = process.platform === "win32" ? "git.exe" : "git";
 
 function git(args, cwd = repoRoot) {
@@ -230,6 +231,62 @@ try {
   const fWorktreeRoot = registeredF.worktreeRoot;
   await finalizeWorkspaceTask(TASK_F, "completed");
   assert.equal(fs.existsSync(fWorktreeRoot), false, "verified committed pushed task worktree should be removed on completion");
+
+  git(["fetch", "origin", "main"]);
+  git(["reset", "--hard", "origin/main"]);
+  const registeredG = await registerWorkspaceTask(TASK_G);
+  await claimWorkspacePaths(TASK_G, ["a.txt"]);
+  const staleBaseG = registeredG.baseHead;
+
+  fs.writeFileSync(path.join(repoRoot, "a.txt"), "a3 historical remote change\n", "utf8");
+  git(["add", "a.txt"]);
+  git(["commit", "-m", "historical remote change before task G local work"]);
+  git(["push", "origin", "main"]);
+  const historicalRemoteHeadG = git(["rev-parse", "HEAD"]);
+
+  git(["fetch", "origin", "main"], registeredG.worktreeRoot);
+  git(["rebase", "origin/main"], registeredG.worktreeRoot);
+  assert.equal(git(["rev-parse", "HEAD"], registeredG.worktreeRoot), historicalRemoteHeadG, "task G should incorporate the historical remote change before making its own change");
+  assert.equal(readWorkspaceCoordination(repoRoot).tasks[TASK_G.taskId].baseHead, staleBaseG, "task G coordination metadata should remain intentionally stale for the regression");
+
+  fs.writeFileSync(path.join(registeredG.worktreeRoot, "a.txt"), "a4 from task G after historical remote\n", "utf8");
+  await recordWorkspacePathsTouched(TASK_G, ["a.txt"]);
+  assert.equal((await runTask(TASK_G, registeredG, "git add a.txt")).exitCode, 0);
+  assert.equal((await runTask(TASK_G, registeredG, 'git commit -m "task G stale base local change"')).exitCode, 0);
+  const gCommitBeforeRebase = git(["rev-parse", "HEAD"], registeredG.worktreeRoot);
+  assert.match(git(["log", "-1", "--format=%B"], registeredG.worktreeRoot), new RegExp(`CodexPro-Task: ${TASK_G.taskId}`));
+
+  fs.writeFileSync(path.join(repoRoot, "b.txt"), "b2 remote after task G merge base\n", "utf8");
+  git(["add", "b.txt"]);
+  git(["commit", "-m", "disjoint remote change after task G merge base"]);
+  git(["push", "origin", "main"]);
+  const remoteBeforeIntegrationG = git(["rev-parse", "HEAD"]);
+  git(["fetch", "origin", "main"], registeredG.worktreeRoot);
+  const actualMergeBaseG = git(["merge-base", gCommitBeforeRebase, remoteBeforeIntegrationG], registeredG.worktreeRoot);
+  assert.equal(actualMergeBaseG, historicalRemoteHeadG, "task G should have a newer actual merge-base than its stored coordination base");
+  const staleLocalChangedG = git(["diff", "--name-only", `${staleBaseG}..${gCommitBeforeRebase}`], registeredG.worktreeRoot).split(/\r?\n/).filter(Boolean);
+  const staleRemoteChangedG = git(["diff", "--name-only", `${staleBaseG}..${remoteBeforeIntegrationG}`], registeredG.worktreeRoot).split(/\r?\n/).filter(Boolean);
+  assert.ok(staleLocalChangedG.includes("a.txt") && staleRemoteChangedG.includes("a.txt"), "the stale base should reproduce the historical false-overlap shape");
+  const actualRemoteChangedG = git(["diff", "--name-only", `${actualMergeBaseG}..${remoteBeforeIntegrationG}`], registeredG.worktreeRoot).split(/\r?\n/).filter(Boolean);
+  assert.deepEqual(actualRemoteChangedG, ["b.txt"], "actual merge-base to remote should contain no task-owned a.txt delta");
+
+  await preflightWorkspacePush(taskContext(TASK_G, registeredG), "main");
+  const gCommitAfterRebase = git(["rev-parse", "HEAD"], registeredG.worktreeRoot);
+  assert.notEqual(gCommitAfterRebase, gCommitBeforeRebase, "stale-base false conflict should allow the internal rebase to run");
+  const refreshedG = readWorkspaceCoordination(repoRoot).tasks[TASK_G.taskId];
+  assert.equal(refreshedG.baseHead, remoteBeforeIntegrationG, "internal rebase should refresh task G baseHead to the remote head it rebased onto");
+  assert.equal(refreshedG.baseRemoteHead, remoteBeforeIntegrationG, "internal rebase should refresh task G baseRemoteHead");
+  assert.ok(refreshedG.commitShas.includes(gCommitAfterRebase), "internal rebase should record the rebased task commit SHA");
+  assert.equal(fs.readFileSync(path.join(registeredG.worktreeRoot, "a.txt"), "utf8").replace(/\r\n/g, "\n"), "a4 from task G after historical remote\n", "rebased task G worktree should preserve local semantics");
+  assert.equal(fs.readFileSync(path.join(registeredG.worktreeRoot, "b.txt"), "utf8").replace(/\r\n/g, "\n"), "b2 remote after task G merge base\n", "rebased task G worktree should preserve remote semantics");
+  const pushG = await runTask(TASK_G, registeredG, "git push origin main", 60_000);
+  assert.equal(pushG.exitCode, 0, "stale-base false overlap must not block the sanctioned push");
+  assert.equal(git(["--git-dir", remoteRoot, "show", "refs/heads/main:a.txt"]), "a4 from task G after historical remote");
+  assert.equal(git(["--git-dir", remoteRoot, "show", "refs/heads/main:b.txt"]), "b2 remote after task G merge base");
+  assert.equal(readWorkspaceCoordination(repoRoot).tasks[TASK_G.taskId].integrationStatus, "integrated");
+  const gWorktreeRoot = registeredG.worktreeRoot;
+  await finalizeWorkspaceTask(TASK_G, "completed");
+  assert.equal(fs.existsSync(gWorktreeRoot), false, "clean integrated stale-base regression worktree should be removed on completion");
 
   git(["fetch", "origin", "main"]);
   git(["reset", "--hard", "origin/main"]);
