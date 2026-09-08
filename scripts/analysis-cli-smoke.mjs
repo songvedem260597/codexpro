@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(projectRoot, 'scripts', 'codexpro.mjs');
+const analysisCli = path.join(projectRoot, 'scripts', 'analysis-cli.mjs');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-analysis-cli-'));
 const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-analysis-cli-home-'));
 
@@ -20,6 +21,13 @@ function run(args) {
 }
 
 try {
+  const cliSource = await fs.readFile(cli, 'utf8');
+  const analysisCliSource = await fs.readFile(analysisCli, 'utf8');
+  assert.match(cliSource, /import \{ createAnalysisCli \} from '\.\/analysis-cli\.mjs';/);
+  assert.match(cliSource, /const runAnalysisCli = createAnalysisCli\(\{ projectRoot, parseArgs, realDir \}\);/);
+  assert(!cliSource.includes('function analysisChangedPaths(status)'));
+  assert.match(analysisCliSource, /export function createAnalysisCli\(/);
+
   await fs.mkdir(path.join(root, 'src'), { recursive: true });
   await fs.mkdir(path.join(root, 'test'), { recursive: true });
   await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'cli-fixture', scripts: { test: 'node --test' } }, null, 2), 'utf8');
