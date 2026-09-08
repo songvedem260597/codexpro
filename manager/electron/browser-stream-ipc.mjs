@@ -67,7 +67,6 @@ export function createBrowserStreamIpcCoordinator({
   };
 
   const recoverTimedOutBatch = (timedOutBatch) => {
-    for (const update of timedOutBatch.updates) rememberLatest(update);
     counters.timeouts += 1;
     onTimeout?.({ sequence: timedOutBatch.sequence, pendingKeys: pending.size, timeoutMs: ackTimeoutMs });
   };

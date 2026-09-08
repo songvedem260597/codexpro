@@ -108,6 +108,20 @@ assert.equal(timeoutCoordinator.acknowledge(timedOutSequence), false, "late ACK 
 assert.equal(timeoutCoordinator.metrics().timeouts, 1);
 assert.equal(timeoutCoordinator.metrics().maxInFlight, 1);
 
+const quietTimeoutTimers = createFakeTimers();
+const quietTimeoutSent = [];
+const quietTimeoutCoordinator = createBrowserStreamIpcCoordinator({
+  send: (payload) => quietTimeoutSent.push(payload),
+  ackTimeoutMs: 1_000,
+  setTimeoutFn: quietTimeoutTimers.setTimeout,
+  clearTimeoutFn: quietTimeoutTimers.clearTimeout
+});
+quietTimeoutCoordinator.queue([streamUpdate(1)]);
+assert.equal(quietTimeoutTimers.fireNext(), true, "quiet ACK timeout must fire");
+assert.equal(quietTimeoutSent.length, 1, "ACK timeout without a newer pending revision must not replay the same batch forever");
+assert.equal(quietTimeoutCoordinator.state().inFlightSequence, 0);
+assert.equal(quietTimeoutCoordinator.state().pendingKeys, 0);
+
 const resetTimers = createFakeTimers();
 const resetSent = [];
 const resetCoordinator = createBrowserStreamIpcCoordinator({
