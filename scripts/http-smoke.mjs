@@ -754,6 +754,7 @@ await expectHttpTokenRequired('non-loopback-allow-no-token', { CODEXPRO_HOST: '0
 await expectHttpTokenRequired('tunnel-mode', { CODEXPRO_TUNNEL_MODE: '1' });
 await expectWeakHttpTokenRejected();
 await expectActiveSessionPreservedUnderCapacityPressure();
+await import('./prepared-worker-recovery-smoke.mjs');
 await expectPreparedTaskSurvivesRuntimeRestart();
 
 async function withClient(url, fn) {

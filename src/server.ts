@@ -25,9 +25,9 @@ import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileTaskBinding, getBrowserExtensionProfileWorkspaceBinding, getBrowserExtensionTaskOwners, listBrowserExtensionProfiles, rebindBrowserExtensionProfileTaskConversation, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
-import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readWorkerJob, resumeWorkerJob, workerJobHasLegacyStaleCancellation, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
+import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readPreparedWorkerJob, readWorkerJob, resumeWorkerJob, workerJobHasLegacyStaleCancellation, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
 import { classifiedWorkerJobPublicRecord, createWorkerJobToolDefinitions } from "./workerJobTools.js";
-import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, readWorkspaceTaskCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, verifyWorkspaceTaskResume, withVerifiedWorkspaceTaskResume, type WorkspaceTaskContext } from "./workspaceCoordination.js";
+import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, readWorkspaceTaskCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, resolveWorkspaceTaskRootByTaskId, verifyWorkspaceTaskResume, withVerifiedWorkspaceTaskResume, type ResolvedWorkspaceTaskRoot, type WorkspaceTaskContext } from "./workspaceCoordination.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 const CODEXPRO_GLOBAL_RULES_FILE = "CODEXPRO.md";
@@ -325,6 +325,7 @@ function resolveWorkerJobProfileIdForServer(server: object, taskId: string): str
   return repoTaskGateProfileByServer.get(server) || "";
 }
 type ActiveRepoTask = {
+  coordinationRoot?: string;
   taskId: string;
   taskTitle: string;
   root: string;
@@ -412,6 +413,67 @@ function sameRepoTask(left: ActiveRepoTask | undefined, right: ExpectedRepoTask 
   );
 }
 
+function isPreparedLifecycleRecovery(job: WorkerJobRecord | undefined): job is WorkerJobRecord {
+  return Boolean(
+    job
+    && job.status === "prepared"
+    && job.kind === "code"
+    && (job.codexGraphActive || job.events.some((entry) => entry.type === "bootstrapped"))
+  );
+}
+
+function resolvePreparedLifecycleRecovery(input: {
+  taskId: string;
+  workerId: string;
+  preparedJob: WorkerJobRecord;
+  requestedRoot: string;
+  scope: "workspace" | "all_allowed";
+}): ResolvedWorkspaceTaskRoot {
+  const normalizeOwner = (value: string) => String(value || "").trim().replace(/^browser:/, "");
+  if (normalizeOwner(input.preparedJob.workerId) !== normalizeOwner(input.workerId)) {
+    throw new CodexProError("REPO_TASK_PREPARED_OWNER_MISMATCH: prepared WorkerJob belongs to another worker.", {
+      code: "REPO_TASK_PREPARED_OWNER_MISMATCH",
+      details: { task_id: input.taskId, prepared_worker_id: input.preparedJob.workerId, received_worker_id: input.workerId }
+    });
+  }
+  if (input.preparedJob.scope !== input.scope) {
+    throw new CodexProError("REPO_TASK_PREPARED_SCOPE_MISMATCH: prepared WorkerJob scope changed before recovery.", {
+      code: "REPO_TASK_PREPARED_SCOPE_MISMATCH",
+      details: { task_id: input.taskId, prepared_scope: input.preparedJob.scope, received_scope: input.scope }
+    });
+  }
+  if (!input.preparedJob.root || !sameResolvedRoot(input.preparedJob.root, input.requestedRoot)) {
+    throw new CodexProError("REPO_TASK_PREPARED_ROOT_MISMATCH: prepared WorkerJob root does not match the Manager-prepared execution root.", {
+      code: "REPO_TASK_PREPARED_ROOT_MISMATCH",
+      details: { task_id: input.taskId, prepared_root: input.preparedJob.root || null, received_root: input.requestedRoot }
+    });
+  }
+  const resolved = resolveWorkspaceTaskRootByTaskId({
+    taskId: input.taskId,
+    rootHint: input.requestedRoot,
+    workerId: input.workerId,
+    requireUniqueMatch: true
+  });
+  if (resolved.task.status !== "running") {
+    throw new CodexProError(`WORKSPACE_TASK_NOT_ACTIVE: ${input.taskId} is not an active running workspace task.`, {
+      code: "WORKSPACE_TASK_NOT_ACTIVE",
+      details: { task_id: input.taskId, workspace_root: resolved.root, status: resolved.task.status }
+    });
+  }
+  if (!resolved.task.worktreeRoot || !sameResolvedRoot(resolved.task.worktreeRoot, input.requestedRoot)) {
+    throw new CodexProError("REPO_TASK_PREPARED_WORKTREE_MISMATCH: Manager-prepared execution root does not match the authoritative task worktree.", {
+      code: "REPO_TASK_PREPARED_WORKTREE_MISMATCH",
+      details: {
+        task_id: input.taskId,
+        coordination_root: resolved.root,
+        authoritative_worktree_root: resolved.task.worktreeRoot || null,
+        prepared_root: input.requestedRoot
+      }
+    });
+  }
+  return resolved;
+}
+
 const REPO_TASK_GATE_EXEMPT_TOOLS = new Set<string>([
   SUPERTOOL_NAME,
   "begin_repo_task",
@@ -487,6 +549,10 @@ function assertTaskChecklistReady(server: McpServer): void {
   );
 }
 
+function repoTaskCoordinationRoot(active: ActiveRepoTask): string {
+  return active.coordinationRoot || active.root;
+}
+
 function repoTaskWorktree(active: ActiveRepoTask): { root?: string; branch?: string } {
   if (active.worktreeRoot) {
     if (!fs.existsSync(active.worktreeRoot)) {
@@ -497,7 +563,7 @@ function repoTaskWorktree(active: ActiveRepoTask): { root?: string; branch?: str
     }
     return { root: active.worktreeRoot, branch: active.worktreeBranch };
   }
-  const record = readWorkspaceCoordination(active.root).tasks[active.taskId];
+  const record = readWorkspaceCoordination(repoTaskCoordinationRoot(active)).tasks[active.taskId];
   if (record?.worktreeRoot) {
     if (!fs.existsSync(record.worktreeRoot)) {
       throw new CodexProError(`WORKSPACE_TASK_WORKTREE_MISSING: recorded worktree no longer exists: ${record.worktreeRoot}.`, {
@@ -531,14 +597,16 @@ function workspaceTaskContextForServer(server: McpServer, workspace: Workspace):
   const active = profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
   if (!active) return undefined;
   const worktree = repoTaskWorktree(active);
-  const matchesPrimary = sameResolvedRoot(active.root, workspace.root);
+  const coordinationRoot = repoTaskCoordinationRoot(active);
+  const matchesCoordination = sameResolvedRoot(coordinationRoot, workspace.root);
+  const matchesExecution = sameResolvedRoot(active.root, workspace.root);
   const matchesWorktree = Boolean(worktree.root && sameResolvedRoot(worktree.root, workspace.root));
-  if (!matchesPrimary && !matchesWorktree) return undefined;
+  if (!matchesCoordination && !matchesExecution && !matchesWorktree) return undefined;
   return {
     taskId: active.taskId,
     workerId: profileId || `direct.${active.taskId}`,
     title: active.taskTitle,
-    root: active.root,
+    root: coordinationRoot,
     ...(worktree.root ? { worktreeRoot: worktree.root } : {})
   };
 }
@@ -2068,6 +2136,19 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
           }
         );
       }
+      let preparedLifecycleRecovery: ResolvedWorkspaceTaskRoot | undefined;
+      if (managerPrepared && args.task_kind === "code") {
+        const preparedJob = readPreparedWorkerJob(taskId);
+        if (isPreparedLifecycleRecovery(preparedJob)) {
+          preparedLifecycleRecovery = resolvePreparedLifecycleRecovery({
+            taskId,
+            workerId: gateProfileId || preparedJob.workerId,
+            preparedJob,
+            requestedRoot: resolvedRoot,
+            scope
+          });
+        }
+      }
       if (gateProfileId && !managerPrepared) {
         expected = rememberExpectedRepoTask(gateProfileId, { taskId, root: resolvedRoot, scope: "workspace" });
       }
@@ -2178,13 +2259,15 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       if (!workspace || !globalRules || !codexGraph) {
         throw new CodexProError("REPO_TASK_CODE_CONTEXT_MISSING: code task activation requires a workspace, global rules, and CodexGraph.", { code: "REPO_TASK_CODE_CONTEXT_MISSING" });
       }
-      const coordinationTask = await registerWorkspaceTask({
+      const coordinationRoot = preparedLifecycleRecovery?.root || proof.root;
+      const coordinationTask = preparedLifecycleRecovery?.task || await registerWorkspaceTask({
         taskId: proof.taskId,
         workerId: gateProfileId || `direct.${proof.taskId}`,
         title: proof.taskTitle,
         root: proof.root
       });
       const activeTask: ActiveRepoTask = {
+        coordinationRoot,
         taskId: proof.taskId,
         taskTitle: proof.taskTitle,
         root: proof.root,
@@ -2214,6 +2297,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         verified: true,
         gate_active: true,
         workspace_access: true,
+        prepared_recovery: Boolean(preparedLifecycleRecovery),
+        coordination_root: coordinationRoot,
         root: proof.root,
         workspace_id: proof.workspaceId,
         worktree_root: coordinationTask.worktreeRoot,

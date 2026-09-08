@@ -321,6 +321,11 @@ export function readWorkerJob(jobId: string): WorkerJobRecord | undefined {
   return reconcileWorkerJobRecordWithWorkspace(readWorkerJobFile(jobId));
 }
 
+export function readPreparedWorkerJob(jobId: string): WorkerJobRecord | undefined {
+  const record = readWorkerJobFile(jobId);
+  return record?.status === "prepared" ? record : undefined;
+}
+
 export function workerJobHasLegacyStaleCancellation(record: WorkerJobRecord | undefined): boolean {
   if (!record || record.status !== "cancelled" || record.kind !== "code" || !record.root
     || !record.startedAt || !record.finishedAt || record.completionConfirmed || record.summary || record.error) return false;

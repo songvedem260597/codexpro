@@ -356,10 +356,11 @@ export function resolveWorkspaceTaskRootByTaskId(input: {
   taskId: string;
   rootHint?: string;
   workerId?: string;
+  requireUniqueMatch?: boolean;
 }): ResolvedWorkspaceTaskRoot {
   const taskId = String(input.taskId || "").trim();
   const rootHint = String(input.rootHint || "").trim();
-  if (rootHint) {
+  if (rootHint && !input.requireUniqueMatch) {
     const hintedState = readState(rootHint);
     const hintedTask = hintedState.tasks[taskId];
     if (hintedTask) return requireCompatibleTaskOwner({ root: hintedState.root, task: hintedTask }, input.workerId);

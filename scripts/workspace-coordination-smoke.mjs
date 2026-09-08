@@ -159,14 +159,14 @@ try {
   assert.equal(resolvedL.root, fs.realpathSync.native(path.resolve(repoRoot)), "isolated task worktree must resolve back to the primary coordination root by exact Task ID");
   assert.equal(resolvedL.task.taskId, TASK_L.taskId);
   assert.throws(
-    () => resolveWorkspaceTaskRootByTaskId({ taskId: TASK_L.taskId, rootHint: registeredL.worktreeRoot, workerId: "worker:other" }),
+    () => resolveWorkspaceTaskRootByTaskId({ taskId: TASK_L.taskId, rootHint: registeredL.worktreeRoot, workerId: "worker:other", requireUniqueMatch: true }),
     /WORKSPACE_TASK_OWNER_MISMATCH/,
-    "authoritative task-root fallback must enforce worker ownership"
+    "prepared recovery resolution must enforce worker ownership"
   );
   assert.throws(
-    () => resolveWorkspaceTaskRootByTaskId({ taskId: "cpt_999999999999999999999998", rootHint: registeredL.worktreeRoot, workerId: TASK_L.workerId }),
+    () => resolveWorkspaceTaskRootByTaskId({ taskId: "cpt_999999999999999999999998", rootHint: registeredL.worktreeRoot, workerId: TASK_L.workerId, requireUniqueMatch: true }),
     /WORKSPACE_TASK_NOT_FOUND/,
-    "unknown Task IDs must preserve WORKSPACE_TASK_NOT_FOUND"
+    "prepared recovery resolution must fail closed when no authoritative Task ID exists"
   );
   await finalizeWorkspaceTask({ ...TASK_L, root: registeredL.worktreeRoot }, "cancelled");
   const finalizedL = readWorkspaceCoordination(repoRoot);
@@ -175,14 +175,14 @@ try {
 
   const ambiguityRootA = path.join(scratchRoot, "ambiguity-a");
   const ambiguityRootB = path.join(scratchRoot, "ambiguity-b");
-  const ambiguityHint = path.join(scratchRoot, "ambiguity-isolated-hint");
+
   fs.mkdirSync(ambiguityRootA, { recursive: true });
   fs.mkdirSync(ambiguityRootB, { recursive: true });
-  fs.mkdirSync(ambiguityHint, { recursive: true });
+
   writeCoordinationTaskFixture(ambiguityRootA, TASK_M_ID, "worker:m");
   writeCoordinationTaskFixture(ambiguityRootB, TASK_M_ID, "worker:m");
   assert.throws(
-    () => resolveWorkspaceTaskRootByTaskId({ taskId: TASK_M_ID, rootHint: ambiguityHint, workerId: "worker:m" }),
+    () => resolveWorkspaceTaskRootByTaskId({ taskId: TASK_M_ID, rootHint: ambiguityRootA, workerId: "worker:m", requireUniqueMatch: true }),
     /WORKSPACE_TASK_ROOT_AMBIGUOUS/,
     "conflicting persisted records for the same Task ID must fail explicitly instead of guessing a root"
   );
