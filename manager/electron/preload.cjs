@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   testApiWorker: (id) => invoke("codexpro:test-api-worker", id),
   onBrowserProfiles: (callback) => subscribe("codexpro:browser-profiles", callback),
   onBrowserStream: (callback) => subscribe("codexpro:browser-stream", callback),
+  ackBrowserStream: (payload) => ipcRenderer.send("codexpro:browser-stream-ack", payload),
   onWorkerUpdate: (callback) => subscribe("codexpro:worker-update", callback),
   controlServer: (action) => invoke("codexpro:control", action),
   copyText: (text) => invoke("codexpro:copy", text),

@@ -42,6 +42,8 @@ export function useRuntimeStatus({
   const connectorAutoMigrationInFlight = useRef("");
   const pendingBrowserStreamUpdates = useRef(new Map());
   const browserStreamFrame = useRef(0);
+  const browserStreamAckFrame = useRef(0);
+  const pendingBrowserStreamSequence = useRef(0);
 
   const mergeStatus = useCallback((current, nextStatus) => {
     const merged = mergeRuntimeStatus(current, nextStatus);
@@ -164,63 +166,76 @@ export function useRuntimeStatus({
       });
     });
     const unsubscribeBrowserStream = api.onBrowserStream?.((payload) => {
+      const sequence = Math.max(0, Number(payload?.sequence) || 0);
+      if (sequence) pendingBrowserStreamSequence.current = sequence;
       for (const update of Array.isArray(payload?.updates) ? payload.updates : []) {
         const profileId = String(update?.profile_id || "");
         const conversationId = String(update?.conversation_id || "");
         if (!profileId || !conversationId) continue;
         pendingBrowserStreamUpdates.current.set(`${profileId}:${conversationId}`, update);
       }
-      if (browserStreamFrame.current || !pendingBrowserStreamUpdates.current.size) return;
+      if (browserStreamFrame.current) return;
       browserStreamFrame.current = window.requestAnimationFrame(() => {
         browserStreamFrame.current = 0;
+        const consumedSequence = pendingBrowserStreamSequence.current;
+        pendingBrowserStreamSequence.current = 0;
         const updates = [...pendingBrowserStreamUpdates.current.values()];
         pendingBrowserStreamUpdates.current.clear();
-        setRequestResponses((current) => {
-          let next = current;
-          for (const update of updates) {
-            const profileId = String(update?.profile_id || "");
-            const conversationId = String(update?.conversation_id || "");
-            const selectedTarget = String(requestTargetsRef.current[profileId] || "");
-            if (!profileId || !conversationId || (selectedTarget && selectedTarget !== conversationId)) continue;
-            const previous = next[profileId] || {};
-            if (previous.conversationId && previous.conversationId !== conversationId) continue;
-            const recordId = Math.max(0, Number(update?.record_id) || 0);
-            const revision = Math.max(0, Number(update?.revision) || 0);
-            const previousRecordId = Math.max(0, Number(previous.networkStreamPushRecordId) || 0);
-            const previousRevision = Math.max(0, Number(previous.networkStreamPushRevision) || 0);
-            if (previousRecordId === recordId && revision <= previousRevision) continue;
-            const streamUpdatedAt = String(update?.updated_at || "");
-            if (!isNetworkStreamCurrentGeneration({ networkStartedAt: previous.networkStartedAt, streamUpdatedAt })) continue;
-            const streamText = String(update?.text || "");
-            const messages = streamText
-              ? mergeNetworkStreamTranscript(previous.messages || [], { conversationId, text: streamText, truncated: false })
-              : previous.messages || [];
-            networkStreamPushTimes.current.set(`${profileId}:${conversationId}`, Date.now());
-            if (next === current) next = { ...current };
-            next[profileId] = {
-              ...previous,
-              visible: true,
-              conversationId,
-              messages,
-              text: streamText || previous.text || "",
-              busy: update?.in_progress === true,
-              loading: false,
-              networkStreamAvailable: Boolean(streamText || update?.activity_text || previous.networkStreamAvailable),
-              networkStreamInProgress: update?.in_progress === true,
-              networkStreamUpdatedAt: streamUpdatedAt,
-              networkStreamEventCount: Math.max(0, Number(update?.event_count) || 0),
-              networkStreamError: String(update?.error || ""),
-              networkStreamActivityText: String(update?.activity_text || ""),
-              networkStreamPushRecordId: recordId,
-              networkStreamPushRevision: revision,
-              incomplete: update?.in_progress === true,
-              incompleteReason: update?.in_progress === true ? "network_stream_in_progress" : "",
-              contentNeedsRefresh: false,
-              updatedAt: streamUpdatedAt || previous.updatedAt
-            };
-          }
-          return next;
-        });
+        if (updates.length) {
+          setRequestResponses((current) => {
+            let next = current;
+            for (const update of updates) {
+              const profileId = String(update?.profile_id || "");
+              const conversationId = String(update?.conversation_id || "");
+              const selectedTarget = String(requestTargetsRef.current[profileId] || "");
+              if (!profileId || !conversationId || (selectedTarget && selectedTarget !== conversationId)) continue;
+              const previous = next[profileId] || {};
+              if (previous.conversationId && previous.conversationId !== conversationId) continue;
+              const recordId = Math.max(0, Number(update?.record_id) || 0);
+              const revision = Math.max(0, Number(update?.revision) || 0);
+              const previousRecordId = Math.max(0, Number(previous.networkStreamPushRecordId) || 0);
+              const previousRevision = Math.max(0, Number(previous.networkStreamPushRevision) || 0);
+              if (previousRecordId === recordId && revision <= previousRevision) continue;
+              const streamUpdatedAt = String(update?.updated_at || "");
+              if (!isNetworkStreamCurrentGeneration({ networkStartedAt: previous.networkStartedAt, streamUpdatedAt })) continue;
+              const streamText = String(update?.text || "");
+              const messages = streamText
+                ? mergeNetworkStreamTranscript(previous.messages || [], { conversationId, text: streamText, truncated: false })
+                : previous.messages || [];
+              networkStreamPushTimes.current.set(`${profileId}:${conversationId}`, Date.now());
+              if (next === current) next = { ...current };
+              next[profileId] = {
+                ...previous,
+                visible: true,
+                conversationId,
+                messages,
+                text: streamText || previous.text || "",
+                busy: update?.in_progress === true,
+                loading: false,
+                networkStreamAvailable: Boolean(streamText || update?.activity_text || previous.networkStreamAvailable),
+                networkStreamInProgress: update?.in_progress === true,
+                networkStreamUpdatedAt: streamUpdatedAt,
+                networkStreamEventCount: Math.max(0, Number(update?.event_count) || 0),
+                networkStreamError: String(update?.error || ""),
+                networkStreamActivityText: String(update?.activity_text || ""),
+                networkStreamPushRecordId: recordId,
+                networkStreamPushRevision: revision,
+                incomplete: update?.in_progress === true,
+                incompleteReason: update?.in_progress === true ? "network_stream_in_progress" : "",
+                contentNeedsRefresh: false,
+                updatedAt: streamUpdatedAt || previous.updatedAt
+              };
+            }
+            return next;
+          });
+        }
+        if (consumedSequence && typeof api.ackBrowserStream === "function") {
+          if (browserStreamAckFrame.current) window.cancelAnimationFrame(browserStreamAckFrame.current);
+          browserStreamAckFrame.current = window.requestAnimationFrame(() => {
+            browserStreamAckFrame.current = 0;
+            api.ackBrowserStream({ sequence: consumedSequence });
+          });
+        }
       });
     });
     const unsubscribeWorkers = api.onWorkerUpdate?.((payload) => {
@@ -242,7 +257,10 @@ export function useRuntimeStatus({
       unsubscribeBrowserStream?.();
       unsubscribeWorkers?.();
       if (browserStreamFrame.current) window.cancelAnimationFrame(browserStreamFrame.current);
+      if (browserStreamAckFrame.current) window.cancelAnimationFrame(browserStreamAckFrame.current);
       browserStreamFrame.current = 0;
+      browserStreamAckFrame.current = 0;
+      pendingBrowserStreamSequence.current = 0;
       pendingBrowserStreamUpdates.current.clear();
       window.clearInterval(statusTimer);
       window.clearInterval(projectsTimer);

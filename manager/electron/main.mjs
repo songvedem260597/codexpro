@@ -56,6 +56,7 @@ import {
   requestFileSummary
 } from "./request-attachments.mjs";
 import { normalizeTerminalMessageStreamProfiles } from "./terminal-message-stream-state.mjs";
+import { createBrowserStreamIpcCoordinator } from "./browser-stream-ipc.mjs";
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "codexpro-plugin",
@@ -599,27 +600,64 @@ function cachedBrowserProfileForSend(profileId) {
 function startBrowserProfileEventStream(win) {
   browserProfileStreamControllers.get(win)?.abort();
   const controller = new AbortController();
-  const pendingStreamUpdates = new Map();
   let pendingProfilePayload = null;
-  let streamFlushTimer = null;
   let profileFlushTimer = null;
-  const flushStreamUpdates = () => {
-    streamFlushTimer = null;
-    if (controller.signal.aborted || win.isDestroyed() || win.webContents.isDestroyed()) {
-      pendingStreamUpdates.clear();
-      return;
+  let streamMetricsTimer = null;
+  let previousStreamMetrics = null;
+  const browserStreamIpc = createBrowserStreamIpcCoordinator({
+    ackTimeoutMs: 2_500,
+    send: (payload) => {
+      if (controller.signal.aborted || win.isDestroyed() || win.webContents.isDestroyed()) return;
+      win.webContents.send("codexpro:browser-stream", payload);
+    },
+    onTimeout: ({ sequence, pendingKeys, timeoutMs }) => {
+      diagnostic("warn", "manager", "stream", `Renderer browser-stream ACK quá hạn (${timeoutMs} ms)`, {
+        action: "browser-stream-ack-timeout",
+        sequence,
+        pending_keys: pendingKeys,
+        timeout_ms: timeoutMs
+      });
     }
-    const updates = [...pendingStreamUpdates.values()];
-    pendingStreamUpdates.clear();
-    if (updates.length) win.webContents.send("codexpro:browser-stream", { type: "browser-stream", updates });
+  });
+  const acknowledgeBrowserStream = (event, payload) => {
+    if (event.sender?.id !== win.webContents.id) return;
+    browserStreamIpc.acknowledge(payload?.sequence);
   };
-  const queueStreamUpdates = (updates) => {
-    for (const update of Array.isArray(updates) ? updates : []) {
-      const key = `${String(update?.profile_id || "")}:${String(update?.tab_id || "")}`;
-      pendingStreamUpdates.set(key, update);
+  const pauseBrowserStreamOnReload = () => browserStreamIpc.pause({ requeueInFlight: true });
+  const resumeBrowserStreamAfterReload = () => browserStreamIpc.resume();
+  const destroyBrowserStreamOnRendererDestroyed = () => {
+    browserStreamIpc.destroy();
+    controller.abort();
+  };
+  ipcMain.on("codexpro:browser-stream-ack", acknowledgeBrowserStream);
+  win.webContents.on("did-start-loading", pauseBrowserStreamOnReload);
+  win.webContents.on("did-finish-load", resumeBrowserStreamAfterReload);
+  win.webContents.once("destroyed", destroyBrowserStreamOnRendererDestroyed);
+  streamMetricsTimer = setInterval(() => {
+    const current = browserStreamIpc.metrics();
+    const previous = previousStreamMetrics || { ...current, sourceEvents: 0, sends: 0, acknowledgements: 0, payloadBytes: 0, now: current.startedAt };
+    const elapsedSeconds = Math.max(0.001, (current.now - previous.now) / 1000);
+    const sourceEvents = current.sourceEvents - previous.sourceEvents;
+    const sends = current.sends - previous.sends;
+    const acknowledgements = current.acknowledgements - previous.acknowledgements;
+    const payloadBytes = current.payloadBytes - previous.payloadBytes;
+    if (sourceEvents || sends || acknowledgements || current.inFlight || current.pendingKeys) {
+      diagnostic("info", "manager", "stream", "Browser stream IPC flow metrics", {
+        action: "browser-stream-ipc-metrics",
+        SOURCE_STREAM_EVENTS_PER_SEC: Number((sourceEvents / elapsedSeconds).toFixed(2)),
+        MAIN_BROWSER_STREAM_IPC_SENDS_PER_SEC: Number((sends / elapsedSeconds).toFixed(2)),
+        MAX_IPC_IN_FLIGHT: current.maxInFlight,
+        MAX_PENDING_STREAM_KEYS: current.maxPendingKeys,
+        STREAM_PAYLOAD_BYTES_PER_SEC: Math.round(payloadBytes / elapsedSeconds),
+        RENDERER_STREAM_BATCHES_PER_SEC: Number((acknowledgements / elapsedSeconds).toFixed(2)),
+        current_ipc_in_flight: current.inFlight,
+        current_pending_stream_keys: current.pendingKeys,
+        ack_timeouts_total: current.timeouts
+      });
     }
-    if (!streamFlushTimer && pendingStreamUpdates.size) streamFlushTimer = setTimeout(flushStreamUpdates, 50);
-  };
+    previousStreamMetrics = current;
+  }, 5_000);
+  streamMetricsTimer.unref?.();
   const flushProfilePayload = () => {
     profileFlushTimer = null;
     const payload = pendingProfilePayload;
@@ -639,13 +677,30 @@ function startBrowserProfileEventStream(win) {
   };
   const stopStream = () => {
     controller.abort();
-    if (streamFlushTimer) clearTimeout(streamFlushTimer);
     if (profileFlushTimer) clearTimeout(profileFlushTimer);
-    streamFlushTimer = null;
+    if (streamMetricsTimer) clearInterval(streamMetricsTimer);
     profileFlushTimer = null;
-    pendingStreamUpdates.clear();
+    streamMetricsTimer = null;
+    browserStreamIpc.destroy();
+    ipcMain.off("codexpro:browser-stream-ack", acknowledgeBrowserStream);
+    if (!win.webContents.isDestroyed()) {
+      win.webContents.off("did-start-loading", pauseBrowserStreamOnReload);
+      win.webContents.off("did-finish-load", resumeBrowserStreamAfterReload);
+      win.webContents.off("destroyed", destroyBrowserStreamOnRendererDestroyed);
+    }
     pendingProfilePayload = null;
   };
+  controller.signal.addEventListener("abort", () => {
+    browserStreamIpc.destroy();
+    ipcMain.off("codexpro:browser-stream-ack", acknowledgeBrowserStream);
+    if (streamMetricsTimer) clearInterval(streamMetricsTimer);
+    streamMetricsTimer = null;
+    if (!win.webContents.isDestroyed()) {
+      win.webContents.off("did-start-loading", pauseBrowserStreamOnReload);
+      win.webContents.off("did-finish-load", resumeBrowserStreamAfterReload);
+      win.webContents.off("destroyed", destroyBrowserStreamOnRendererDestroyed);
+    }
+  }, { once: true });
   browserProfileStreamControllers.set(win, controller);
   win.once("closed", stopStream);
   void (async () => {
@@ -678,7 +733,7 @@ function startBrowserProfileEventStream(win) {
             if (!data) continue;
             const payload = JSON.parse(data);
             if (payload?.type === "browser-stream" && Array.isArray(payload?.updates)) {
-              queueStreamUpdates(payload.updates);
+              browserStreamIpc.queue(payload.updates);
               continue;
             }
             if (!win.isDestroyed() && Array.isArray(payload?.profiles)) queueProfilePayload(payload);

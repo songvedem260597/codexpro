@@ -15,13 +15,14 @@ assert.match(extensionSource, /finally\s*\{[\s\S]*?realtimeStreamPushInFlight\s*
 assert.match(extensionSource, /REALTIME_STREAM_PUSH_TIMEOUT_MS[\s\S]*?AbortController[\s\S]*?signal:\s*requestController\.signal/, "a hung extension stream upload must be aborted so later updates can recover");
 assert.match(httpSource, /streamBackpressured[\s\S]*?res\.on\("drain"/, "browser SSE must stop flushing while the response is backpressured");
 assert.match(httpSource, /pendingStreamUpdates\s*=\s*new Map/, "browser SSE must retain only the latest pending revision per tab");
-assert.match(managerMainSource, /pendingStreamUpdates\s*=\s*new Map[\s\S]*?codexpro:browser-stream/, "Electron IPC must coalesce browser stream updates before sending them to the renderer");
+assert.match(managerMainSource, /createBrowserStreamIpcCoordinator[\s\S]*?codexpro:browser-stream-ack/, "Electron IPC must gate browser stream sends behind renderer acknowledgement");
 assert.match(extensionSource, /if\(now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS\)return null;/, "flight recorder cooldown must cover rate-limit incidents, not only generic CDP incidents");
 assert.doesNotMatch(extensionSource, /if\(reason==='cdp'&&now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS\)/, "429 incidents must not bypass the recorder cooldown");
 assert.match(bridgeSource, /duplicateBrowserRateLimitIncident[\s\S]*?RATE_LIMIT_INCIDENT_DEDUPE_MS/, "browser bridge must defensively deduplicate 429 incidents from old or noisy workers");
 assert.match(managerMainSource, /pendingProfilePayload[\s\S]*?queueProfilePayload[\s\S]*?setTimeout\(flushProfilePayload, 100\)/, "Manager must keep only the newest pending full profile snapshot before Electron IPC");
 assert.match(managerMainSource, /flushProfilePayload[\s\S]*?codexpro:browser-profiles/, "coalesced profile snapshots must still reach the renderer");
 assert.match(managerRendererSource, /pendingBrowserStreamUpdates[\s\S]*?requestAnimationFrame/, "renderer stream state updates must be coalesced to animation frames");
+assert.match(managerRendererSource, /setRequestResponses[\s\S]*?browserStreamAckFrame[\s\S]*?requestAnimationFrame[\s\S]*?ackBrowserStream/, "renderer must ACK only after the rAF application boundary");
 
 const profileId = "stream-smoke-profile";
 const conversationId = "conversation-stream-1234";
