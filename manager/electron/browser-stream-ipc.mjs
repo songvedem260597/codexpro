@@ -173,6 +173,7 @@ export function createBrowserStreamIpcCoordinator({
       return {
         ...counters,
         inFlight: inFlight ? 1 : 0,
+        paused,
         pendingKeys: pending.size,
         currentSequence: sequence,
         now: Number(now()) || Date.now()

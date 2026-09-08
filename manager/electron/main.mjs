@@ -603,6 +603,7 @@ function startBrowserProfileEventStream(win) {
   let pendingProfilePayload = null;
   let profileFlushTimer = null;
   let streamMetricsTimer = null;
+  let streamReloadResumeTimer = null;
   let previousStreamMetrics = null;
   const browserStreamIpc = createBrowserStreamIpcCoordinator({
     ackTimeoutMs: 2_500,
@@ -623,14 +624,25 @@ function startBrowserProfileEventStream(win) {
     if (event.sender?.id !== win.webContents.id) return;
     browserStreamIpc.acknowledge(payload?.sequence);
   };
-  const pauseBrowserStreamOnReload = () => browserStreamIpc.pause({ requeueInFlight: true });
-  const resumeBrowserStreamAfterReload = () => browserStreamIpc.resume();
+  const pauseBrowserStreamOnReload = () => {
+    browserStreamIpc.pause({ requeueInFlight: true });
+    if (streamReloadResumeTimer) clearTimeout(streamReloadResumeTimer);
+    streamReloadResumeTimer = setTimeout(resumeBrowserStreamAfterReload, 2_500);
+    streamReloadResumeTimer.unref?.();
+  };
+  const resumeBrowserStreamAfterReload = () => {
+    if (streamReloadResumeTimer) clearTimeout(streamReloadResumeTimer);
+    streamReloadResumeTimer = null;
+    browserStreamIpc.resume();
+  };
   const destroyBrowserStreamOnRendererDestroyed = () => {
     browserStreamIpc.destroy();
     controller.abort();
   };
   ipcMain.on("codexpro:browser-stream-ack", acknowledgeBrowserStream);
   win.webContents.on("did-start-loading", pauseBrowserStreamOnReload);
+  win.webContents.on("dom-ready", resumeBrowserStreamAfterReload);
+  win.webContents.on("did-stop-loading", resumeBrowserStreamAfterReload);
   win.webContents.on("did-finish-load", resumeBrowserStreamAfterReload);
   win.webContents.once("destroyed", destroyBrowserStreamOnRendererDestroyed);
   streamMetricsTimer = setInterval(() => {
@@ -651,6 +663,7 @@ function startBrowserProfileEventStream(win) {
         STREAM_PAYLOAD_BYTES_PER_SEC: Math.round(payloadBytes / elapsedSeconds),
         RENDERER_STREAM_BATCHES_PER_SEC: Number((acknowledgements / elapsedSeconds).toFixed(2)),
         current_ipc_in_flight: current.inFlight,
+        current_ipc_paused: current.paused,
         current_pending_stream_keys: current.pendingKeys,
         ack_timeouts_total: current.timeouts
       });
@@ -679,12 +692,16 @@ function startBrowserProfileEventStream(win) {
     controller.abort();
     if (profileFlushTimer) clearTimeout(profileFlushTimer);
     if (streamMetricsTimer) clearInterval(streamMetricsTimer);
+    if (streamReloadResumeTimer) clearTimeout(streamReloadResumeTimer);
     profileFlushTimer = null;
     streamMetricsTimer = null;
+    streamReloadResumeTimer = null;
     browserStreamIpc.destroy();
     ipcMain.off("codexpro:browser-stream-ack", acknowledgeBrowserStream);
     if (!win.webContents.isDestroyed()) {
       win.webContents.off("did-start-loading", pauseBrowserStreamOnReload);
+      win.webContents.off("dom-ready", resumeBrowserStreamAfterReload);
+      win.webContents.off("did-stop-loading", resumeBrowserStreamAfterReload);
       win.webContents.off("did-finish-load", resumeBrowserStreamAfterReload);
       win.webContents.off("destroyed", destroyBrowserStreamOnRendererDestroyed);
     }
@@ -694,9 +711,13 @@ function startBrowserProfileEventStream(win) {
     browserStreamIpc.destroy();
     ipcMain.off("codexpro:browser-stream-ack", acknowledgeBrowserStream);
     if (streamMetricsTimer) clearInterval(streamMetricsTimer);
+    if (streamReloadResumeTimer) clearTimeout(streamReloadResumeTimer);
     streamMetricsTimer = null;
+    streamReloadResumeTimer = null;
     if (!win.webContents.isDestroyed()) {
       win.webContents.off("did-start-loading", pauseBrowserStreamOnReload);
+      win.webContents.off("dom-ready", resumeBrowserStreamAfterReload);
+      win.webContents.off("did-stop-loading", resumeBrowserStreamAfterReload);
       win.webContents.off("did-finish-load", resumeBrowserStreamAfterReload);
       win.webContents.off("destroyed", destroyBrowserStreamOnRendererDestroyed);
     }

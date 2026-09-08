@@ -16,6 +16,7 @@ assert.match(extensionSource, /REALTIME_STREAM_PUSH_TIMEOUT_MS[\s\S]*?AbortContr
 assert.match(httpSource, /streamBackpressured[\s\S]*?res\.on\("drain"/, "browser SSE must stop flushing while the response is backpressured");
 assert.match(httpSource, /pendingStreamUpdates\s*=\s*new Map/, "browser SSE must retain only the latest pending revision per tab");
 assert.match(managerMainSource, /createBrowserStreamIpcCoordinator[\s\S]*?codexpro:browser-stream-ack/, "Electron IPC must gate browser stream sends behind renderer acknowledgement");
+assert.match(managerMainSource, /streamReloadResumeTimer[\s\S]*?setTimeout\(resumeBrowserStreamAfterReload, 2_500\)[\s\S]*?did-start-loading[\s\S]*?did-stop-loading/, "renderer reload pause must have a finite resume path so streaming cannot remain paused forever");
 assert.match(extensionSource, /if\(now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS\)return null;/, "flight recorder cooldown must cover rate-limit incidents, not only generic CDP incidents");
 assert.doesNotMatch(extensionSource, /if\(reason==='cdp'&&now-previous<FLIGHT_RECORDER_INCIDENT_COOLDOWN_MS\)/, "429 incidents must not bypass the recorder cooldown");
 assert.match(bridgeSource, /duplicateBrowserRateLimitIncident[\s\S]*?RATE_LIMIT_INCIDENT_DEDUPE_MS/, "browser bridge must defensively deduplicate 429 incidents from old or noisy workers");
