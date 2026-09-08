@@ -7,6 +7,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const content = readFileSync(join(here, 'content.js'), 'utf8');
 const network = readFileSync(join(here, 'upload-network.js'), 'utf8');
 const diagnosticsUi = readFileSync(join(here, 'diagnostics-ui.js'), 'utf8');
+const zipUpload = readFileSync(join(here, 'zip-upload.js'), 'utf8');
 const manifest = JSON.parse(readFileSync(join(here, 'manifest.json'), 'utf8'));
 
 assert.equal(manifest.content_scripts?.[0]?.run_at, 'document_start', 'network hook must install at document_start');
@@ -19,8 +20,8 @@ assert.equal(manifest.content_scripts?.[0]?.world, 'MAIN', 'network hook must ru
 assert.equal(manifest.content_scripts?.[1]?.run_at, 'document_idle', 'UI scripts should wait for the document');
 assert.deepEqual(
   manifest.content_scripts?.[1]?.js,
-  ['content.js', 'diagnostics-ui.js'],
-  'upload UI and diagnostics UI must load after the early hook'
+  ['zip-upload.js', 'content.js', 'diagnostics-ui.js'],
+  'ZIP transformer must load before upload UI and diagnostics UI'
 );
 assert.equal(manifest.content_scripts?.[1]?.world, 'MAIN', 'upload UI must run in ChatGPT MAIN world');
 
@@ -31,6 +32,13 @@ assert.match(content, /Upload Full/, 'full button must exist');
 assert.match(content, /Lịch sử/, 'history button must exist');
 assert.match(content, /monitor\.waitForSnapshot\(file, startedAt, UPLOAD_TIMEOUT_MS\)/, 'baseline flow must wait for network confirmation');
 assert.match(content, /canAdvanceBaselineFromRecord/, 'history retry must guard against baseline rollback');
+
+assert.match(zipUpload, /application\/zip/, 'snapshot transformer must emit ZIP files');
+assert.match(zipUpload, /_codexpro\/manifest\.txt/, 'ZIP must include a snapshot manifest');
+assert.match(zipUpload, /0x04034b50/, 'ZIP must contain local file headers');
+assert.match(zipUpload, /0x02014b50/, 'ZIP must contain central directory headers');
+assert.match(zipUpload, /0x06054b50/, 'ZIP must contain end-of-central-directory record');
+assert.match(zipUpload, /-local-source-\(\?:full\|delta\)-r/, 'ZIP conversion must target generated local source snapshots only');
 
 const attachConfirmStart = content.indexOf('async function attachAndConfirm');
 const markConfirmedStart = content.indexOf('async function markRecordConfirmed');
