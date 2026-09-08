@@ -36,6 +36,8 @@ export type WorkspaceTaskRecord = {
   lastVerificationStatus?: "passed" | "failed";
   lastVerificationLabel?: string;
   lastVerificationAt?: string;
+  lastVerificationHead?: string;
+  lastVerificationTree?: string;
   lastCommitAt?: string;
   worktreeRoot?: string;
   worktreeBranch?: string;
@@ -242,6 +244,8 @@ function normalizeTask(value: unknown): WorkspaceTaskRecord | undefined {
     ...(source.lastVerificationStatus === "passed" || source.lastVerificationStatus === "failed" ? { lastVerificationStatus: source.lastVerificationStatus } : {}),
     ...(source.lastVerificationLabel ? { lastVerificationLabel: String(source.lastVerificationLabel).slice(0, 200) } : {}),
     ...(source.lastVerificationAt ? { lastVerificationAt: String(source.lastVerificationAt) } : {}),
+    ...(source.lastVerificationHead ? { lastVerificationHead: String(source.lastVerificationHead).trim().slice(0, 80) } : {}),
+    ...(source.lastVerificationTree ? { lastVerificationTree: String(source.lastVerificationTree).trim().slice(0, 80) } : {}),
     ...(source.lastCommitAt ? { lastCommitAt: String(source.lastCommitAt) } : {}),
     ...(source.worktreeRoot ? { worktreeRoot: String(source.worktreeRoot) } : {}),
     ...(source.worktreeBranch ? { worktreeBranch: String(source.worktreeBranch) } : {}),
@@ -667,6 +671,8 @@ export async function recordWorkspacePathsTouched(context: WorkspaceTaskContext,
     task.lastVerificationStatus = undefined;
     task.lastVerificationLabel = undefined;
     task.lastVerificationAt = undefined;
+    task.lastVerificationHead = undefined;
+    task.lastVerificationTree = undefined;
     task.lastCommitAt = undefined;
     task.integrationStatus = "idle";
     task.integrationBranch = undefined;
@@ -685,9 +691,14 @@ export async function recordWorkspaceVerification(context: WorkspaceTaskContext,
   return await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     const now = nowIso();
+    const gitRoot = taskGitRoot(context, task);
+    const verificationHead = await currentHead(gitRoot);
+    const verificationTree = verificationHead ? await gitText(gitRoot, ["rev-parse", `${verificationHead}^{tree}`]) : "";
     task.lastVerificationStatus = passed ? "passed" : "failed";
     task.lastVerificationLabel = String(label || "verification").trim().slice(0, 200) || "verification";
     task.lastVerificationAt = now;
+    task.lastVerificationHead = verificationHead || undefined;
+    task.lastVerificationTree = verificationTree || undefined;
     task.updatedAt = now;
     return task;
   });
@@ -1041,6 +1052,13 @@ function atOrAfter(left: string | undefined, right: string | undefined): boolean
   return Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs >= rightMs;
 }
 
+function verificationMatchesOwnedCommittedHead(task: WorkspaceTaskRecord): boolean {
+  const verificationHead = String(task.lastVerificationHead || "").trim();
+  const verificationTree = String(task.lastVerificationTree || "").trim();
+  if (!verificationHead || !verificationTree) return false;
+  return task.commitShas.includes(verificationHead) || task.integratedHead === verificationHead;
+}
+
 export function assertWorkspaceTaskCompletionReady(context: WorkspaceTaskContext): WorkspaceTaskRecord {
   const root = canonicalRoot(context.root);
   const task = readState(root).tasks[context.taskId];
@@ -1063,13 +1081,17 @@ export function assertWorkspaceTaskCompletionReady(context: WorkspaceTaskContext
       }
     });
   }
-  if (!task.commitShas.length || !task.lastCommitAt || !atOrAfter(task.lastCommitAt, task.lastVerificationAt)) {
+  const commitAfterVerification = atOrAfter(task.lastCommitAt, task.lastVerificationAt);
+  const verificationMatchesCommittedIdentity = verificationMatchesOwnedCommittedHead(task);
+  if (!task.commitShas.length || !task.lastCommitAt || (!commitAfterVerification && !verificationMatchesCommittedIdentity)) {
     throw new CodexProError(`WORKSPACE_TASK_COMMIT_REQUIRED: task ${task.taskId} must commit its verified source changes after tests pass before completion.`, {
       code: "WORKSPACE_TASK_COMMIT_REQUIRED",
       details: {
         task_id: task.taskId,
         commit_shas: task.commitShas,
         last_verification_at: task.lastVerificationAt || null,
+        last_verification_head: task.lastVerificationHead || null,
+        last_verification_tree: task.lastVerificationTree || null,
         last_commit_at: task.lastCommitAt || null
       }
     });

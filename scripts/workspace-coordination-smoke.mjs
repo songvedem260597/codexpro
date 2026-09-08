@@ -32,6 +32,10 @@ const TASK_D = { taskId: "cpt_dddddddddddddddddddddddd", workerId: "worker:d", t
 const TASK_E = { taskId: "cpt_eeeeeeeeeeeeeeeeeeeeeeee", workerId: "worker:e", title: "Reservation task", root: repoRoot };
 const TASK_F = { taskId: "cpt_ffffffffffffffffffffffff", workerId: "worker:f", title: "Completion gate task", root: repoRoot };
 const TASK_G = { taskId: "cpt_111111111111111111111111", workerId: "worker:g", title: "Stale base integration task", root: repoRoot };
+const TASK_H = { taskId: "cpt_222222222222222222222222", workerId: "worker:h", title: "Commit then verify task", root: repoRoot };
+const TASK_I = { taskId: "cpt_333333333333333333333333", workerId: "worker:i", title: "Integrate then verify task", root: repoRoot };
+const TASK_J = { taskId: "cpt_444444444444444444444444", workerId: "worker:j", title: "Dirty after commit task", root: repoRoot };
+const TASK_K = { taskId: "cpt_555555555555555555555555", workerId: "worker:k", title: "Unowned verification task", root: repoRoot };
 const gitExecutable = process.platform === "win32" ? "git.exe" : "git";
 
 function git(args, cwd = repoRoot) {
@@ -76,6 +80,16 @@ async function runTask(task, record, command, timeoutMs = 30_000) {
     repoTask: taskContext(task, record),
     timeoutMs
   });
+}
+
+async function runCompletionVerification(task, record) {
+  const smokePath = path.join(record.worktreeRoot, "completion-gate-smoke.mjs");
+  fs.writeFileSync(smokePath, "console.log('completion gate smoke pass');\n", "utf8");
+  try {
+    return await runTask(task, record, "node completion-gate-smoke.mjs");
+  } finally {
+    fs.rmSync(smokePath, { force: true });
+  }
 }
 
 try {
@@ -211,7 +225,10 @@ try {
   const verificationF = await runTask(TASK_F, registeredF, "node completion-gate-smoke.mjs");
   fs.rmSync(completionGateSmokePath, { force: true });
   assert.equal(verificationF.exitCode, 0, "completion gate verification should pass");
-  assert.equal(readWorkspaceCoordination(repoRoot).tasks[TASK_F.taskId].lastVerificationStatus, "passed");
+  const verifiedF = readWorkspaceCoordination(repoRoot).tasks[TASK_F.taskId];
+  assert.equal(verifiedF.lastVerificationStatus, "passed");
+  assert.ok(verifiedF.lastVerificationHead, "verification must record Git HEAD even before the source commit");
+  assert.ok(verifiedF.lastVerificationTree, "verification must record the HEAD tree even before the source commit");
   assert.throws(
     () => assertWorkspaceTaskCompletionReady(TASK_F),
     /WORKSPACE_TASK_COMMIT_REQUIRED/,
@@ -231,6 +248,96 @@ try {
   const fWorktreeRoot = registeredF.worktreeRoot;
   await finalizeWorkspaceTask(TASK_F, "completed");
   assert.equal(fs.existsSync(fWorktreeRoot), false, "verified committed pushed task worktree should be removed on completion");
+
+  // Regression B: change -> commit -> verify same committed tree -> integrate -> finalize.
+  git(["fetch", "origin", "main"]);
+  git(["reset", "--hard", "origin/main"]);
+  const registeredH = await registerWorkspaceTask(TASK_H);
+  await claimWorkspacePaths(TASK_H, ["f.txt"]);
+  fs.writeFileSync(path.join(registeredH.worktreeRoot, "f.txt"), "f2 commit then verify\n", "utf8");
+  await recordWorkspacePathsTouched(TASK_H, ["f.txt"]);
+  assert.equal((await runTask(TASK_H, registeredH, "git add f.txt")).exitCode, 0);
+  assert.equal((await runTask(TASK_H, registeredH, 'git commit -m "commit then verify fixture"')).exitCode, 0);
+  const hCommit = git(["rev-parse", "HEAD"], registeredH.worktreeRoot);
+  const hTree = git(["rev-parse", "HEAD^{tree}"], registeredH.worktreeRoot);
+  assert.equal((await runCompletionVerification(TASK_H, registeredH)).exitCode, 0);
+  const verifiedH = readWorkspaceCoordination(repoRoot).tasks[TASK_H.taskId];
+  assert.equal(verifiedH.lastVerificationHead, hCommit, "verification must persist the committed HEAD identity");
+  assert.equal(verifiedH.lastVerificationTree, hTree, "verification must persist the committed tree identity");
+  assert.throws(
+    () => assertWorkspaceTaskCompletionReady(TASK_H),
+    /WORKSPACE_TASK_PUSH_REQUIRED/,
+    "verification after commit on the same owned tree must not require another commit"
+  );
+  assert.equal((await runTask(TASK_H, registeredH, "git push origin main", 60_000)).exitCode, 0);
+  assert.equal(assertWorkspaceTaskCompletionReady(TASK_H).integrationStatus, "integrated");
+  await finalizeWorkspaceTask(TASK_H, "completed");
+
+  // Regression C: change -> commit -> integrate -> verify same integrated tree -> finalize.
+  git(["fetch", "origin", "main"]);
+  git(["reset", "--hard", "origin/main"]);
+  const registeredI = await registerWorkspaceTask(TASK_I);
+  await claimWorkspacePaths(TASK_I, ["f.txt"]);
+  fs.writeFileSync(path.join(registeredI.worktreeRoot, "f.txt"), "f3 integrate then verify\n", "utf8");
+  await recordWorkspacePathsTouched(TASK_I, ["f.txt"]);
+  assert.equal((await runTask(TASK_I, registeredI, "git add f.txt")).exitCode, 0);
+  assert.equal((await runTask(TASK_I, registeredI, 'git commit -m "integrate then verify fixture"')).exitCode, 0);
+  assert.equal((await runTask(TASK_I, registeredI, "git push origin main", 60_000)).exitCode, 0);
+  const integratedI = readWorkspaceCoordination(repoRoot).tasks[TASK_I.taskId];
+  const integratedTreeI = git(["rev-parse", "HEAD^{tree}"], registeredI.worktreeRoot);
+  assert.equal((await runCompletionVerification(TASK_I, registeredI)).exitCode, 0);
+  const verifiedI = readWorkspaceCoordination(repoRoot).tasks[TASK_I.taskId];
+  assert.equal(verifiedI.lastVerificationHead, integratedI.integratedHead, "post-integration verification must record the integrated HEAD");
+  assert.equal(verifiedI.lastVerificationTree, integratedTreeI, "post-integration verification must record the integrated tree");
+  assert.equal(assertWorkspaceTaskCompletionReady(TASK_I).integratedHead, integratedI.integratedHead);
+  await finalizeWorkspaceTask(TASK_I, "completed");
+
+  // Regression D: change -> commit -> new source change -> verify must still require a commit.
+  git(["fetch", "origin", "main"]);
+  git(["reset", "--hard", "origin/main"]);
+  const registeredJ = await registerWorkspaceTask(TASK_J);
+  await claimWorkspacePaths(TASK_J, ["f.txt"]);
+  fs.writeFileSync(path.join(registeredJ.worktreeRoot, "f.txt"), "f4 committed state\n", "utf8");
+  await recordWorkspacePathsTouched(TASK_J, ["f.txt"]);
+  assert.equal((await runTask(TASK_J, registeredJ, "git add f.txt")).exitCode, 0);
+  assert.equal((await runTask(TASK_J, registeredJ, 'git commit -m "dirty after commit fixture"')).exitCode, 0);
+  fs.writeFileSync(path.join(registeredJ.worktreeRoot, "f.txt"), "f4 changed again after commit\n", "utf8");
+  await recordWorkspacePathsTouched(TASK_J, ["f.txt"]);
+  assert.equal((await runCompletionVerification(TASK_J, registeredJ)).exitCode, 0);
+  assert.throws(
+    () => assertWorkspaceTaskCompletionReady(TASK_J),
+    /WORKSPACE_TASK_COMMIT_REQUIRED/,
+    "verification must not cover a new uncommitted source delta"
+  );
+  await finalizeWorkspaceTask(TASK_J, "cancelled");
+
+  // Regression E: verification on a different, non-task-owned HEAD/tree must fail.
+  git(["fetch", "origin", "main"]);
+  git(["reset", "--hard", "origin/main"]);
+  const registeredK = await registerWorkspaceTask(TASK_K);
+  await claimWorkspacePaths(TASK_K, ["f.txt"]);
+  fs.writeFileSync(path.join(registeredK.worktreeRoot, "f.txt"), "f5 owned committed state\n", "utf8");
+  await recordWorkspacePathsTouched(TASK_K, ["f.txt"]);
+  assert.equal((await runTask(TASK_K, registeredK, "git add f.txt")).exitCode, 0);
+  assert.equal((await runTask(TASK_K, registeredK, 'git commit -m "owned verification fixture"')).exitCode, 0);
+  const ownedCommitK = git(["rev-parse", "HEAD"], registeredK.worktreeRoot);
+  fs.writeFileSync(path.join(registeredK.worktreeRoot, "foreign-verification.txt"), "foreign head\n", "utf8");
+  git(["add", "foreign-verification.txt"], registeredK.worktreeRoot);
+  git(["commit", "-m", "foreign unowned verification head"], registeredK.worktreeRoot);
+  const foreignHeadK = git(["rev-parse", "HEAD"], registeredK.worktreeRoot);
+  const foreignTreeK = git(["rev-parse", "HEAD^{tree}"], registeredK.worktreeRoot);
+  assert.notEqual(foreignHeadK, ownedCommitK);
+  assert.equal((await runCompletionVerification(TASK_K, registeredK)).exitCode, 0);
+  const verifiedK = readWorkspaceCoordination(repoRoot).tasks[TASK_K.taskId];
+  assert.equal(verifiedK.lastVerificationHead, foreignHeadK);
+  assert.equal(verifiedK.lastVerificationTree, foreignTreeK);
+  assert.equal(verifiedK.commitShas.includes(foreignHeadK), false, "foreign verification HEAD must not become task-owned merely because tests ran there");
+  assert.throws(
+    () => assertWorkspaceTaskCompletionReady(TASK_K),
+    /WORKSPACE_TASK_COMMIT_REQUIRED/,
+    "verification on an unowned HEAD/tree must not satisfy completion"
+  );
+  await finalizeWorkspaceTask(TASK_K, "cancelled");
 
   git(["fetch", "origin", "main"]);
   git(["reset", "--hard", "origin/main"]);
