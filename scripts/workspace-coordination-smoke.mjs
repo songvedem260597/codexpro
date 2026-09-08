@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +20,7 @@ const {
   preflightWorkspaceGitAdd,
   preflightWorkspacePush,
   readWorkspaceCoordination,
+  resolveWorkspaceTaskRootByTaskId,
   recordWorkspacePathsTouched,
   registerWorkspaceTask,
   releaseWorkspacePaths
@@ -36,6 +38,8 @@ const TASK_H = { taskId: "cpt_222222222222222222222222", workerId: "worker:h", t
 const TASK_I = { taskId: "cpt_333333333333333333333333", workerId: "worker:i", title: "Integrate then verify task", root: repoRoot };
 const TASK_J = { taskId: "cpt_444444444444444444444444", workerId: "worker:j", title: "Dirty after commit task", root: repoRoot };
 const TASK_K = { taskId: "cpt_555555555555555555555555", workerId: "worker:k", title: "Unowned verification task", root: repoRoot };
+const TASK_L = { taskId: "cpt_666666666666666666666666", workerId: "worker:l", title: "Authoritative root fallback task", root: repoRoot };
+const TASK_M_ID = "cpt_777777777777777777777777";
 const gitExecutable = process.platform === "win32" ? "git.exe" : "git";
 
 function git(args, cwd = repoRoot) {
@@ -44,6 +48,31 @@ function git(args, cwd = repoRoot) {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"]
   }).trim();
+}
+
+function coordinationStatePath(root) {
+  const canonical = fs.realpathSync.native(path.resolve(root));
+  const identity = process.platform === "win32" ? canonical.toLowerCase() : canonical;
+  const key = createHash("sha256").update(identity).digest("hex").slice(0, 32);
+  const dir = path.join(process.env.CODEXPRO_HOME, "workspace-coordination");
+  fs.mkdirSync(dir, { recursive: true });
+  return { canonical, file: path.join(dir, `${key}.json`) };
+}
+
+function writeCoordinationTaskFixture(root, taskId, workerId) {
+  const { canonical, file } = coordinationStatePath(root);
+  const now = new Date().toISOString();
+  fs.writeFileSync(file, `${JSON.stringify({
+    version: 1,
+    root: canonical,
+    updatedAt: now,
+    tasks: {
+      [taskId]: { taskId, workerId, title: "Ambiguous task root fixture", status: "running", startedAt: now, updatedAt: now }
+    },
+    claims: {},
+    integrationQueue: []
+  }, null, 2)}\n`, "utf8");
+  return file;
 }
 
 function taskContext(task, record) {
@@ -120,6 +149,43 @@ try {
   assert.notEqual(registeredA.worktreeRoot, registeredB.worktreeRoot, "parallel tasks must use different worktrees");
   assert.notEqual(registeredA.worktreeBranch, registeredB.worktreeBranch, "parallel tasks must use different branches");
   assert.deepEqual(registeredA.initialDirtyPaths, [], "clean workspace should produce a clean initial dirty set");
+
+  const directRootA = resolveWorkspaceTaskRootByTaskId({ taskId: TASK_A.taskId, rootHint: repoRoot, workerId: TASK_A.workerId });
+  assert.equal(directRootA.root, fs.realpathSync.native(path.resolve(repoRoot)), "rootHint must win when it already contains the exact task");
+
+  const registeredL = await registerWorkspaceTask(TASK_L);
+  await claimWorkspacePaths(TASK_L, ["resolver-owned.txt"]);
+  const resolvedL = resolveWorkspaceTaskRootByTaskId({ taskId: TASK_L.taskId, rootHint: registeredL.worktreeRoot, workerId: TASK_L.workerId });
+  assert.equal(resolvedL.root, fs.realpathSync.native(path.resolve(repoRoot)), "isolated task worktree must resolve back to the primary coordination root by exact Task ID");
+  assert.equal(resolvedL.task.taskId, TASK_L.taskId);
+  assert.throws(
+    () => resolveWorkspaceTaskRootByTaskId({ taskId: TASK_L.taskId, rootHint: registeredL.worktreeRoot, workerId: "worker:other" }),
+    /WORKSPACE_TASK_OWNER_MISMATCH/,
+    "authoritative task-root fallback must enforce worker ownership"
+  );
+  assert.throws(
+    () => resolveWorkspaceTaskRootByTaskId({ taskId: "cpt_999999999999999999999998", rootHint: registeredL.worktreeRoot, workerId: TASK_L.workerId }),
+    /WORKSPACE_TASK_NOT_FOUND/,
+    "unknown Task IDs must preserve WORKSPACE_TASK_NOT_FOUND"
+  );
+  await finalizeWorkspaceTask({ ...TASK_L, root: registeredL.worktreeRoot }, "cancelled");
+  const finalizedL = readWorkspaceCoordination(repoRoot);
+  assert.equal(finalizedL.tasks[TASK_L.taskId].status, "cancelled", "finalizeWorkspaceTask must mutate the authoritative primary-root task record");
+  assert.equal(Object.values(finalizedL.claims).some((claim) => claim.taskId === TASK_L.taskId), false, "finalizeWorkspaceTask must release claims from the authoritative primary root");
+
+  const ambiguityRootA = path.join(scratchRoot, "ambiguity-a");
+  const ambiguityRootB = path.join(scratchRoot, "ambiguity-b");
+  const ambiguityHint = path.join(scratchRoot, "ambiguity-isolated-hint");
+  fs.mkdirSync(ambiguityRootA, { recursive: true });
+  fs.mkdirSync(ambiguityRootB, { recursive: true });
+  fs.mkdirSync(ambiguityHint, { recursive: true });
+  writeCoordinationTaskFixture(ambiguityRootA, TASK_M_ID, "worker:m");
+  writeCoordinationTaskFixture(ambiguityRootB, TASK_M_ID, "worker:m");
+  assert.throws(
+    () => resolveWorkspaceTaskRootByTaskId({ taskId: TASK_M_ID, rootHint: ambiguityHint, workerId: "worker:m" }),
+    /WORKSPACE_TASK_ROOT_AMBIGUOUS/,
+    "conflicting persisted records for the same Task ID must fail explicitly instead of guessing a root"
+  );
 
   await claimWorkspacePaths(TASK_A, ["a.txt"]);
   await assert.rejects(

@@ -102,6 +102,10 @@ function canonicalPathKey(value: string): string {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
+function normalizeTaskOwner(value: string | undefined): string {
+  return String(value || "").trim().replace(/^browser:/, "");
+}
+
 function workspaceKey(root: string): string {
   const canonical = canonicalRoot(root);
   const identity = process.platform === "win32" ? canonical.toLowerCase() : canonical;
@@ -303,6 +307,82 @@ function readState(root: string): WorkspaceCoordinationState {
   } catch {
     return emptyState(canonical);
   }
+}
+
+export type ResolvedWorkspaceTaskRoot = {
+  root: string;
+  task: WorkspaceTaskRecord;
+};
+
+function persistedWorkspaceTaskMatches(taskId: string): ResolvedWorkspaceTaskRoot[] {
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(coordinationDir(), { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+  }
+  const matches = new Map<string, ResolvedWorkspaceTaskRoot>();
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^[a-f0-9]{32}\.json$/i.test(entry.name)) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(coordinationDir(), entry.name), "utf8"));
+      const task = normalizeTask(parsed?.tasks?.[taskId]);
+      const persistedRoot = String(parsed?.root || "").trim();
+      if (!task || task.taskId !== taskId || !persistedRoot) continue;
+      const root = canonicalRoot(persistedRoot);
+      const key = process.platform === "win32" ? root.toLowerCase() : root;
+      if (!matches.has(key)) matches.set(key, { root, task });
+    } catch {}
+  }
+  return [...matches.values()];
+}
+
+function requireCompatibleTaskOwner(resolved: ResolvedWorkspaceTaskRoot, workerId?: string): ResolvedWorkspaceTaskRoot {
+  if (workerId && normalizeTaskOwner(resolved.task.workerId) !== normalizeTaskOwner(workerId)) {
+    throw new CodexProError("WORKSPACE_TASK_OWNER_MISMATCH: workspace task belongs to another worker.", {
+      code: "WORKSPACE_TASK_OWNER_MISMATCH",
+      details: {
+        task_id: resolved.task.taskId,
+        expected_worker_id: resolved.task.workerId,
+        received_worker_id: workerId,
+        workspace_root: resolved.root
+      }
+    });
+  }
+  return resolved;
+}
+
+export function resolveWorkspaceTaskRootByTaskId(input: {
+  taskId: string;
+  rootHint?: string;
+  workerId?: string;
+}): ResolvedWorkspaceTaskRoot {
+  const taskId = String(input.taskId || "").trim();
+  const rootHint = String(input.rootHint || "").trim();
+  if (rootHint) {
+    const hintedState = readState(rootHint);
+    const hintedTask = hintedState.tasks[taskId];
+    if (hintedTask) return requireCompatibleTaskOwner({ root: hintedState.root, task: hintedTask }, input.workerId);
+  }
+
+  const matches = persistedWorkspaceTaskMatches(taskId);
+  if (matches.length === 0) {
+    throw new CodexProError(`WORKSPACE_TASK_NOT_FOUND: ${taskId} is not registered.`, {
+      code: "WORKSPACE_TASK_NOT_FOUND",
+      details: { task_id: taskId, root_hint: rootHint || null }
+    });
+  }
+  if (matches.length > 1) {
+    throw new CodexProError(`WORKSPACE_TASK_ROOT_AMBIGUOUS: ${taskId} exists in multiple workspace coordination roots.`, {
+      code: "WORKSPACE_TASK_ROOT_AMBIGUOUS",
+      details: {
+        task_id: taskId,
+        root_hint: rootHint || null,
+        matches: matches.map((match) => ({ root: match.root, worker_id: match.task.workerId, status: match.task.status }))
+      }
+    });
+  }
+  return requireCompatibleTaskOwner(matches[0], input.workerId);
 }
 
 async function writeState(root: string, state: WorkspaceCoordinationState): Promise<void> {
@@ -1060,14 +1140,11 @@ function verificationMatchesOwnedCommittedHead(task: WorkspaceTaskRecord): boole
 }
 
 export function assertWorkspaceTaskCompletionReady(context: WorkspaceTaskContext): WorkspaceTaskRecord {
-  const root = canonicalRoot(context.root);
-  const task = readState(root).tasks[context.taskId];
-  if (!task) {
-    throw new CodexProError(`WORKSPACE_TASK_NOT_FOUND: ${context.taskId} is not registered.`, {
-      code: "WORKSPACE_TASK_NOT_FOUND",
-      details: { task_id: context.taskId }
-    });
-  }
+  const { task } = resolveWorkspaceTaskRootByTaskId({
+    taskId: context.taskId,
+    rootHint: context.root,
+    workerId: context.workerId
+  });
   if (!task.touchedPaths.length) return task;
   if (!task.lastSourceChangeAt || task.lastVerificationStatus !== "passed" || !atOrAfter(task.lastVerificationAt, task.lastSourceChangeAt)) {
     throw new CodexProError(`WORKSPACE_TASK_TESTS_REQUIRED: task ${task.taskId} changed source and must pass a recognized test/check/verify/smoke command after the latest source change before completion.`, {
@@ -1113,7 +1190,11 @@ export function assertWorkspaceTaskCompletionReady(context: WorkspaceTaskContext
 }
 
 export async function finalizeWorkspaceTask(context: WorkspaceTaskContext, status: WorkspaceTaskStatus): Promise<void> {
-  const root = canonicalRoot(context.root);
+  const { root } = resolveWorkspaceTaskRootByTaskId({
+    taskId: context.taskId,
+    rootHint: context.root,
+    workerId: context.workerId
+  });
   const cleanup = await withState(root, async (state) => {
     const task = state.tasks[context.taskId];
     if (!task) return undefined;

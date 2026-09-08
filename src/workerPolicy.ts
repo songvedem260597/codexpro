@@ -4,7 +4,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { codexProHome } from "./profileStore.js";
 import { saveWorkerContextCheckpoint } from "./workerContext.js";
-import { readWorkspaceCoordination } from "./workspaceCoordination.js";
+import { resolveWorkspaceTaskRootByTaskId } from "./workspaceCoordination.js";
 
 export const WORKER_POLICY_VERSION = "worker-policy-v2";
 export const WORKER_PREPARED_PLACEHOLDER_TTL_MS = 15 * 60 * 1000;
@@ -277,10 +277,18 @@ function readWorkerJobFile(jobId: string): WorkerJobRecord | undefined {
   }
 }
 
+function workspaceTaskResolutionNotFound(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "WORKSPACE_TASK_NOT_FOUND");
+}
+
 function reconcileWorkerJobRecordWithWorkspace(record: WorkerJobRecord | undefined): WorkerJobRecord | undefined {
   if (!record || !["prepared", "running"].includes(record.status) || record.kind !== "code" || !record.root) return record;
   try {
-    const workspaceTask = readWorkspaceCoordination(record.root).tasks[record.jobId];
+    const workspaceTask = resolveWorkspaceTaskRootByTaskId({
+      taskId: record.jobId,
+      rootHint: record.root,
+      workerId: record.workerId
+    }).task;
     if (!workspaceTask || !["completed", "failed", "cancelled"].includes(workspaceTask.status)) return record;
     if (workerOwnerKey(workspaceTask.workerId) !== workerOwnerKey(record.workerId)) return record;
     const status = workspaceTask.status as "completed" | "failed" | "cancelled";
@@ -303,8 +311,9 @@ function reconcileWorkerJobRecordWithWorkspace(record: WorkerJobRecord | undefin
         details: { status, workspace_finished_at: finishedAt }
       }]
     };
-  } catch {
-    return record;
+  } catch (error) {
+    if (workspaceTaskResolutionNotFound(error)) return record;
+    throw error;
   }
 }
 
@@ -320,7 +329,13 @@ export function workerJobHasLegacyStaleCancellation(record: WorkerJobRecord | un
   if (record.events.some(item => item.type === "finalized")) return false;
   const terminal = record.events.filter(item => item.type === "workspace_status_reconciled").at(-1);
   if (terminal?.details?.status !== "cancelled" || terminal.details.workspace_finished_at !== record.finishedAt) return false;
-  const task = readWorkspaceCoordination(record.root).tasks[record.jobId];
+  let task;
+  try {
+    task = resolveWorkspaceTaskRootByTaskId({ taskId: record.jobId, rootHint: record.root, workerId: record.workerId }).task;
+  } catch (error) {
+    if (workspaceTaskResolutionNotFound(error)) return false;
+    throw error;
+  }
   if (!task || task.status !== "running" || task.finishedAt || workerOwnerKey(task.workerId) !== workerOwnerKey(record.workerId)) return false;
   const elapsed = Date.parse(record.finishedAt) - Date.parse(task.updatedAt || task.startedAt);
   return Number.isFinite(elapsed) && elapsed > 6 * 60 * 60 * 1000;

@@ -4216,7 +4216,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             summary: undefined,
             error: terminalOutcome === "failed" ? String(result.network_error || result.error || "ChatGPT generation failed.") : undefined
           });
-          if (finalized.root) {
+          if (finalized.kind === "code" && finalized.root) {
             await finalizeWorkspaceTask({
               taskId: finalized.jobId,
               workerId: selectedProfile,

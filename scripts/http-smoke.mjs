@@ -412,6 +412,11 @@ async function expectActiveSessionPreservedUnderCapacityPressure() {
     if (began.structuredContent.task_kind !== 'code' || began.structuredContent.gate_active !== true || began.structuredContent.global_rules_loaded !== true || began.structuredContent.codexgraph_active !== true) {
       throw new Error(`code profile task omitted rule/graph evidence: ${JSON.stringify(began.structuredContent)}`);
     }
+    const isolatedWorkerRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-isolated-worker-'));
+    const workerJobFile = path.join(codexProHome, 'worker-jobs', 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa.json');
+    const isolatedWorkerJob = JSON.parse(await fs.readFile(workerJobFile, 'utf8'));
+    isolatedWorkerJob.root = isolatedWorkerRoot;
+    await fs.writeFile(workerJobFile, `${JSON.stringify(isolatedWorkerJob, null, 2)}\n`, 'utf8');
     const siblingStatus = await callTool(gatedSibling, 'repo_task_status', { task_id: 'cpt_aaaaaaaaaaaaaaaaaaaaaaaa' });
     if (!siblingStatus.structuredContent.verified || !siblingStatus.structuredContent.gate_active) {
       throw new Error(`profile sibling did not observe the active repo task: ${JSON.stringify(siblingStatus.structuredContent)}`);

@@ -292,21 +292,22 @@ try {
   await finalizeWorkerJob({ jobId: freshFollowerId, workerId: "chrome.fixture-fresh", outcome: "completed" });
 
   const driftedId = "cpt_888888888888888888888888";
-  const driftedRoot = fs.mkdtempSync(path.join(home, "workspace-drift-"));
-  await prepareWorkerJob({ jobId: driftedId, workerId: "chrome.fixture-drift", scope: "workspace", root: driftedRoot });
+  const driftedPrimaryRoot = fs.mkdtempSync(path.join(home, "workspace-drift-primary-"));
+  const driftedIsolatedRoot = fs.mkdtempSync(path.join(home, "workspace-drift-isolated-"));
+  await prepareWorkerJob({ jobId: driftedId, workerId: "chrome.fixture-drift", scope: "workspace", root: driftedIsolatedRoot });
   await bootstrapWorkerJob({
     jobId: driftedId,
     workerId: "chrome.fixture-drift",
     title: "Reconcile cancelled workspace task",
     kind: "code",
-    root: driftedRoot,
+    root: driftedIsolatedRoot,
     workspaceId: "ws_drift",
     scope: "workspace",
     rulesHash: "rules",
     agentsHash: "agents",
     codexGraphActive: true
   });
-  const canonicalDriftedRoot = fs.realpathSync.native(path.resolve(driftedRoot));
+  const canonicalDriftedRoot = fs.realpathSync.native(path.resolve(driftedPrimaryRoot));
   const workspaceIdentity = process.platform === "win32" ? canonicalDriftedRoot.toLowerCase() : canonicalDriftedRoot;
   const workspaceKey = createHash("sha256").update(workspaceIdentity).digest("hex").slice(0, 32);
   const workspaceFinishedAt = new Date().toISOString();

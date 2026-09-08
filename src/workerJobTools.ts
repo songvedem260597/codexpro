@@ -13,7 +13,7 @@ import {
 import {
   assertWorkspaceTaskCompletionReady,
   finalizeWorkspaceTask,
-  readWorkspaceCoordination
+  resolveWorkspaceTaskRootByTaskId
 } from "./workspaceCoordination.js";
 
 export type WorkerJobToolDefinition = {
@@ -33,12 +33,17 @@ type WorkerJobToolDependencies = {
 function workerJobSourceChanges(job: WorkerJobRecord | undefined): string[] {
   if (!job || job.kind !== "code" || !job.root) return [];
   try {
-    const task = readWorkspaceCoordination(job.root).tasks[job.jobId];
+    const task = resolveWorkspaceTaskRootByTaskId({
+      taskId: job.jobId,
+      rootHint: job.root,
+      workerId: job.workerId
+    }).task;
     return [...new Set((Array.isArray(task?.touchedPaths) ? task.touchedPaths : [])
       .map((value) => String(value || "").trim())
       .filter(Boolean))].slice(0, 100);
-  } catch {
-    return [];
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "WORKSPACE_TASK_NOT_FOUND") return [];
+    throw error;
   }
 }
 
@@ -229,7 +234,7 @@ export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies):
             summary: args.summary,
             error: args.error
           });
-          if (record.root) {
+          if (record.kind === "code" && record.root) {
             const coordinationStatus = record.status === "completed" || record.status === "failed" || record.status === "cancelled" ? record.status : args.outcome;
             await finalizeWorkspaceTask({
               taskId: record.jobId,
