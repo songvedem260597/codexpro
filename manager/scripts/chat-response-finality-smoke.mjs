@@ -147,7 +147,7 @@ const here = fileURLToPath(new URL(".", import.meta.url));
 const sessionSource = fs.readFileSync(new URL("../src/hooks/use-chat-session.js", import.meta.url), "utf8");
 const sendActionsSource = fs.readFileSync(new URL("../src/hooks/use-chat-send-actions.js", import.meta.url), "utf8");
 const chatModalSource = fs.readFileSync(new URL("../src/features/chat/chat-modal.jsx", import.meta.url), "utf8");
-assert.match(sessionSource, /if \(currentResponse\?\.finalityPending\)[\s\S]*?loadResponse\(profile, conversationId, true, true, false, false\)/, "finality polling must re-read the DOM rather than canonical-only state");
+assert.match(sessionSource, /if \(currentResponse\?\.finalityPending\)[\s\S]*?loadResponse\(profile, conversationId, true, true, false, false(?:, "[^"]+")?\)/, "finality polling must re-read the DOM rather than canonical-only state");
 assert.match(sendActionsSource, /finalityPending: currentResponse\?\.finalityPending/, "the send guard must receive finalityPending");
 assert.match(chatModalSource, /shouldShowChatSettling\(\{[\s\S]*?finalityPending: responseCurrent && response\?\.finalityPending/, "the visible settling state must receive finalityPending");
 assert.match(chatModalSource, /canAcceptNextChatMessage\(\{[\s\S]*?finalityPending: responseCurrent && response\?\.finalityPending/, "turn readiness must receive finalityPending");

@@ -14,6 +14,19 @@ export function shouldScheduleGeneratingPoll(chatProfileId, profileId) {
   return Boolean(chatProfileId) && chatProfileId === profileId;
 }
 
+function canonicalTelemetryResponseBytes(result) {
+  const text = String(result?.text || "");
+  if (!text) return 0;
+  try { return new TextEncoder().encode(text).byteLength; }
+  catch { return text.length; }
+}
+
+function canonicalTelemetryHttpStatus(result) {
+  if (result?.canonical_rate_limited === true || result?.canonical_poll_deferred === true) return 429;
+  if (result?.canonical_available === true || result?.canonical_observed === true || result?.response_source === "canonical_api") return 200;
+  return 0;
+}
+
 export function createCanonicalResponseReadCoordinator({ now = () => Date.now(), maxCooldownMs = 60_000 } = {}) {
   const states = new Map();
   const normalizedCooldownLimit = Math.max(0, Number(maxCooldownMs) || 0);
@@ -29,22 +42,47 @@ export function createCanonicalResponseReadCoordinator({ now = () => Date.now(),
       : Math.max(0, requestedAt - currentNow);
     return currentNow + boundedDelay;
   };
+  const emitTelemetry = (telemetry, details = {}) => {
+    if (typeof telemetry?.onEvent !== "function") return;
+    try {
+      telemetry.onEvent({
+        canonical_attempt_id: String(telemetry.canonical_attempt_id || ""),
+        profile_id: String(telemetry.profile_id || ""),
+        conversation_id: String(telemetry.conversation_id || ""),
+        trigger: String(telemetry.trigger || "manual_or_interactive"),
+        coalesced: details.coalesced === true,
+        backoff_remaining_ms: Math.max(0, Number(details.backoff_remaining_ms) || 0),
+        http_status: Math.max(0, Number(details.http_status) || 0),
+        response_bytes: Math.max(0, Number(details.response_bytes) || 0),
+        duration_ms: Math.max(0, Number(details.duration_ms) || 0)
+      });
+    } catch {}
+  };
   return {
-    run(key, read) {
+    run(key, read, telemetry = {}) {
       const normalizedKey = String(key || "");
       if (!normalizedKey || typeof read !== "function") return Promise.resolve(null);
       const currentNow = Number(now()) || Date.now();
       const current = states.get(normalizedKey) || { inFlight: null, nextAllowedAt: 0, lastRateLimitedResult: null, touchedAt: currentNow };
-      if (current.inFlight) return current.inFlight;
+      if (current.inFlight) {
+        emitTelemetry(telemetry, { coalesced: true });
+        return current.inFlight;
+      }
       if (current.nextAllowedAt > currentNow) {
-        return Promise.resolve({
+        const deferred = {
           ...(current.lastRateLimitedResult || {}),
           canonical_rate_limited: true,
           canonical_poll_deferred: true,
           canonical_retry_at: new Date(current.nextAllowedAt).toISOString(),
           canonical_retry_after_ms: Math.max(0, current.nextAllowedAt - currentNow)
+        };
+        emitTelemetry(telemetry, {
+          backoff_remaining_ms: deferred.canonical_retry_after_ms,
+          http_status: 429
         });
+        return Promise.resolve(deferred);
       }
+      const startedAt = currentNow;
       let operation;
       operation = Promise.resolve().then(read).then((result) => {
         const completedAt = Number(now()) || Date.now();
@@ -55,7 +93,17 @@ export function createCanonicalResponseReadCoordinator({ now = () => Date.now(),
           lastRateLimitedResult: result?.canonical_rate_limited === true ? result : null,
           touchedAt: completedAt
         });
+        emitTelemetry(telemetry, {
+          backoff_remaining_ms: Math.max(0, nextAllowedAt - completedAt),
+          http_status: canonicalTelemetryHttpStatus(result),
+          response_bytes: canonicalTelemetryResponseBytes(result),
+          duration_ms: Math.max(0, completedAt - startedAt)
+        });
         return result;
+      }, (error) => {
+        const failedAt = Number(now()) || Date.now();
+        emitTelemetry(telemetry, { duration_ms: Math.max(0, failedAt - startedAt) });
+        throw error;
       }).finally(() => {
         const latest = states.get(normalizedKey);
         if (latest?.inFlight === operation) states.set(normalizedKey, { ...latest, inFlight: null });
@@ -111,11 +159,36 @@ export function useChatSession({
   const requestTargetDiagnostics = useRef(new Map());
   const responseAuditSignatures = useRef(new Map());
   const canonicalResponseReads = useRef(null);
+  const canonicalAttemptSequence = useRef(0);
+  const canonicalTelemetryLastAt = useRef(new Map());
   if (!canonicalResponseReads.current) canonicalResponseReads.current = createCanonicalResponseReadCoordinator();
-  const loadCanonicalResponse = (profile, conversationId) => canonicalResponseReads.current.run(
-    `${profile.profile_id}:${conversationId}`,
-    () => loadResponse(profile, conversationId, true, false, false, true)
-  );
+  const loadCanonicalResponse = (profile, conversationId, trigger = "manual_or_interactive") => {
+    canonicalAttemptSequence.current = (canonicalAttemptSequence.current + 1) % Number.MAX_SAFE_INTEGER;
+    const canonicalAttemptId = `ca_${Date.now().toString(36)}_${canonicalAttemptSequence.current.toString(36)}`;
+    const telemetryKey = `${profile.profile_id}:${conversationId}`;
+    return canonicalResponseReads.current.run(
+      telemetryKey,
+      () => loadResponse(profile, conversationId, true, false, false, true, trigger),
+      {
+        canonical_attempt_id: canonicalAttemptId,
+        profile_id: profile.profile_id,
+        conversation_id: conversationId,
+        trigger,
+        onEvent: (event) => {
+          const now = Date.now();
+          const lastAt = Number(canonicalTelemetryLastAt.current.get(telemetryKey) || 0);
+          const highSignal = event.backoff_remaining_ms > 0 || event.http_status >= 400 || event.duration_ms >= 5000 || trigger !== "generating";
+          if (!highSignal && now - lastAt < 15_000) return;
+          canonicalTelemetryLastAt.current.set(telemetryKey, now);
+          trimMapEntries(canonicalTelemetryLastAt.current, 96);
+          logRendererDiagnostic(api, event.http_status >= 400 || event.duration_ms >= 5000 ? "warn" : "info", "chat", "Canonical read causal telemetry", {
+            action: "canonical-read-causal",
+            ...event
+          });
+        }
+      }
+    );
+  };
   useEffect(() => {
     profilesRef.current = status?.browserProfiles || [];
   }, [status?.browserProfiles]);
@@ -171,7 +244,7 @@ export function useChatSession({
           const lastRecovery = Number(connectionRecoveryReads.current.get(recoveryKey) || 0);
           if (Date.now() - lastRecovery >= 15000) {
             connectionRecoveryReads.current.set(recoveryKey, Date.now());
-            void loadResponse(profile, conversationId, true, true, true);
+            void loadResponse(profile, conversationId, true, true, true, false, "network_recovery");
           }
           continue;
         }
@@ -186,7 +259,7 @@ export function useChatSession({
           const lastRecovery = Number(connectionRecoveryReads.current.get(recoveryKey) || 0);
           if (Date.now() - lastRecovery >= LATEST_RESPONSE_RECOVERY_POLL_MS) {
             connectionRecoveryReads.current.set(recoveryKey, Date.now());
-            void loadCanonicalResponse(profile, conversationId);
+            void loadCanonicalResponse(profile, conversationId, "network_recovery");
           }
           continue;
         }
@@ -199,8 +272,8 @@ export function useChatSession({
           const activityPollMs = realtimePushFresh ? LATEST_RESPONSE_RECOVERY_POLL_MS : networkState === "generating" ? 850 : LATEST_RESPONSE_RECOVERY_POLL_MS;
           if (Date.now() - lastStreamRead >= activityPollMs) {
             networkStreamReads.current.set(streamKey, Date.now());
-            if (networkState === "generating") void loadResponse(profile, conversationId, true, false, false, false);
-            else void loadCanonicalResponse(profile, conversationId);
+            if (networkState === "generating") void loadResponse(profile, conversationId, true, false, false, false, "generating");
+            else void loadCanonicalResponse(profile, conversationId, "generating");
           }
           continue;
         }
@@ -209,7 +282,7 @@ export function useChatSession({
           const lastFinalityRead = Number(connectionRecoveryReads.current.get(finalityPollKey) || 0);
           if (Date.now() - lastFinalityRead >= LATEST_RESPONSE_RECOVERY_POLL_MS) {
             connectionRecoveryReads.current.set(finalityPollKey, Date.now());
-            void loadResponse(profile, conversationId, true, true, false, false);
+            void loadResponse(profile, conversationId, true, true, false, false, "finality");
           }
           continue;
         }
@@ -219,7 +292,7 @@ export function useChatSession({
         if (!contentAlreadyRead) {
           networkCompletionReads.current.set(completionKey, networkCompletedAt);
           void (async () => {
-            const canonical = await loadCanonicalResponse(profile, conversationId);
+            const canonical = await loadCanonicalResponse(profile, conversationId, "completion");
             if (!canonical) {
               if (networkCompletionReads.current.get(completionKey) === networkCompletedAt) networkCompletionReads.current.delete(completionKey);
               return;
@@ -229,7 +302,7 @@ export function useChatSession({
               return;
             }
             if (completedResponseNeedsDomFallback(canonical)) {
-              const dom = await loadResponse(profile, conversationId, true, true);
+              const dom = await loadResponse(profile, conversationId, true, true, false, false, "completion");
               if (!dom && networkCompletionReads.current.get(completionKey) === networkCompletedAt) networkCompletionReads.current.delete(completionKey);
             }
           })();
@@ -324,14 +397,14 @@ export function useChatSession({
       const profile = profilesRef.current.find((item) => item.profile_id === chatProfileId);
       if (cancelled) return;
       if (profile?.connected) {
-        const canonical = await loadCanonicalResponse(profile, conversationId);
+        const canonical = await loadCanonicalResponse(profile, conversationId, "network_recovery");
         if (canonical?.canonical_rate_limited) {
           const retryAtMs = Date.parse(String(canonical.canonical_retry_at || ""));
           const retryAfterMs = Number(canonical.canonical_retry_after_ms) || 0;
           nextPollMs = Math.max(nextPollMs, Math.min(60_000, Number.isFinite(retryAtMs) ? retryAtMs - Date.now() : retryAfterMs));
         }
         if (!cancelled && !canonical?.canonical_poll_deferred && !canonical?.canonical_rate_limited && completedResponseNeedsDomFallback(canonical)) {
-          await loadResponse(profile, conversationId, true, true);
+          await loadResponse(profile, conversationId, true, true, false, false, "network_recovery");
         }
       }
       if (!cancelled) timer = window.setTimeout(pollLatestResponse, Math.max(500, nextPollMs));

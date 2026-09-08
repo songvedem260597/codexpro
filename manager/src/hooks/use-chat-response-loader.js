@@ -20,6 +20,24 @@ import { logicalTaskTracking, recordCompletedLogicalTask, shouldQualifyFastMessa
 import { logRendererDiagnostic } from "../diagnostic-log-view.jsx";
 import { trimMapEntries } from "../performance-retention.js";
 
+const RESPONSE_READ_TRIGGERS = new Set([
+  "generating",
+  "completion",
+  "finality",
+  "network_recovery",
+  "cache_hydration",
+  "manual_or_interactive"
+]);
+
+function normalizeResponseReadTrigger(value) {
+  const trigger = String(value || "");
+  return RESPONSE_READ_TRIGGERS.has(trigger) ? trigger : "manual_or_interactive";
+}
+
+function nextResponseReadId(sequence) {
+  return `rr_${Date.now().toString(36)}_${sequence.toString(36)}`;
+}
+
 export function useChatResponseLoader({
   api,
   status,
@@ -34,8 +52,58 @@ export function useChatResponseLoader({
 }) {
   const responseFetches = useRef(new Set());
   const responseFinalCandidates = useRef(new Map());
+  const responseReadSequence = useRef(0);
+  const responseReadTelemetry = useRef(new Map());
+  const chatProfileIdRef = useRef(chatProfileId);
 
-  const loadResponse = useCallback(async (profile, explicitConversationId, silent = false, readDom = false, recoverStaleDom = false, canonicalOnly = false) => {
+  const responseReadTargetStillCurrent = useCallback((entry) => {
+    if (!entry) return false;
+    const currentTarget = String(requestTargetsRef.current[entry.profile_id] || "");
+    const conversationStillCurrent = !currentTarget || currentTarget === entry.conversation_id;
+    const profileStillCurrent = !entry.started_as_active || chatProfileIdRef.current === entry.profile_id;
+    return conversationStillCurrent && profileStillCurrent;
+  }, [requestTargetsRef]);
+
+  const emitResponseReadTelemetry = useCallback((entry, resolvedAt = "") => {
+    if (!entry) return;
+    const now = Date.now();
+    const resolvedAtMs = resolvedAt ? Date.parse(resolvedAt) : 0;
+    const durationMs = Math.max(0, (Number.isFinite(resolvedAtMs) && resolvedAtMs > 0 ? resolvedAtMs : now) - entry.started_at_ms);
+    if (!entry.cancel_requested_at && !resolvedAt) return;
+    if (!entry.cancel_requested_at && entry.trigger === "generating" && durationMs < 2_000) return;
+    logRendererDiagnostic(api, "info", "chat", "Response read causal telemetry", {
+      action: "response-read-causal",
+      response_read_id: entry.response_read_id,
+      trigger: entry.trigger,
+      profile_id: entry.profile_id,
+      conversation_id: entry.conversation_id,
+      chat_profile_id_at_start: entry.chat_profile_id_at_start,
+      started_at: entry.started_at,
+      cancel_requested_at: entry.cancel_requested_at || "",
+      resolved_at: resolvedAt,
+      duration_ms: durationMs,
+      target_still_current: responseReadTargetStillCurrent(entry)
+    });
+  }, [api, responseReadTargetStillCurrent]);
+
+  const markStaleResponseReads = useCallback((closed = false) => {
+    const nowIso = new Date().toISOString();
+    for (const entry of responseReadTelemetry.current.values()) {
+      if (entry.cancel_requested_at) continue;
+      if (!closed && responseReadTargetStillCurrent(entry)) continue;
+      entry.cancel_requested_at = nowIso;
+      emitResponseReadTelemetry(entry, "");
+    }
+  }, [emitResponseReadTelemetry, responseReadTargetStillCurrent]);
+
+  useEffect(() => {
+    chatProfileIdRef.current = chatProfileId;
+    markStaleResponseReads(false);
+  }, [chatProfileId, requestTargets, markStaleResponseReads]);
+
+  useEffect(() => () => markStaleResponseReads(true), [markStaleResponseReads]);
+
+  const loadResponse = useCallback(async (profile, explicitConversationId, silent = false, readDom = false, recoverStaleDom = false, canonicalOnly = false, trigger = "manual_or_interactive") => {
     const pinnedTarget = String(requestTargetsRef.current[profile.profile_id] || requestTargets[profile.profile_id] || "");
     const conversations = profileRequestChats(profile, pinnedTarget);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
@@ -47,6 +115,22 @@ export function useChatResponseLoader({
     };
     if (!conversationId || conversationId === NEW_CHAT_TARGET || responseFetches.current.has(fetchKey)) return null;
     responseFetches.current.add(fetchKey);
+    responseReadSequence.current += 1;
+    const responseReadId = nextResponseReadId(responseReadSequence.current);
+    const startedAtMs = Date.now();
+    const responseReadEntry = {
+      response_read_id: responseReadId,
+      trigger: normalizeResponseReadTrigger(trigger),
+      profile_id: String(profile.profile_id || ""),
+      conversation_id: conversationId,
+      chat_profile_id_at_start: String(chatProfileIdRef.current || ""),
+      started_at: new Date(startedAtMs).toISOString(),
+      started_at_ms: startedAtMs,
+      started_as_active: chatProfileIdRef.current === profile.profile_id,
+      cancel_requested_at: ""
+    };
+    responseReadTelemetry.current.set(responseReadId, responseReadEntry);
+    trimMapEntries(responseReadTelemetry.current, 96);
     if (!silent) {
       setRequestResponses((current) => responseTargetStillCurrent()
         ? { ...current, [profile.profile_id]: { ...(current[profile.profile_id] || {}), visible: true, loading: true, error: "", conversationId } }
@@ -62,7 +146,11 @@ export function useChatResponseLoader({
         readDom,
         recoverStaleDom,
         canonicalOnly,
-        priority: profile.profile_id === chatProfileId ? "interactive" : "background"
+        priority: profile.profile_id === chatProfileId ? "interactive" : "background",
+        responseReadId,
+        trigger: responseReadEntry.trigger,
+        chatProfileIdAtStart: responseReadEntry.chat_profile_id_at_start,
+        startedAt: responseReadEntry.started_at
       });
       const responseProfileId = String(result?.response_profile_id || result?.profile_id || "").trim();
       const responseConversationId = String(result?.response_conversation_id || result?.conversation_id || "").trim()
@@ -267,9 +355,12 @@ export function useChatResponseLoader({
       if (!silent && responseTargetStillCurrent()) setError(message);
       return null;
     } finally {
+      const resolvedAt = new Date().toISOString();
+      emitResponseReadTelemetry(responseReadEntry, resolvedAt);
+      responseReadTelemetry.current.delete(responseReadId);
       responseFetches.current.delete(fetchKey);
     }
-  }, [api, chatProfileId, requestResponsesRef, requestTargetReasons, requestTargets, requestTargetsRef, setError, setRequestResponses, setRequestTargets, status?.workerJobs]);
+  }, [api, chatProfileId, emitResponseReadTelemetry, requestResponsesRef, requestTargetReasons, requestTargets, requestTargetsRef, setError, setRequestResponses, setRequestTargets, status?.workerJobs]);
 
   useEffect(() => {
     const sweep = () => trimMapEntries(responseFinalCandidates.current, 96);

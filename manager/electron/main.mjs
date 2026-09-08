@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
 import "./resource-overload-runtime.mjs";
 import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
+import { createMcpCausalTelemetry } from "./mcp-causal-telemetry.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
 import { collectTunnelOfflineEvidence } from "./tunnel-offline-diagnostic.mjs";
 import { createInterruptionAlertTracker } from "./interruption-alert.mjs";
@@ -155,6 +156,7 @@ const managedAppPluginInstaller = createManagedAppPluginInstaller({
   templateRoot: path.join(here, "app-plugins", "templates", "taste-skill"),
   gitDiagramTemplateRoot: path.join(here, "app-plugins", "templates", "gitdiagram")
 });
+const mcpCausalTelemetry = createMcpCausalTelemetry();
 const diagnostic = (level, source, category, message, details = {}) => {
   void appendDiagnosticLog(codexProHome, {
     level,
@@ -173,6 +175,19 @@ const diagnostic = (level, source, category, message, details = {}) => {
     console.error("[manager-diagnostic]", error?.message || error);
   });
 };
+function emitMcpCausalTelemetry(stage, call, force = false) {
+  const snapshot = mcpCausalTelemetry.snapshot(call);
+  const trackedCaller = snapshot.caller !== "other";
+  const overlap = snapshot.MCP_INITIALIZE_IN_FLIGHT > 1 || snapshot.MCP_SESSIONS_IN_FLIGHT > 1;
+  const slow = snapshot.duration_ms >= 1_000;
+  const lifecycleBoundary = stage === "open_started" || stage === "close_completed";
+  if (!force && !overlap && !slow && !(trackedCaller && lifecycleBoundary)) return;
+  diagnostic(slow || overlap ? "warn" : "info", "mcp", "causal", "MCP causal lifecycle telemetry", {
+    action: `mcp-causal-${stage}`,
+    ...snapshot
+  });
+}
+
 function recordUserReportedError(payload, context = {}) {
   if (payload?.toolRetry || Number(payload?.toolRolloverCount) > 0 || payload?.user_report_logging === false) return null;
   const report = classifyUserReportedError(payload);
@@ -346,6 +361,7 @@ let runtimeBasePromise = null;
 let runtimeStatusPromise = null;
 let runtimeFreshnessPromise = null;
 let runtimeFreshnessRetryTimer = null;
+let runtimeFreshnessIterationSequence = 0;
 let scheduledTaskCache = null;
 let scheduledTaskPromise = null;
 const runtimeHealthDiagnosticTracker = createRuntimeHealthDiagnosticTracker();
@@ -1947,7 +1963,7 @@ async function collectRuntimeStatus(options = {}) {
   const workerExtensionVersion = await availableExtensionVersion(base.config.root, WORKER_EXTENSION_VERSION);
   const [browserProfileSnapshot, workerJobSnapshot] = base.local.ok
     ? await Promise.all([
-      listBrowserProfilesThroughMcp(base.config, base.token).then((profiles) => ({
+      listBrowserProfilesThroughMcp(base.config, base.token, { caller: "status_list_profiles" }).then((profiles) => ({
         available: true,
         profiles: Array.isArray(profiles) ? profiles : []
       })).catch((error) => {
@@ -1962,7 +1978,7 @@ async function collectRuntimeStatus(options = {}) {
       localMcpTool(base.config, base.token, "worker_job_history", {
         statuses: ["prepared", "running", "completed", "failed", "cancelled", "blocked"],
         limit: WORKER_JOB_HISTORY_LIMIT
-      }).then((result) => ({
+      }, 15000, { caller: "status_worker_history" }).then((result) => ({
         available: true,
         jobs: Array.isArray(result?.jobs) ? result.jobs : []
       })).catch(() => ({ available: false, jobs: [] }))
@@ -2524,11 +2540,17 @@ async function mcpRequest(url, token, body, sessionId, timeoutMs = 15000) {
   }
 }
 
-async function openLocalMcpSession(config, token) {
+async function openLocalMcpSession(config, token, telemetryOptions = {}) {
   const url = `http://127.0.0.1:${config.port}/mcp`;
+  const causalCall = mcpCausalTelemetry.begin(telemetryOptions?.caller, {
+    runtime_freshness_iteration_id: telemetryOptions?.runtime_freshness_iteration_id,
+    response_read_id: telemetryOptions?.response_read_id
+  });
+  emitMcpCausalTelemetry("open_started", causalCall);
   const startedAt = Date.now();
   const phaseTimings = {};
   let phaseStartedAt = Date.now();
+  try {
   const initialized = await mcpRequest(url, token, {
     jsonrpc: "2.0",
     id: 1,
@@ -2536,16 +2558,34 @@ async function openLocalMcpSession(config, token) {
     params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: MANAGER_VERSION } }
   });
   phaseTimings.initialize_ms = Date.now() - phaseStartedAt;
-  const session = { url, token, sessionId: initialized.sessionId, nextId: 2, phaseTimings };
+  const session = { url, token, sessionId: initialized.sessionId, nextId: 2, phaseTimings, causalTelemetryCall: causalCall };
   phaseStartedAt = Date.now();
   await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, session.sessionId);
   phaseTimings.initialized_notification_ms = Date.now() - phaseStartedAt;
   phaseTimings.open_total_ms = Date.now() - startedAt;
+  mcpCausalTelemetry.markInitialized(causalCall);
+  emitMcpCausalTelemetry("initialized", causalCall);
   return session;
+  } catch (error) {
+    mcpCausalTelemetry.markCloseCompleted(causalCall);
+    emitMcpCausalTelemetry("close_completed", causalCall, true);
+    throw error;
+  }
 }
 
 async function closeLocalMcpSession(session) {
-  if (!session?.url || !session?.sessionId) return;
+  const causalCall = session?.causalTelemetryCall;
+  if (!session?.url || !session?.sessionId) {
+    if (causalCall) {
+      mcpCausalTelemetry.markCloseCompleted(causalCall);
+      emitMcpCausalTelemetry("close_completed", causalCall, true);
+    }
+    return;
+  }
+  if (causalCall) {
+    mcpCausalTelemetry.markCloseStarted(causalCall);
+    emitMcpCausalTelemetry("close_started", causalCall);
+  }
   const startedAt = Date.now();
   try {
     await fetch(session.url, {
@@ -2558,6 +2598,10 @@ async function closeLocalMcpSession(session) {
       },
       signal: AbortSignal.timeout(3000)
     });
+    if (causalCall) {
+      mcpCausalTelemetry.markCloseCompleted(causalCall);
+      emitMcpCausalTelemetry("close_completed", causalCall);
+    }
     const durationMs = Date.now() - startedAt;
     if (durationMs >= 1000 && diagnosticAllowed("mcp-close-session-slow", 30_000)) {
       diagnostic("warn", "mcp", "transport", `Đóng MCP session chậm (${durationMs} ms)`, {
@@ -2566,6 +2610,10 @@ async function closeLocalMcpSession(session) {
       });
     }
   } catch (error) {
+    if (causalCall) {
+      mcpCausalTelemetry.markCloseCompleted(causalCall);
+      emitMcpCausalTelemetry("close_completed", causalCall);
+    }
     const message = error instanceof Error ? error.message : String(error);
     if (process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1") {
       console.error(`[manager-mcp] close session failed: ${message}`);
@@ -2594,6 +2642,10 @@ async function localMcpToolInSession(session, toolName, args, timeoutMs = 15000)
       session.phaseTimings.tool_call_ms = Math.max(0, Number(session.phaseTimings.tool_call_ms) || 0) + (Date.now() - startedAt);
       session.phaseTimings.tool_call_count = Math.max(0, Number(session.phaseTimings.tool_call_count) || 0) + 1;
     }
+    if (session?.causalTelemetryCall) {
+      mcpCausalTelemetry.markToolCompleted(session.causalTelemetryCall);
+      emitMcpCausalTelemetry("tool_completed", session.causalTelemetryCall);
+    }
   }
   const result = called.payload.result;
   if (result?.isError) {
@@ -2609,7 +2661,7 @@ async function localMcpToolInSession(session, toolName, args, timeoutMs = 15000)
   return result?.structuredContent || {};
 }
 
-async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
+async function localMcpTool(config, token, toolName, args, timeoutMs = 15000, telemetryOptions = {}) {
   const debug = process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1";
   const startedAt = Date.now();
   const toolAction = String(args?.action || "");
@@ -2617,7 +2669,7 @@ async function localMcpTool(config, token, toolName, args, timeoutMs = 15000) {
   let session = null;
   try {
     if (debug) console.error(`[manager-mcp] ${toolActionName}: open session`);
-    session = await openLocalMcpSession(config, token);
+    session = await openLocalMcpSession(config, token, telemetryOptions);
     if (debug) console.error(`[manager-mcp] ${toolActionName}: tools/call`);
     const result = await localMcpToolInSession(session, toolName, args, timeoutMs);
     const totalMs = Date.now() - startedAt;
@@ -2651,8 +2703,8 @@ async function ipcResult(operation) {
   catch (error) { return { ok: false, error: managerErrorEnvelope(error) }; }
 }
 
-async function listBrowserProfilesThroughMcp(config, token) {
-  const result = await localMcpTool(config, token, "browser_control", { action: "list_profiles" });
+async function listBrowserProfilesThroughMcp(config, token, telemetryOptions = {}) {
+  const result = await localMcpTool(config, token, "browser_control", { action: "list_profiles" }, 15000, telemetryOptions);
   return Array.isArray(result.profiles) ? result.profiles : [];
 }
 
@@ -3845,7 +3897,10 @@ async function getProfileResponse(payload) {
       canonical_only: payload?.canonicalOnly === true,
       recover_stale_dom: payload?.recoverStaleDom === true,
       task_id: /^cpt_[a-f0-9]{24}$/.test(taskId) ? taskId : undefined
-    }, 80000);
+    }, 80000, {
+      caller: "get_profile_response",
+      response_read_id: String(payload?.responseReadId || "")
+    });
     const responseProfileId = String(result?.profile_id || "").trim();
     const responseConversationId = String(result?.conversation_id || "").trim()
       || String(result?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1]
@@ -3996,10 +4051,16 @@ function ensureFreshRuntimeAfterManagerStart() {
     if (!expectedBuildId || activeBuildId === expectedBuildId) {
       return { checked: true, restarted: false, reason: expectedBuildId ? "current" : "build-unavailable" };
     }
+    runtimeFreshnessIterationSequence = (runtimeFreshnessIterationSequence + 1) % Number.MAX_SAFE_INTEGER;
+    const runtimeFreshnessIterationId = `rf_${Date.now().toString(36)}_${runtimeFreshnessIterationSequence.toString(36)}`;
     const [profiles, runtimeWorkerJobs] = await Promise.all([
-      listBrowserProfilesThroughMcp(base.config, base.token).catch((error) => {
+      listBrowserProfilesThroughMcp(base.config, base.token, {
+        caller: "runtime_freshness_list_profiles",
+        runtime_freshness_iteration_id: runtimeFreshnessIterationId
+      }).catch((error) => {
         diagnostic("warn", "manager", "runtime", "Chưa xác minh được profile trước khi đồng bộ runtime; Manager sẽ hoãn restart", {
           action: "runtime-build-refresh-profile-check-failed",
+          runtime_freshness_iteration_id: runtimeFreshnessIterationId,
           active_build_id: activeBuildId,
           expected_build_id: expectedBuildId,
           error
@@ -4009,6 +4070,9 @@ function ensureFreshRuntimeAfterManagerStart() {
       localMcpTool(base.config, base.token, "worker_job_history", {
         statuses: ["prepared", "running", "completed", "failed", "cancelled", "blocked"],
         limit: WORKER_JOB_HISTORY_LIMIT
+      }, 15000, {
+        caller: "runtime_freshness_worker_history",
+        runtime_freshness_iteration_id: runtimeFreshnessIterationId
       }).then((result) => Array.isArray(result?.jobs) ? result.jobs : []).catch(() => [])
     ]);
     if (!profiles) {
@@ -4020,6 +4084,7 @@ function ensureFreshRuntimeAfterManagerStart() {
     if (activeProfiles.length) {
       diagnostic("warn", "manager", "runtime", "Runtime CodexPro đang chạy bản cũ nhưng còn task hoạt động; Manager hoãn restart", {
         action: "runtime-build-refresh-deferred",
+        runtime_freshness_iteration_id: runtimeFreshnessIterationId,
         active_build_id: activeBuildId,
         expected_build_id: expectedBuildId,
         active_profile_count: activeProfiles.length,

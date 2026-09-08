@@ -125,6 +125,10 @@ try {
   const toolCategory = await readDiagnosticLogs(root, { hours: 24, source: "mcp", category: "tool" });
   assert.equal(toolCategory.entries.length, 1);
   assert.equal(toolCategory.entries[0].duration_ms, 42);
+  for (const field of ["pending_records", "pending_bytes", "oldest_pending_age_ms"]) {
+    assert.equal(Number.isFinite(toolCategory.entries[0].details?.[field]), true, `diagnostic writer telemetry must expose ${field}`);
+    assert.ok(toolCategory.entries[0].details[field] >= 0, `diagnostic writer telemetry ${field} must stay non-negative`);
+  }
 
   const routedTask = await readDiagnosticLogs(root, { hours: 24, source: "mcp-task", category: "task-routing", query: "profile-session" });
   assert.equal(routedTask.entries.length, 1);

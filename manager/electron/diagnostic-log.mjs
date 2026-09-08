@@ -44,6 +44,15 @@ function writeState(home) {
   return state;
 }
 
+function diagnosticWriterMetrics(state, currentTime = Date.now()) {
+  const oldestEnqueuedAt = Number(state?.pending?.[0]?.enqueuedAtMs) || 0;
+  return {
+    pending_records: Math.max(0, Number(state?.pending?.length) || 0),
+    pending_bytes: Math.max(0, Number(state?.pendingBytes) || 0),
+    oldest_pending_age_ms: oldestEnqueuedAt > 0 ? Math.max(0, currentTime - oldestEnqueuedAt) : 0
+  };
+}
+
 function profileTaskEventLogPaths(home) {
   const current = path.join(home, "profile-task-events.jsonl");
   return [`${current}.1`, current];
@@ -423,12 +432,18 @@ function scheduleDiagnosticFlush(home, state) {
 }
 
 export function appendDiagnosticLog(home, entry) {
-  const record = normalizeRecord(entry);
-  const line = `${JSON.stringify(record)}\n`;
   const state = writeState(home);
+  const record = normalizeRecord({
+    ...entry,
+    details: {
+      ...(entry?.details && typeof entry.details === "object" ? entry.details : {}),
+      ...diagnosticWriterMetrics(state)
+    }
+  });
+  const line = `${JSON.stringify(record)}\n`;
   const promise = new Promise((resolve, reject) => {
     const bytes = Buffer.byteLength(line, "utf8");
-    state.pending.push({ line, bytes, resolve, reject });
+    state.pending.push({ line, bytes, enqueuedAtMs: Date.now(), resolve, reject });
     state.pendingBytes += bytes;
     trimPendingBacklog(state);
   });

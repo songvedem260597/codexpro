@@ -85,10 +85,10 @@ assert.ok(events.every((event) => (event.backgroundActive ?? 0) <= 2), "queue te
 assert.ok(events.some((event) => event.lane === "profile-a"), "queue telemetry must include the per-profile lane");
 
 const managerMain = await readFile(new URL("../electron/main.mjs", import.meta.url), "utf8");
-const managerUi = await readFile(new URL("../src/main.jsx", import.meta.url), "utf8");
+const responseLoader = await readFile(new URL("../src/hooks/use-chat-response-loader.js", import.meta.url), "utf8");
 assert.match(managerMain, /createMcpResponseQueue\([\s\S]*?maxConcurrent:\s*3[\s\S]*?maxBackgroundConcurrent:\s*2/, "Manager must allow two background profiles while reserving a third slot for foreground chat");
 assert.match(managerMain, /responseQueue\.run\([\s\S]*?responseQueueKey[\s\S]*?priority,\s*lane:\s*profileId/, "every profile response read must use a keyed per-profile lane");
 assert.match(managerMain, /queue_wait_ms[\s\S]*?queue_active_at_enqueue[\s\S]*?queue_queued_at_enqueue[\s\S]*?queue_coalesced/, "response diagnostics must retain queue pressure evidence");
-assert.match(managerUi, /getProfileResponse\(\{[\s\S]*?priority:\s*profile\.profile_id === chatProfileId \? "interactive" : "background"/, "the open chat must receive foreground response priority");
+assert.match(responseLoader, /getProfileResponse\(\{[\s\S]*?priority:\s*profile\.profile_id === chatProfileId \? "interactive" : "background"/, "the open chat must receive foreground response priority");
 
 console.log("✓ MCP response queue parallel profile lanes, coalescing, priority, and diagnostics smoke test passed");

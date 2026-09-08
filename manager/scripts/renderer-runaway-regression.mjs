@@ -237,12 +237,12 @@ assert.match(
 assert.match(sessionSource, /if \(currentResponse\?\.finalityPending\)/, "finality polling must remain intact");
 assert.match(
   sessionSource,
-  /if \(networkState !== "completed" \|\| !networkCompletedAt\) continue;[\s\S]*?const canonical = await loadCanonicalResponse\(profile, conversationId\);/,
+  /if \(networkState !== "completed" \|\| !networkCompletedAt\) continue;[\s\S]*?const canonical = await loadCanonicalResponse\(profile, conversationId(?:, "[^"]+")?\);/,
   "background completion verification must remain intact and use the shared canonical coordinator"
 );
 assert.match(
   sessionSource,
-  /const canonical = await loadCanonicalResponse\(profile, conversationId\);[\s\S]*?canonical_poll_deferred[\s\S]*?canonical_rate_limited/,
+  /const canonical = await loadCanonicalResponse\(profile, conversationId(?:, "[^"]+")?\);[\s\S]*?canonical_poll_deferred[\s\S]*?canonical_rate_limited/,
   "latest-response polling must obey renderer canonical cooldown before DOM fallback"
 );
 assert.doesNotMatch(

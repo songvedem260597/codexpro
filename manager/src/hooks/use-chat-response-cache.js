@@ -235,13 +235,13 @@ export function useChatResponseCache({ api, requestTargetsRef, setRequestRespons
     if (selectedTargetNow && selectedTargetNow !== conversationId) return;
     if (!cacheFresh) {
       const cachedHasContent = Boolean(cached?.messages?.length || String(cached?.text || "").trim());
-      const fastResult = await loadResponse(profile, conversationId, true, false);
+      const fastResult = await loadResponse(profile, conversationId, true, false, false, false, "cache_hydration");
       const fastHasContent = Boolean(
         fastResult?.network_stream_available && fastResult?.network_stream_in_progress === true
         && (String(fastResult?.text || "").trim() || fastResult?.messages?.length || String(fastResult?.network_stream_activity_text || "").trim())
       );
       if (!fastHasContent && completedResponseNeedsDomFallback(fastResult)) {
-        window.setTimeout(() => void loadResponse(profile, conversationId, true, true, false, false), cachedHasContent ? 250 : 0);
+        window.setTimeout(() => void loadResponse(profile, conversationId, true, true, false, false, "cache_hydration"), cachedHasContent ? 250 : 0);
       }
     }
   }, [cachedResponseIsFresh, getResponseCacheEntry, loadResponse, requestTargetsRef, responseCacheKey, setRequestResponses]);
