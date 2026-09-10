@@ -32,8 +32,10 @@ assert.equal(tracker.observeRuntimeHealth({ details: { transition: "still-offlin
 assert.equal(tracker.observeRuntimeHealth({ details: { transition: "recovered", probe_label: "Public tunnel" } }), null);
 
 const main = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
+const workerUpdateBroadcaster = fs.readFileSync(new URL("../electron/worker-update-broadcaster.mjs", import.meta.url), "utf8");
 assert.match(main, /createInterruptionAlertTracker/);
-assert.match(main, /observeApiWorker\(update\)[\s\S]{0,300}taskNotifications[\s\S]{0,300}showManagerNotification/);
+assert.match(main, /createWorkerUpdateBroadcaster\([\s\S]{0,300}interruptionAlertTracker[\s\S]{0,300}readManagerSettings/);
+assert.match(workerUpdateBroadcaster, /observeApiWorker\(update\)[\s\S]{0,300}taskNotifications[\s\S]{0,300}showManagerNotification/);
 assert.match(main, /observeRuntimeHealth\(event, activeBrowserTaskSummaries\(\)\)[\s\S]{0,300}taskNotifications[\s\S]{0,300}showManagerNotification/);
 
 const renderer = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
