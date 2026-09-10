@@ -21,6 +21,7 @@ import { CODEXPRO_GLOBAL_RULES_FILE, readGlobalRulesSnapshot, readGlobalRulesSna
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { errorResult, errorText, textResult } from "./toolResults.js";
 import { createToolRegistrationRuntime } from "./toolRegistration.js";
+import { createRepoTaskRuntime, type ActiveRepoTask, type ExpectedRepoTask } from "./repoTaskRuntime.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { projectCompactGraph } from "./analysis/projection.js";
 
@@ -30,7 +31,7 @@ import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 import { bootstrapWorkerJob, finalizeWorkerJob, listWorkerJobs, prepareWorkerJob, readPreparedWorkerJob, readWorkerJob, resumeWorkerJob, workerJobHasLegacyStaleCancellation, type WorkerJobRecord, WORKER_POLICY_VERSION } from "./workerPolicy.js";
 import { classifiedWorkerJobPublicRecord, createWorkerJobToolDefinitions } from "./workerJobTools.js";
-import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, readWorkspaceTaskCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, resolveWorkspaceTaskRootByTaskId, verifyWorkspaceTaskResume, withVerifiedWorkspaceTaskResume, type ResolvedWorkspaceTaskRoot, type WorkspaceTaskContext } from "./workspaceCoordination.js";
+import { claimWorkspacePaths, finalizeWorkspaceTask, readWorkspaceCoordination, readWorkspaceCoordinationStatus, readWorkspaceTaskCoordinationStatus, recordWorkspacePathsTouched, registerWorkspaceTask, releaseWorkspacePaths, resolveWorkspaceTaskRootByTaskId, verifyWorkspaceTaskResume, withVerifiedWorkspaceTaskResume, type ResolvedWorkspaceTaskRoot } from "./workspaceCoordination.js";
 import { shouldRegisterTool, toolNamesForMode } from "./toolSurface.js";
 
 
@@ -77,31 +78,6 @@ const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
 };
 
 const runtimeTraceWorkspaceByServer = new WeakMap<object, () => Workspace | undefined>();
-const repoTaskGateRequiredByServer = new WeakMap<object, boolean>();
-const repoTaskGateProfileByServer = new WeakMap<object, string>();
-
-function resolveWorkerJobProfileIdForServer(server: object, taskId: string): string {
-  const durableWorkerId = String(readWorkerJob(taskId)?.workerId || "").trim();
-  if (durableWorkerId) {
-    repoTaskGateProfileByServer.set(server, durableWorkerId);
-    return durableWorkerId;
-  }
-  return repoTaskGateProfileByServer.get(server) || "";
-}
-type ActiveRepoTask = {
-  coordinationRoot?: string;
-  taskId: string;
-  taskTitle: string;
-  root: string;
-  workspaceId: string;
-  scope: "workspace" | "all_allowed";
-  globalRulesSha256: string;
-  worktreeRoot?: string;
-  worktreeBranch?: string;
-};
-const activeRepoTaskByServer = new WeakMap<object, ActiveRepoTask>();
-const activeRepoTaskByProfile = new Map<string, ActiveRepoTask>();
-const repoTaskWorkspaceSelectorByServer = new WeakMap<object, (root: string) => Workspace>();
 const repoTaskRuntimeResumeKey = `runtime-${process.pid}-${randomBytes(8).toString("hex")}`;
 const repoTaskResumeTails = new Map<string, Promise<{
   taskId: string;
@@ -118,65 +94,6 @@ const repoTaskResumeTails = new Map<string, Promise<{
   rulesChanged: boolean;
   ownerBindingRecovered: boolean;
 }>>();
-type ExpectedRepoTask = {
-  taskId: string;
-  root?: string;
-  scope: "workspace" | "all_allowed";
-  preparedAt: number;
-};
-const expectedRepoTaskByProfile = new Map<string, ExpectedRepoTask>();
-
-
-function sameResolvedRoot(left: string, right: string): boolean {
-  const resolvedLeft = path.resolve(left);
-  const resolvedRight = path.resolve(right);
-  return process.platform === "win32"
-    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
-    : resolvedLeft === resolvedRight;
-}
-
-function expectedRepoTask(profileId: string): ExpectedRepoTask | undefined {
-  return expectedRepoTaskByProfile.get(profileId);
-}
-
-function expectedRepoTaskOwner(taskId: string): { profileId: string; expected: ExpectedRepoTask } | undefined {
-  let owner: { profileId: string; expected: ExpectedRepoTask } | undefined;
-  for (const [profileId, expected] of expectedRepoTaskByProfile) {
-    if (expected.taskId !== taskId) continue;
-    if (owner) return undefined;
-    owner = { profileId, expected };
-  }
-  return owner;
-}
-
-function rememberExpectedRepoTask(profileId: string, expected: Omit<ExpectedRepoTask, "preparedAt">): ExpectedRepoTask {
-  const prepared = { ...expected, preparedAt: Date.now() };
-  activeRepoTaskByProfile.delete(profileId);
-  expectedRepoTaskByProfile.delete(profileId);
-  expectedRepoTaskByProfile.set(profileId, prepared);
-  if (expectedRepoTaskByProfile.size > 500) {
-    for (const staleProfileId of [...expectedRepoTaskByProfile.keys()].slice(0, expectedRepoTaskByProfile.size - 400)) {
-      expectedRepoTaskByProfile.delete(staleProfileId);
-    }
-  }
-  return prepared;
-}
-
-function repoTaskRootMatches(leftRoot: string, right: ExpectedRepoTask | ActiveRepoTask): boolean {
-  if (right.scope === "all_allowed" && !right.root) return true;
-  return Boolean(right.root && sameResolvedRoot(leftRoot, right.root));
-}
-
-function sameRepoTask(left: ActiveRepoTask | undefined, right: ExpectedRepoTask | ActiveRepoTask | undefined): boolean {
-  return Boolean(
-    left
-    && right
-    && left.taskId === right.taskId
-    && left.scope === right.scope
-    && repoTaskRootMatches(left.root, right)
-  );
-}
-
 function isPreparedLifecycleRecovery(job: WorkerJobRecord | undefined): job is WorkerJobRecord {
   return Boolean(
     job
@@ -238,64 +155,30 @@ function resolvePreparedLifecycleRecovery(input: {
   return resolved;
 }
 
-const REPO_TASK_GATE_EXEMPT_TOOLS = new Set<string>([
-  SUPERTOOL_NAME,
-  "begin_repo_task",
-  "resume_repo_task",
-  "repo_task_status",
-  "workspace_coordination_status",
-  "worker_job_status",
-  "worker_job_history",
-  "worker_context_history",
-  "report_worker_job_progress",
-  "finalize_worker_job"
-]);
-
-function assertRepoTaskGate(server: McpServer, name: string): void {
-  if (!repoTaskGateRequiredByServer.get(server as object) || REPO_TASK_GATE_EXEMPT_TOOLS.has(name)) return;
-  const profileId = repoTaskGateProfileByServer.get(server as object) || "";
-  const expected = profileId ? expectedRepoTask(profileId) : undefined;
-  const active = profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
-  if (!active || !sameRepoTask(active, expected)) {
-    activeRepoTaskByServer.delete(server as object);
-    if (profileId) activeRepoTaskByProfile.delete(profileId);
-    throw new CodexProError(
-      `BEGIN_REPO_TASK_REQUIRED: ${name} is blocked until the current CodexPro Manager task is activated with begin_repo_task.`,
-      {
-        code: "BEGIN_REPO_TASK_REQUIRED",
-        details: {
-          tool: name,
-          profile_id: profileId || undefined,
-          expected_task_id: expected?.taskId,
-          active_task_id: active?.taskId
-        }
-      }
-    );
-  }
-  const latestRules = readGlobalRulesSnapshotSync();
-  if (latestRules.sha256 !== active.globalRulesSha256) {
-    activeRepoTaskByServer.delete(server as object);
-    if (profileId) activeRepoTaskByProfile.delete(profileId);
-    throw new CodexProError(
-      `BEGIN_REPO_TASK_RULES_CHANGED: ${CODEXPRO_GLOBAL_RULES_FILE} changed after task ${active.taskId} began. Call begin_repo_task again before using ${name}.`,
-      {
-        code: "BEGIN_REPO_TASK_RULES_CHANGED",
-        details: {
-          tool: name,
-          task_id: active.taskId,
-          previous_global_rules_sha256: active.globalRulesSha256,
-          current_global_rules_sha256: latestRules.sha256,
-          global_rules_path: latestRules.path
-        }
-      }
-    );
-  }
-  const sessionActive = activeRepoTaskByServer.get(server as object);
-  if (!sameRepoTask(sessionActive, active) || sessionActive?.globalRulesSha256 !== active.globalRulesSha256) {
-    repoTaskWorkspaceSelectorByServer.get(server as object)?.(active.root);
-    activeRepoTaskByServer.set(server as object, active);
-  }
-}
+const {
+  configureServer: configureRepoTaskRuntimeServer,
+  profileIdForServer: repoTaskProfileIdForServer,
+  setProfileIdForServer: setRepoTaskProfileIdForServer,
+  resolveWorkerJobProfileIdForServer,
+  sameResolvedRoot,
+  expectedRepoTask,
+  expectedRepoTaskOwner,
+  rememberExpectedRepoTask,
+  repoTaskRootMatches,
+  sameRepoTask,
+  activeRepoTaskForProfile,
+  setActiveRepoTaskForProfile,
+  clearActiveRepoTaskForProfile,
+  activeRepoTaskForServer,
+  setActiveRepoTaskForServer,
+  clearActiveRepoTaskForServer,
+  assertRepoTaskGate,
+  assertTaskChecklistReady,
+  repoTaskWorktree,
+  effectiveWorkspaceForServer,
+  workspaceForTool,
+  workspaceTaskContextForServer
+} = createRepoTaskRuntime();
 
 const {
   initializeServer: initializeToolRegistrationServer,
@@ -309,84 +192,6 @@ const {
   runtimeTraceWorkspaceForServer: (server) => runtimeTraceWorkspaceByServer.get(server as object)?.(),
   recordMcpUsage
 });
-
-function activeRepoTaskForServer(server: McpServer): ActiveRepoTask | undefined {
-  const profileId = repoTaskGateProfileByServer.get(server as object) || "";
-  return profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
-}
-
-function assertTaskChecklistReady(server: McpServer): void {
-  const active = activeRepoTaskForServer(server);
-  if (!active) return;
-  const job = readWorkerJob(active.taskId);
-  if (!job || !["medium", "large"].includes(String(job.taskSize)) || job.checklist.length) return;
-  throw new CodexProError(
-    "TASK_CHECKLIST_REQUIRED: Report a complete durable checklist with report_worker_job_progress before modifying source for a medium or large task.",
-    { code: "TASK_CHECKLIST_REQUIRED", details: { task_id: active.taskId, task_size: job.taskSize } }
-  );
-}
-
-function repoTaskCoordinationRoot(active: ActiveRepoTask): string {
-  return active.coordinationRoot || active.root;
-}
-
-function repoTaskWorktree(active: ActiveRepoTask): { root?: string; branch?: string } {
-  if (active.worktreeRoot) {
-    if (!fs.existsSync(active.worktreeRoot)) {
-      throw new CodexProError(`WORKSPACE_TASK_WORKTREE_MISSING: recorded worktree no longer exists: ${active.worktreeRoot}.`, {
-        code: "WORKSPACE_TASK_WORKTREE_MISSING",
-        details: { task_id: active.taskId, worktree_root: active.worktreeRoot, workspace_root: active.root }
-      });
-    }
-    return { root: active.worktreeRoot, branch: active.worktreeBranch };
-  }
-  const record = readWorkspaceCoordination(repoTaskCoordinationRoot(active)).tasks[active.taskId];
-  if (record?.worktreeRoot) {
-    if (!fs.existsSync(record.worktreeRoot)) {
-      throw new CodexProError(`WORKSPACE_TASK_WORKTREE_MISSING: recorded worktree no longer exists: ${record.worktreeRoot}.`, {
-        code: "WORKSPACE_TASK_WORKTREE_MISSING",
-        details: { task_id: active.taskId, worktree_root: record.worktreeRoot, workspace_root: active.root }
-      });
-    }
-    active.worktreeRoot = record.worktreeRoot;
-    active.worktreeBranch = record.worktreeBranch;
-    return { root: record.worktreeRoot, branch: record.worktreeBranch };
-  }
-  return {};
-}
-
-function effectiveWorkspaceForServer(server: McpServer, workspace: Workspace): Workspace {
-  const active = activeRepoTaskForServer(server);
-  if (!active) return workspace;
-  const worktree = repoTaskWorktree(active);
-  if (!worktree.root) return workspace;
-  if (sameResolvedRoot(workspace.root, worktree.root)) return workspace;
-  if (!sameResolvedRoot(workspace.root, active.root)) return workspace;
-  return { ...workspace, root: worktree.root };
-}
-
-function workspaceForTool(server: McpServer, workspaces: WorkspaceManager, workspaceId?: string): Workspace {
-  return effectiveWorkspaceForServer(server, workspaces.getWorkspace(workspaceId));
-}
-
-function workspaceTaskContextForServer(server: McpServer, workspace: Workspace): WorkspaceTaskContext | undefined {
-  const profileId = repoTaskGateProfileByServer.get(server as object) || "";
-  const active = profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
-  if (!active) return undefined;
-  const worktree = repoTaskWorktree(active);
-  const coordinationRoot = repoTaskCoordinationRoot(active);
-  const matchesCoordination = sameResolvedRoot(coordinationRoot, workspace.root);
-  const matchesExecution = sameResolvedRoot(active.root, workspace.root);
-  const matchesWorktree = Boolean(worktree.root && sameResolvedRoot(worktree.root, workspace.root));
-  if (!matchesCoordination && !matchesExecution && !matchesWorktree) return undefined;
-  return {
-    taskId: active.taskId,
-    workerId: profileId || `direct.${active.taskId}`,
-    title: active.taskTitle,
-    root: coordinationRoot,
-    ...(worktree.root ? { worktreeRoot: worktree.root } : {})
-  };
-}
 
 function normalizeSupertoolAction(value: unknown): string {
   const raw = String(value ?? "list_actions").trim();
@@ -839,9 +644,11 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
   const guard = new PathGuard(config);
   const server = new McpServer({ name: "CodexPro", version: "0.29.12" }, { instructions: serverInstructions(config, requireRepoTask) });
   runtimeTraceWorkspaceByServer.set(server as object, () => selectedRuntimeTraceWorkspace ?? workspaces.defaultWorkspace());
-  repoTaskWorkspaceSelectorByServer.set(server as object, (root) => workspaces.openWorkspace(root));
-  repoTaskGateRequiredByServer.set(server as object, requireRepoTask);
-  if (browserProfileId) repoTaskGateProfileByServer.set(server as object, browserProfileId);
+  configureRepoTaskRuntimeServer(server, {
+    requireRepoTask,
+    profileId: browserProfileId,
+    workspaceSelector: (root) => workspaces.openWorkspace(root)
+  });
   if (config.browserControl) ensureBrowserExtensionBridge();
   initializeToolRegistrationServer(server);
   registerToolCardResource(server, config);
@@ -1478,7 +1285,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
     },
     async (args) => {
-      const sessionProfileId = repoTaskGateProfileByServer.get(server as object) || "";
+      const sessionProfileId = repoTaskProfileIdForServer(server as object);
       let gateProfileId = sessionProfileId;
       let expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
       const managerPrepared = Boolean(args.task_id);
@@ -1523,7 +1330,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         gateProfileId = preparedOwner.profileId;
         expected = preparedOwner.expected;
         browserProfileId = gateProfileId;
-        repoTaskGateProfileByServer.set(server as object, gateProfileId);
+        setRepoTaskProfileIdForServer(server as object, gateProfileId);
         recordBrowserProfileTaskEvent("repo_task_profile_rerouted", {
           task_id: taskId,
           task_title: String(args.task_title || ""),
@@ -1708,8 +1515,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         codexgraph_relationship_count: codexGraph?.coverage.relationshipCount
       });
       rememberRepoTaskProof(proof);
-      activeRepoTaskByServer.delete(server as object);
-      if (gateProfileId) activeRepoTaskByProfile.delete(gateProfileId);
+      clearActiveRepoTaskForServer(server);
+      if (gateProfileId) clearActiveRepoTaskForProfile(gateProfileId);
       if (proof.taskKind === "general") {
         return textResult(`# Profile Task Registered\n\nTask: ${proof.taskId}\nTitle: ${proof.taskTitle}\nKind: general\n\nGlobal rules and CodexGraph were not loaded because this task does not use repository tools.`, {
           task_id: proof.taskId,
@@ -1757,10 +1564,10 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         worktreeRoot: coordinationTask.worktreeRoot,
         worktreeBranch: coordinationTask.worktreeBranch
       };
-      activeRepoTaskByServer.set(server as object, activeTask);
+      setActiveRepoTaskForServer(server, activeTask);
       if (gateProfileId) {
-        activeRepoTaskByProfile.delete(gateProfileId);
-        activeRepoTaskByProfile.set(gateProfileId, activeTask);
+        clearActiveRepoTaskForProfile(gateProfileId);
+        setActiveRepoTaskForProfile(gateProfileId, activeTask);
       }
       return textResult(withGlobalRules(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}\nCodexGraph: active (${codexGraph.coverage.symbolCount} symbols, ${codexGraph.coverage.relationshipCount} relationships)`, globalRules), {
         task_id: proof.taskId,
@@ -1819,7 +1626,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     },
     async (args) => {
       const taskId = String(args.task_id || "").trim();
-      const sessionProfileId = repoTaskGateProfileByServer.get(server as object) || "";
+      const sessionProfileId = repoTaskProfileIdForServer(server as object);
       const requestedProfileId = String(args.profile_id || "").trim();
       if (sessionProfileId && requestedProfileId && sessionProfileId !== requestedProfileId) {
         throw new CodexProError("REPO_TASK_RESUME_PROFILE_MISMATCH: bound MCP profile does not match the requested task owner.", {
@@ -1890,7 +1697,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
       }
 
       const durableScope = durableBefore.scope === "all_allowed" ? "all_allowed" : "workspace";
-      const existingActive = activeRepoTaskByProfile.get(profileId);
+      const existingActive = activeRepoTaskForProfile(profileId);
       const existingExpected = expectedRepoTask(profileId);
       const latestRules = readGlobalRulesSnapshotSync();
       if (durableBefore.status === "running" && existingActive
@@ -1906,7 +1713,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         await withVerifiedWorkspaceTaskResume(context, verified, async () => assertResumeStillCurrent());
         const worktree = repoTaskWorktree(existingActive);
         assertResumeStillCurrent();
-        activeRepoTaskByServer.set(server as object, existingActive);
+        setActiveRepoTaskForServer(server, existingActive);
         return textResult(`# Repo Task Gate Ready\n\nTask: ${taskId}\nProfile: ${profileId}\n\nThe existing task gate is already valid; no task action was replayed.`, {
           resumed: true,
           gate_active: true,
@@ -2020,7 +1827,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
             worktreeRoot: coordinationTask.worktreeRoot,
             worktreeBranch: coordinationTask.worktreeBranch
           };
-          activeRepoTaskByProfile.set(profileId, activeTask);
+          setActiveRepoTaskForProfile(profileId, activeTask);
           const ownerBindingRecovered = !profileBinding || persistedOwners.length === 0;
           setBrowserExtensionProfileTask(profileId, taskId, durableJob.title);
           if (!resumedJob.deduplicated) {
@@ -2076,8 +1883,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         worktreeBranch: recovered.worktreeBranch
       };
       assertResumeStillCurrent();
-      activeRepoTaskByProfile.set(profileId, activeTask);
-      activeRepoTaskByServer.set(server as object, activeTask);
+      setActiveRepoTaskForProfile(profileId, activeTask);
+      setActiveRepoTaskForServer(server, activeTask);
       return textResult(`# Repo Task Resumed\n\nTask: ${taskId}\nProfile: ${profileId}\nWorktree: ${recovered.worktreeRoot}\n\nThe existing task gate was restored without replaying prior task actions.`, {
         resumed: true,
         gate_active: true,
@@ -2121,9 +1928,9 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     },
     async (args) => {
       const proof = repoTaskProofs.get(args.task_id);
-      const gateProfileId = repoTaskGateProfileByServer.get(server as object) || "";
+      const gateProfileId = repoTaskProfileIdForServer(server as object);
       const expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
-      const active = gateProfileId ? activeRepoTaskByProfile.get(gateProfileId) : activeRepoTaskByServer.get(server as object);
+      const active = activeRepoTaskForServer(server);
       const rulesMatch = Boolean(active && readGlobalRulesSnapshotSync().sha256 === active.globalRulesSha256);
       const workerJob = readWorkerJob(args.task_id);
       const durableProof = durableRepoTaskProof(workerJob, args.task_id, gateProfileId);
