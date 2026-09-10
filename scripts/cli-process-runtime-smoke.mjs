@@ -127,7 +127,7 @@ const packageSource = await fs.readFile(path.join(root, 'package.json'), 'utf8')
 assert.match(moduleSource, /from '\.\/cli-executables\.mjs';/);
 assert.match(cliSource, /from '\.\/cli-process-runtime\.mjs';/);
 assert.match(cliSource, /createCliTunnelExecutables\(\{ spawnSyncPortable \}\)/);
-assert.match(cliSource, /function requestQuickTunnelViaCurl\(/);
+assert.match(cliSource, /from '\.\/cli-tunnel-runtime\.mjs';/);
 for (const name of ['sleep', 'waitForHealth', 'portInUseHelp', 'normalizePort', 'assertPortAvailable', 'quoteWindowsCmdArg', 'processInvocation', 'spawnSyncPortable', 'spawnLogged', 'waitForProcessExit', 'killProcess', 'cleanupChildren', 'watchHiddenLauncherParent']) assert(!cliSource.includes(`function ${name}(`), `${name} still implemented in codexpro.mjs`);
 assert(!cliSource.includes('const spawnedChildren = new Set()'));
 assert.match(packageSource, /node scripts\/cli-process-runtime-smoke\.mjs/);
