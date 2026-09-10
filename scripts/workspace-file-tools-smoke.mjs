@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { registerWorkspaceFileTools } from "../src/workspaceFileTools.js";
+import { registerWorkspaceFileTools } from "../dist/workspaceFileTools.js";
 
 const config = { maxSearchResults: 50, analysisEnabled: true };
 const server = {};

@@ -3,8 +3,8 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { CodexProError } from "../src/guard.js";
-import { registerHandoffTools } from "../src/handoffTools.js";
+import { CodexProError } from "../dist/guard.js";
+import { registerHandoffTools } from "../dist/handoffTools.js";
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-handoff-tools-"));
 const contextDir = ".ai-bridge";

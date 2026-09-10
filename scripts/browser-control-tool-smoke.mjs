@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { CodexProError } from "../src/guard.js";
-import { registerBrowserControlTool } from "../src/browserControlTool.js";
+import { CodexProError } from "../dist/guard.js";
+import { registerBrowserControlTool } from "../dist/browserControlTool.js";
 
 const config = { browserDebugUrl: "http://127.0.0.1:9223" };
 const server = {};

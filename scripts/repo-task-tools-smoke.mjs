@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CodexProError } from "../src/guard.js";
-import { createRepoTaskRuntime } from "../src/repoTaskRuntime.js";
-import { registerRepoTaskTools } from "../src/repoTaskTools.js";
+import { CodexProError } from "../dist/guard.js";
+import { createRepoTaskRuntime } from "../dist/repoTaskRuntime.js";
+import { registerRepoTaskTools } from "../dist/repoTaskTools.js";
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-repo-task-tools-"));
 const repoRoot = path.join(tempRoot, "repo");
