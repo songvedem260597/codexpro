@@ -19,10 +19,11 @@ import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_URI, descriptorOptionsForConfig, registerToolCardResource, toolCardMeta, usesToolCard } from "./toolCardRegistration.js";
 import { CODEXPRO_GLOBAL_RULES_FILE, readGlobalRulesSnapshot, readGlobalRulesSnapshotSync, withGlobalRules } from "./globalRules.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
-import { compactStructuredContent, errorResult, errorText, textResult } from "./toolResults.js";
+import { errorResult, errorText, textResult } from "./toolResults.js";
+import { createToolRegistrationRuntime } from "./toolRegistration.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { projectCompactGraph } from "./analysis/projection.js";
-import { createRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext, type RuntimeTraceContext } from "./analysis/runtimeTrace.js";
+
 import { runBrowserControl } from "./browserOps.js";
 import { ensureBrowserExtensionBridge, forgetBrowserExtensionProfile, getBrowserExtensionPendingTaskOwner, getBrowserExtensionProfileTaskBinding, getBrowserExtensionProfileWorkspaceBinding, getBrowserExtensionTaskOwners, listBrowserExtensionProfiles, rebindBrowserExtensionProfileTaskConversation, recordBrowserProfileTaskEvent, runBrowserExtensionCommand, setBrowserExtensionProfilePendingTask, setBrowserExtensionProfileTask, setBrowserExtensionProfileWorkspace, setBrowserExtensionProfileWorkspaceBinding } from "./browserExtensionBridge.js";
 import { recordMcpUsage } from "./mcpUsage.js";
@@ -60,52 +61,6 @@ function bashTextResult(config: CodexProConfig, result: Awaited<ReturnType<typeo
   ].join("\n");
 }
 
-function validateToolArgs(name: string, options: Record<string, unknown>, args: unknown): any {
-  const inputSchema = options.inputSchema;
-  if (!inputSchema || typeof inputSchema !== "object" || Array.isArray(inputSchema)) return args ?? {};
-  const shape: Record<string, z.ZodTypeAny> = {};
-  for (const [key, value] of Object.entries(inputSchema)) {
-    if (value && typeof (value as { safeParse?: unknown }).safeParse === "function") {
-      shape[key] = value as z.ZodTypeAny;
-    }
-  }
-  if (!Object.keys(shape).length) return {};
-  const parsed = z.object(shape).safeParse(args ?? {});
-  if (parsed.success) return parsed.data;
-  const details = parsed.error.issues
-    .map((issue) => `${issue.path.length ? issue.path.join(".") : "arguments"}: ${issue.message}`)
-    .join("; ");
-  throw new CodexProError(`Invalid arguments for ${name}: ${details}`);
-}
-
-function tagToolResult(result: any, name: string, options: Record<string, unknown>): any {
-  if (!result || typeof result !== "object") return result;
-  const structured = result.structuredContent;
-  const base =
-    structured && typeof structured === "object" && !Array.isArray(structured)
-      ? structured
-      : {};
-  const tagged = {
-    codexpro_tool: name,
-    codexpro_title: options.title ?? name,
-    ...base
-  };
-  const meta = (options._meta as Record<string, unknown> | undefined) ?? {};
-  result.structuredContent = meta.ui || meta["openai/outputTemplate"] ? compactStructuredContent(tagged) : tagged;
-  return result;
-}
-
-function toolCallLoggingEnabled(): boolean {
-  return process.env.CODEXPRO_LOG_TOOL_CALLS === "1" || process.env.CODEXPRO_LOG_REQUESTS === "1";
-}
-
-function logToolCall(name: string, status: "ok" | "error", started: number): void {
-  if (!toolCallLoggingEnabled()) return;
-  console.error(`[CodexProTool] ${name} ${status} ${Date.now() - started}ms`);
-}
-
-type CodexToolHandler = (args: any) => Promise<any> | any;
-
 const SUPERTOOL_NAME = "codexpro";
 const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
   actions: "list_actions",
@@ -121,7 +76,6 @@ const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
   codex_handoff: "handoff_to_codex"
 };
 
-const registeredToolHandlersByServer = new WeakMap<object, Map<string, CodexToolHandler>>();
 const runtimeTraceWorkspaceByServer = new WeakMap<object, () => Workspace | undefined>();
 const repoTaskGateRequiredByServer = new WeakMap<object, boolean>();
 const repoTaskGateProfileByServer = new WeakMap<object, string>();
@@ -343,6 +297,19 @@ function assertRepoTaskGate(server: McpServer, name: string): void {
   }
 }
 
+const {
+  initializeServer: initializeToolRegistrationServer,
+  registerCodexTool,
+  registeredToolHandler,
+  registeredToolNames
+} = createToolRegistrationRuntime({
+  shouldRegisterTool,
+  descriptorOptionsForConfig,
+  assertRepoTaskGate,
+  runtimeTraceWorkspaceForServer: (server) => runtimeTraceWorkspaceByServer.get(server as object)?.(),
+  recordMcpUsage
+});
+
 function activeRepoTaskForServer(server: McpServer): ActiveRepoTask | undefined {
   const profileId = repoTaskGateProfileByServer.get(server as object) || "";
   return profileId ? activeRepoTaskByProfile.get(profileId) : activeRepoTaskByServer.get(server as object);
@@ -421,47 +388,6 @@ function workspaceTaskContextForServer(server: McpServer, workspace: Workspace):
   };
 }
 
-function rememberRegisteredToolHandler(server: McpServer, name: string, handler: CodexToolHandler): void {
-  const key = server as object;
-  const handlers = registeredToolHandlersByServer.get(key) ?? new Map<string, CodexToolHandler>();
-  if (!registeredToolHandlersByServer.has(key)) registeredToolHandlersByServer.set(key, handlers);
-  handlers.set(name, handler);
-}
-
-function registeredToolHandler(server: McpServer, name: string): CodexToolHandler | undefined {
-  return registeredToolHandlersByServer.get(server as object)?.get(name);
-}
-
-async function recordToolRuntimeTrace(
-  server: McpServer,
-  name: string,
-  args: any,
-  status: "ok" | "error",
-  startedAtMs: number,
-  endedAtMs: number,
-  context?: RuntimeTraceContext
-): Promise<void> {
-  let workspace: Workspace | undefined;
-  try {
-    workspace = runtimeTraceWorkspaceByServer.get(server as object)?.();
-  } catch {
-    workspace = undefined;
-  }
-  if (!workspace) return;
-  const matchingContext = context?.workspaceId === workspace.id ? context : undefined;
-  const rawAction = typeof args?.action === "string" ? args.action.trim() : "";
-  await recordRuntimeTraceSpan(workspace, {
-    ...(matchingContext ? { traceId: matchingContext.traceId, spanId: matchingContext.spanId } : {}),
-    kind: "tool",
-    name,
-    ...(rawAction ? { action: rawAction.slice(0, 160) } : {}),
-    source: "mcp-tool",
-    status,
-    startedAtMs,
-    endedAtMs
-  }).catch(() => undefined);
-}
-
 function normalizeSupertoolAction(value: unknown): string {
   const raw = String(value ?? "list_actions").trim();
   const normalized = raw.toLowerCase().replace(/[\s-]+/g, "_");
@@ -485,98 +411,6 @@ function assertWriteToolAllowed(config: CodexProConfig, relPath: string): void {
     );
   }
   throw new CodexProError("write/edit/apply_patch tools are disabled because CODEXPRO_WRITE_MODE=off. handoff_to_agent and handoff_to_codex are still available for planning.");
-}
-
-function registerToolCompat(
-  server: McpServer,
-  name: string,
-  options: Record<string, unknown>,
-  handler: (args: any) => Promise<any> | any
-): void {
-  const wrapped = async (args: any) => {
-    const started = Date.now();
-    const usageArgs = args ?? {};
-    let initialWorkspace: Workspace | undefined;
-    try {
-      initialWorkspace = runtimeTraceWorkspaceByServer.get(server as object)?.();
-    } catch {
-      initialWorkspace = undefined;
-    }
-    const traceContext = initialWorkspace ? createRuntimeTraceContext(initialWorkspace) : undefined;
-    const invokeHandler = () => handler(usageArgs);
-    try {
-      const handled = traceContext
-        ? await runWithRuntimeTraceContext(traceContext, invokeHandler)
-        : await invokeHandler();
-      const result = tagToolResult(handled, name, options);
-      const status = result?.isError ? "error" : "ok";
-      const durationMs = Date.now() - started;
-      logToolCall(name, status, started);
-      recordMcpUsage(name, usageArgs, result, status, durationMs);
-      await recordToolRuntimeTrace(server, name, usageArgs, status, started, started + durationMs, traceContext);
-      return result;
-    } catch (error) {
-      const result = tagToolResult(errorResult(error), name, options);
-      const durationMs = Date.now() - started;
-      logToolCall(name, "error", started);
-      recordMcpUsage(name, usageArgs, result, "error", durationMs);
-      await recordToolRuntimeTrace(server, name, usageArgs, "error", started, started + durationMs, traceContext);
-      return result;
-    }
-  };
-
-  const securitySchemes = [{ type: "noauth" }];
-  const fullOptions: Record<string, unknown> = {
-    securitySchemes,
-    ...options,
-    _meta: {
-      securitySchemes,
-      ...(options._meta as Record<string, unknown> | undefined)
-    }
-  };
-
-  const s = server as any;
-  if (typeof s.registerTool === "function") {
-    s.registerTool(name, fullOptions, wrapped);
-    return;
-  }
-
-  if (typeof s.tool === "function") {
-    s.tool(name, (fullOptions.description as string | undefined) ?? name, fullOptions.inputSchema ?? {}, wrapped);
-    return;
-  }
-
-  throw new Error("Unsupported MCP SDK: McpServer has neither registerTool nor tool.");
-}
-
-const registeredToolNamesByServer = new WeakMap<object, string[]>();
-
-function rememberRegisteredTool(server: McpServer, name: string): void {
-  const key = server as object;
-  const names = registeredToolNamesByServer.get(key) ?? [];
-  if (!registeredToolNamesByServer.has(key)) registeredToolNamesByServer.set(key, names);
-  if (!names.includes(name)) names.push(name);
-}
-
-function registeredToolNames(server: McpServer): string[] {
-  return [...(registeredToolNamesByServer.get(server as object) ?? [])];
-}
-
-function registerCodexTool(
-  config: CodexProConfig,
-  server: McpServer,
-  name: string,
-  options: Record<string, unknown>,
-  handler: CodexToolHandler
-): void {
-  if (!shouldRegisterTool(config, name)) return;
-  const validatedHandler: CodexToolHandler = (args) => {
-    assertRepoTaskGate(server, name);
-    return handler(validateToolArgs(name, options, args));
-  };
-  registerToolCompat(server, name, descriptorOptionsForConfig(config, name, options), validatedHandler);
-  rememberRegisteredTool(server, name);
-  rememberRegisteredToolHandler(server, name, validatedHandler);
 }
 
 function serverInstructions(config: CodexProConfig, requireRepoTask = false): string {
@@ -1009,7 +843,7 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
   repoTaskGateRequiredByServer.set(server as object, requireRepoTask);
   if (browserProfileId) repoTaskGateProfileByServer.set(server as object, browserProfileId);
   if (config.browserControl) ensureBrowserExtensionBridge();
-  registeredToolNamesByServer.set(server as object, []);
+  initializeToolRegistrationServer(server);
   registerToolCardResource(server, config);
 
   registerCodexTool(
