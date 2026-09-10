@@ -37,7 +37,10 @@ export function createDiagnosticIpcRegistrar({ ipcMain, diagnostic }) {
     const failureMessage = String(options?.failureMessage || `${action} thất bại`);
     ipcMain.handle(channel, async (event, ...args) => {
       const startedAt = Date.now();
-      const ipcCallId = `ipc_${startedAt.toString(36)}_${randomBytes(3).toString("hex")}`;
+      const requestedIpcCallId = String(args?.[0]?.ipc_call_id || "").trim();
+      const ipcCallId = /^ipc_[A-Za-z0-9_-]{6,160}$/.test(requestedIpcCallId)
+        ? requestedIpcCallId
+        : `ipc_${startedAt.toString(36)}_${randomBytes(3).toString("hex")}`;
       const context = {
         ipc_call_id: ipcCallId,
         ipc_channel: channel,
@@ -50,11 +53,13 @@ export function createDiagnosticIpcRegistrar({ ipcMain, diagnostic }) {
         const resultContext = diagnosticProjection(options?.resultDetails, [result, ...args]);
         const resultDiagnostic = diagnosticProjection(options?.resultDiagnostic, [result, ...args], null);
         if (envelopeError) {
-          diagnostic("error", "manager", category, `${failureMessage}: ${envelopeError.message || "Lỗi không xác định"}`, {
+          const errorDiagnostic = diagnosticProjection(options?.errorDiagnostic, [envelopeError, ...args], null);
+          diagnostic(errorDiagnostic?.level || "error", "manager", category, errorDiagnostic?.message || `${failureMessage}: ${envelopeError.message || "Lỗi không xác định"}`, {
             action,
             duration_ms: durationMs,
             ...context,
-            error: envelopeError
+            error: envelopeError,
+            ...(errorDiagnostic?.details || {})
           });
         } else if (resultDiagnostic && diagnosticAllowed(resultDiagnostic.dedupeKey, resultDiagnostic.throttleMs)) {
           diagnostic(resultDiagnostic.level || "warn", "manager", category, resultDiagnostic.message || `${action} cần chú ý`, {

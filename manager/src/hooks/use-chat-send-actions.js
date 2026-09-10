@@ -185,6 +185,8 @@ export function useChatSendActions({
   }
 
   async function sendRequest(profile, draftOverride = null) {
+    const sendTraceId = `send_${Date.now().toString(36)}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    api.sendTraceEvent?.({ event: "renderer_send_started", send_trace_id: sendTraceId, profile_id: String(profile?.profile_id || "") });
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const requestedConversationId = String(requestTargets[profile.profile_id] ?? defaultTarget ?? NEW_CHAT_TARGET);
@@ -342,7 +344,7 @@ export function useChatSendActions({
       };
       setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
       const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
-      const result = await api.sendProfileRequest({ profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, allowBusyFollowup: !newChat, taskMode: logicalAdjustment ? "adjustment" : "new", previousTaskId: logicalAdjustment?.taskId || "", scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
+      const result = await api.sendProfileRequest({ send_trace_id: sendTraceId, profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, allowBusyFollowup: !newChat, taskMode: logicalAdjustment ? "adjustment" : "new", previousTaskId: logicalAdjustment?.taskId || "", scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence(result) }));
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
@@ -453,7 +455,11 @@ export function useChatSendActions({
       return true;
     } catch (err) {
       const message = err?.message || String(err);
-      logRendererDiagnostic(api, "error", "chat", `Gửi yêu cầu thất bại: ${message}`, { action: "send-request", profile_id: profile.profile_id, conversation_id: conversationId, project_root: projectRoot, error: err });
+      const sendErrorDetails = err?.details && typeof err.details === "object" ? err.details : {};
+      const nestedSendErrorDetails = sendErrorDetails?.details && typeof sendErrorDetails.details === "object" ? sendErrorDetails.details : {};
+      const sendAcked = sendErrorDetails?.network_acknowledged === true || nestedSendErrorDetails?.network_acknowledged === true;
+      const sendUncertain = !sendAcked && /BRIDGE_TIMEOUT|EXTENSION_HEARTBEAT_LOST/.test(String(err?.code || sendErrorDetails?.code || ""));
+      logRendererDiagnostic(api, sendUncertain ? "warn" : "error", "chat", sendAcked ? "Đã xác nhận gửi, lỗi xử lý sau ACK" : sendUncertain ? "Trạng thái gửi ChatGPT chưa xác định" : `Gửi yêu cầu thất bại: ${message}`, { action: "send-request", profile_id: profile.profile_id, conversation_id: conversationId, project_root: projectRoot, submission_state: sendAcked ? "submitted" : sendUncertain ? "uncertain" : "failed", network_acknowledged: sendAcked, error: err });
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence({}, err) }));
       const conversationLimitReached = !newChat && message.includes("CONVERSATION_LIMIT_REACHED:");
       if (conversationLimitReached) {

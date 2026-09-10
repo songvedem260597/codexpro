@@ -1,13 +1,14 @@
 import { app, BrowserWindow, clipboard, ClipboardItem, dialog, globalShortcut, ipcMain, nativeImage, Notification, protocol, safeStorage, shell } from "electron";
 import { runGitProcess, runPowerShellProcess } from "./process-runner.mjs";
 import { availableExtensionVersion } from "./extension-release.mjs";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "./diagnostic-log.mjs";
+import { createSendTraceLogger } from "./send-trace-log.mjs";
 import "./resource-overload-runtime.mjs";
 import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
 import { createMcpCausalTelemetry } from "./mcp-causal-telemetry.mjs";
@@ -139,6 +140,29 @@ const WORKER_JOB_HISTORY_LIMIT = 200;
 const codexProHome = process.env.CODEXPRO_HOME
   ? path.resolve(process.env.CODEXPRO_HOME)
   : path.join(os.homedir(), ".codexpro");
+const managerSendTraceLogger = createSendTraceLogger({ home: codexProHome, component: "manager", runId: MANAGER_RUN_ID });
+const sendTrace = (event, details = {}, options = {}) => {
+  try { managerSendTraceLogger.emit(event, details, options); } catch {}
+};
+async function managerBuildIdentity() {
+  const sourceFile = fileURLToPath(import.meta.url);
+  const packagedArtifact = path.join(process.resourcesPath || "", "app.asar");
+  const artifact = app.isPackaged && packagedArtifact && fs.existsSync(packagedArtifact) ? packagedArtifact : sourceFile;
+  try {
+    const stat = await fs.promises.stat(artifact);
+    const hash = createHash("sha256");
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(artifact);
+      stream.on("data", (chunk) => hash.update(chunk));
+      stream.on("error", reject);
+      stream.on("end", resolve);
+    });
+    sendTrace("runtime_identity", { component: "manager", identity_ref: MANAGER_RUN_ID, artifact_name: path.basename(artifact), artifact_size: stat.size, artifact_mtime_ms: Math.round(stat.mtimeMs), artifact_sha256: hash.digest("hex"), packaged: app.isPackaged, version_label: MANAGER_VERSION }, { priority: "critical" });
+  } catch (error) {
+    sendTrace("runtime_identity", { component: "manager", identity_ref: MANAGER_RUN_ID, identity_error: String(error?.message || error).slice(0, 500), packaged: app.isPackaged, version_label: MANAGER_VERSION }, { priority: "critical" });
+  }
+}
+void managerBuildIdentity();
 const appPluginRegistry = createAppPluginRegistry({ home: codexProHome });
 const taskHangTracker = createTaskHangTracker({ home: codexProHome });
 const visualWatchdogService = createVisualWatchdogService({
@@ -3332,6 +3356,8 @@ function workerJobResumeCheckpointText(job, checkpoints = []) {
 
 async function sendProfileRequestUnlocked(payload) {
   const sendDebug = process.env.CODEXPRO_MANAGER_MCP_DEBUG === "1";
+  const sendTraceId = String(payload?.send_trace_id || "").trim().slice(0, 160);
+  const ipcCallId = String(payload?.ipc_call_id || "").trim().slice(0, 160);
   if (sendDebug) console.error('[manager-send] start');
   const profileId = String(payload?.profileId || "").trim();
   const conversationId = String(payload?.conversationId || "").trim();
@@ -3545,15 +3571,23 @@ async function sendProfileRequestUnlocked(payload) {
     }, 75000);
   }
   if (!adjustmentAccepted && !recoveryAccepted) {
-    const preparedTask = await localMcpToolInSession(session, "prepare_repo_task", {
-      profile_id: profileId,
-      task_id: taskId,
-      ...(requestScope === "workspace" ? { root: initialWorkspaceRoot } : {}),
-      scope: requestScope
-    }, 15000);
-    if (preparedTask?.prepared !== true || String(preparedTask?.task_id || "") !== taskId) {
-      throw new Error("CodexPro server không xác nhận task gate trước khi gửi request.");
+    try {
+      const preparedTask = await localMcpToolInSession(session, "prepare_repo_task", {
+        profile_id: profileId,
+        task_id: taskId,
+        ...(requestScope === "workspace" ? { root: initialWorkspaceRoot } : {}),
+        scope: requestScope
+      }, 15000);
+      if (preparedTask?.prepared !== true || String(preparedTask?.task_id || "") !== taskId) {
+        throw new Error("CodexPro server không xác nhận task gate trước khi gửi request.");
+      }
+      sendTrace("task_gate_completed", { send_trace_id: sendTraceId, ipc_call_id: ipcCallId, profile_id: profileId, conversation_id: newChat ? "" : conversationId, task_id: taskId, gate_mode: "prepared" });
+    } catch (error) {
+      sendTrace("task_gate_rejected", { send_trace_id: sendTraceId, ipc_call_id: ipcCallId, profile_id: profileId, conversation_id: newChat ? "" : conversationId, task_id: taskId, error_code: String(error?.code || "TASK_GATE_REJECTED").slice(0, 160) }, { priority: "critical" });
+      throw error;
     }
+  } else {
+    sendTrace("task_gate_completed", { send_trace_id: sendTraceId, ipc_call_id: ipcCallId, profile_id: profileId, conversation_id: newChat ? "" : conversationId, task_id: taskId, gate_mode: recoveryAccepted ? "recovery_active_task" : "adjustment_active_task" });
   }
   const taskScopeLines = codexProWorkspaceExpanded
     ? [
@@ -3645,6 +3679,9 @@ async function sendProfileRequestUnlocked(payload) {
   const taskDispatchedAt = new Date(dispatchStartedAt).toISOString();
   const result = await localMcpChatSendWithRendererRecovery(session, profile, {
     action: "send_chat_request",
+    send_trace_id: sendTraceId,
+    ipc_call_id: ipcCallId,
+    task_id: taskId,
     profile_id: profileId,
     conversation_id: newChat ? undefined : conversationId,
     new_chat: newChat,
@@ -4204,6 +4241,28 @@ ipcMain.on("codexpro:log-diagnostic", (_event, payload) => diagnostic(
   payload?.message || "Renderer diagnostic event",
   { ...(payload?.details && typeof payload.details === "object" ? payload.details : {}), action: payload?.action || payload?.details?.action || "" }
 ));
+ipcMain.on("codexpro:send-trace-event", (_event, payload) => {
+  const eventName = String(payload?.event || "").trim().slice(0, 120);
+  const traceId = String(payload?.send_trace_id || "").trim().slice(0, 160);
+  if (!eventName || !traceId) return;
+  sendTrace(eventName, {
+    send_trace_id: traceId,
+    ipc_call_id: String(payload?.ipc_call_id || "").slice(0, 160),
+    profile_id: String(payload?.profile_id || "").slice(0, 160),
+    conversation_id: String(payload?.conversation_id || "").slice(0, 180),
+    task_id: String(payload?.task_id || "").slice(0, 160),
+    command_id: String(payload?.command_id || "").slice(0, 160),
+    attempt_id: String(payload?.attempt_id || "").slice(0, 160),
+    tab_id: Number.isInteger(Number(payload?.tab_id)) ? Number(payload.tab_id) : undefined,
+    source_component: String(payload?.source_component || "renderer").slice(0, 80),
+    source_run_id: String(payload?.source_run_id || "").slice(0, 160),
+    source_process_id: Number.isInteger(Number(payload?.source_process_id)) ? Number(payload.source_process_id) : undefined,
+    source_sequence: Number(payload?.source_sequence) || 0,
+    source_elapsed_ms: Number(payload?.source_elapsed_ms) || 0,
+    stage_outcome: String(payload?.stage_outcome || "").slice(0, 80),
+    error_code: String(payload?.error_code || "").slice(0, 160)
+  }, { eventAt: String(payload?.event_at || new Date().toISOString()) });
+});
 registerDiagnosticLogIpcHandlers({ ipcMain, codexProHome, readDiagnosticLogs, clearDiagnosticLogs, pruneDiagnosticLogs });
 diagnosticIpcHandle("codexpro:operations-performance", { category: "performance", action: "operations-performance", slowMs: 2_500 }, (_event, pids) => collectOperationsPerformance(Array.isArray(pids) ? pids : []));
 diagnosticIpcHandle("codexpro:rotate-link", {
@@ -4351,7 +4410,7 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
   category: "chat",
   action: "send-profile-request",
   logSuccess: true,
-  successMessage: "ChatGPT đã nhận yêu cầu gửi",
+  successMessage: "Luồng gửi ChatGPT đã kết thúc",
   failureMessage: "Gửi yêu cầu ChatGPT thất bại",
   details: (payload) => ({ profile_id: String(payload?.profileId || ""), conversation_id: String(payload?.conversationId || ""), new_chat: Boolean(payload?.newChat), attachment_count: Array.isArray(payload?.attachments) ? payload.attachments.length : 0, request_scope: String(payload?.scope || "workspace"), workflow_id: String(payload?.workflow || ""), tool_retry: Boolean(payload?.toolRetry), tool_rollover_count: Number(payload?.toolRolloverCount) || 0 }),
   resultDetails: (result) => {
@@ -4402,15 +4461,27 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
       chatgpt_tab_auto_opened: Boolean(value?.chatgpt_tab_auto_opened)
     };
   },
+  errorDiagnostic: (error) => {
+    const details = error?.details && typeof error.details === "object" ? error.details : {};
+    const nested = details?.details && typeof details.details === "object" ? details.details : {};
+    const acked = details?.network_acknowledged === true || nested?.network_acknowledged === true;
+    const code = String(error?.code || details?.code || "");
+    if (acked) return { level: "error", message: "Đã xác nhận gửi, lỗi xử lý sau ACK", details: { submission_state: "submitted", network_acknowledged: true, terminal_outcome: "post_ack_error" } };
+    if (/BRIDGE_TIMEOUT|EXTENSION_HEARTBEAT_LOST/.test(code)) return { level: "warn", message: "Trạng thái gửi ChatGPT chưa xác định", details: { submission_state: "uncertain", network_acknowledged: false } };
+    return { level: "error", message: "Gửi yêu cầu ChatGPT thất bại", details: { submission_state: "failed", network_acknowledged: false } };
+  },
   resultDiagnostic: (result, payload) => {
     const value = result?.ok ? result.value : result;
     const submissionState = String(value?.submission_state || "").toLowerCase();
     const generationState = String(value?.generation_state || value?.network_state || "").toLowerCase();
-    if (submissionState === "uncertain") return { level: "warn", message: "Trạng thái gửi ChatGPT không chắc chắn" };
-    if (generationState === "failed" || value?.network_error) return { level: "error", message: "ChatGPT nhận yêu cầu nhưng generation lỗi network" };
+    if (submissionState === "failed") return { level: "error", message: "Gửi ChatGPT thất bại" };
+    if (submissionState === "uncertain") return { level: "warn", message: "Trạng thái gửi ChatGPT chưa xác định" };
+    if (generationState === "failed" || value?.network_error) return { level: "error", message: value?.network_acknowledged ? "Đã xác nhận gửi, lỗi xử lý sau ACK" : "Generation lỗi nhưng chưa có bằng chứng ACK" };
     return null;
   }
 }, (event, payload) => {
+  const traceBase = { send_trace_id: String(payload?.send_trace_id || "").slice(0, 160), ipc_call_id: String(payload?.ipc_call_id || "").slice(0, 160), profile_id: String(payload?.profileId || "").slice(0, 160), conversation_id: String(payload?.conversationId || "").slice(0, 180), task_id: String(payload?.previousTaskId || "").slice(0, 160) };
+  sendTrace("ipc_accepted", traceBase, { priority: "critical" });
   recordUserReportedError(payload, { request_channel: "chat_composer" });
   const owner = BrowserWindow.fromWebContents(event.sender);
   const restoreManagerFocus = Boolean(owner && !owner.isDestroyed() && owner.isFocused());
@@ -4419,7 +4490,17 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
     try {
       const result = await sendProfileRequest(payload);
       keepChromeFocused = keepChromeFocused || Boolean(result?.chatgpt_tab_auto_opened || result?.new_chat);
+      const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain")).toLowerCase();
+      sendTrace("send_finished", { ...traceBase, task_id: String(result?.repo_task_id || traceBase.task_id || "").slice(0, 160), command_id: String(result?.command_id || "").slice(0, 160), attempt_id: String(result?.attempt_id || "").slice(0, 160), conversation_id: String(result?.conversation_id || traceBase.conversation_id || "").slice(0, 180), submission_state: submissionState, network_acknowledged: result?.network_acknowledged === true, terminal_outcome: submissionState === "failed" ? "failed" : submissionState === "uncertain" ? "uncertain" : "success" }, { priority: submissionState === "submitted" ? "normal" : "critical" });
       return result;
+    } catch (error) {
+      const details = error?.details && typeof error.details === "object" ? error.details : {};
+      const nested = details?.details && typeof details.details === "object" ? details.details : {};
+      const acked = details?.network_acknowledged === true || nested?.network_acknowledged === true;
+      const code = String(error?.code || details?.code || "").slice(0, 160);
+      const uncertain = !acked && /BRIDGE_TIMEOUT|EXTENSION_HEARTBEAT_LOST/.test(code);
+      sendTrace("send_finished", { ...traceBase, task_id: String(details?.task_id || nested?.task_id || traceBase.task_id || "").slice(0, 160), command_id: String(details?.command_id || nested?.command_id || "").slice(0, 160), attempt_id: String(details?.attempt_id || nested?.attempt_id || "").slice(0, 160), submission_state: acked ? "submitted" : uncertain ? "uncertain" : "failed", network_acknowledged: acked, terminal_outcome: acked ? "post_ack_error" : uncertain ? "uncertain" : "failed", post_ack_note: acked ? "đã xác nhận gửi, lỗi xử lý sau ACK" : "", error_code: code }, { priority: "critical" });
+      throw error;
     } finally {
       if (!keepChromeFocused && restoreManagerFocus && owner && !owner.isDestroyed() && !owner.isFocused()) {
         if (owner.isMinimized()) owner.restore();

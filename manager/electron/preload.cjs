@@ -1,4 +1,22 @@
 const { contextBridge, ipcRenderer } = require("electron");
+const traceIdSuffix = () => Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+
+const rendererRunId = `renderer_${Date.now().toString(36)}_${process.pid}_${traceIdSuffix()}`;
+const rendererTraceStartedAt = performance.now();
+let rendererTraceSequence = 0;
+const sendTraceEvent = (payload = {}) => {
+  try {
+    ipcRenderer.send("codexpro:send-trace-event", {
+      ...payload,
+      event_at: String(payload.event_at || new Date().toISOString()),
+      source_component: "renderer",
+      source_run_id: rendererRunId,
+      source_process_id: process.pid,
+      source_sequence: ++rendererTraceSequence,
+      source_elapsed_ms: Math.max(0, Math.round((performance.now() - rendererTraceStartedAt) * 1000) / 1000)
+    });
+  } catch {}
+};
 
 const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload);
 const invokeResult = async (channel, payload) => {
@@ -38,6 +56,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   logChatLayout: (payload) => ipcRenderer.send("codexpro:log-chat-layout", payload),
   logChatResponseAudit: (payload) => ipcRenderer.send("codexpro:log-chat-response-audit", payload),
   logDiagnostic: (payload) => ipcRenderer.send("codexpro:log-diagnostic", payload),
+  sendTraceEvent,
   getDiagnosticLogs: (options) => invoke("codexpro:get-diagnostic-logs", options),
   clearDiagnosticLogs: () => invoke("codexpro:clear-diagnostic-logs"),
   pruneDiagnosticLogs: () => invoke("codexpro:prune-diagnostic-logs"),
@@ -67,7 +86,10 @@ contextBridge.exposeInMainWorld("codexpro", {
   chooseRequestFiles: () => invoke("codexpro:choose-request-files"),
   getRequestFilePreview: (filePath) => invoke("codexpro:get-request-file-preview", filePath),
   captureClipboardImage: () => invoke("codexpro:capture-clipboard-image"),
-  sendProfileRequest: (payload) => invokeResult("codexpro:send-profile-request", payload),
+  sendProfileRequest: (payload) => {
+    const ipcCallId = String(payload?.ipc_call_id || `ipc_${Date.now().toString(36)}_${process.pid}_${traceIdSuffix()}`);
+    return invokeResult("codexpro:send-profile-request", { ...payload, ipc_call_id: ipcCallId });
+  },
   resumeProfileTask: (payload) => invokeResult("codexpro:resume-profile-task", payload),
   renameProfileChat: (payload) => invoke("codexpro:rename-profile-chat", payload),
   getProfileResponse: (payload) => invoke("codexpro:get-profile-response", payload),

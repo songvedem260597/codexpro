@@ -3,7 +3,9 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { CodexProError } from "./guard.js";
+import { createBridgeSendTraceLogger } from "./sendTraceLog.js";
 import { readWorkerJob, reconcileWorkerJobWorkspaceStatus } from "./workerPolicy.js";
 import { createRuntimeTraceContext, currentRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext } from "./analysis/runtimeTrace.js";
 import {
@@ -32,6 +34,7 @@ const COMMAND_TIMEOUT_MS = 25_000;
 const CHECK_COMMAND_TIMEOUT_MS = 60_000;
 const SETUP_COMMAND_TIMEOUT_MS = 300_000;
 const SEND_COMMAND_TIMEOUT_MS = 180_000;
+const TEST_COMMAND_TIMEOUT_MS = Math.max(0, Number(process.env.CODEXPRO_SEND_TRACE_TEST_TIMEOUT_MS) || 0);
 const LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS = 125_000;
 const COMMAND_EXPIRY_HEADROOM_MS = 5_000;
 const COMMAND_HEARTBEAT_TIMEOUT_MS = 35_000;
@@ -48,6 +51,28 @@ const RATE_LIMIT_INCIDENT_DEDUPE_MS = 5_000;
 const RATE_LIMIT_INCIDENT_DEDUPE_MAX = 256;
 
 const PROFILE_REGISTRY_WRITE_INTERVAL_MS = 30_000;
+const BRIDGE_RUN_ID = `bridge_${Date.now().toString(36)}_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
+const bridgeSendTraceLogger = createBridgeSendTraceLogger(BRIDGE_RUN_ID);
+const bridgeTrace = (event: string, details: Record<string, unknown> = {}, options: { eventAt?: string; priority?: "critical" | "normal" } = {}) => {
+  try { bridgeSendTraceLogger.emit(event, details, options); } catch {}
+};
+
+void (async () => {
+  try {
+    const artifact = fileURLToPath(import.meta.url);
+    const stat = await fs.promises.stat(artifact);
+    const hash = createHash("sha256");
+    await new Promise<void>((resolve, reject) => {
+      const stream = fs.createReadStream(artifact);
+      stream.on("data", (chunk) => hash.update(chunk));
+      stream.on("error", reject);
+      stream.on("end", resolve);
+    });
+    bridgeTrace("runtime_identity", { component: "bridge", identity_ref: BRIDGE_RUN_ID, artifact_name: path.basename(artifact), artifact_size: stat.size, artifact_mtime_ms: Math.round(stat.mtimeMs), artifact_sha256: hash.digest("hex") }, { priority: "critical" });
+  } catch (error) {
+    bridgeTrace("runtime_identity", { component: "bridge", identity_ref: BRIDGE_RUN_ID, identity_error: String((error as any)?.message || error).slice(0, 500) }, { priority: "critical" });
+  }
+})();
 
 export interface ExtensionProfileSummary {
   profile_id: string;
@@ -229,6 +254,21 @@ interface PendingResult {
   dispatchedAtMs: number;
   profileId: string;
   action: string;
+  sendTraceId: string;
+  ipcCallId: string;
+  taskId: string;
+  conversationId: string;
+}
+
+interface TimedOutCommand {
+  commandId: string;
+  sendTraceId: string;
+  ipcCallId: string;
+  profileId: string;
+  taskId: string;
+  conversationId: string;
+  action: string;
+  timedOutAt: number;
 }
 
 interface BridgeState {
@@ -237,6 +277,7 @@ interface BridgeState {
   server: http.Server;
   profiles: Map<string, ExtensionProfile>;
   pending: Map<string, PendingResult>;
+  timedOut: Map<string, TimedOutCommand>;
   activeProfileId?: string;
   connectorInfo?: (profileId: string) => BrowserExtensionConnectorInfo;
   profileListeners: Set<(profiles: ExtensionProfileSummary[]) => void>;
@@ -880,14 +921,23 @@ function armPendingCommandHeartbeat(
     state.pending.delete(command.id);
     profile.queued = profile.queued.filter((queued) => queued.id !== command.id);
     clearPendingCommandTimers(pending);
+    state.timedOut.set(command.id, { commandId: command.id, sendTraceId: pending.sendTraceId, ipcCallId: pending.ipcCallId, profileId: pending.profileId, taskId: pending.taskId, conversationId: pending.conversationId, action: pending.action, timedOutAt: Date.now() });
+    while (state.timedOut.size > 500) state.timedOut.delete(state.timedOut.keys().next().value as string);
+    bridgeTrace("bridge_timeout", { send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: command.id, profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId, action: pending.action, timeout_kind: "extension_heartbeat_lost", heartbeat_age_ms: heartbeatAgeMs }, { priority: "critical" });
     pending.reject(new CodexProError(
       `Extension của profile ${profile.label} đã ngừng phản hồi khi đang chạy ${pending.action}. Hãy kiểm tra Chrome trước khi gửi lại để tránh trùng tin.`,
       {
         code: "EXTENSION_HEARTBEAT_LOST",
         details: {
+          send_trace_id: pending.sendTraceId,
+          ipc_call_id: pending.ipcCallId,
+          command_id: command.id,
           profile_id: profile.id,
+          task_id: pending.taskId,
+          conversation_id: pending.conversationId,
           action: pending.action,
-          heartbeat_age_ms: heartbeatAgeMs
+          heartbeat_age_ms: heartbeatAgeMs,
+          submission_state: pending.action === "send_chat_request" && pending.dispatchedAtMs ? "uncertain" : "failed"
         }
       }
     ));
@@ -909,7 +959,11 @@ function armPendingCommandTimeout(
     state.pending.delete(command.id);
     profile.queued = profile.queued.filter((queued) => queued.id !== command.id);
     clearPendingCommandTimers(pending);
-    pending.reject(new CodexProError(message));
+    const timedOut: TimedOutCommand = { commandId: command.id, sendTraceId: pending.sendTraceId, ipcCallId: pending.ipcCallId, profileId: pending.profileId, taskId: pending.taskId, conversationId: pending.conversationId, action: pending.action, timedOutAt: Date.now() };
+    state.timedOut.set(command.id, timedOut);
+    while (state.timedOut.size > 500) state.timedOut.delete(state.timedOut.keys().next().value as string);
+    bridgeTrace("bridge_timeout", { send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: command.id, profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId, action: pending.action, timeout_ms: timeoutMs }, { priority: "critical" });
+    pending.reject(new CodexProError(message, { code: "BRIDGE_TIMEOUT", details: { send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: command.id, profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId, action: pending.action, submission_state: pending.action === "send_chat_request" && pending.dispatchedAtMs ? "uncertain" : "failed" } }));
   }, timeoutMs);
   pending.timer.unref?.();
   armPendingCommandHeartbeat(state, profile, command, pending);
@@ -918,7 +972,10 @@ function armPendingCommandTimeout(
 function markCommandDispatched(state: BridgeState, profile: ExtensionProfile, command: BridgeCommand): void {
   const pending = state.pending.get(command.id);
   if (!pending) return;
-  if (!pending.dispatchedAtMs) pending.dispatchedAtMs = Date.now();
+  if (!pending.dispatchedAtMs) {
+    pending.dispatchedAtMs = Date.now();
+    bridgeTrace("bridge_dispatched", { send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: command.id, profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId, action: pending.action });
+  }
   if (!pending.waitingForReconnect) {
     armPendingCommandHeartbeat(state, profile, command, pending);
     return;
@@ -1091,6 +1148,14 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     return;
   }
 
+  if (req.url === "/trace") {
+    const event = String(body.event || "").slice(0, 120);
+    const sendTraceId = String(body.send_trace_id || "").slice(0, 160);
+    if (event) bridgeTrace(event, { send_trace_id: sendTraceId, ipc_call_id: String(body.ipc_call_id || "").slice(0, 160), command_id: String(body.command_id || "").slice(0, 160), attempt_id: String(body.attempt_id || "").slice(0, 160), profile_id: String(body.profile_id || "").slice(0, 160), tab_id: Number.isInteger(Number(body.tab_id)) ? Number(body.tab_id) : undefined, conversation_id: String(body.conversation_id || "").slice(0, 180), task_id: String(body.task_id || "").slice(0, 160), source_component: String(body.source_component || "extension").slice(0, 80), source_run_id: String(body.source_run_id || "").slice(0, 160), source_sequence: Number(body.source_sequence) || 0, source_elapsed_ms: Number(body.source_elapsed_ms) || 0, stage_outcome: String(body.stage_outcome || "").slice(0, 80), ack_source: String(body.ack_source || "").slice(0, 120), submission_state: String(body.submission_state || "").slice(0, 80), error_code: String(body.error_code || "").slice(0, 160), handled: body.handled === true, artifact_name: String(body.artifact_name || "").slice(0, 200), artifact_sha256: String(body.artifact_sha256 || "").slice(0, 128), artifact_size: Number(body.artifact_size) || 0, extension_version_label: String(body.extension_version_label || "").slice(0, 80) }, { eventAt: String(body.event_at || new Date().toISOString()), priority: event === "network_ack" || event === "runtime_identity" ? "critical" : "normal" });
+    sendJson(req, res, 200, { ok: true });
+    return;
+  }
+
   if (req.url === "/result") {
     profileFromBody(state, body);
     const commandId = String(body.command_id ?? "");
@@ -1098,14 +1163,22 @@ async function handleRequest(state: BridgeState, req: IncomingMessage, res: Serv
     if (pending) {
       clearPendingCommandTimers(pending);
       state.pending.delete(commandId);
+      state.timedOut.delete(commandId);
+      bridgeTrace("result_received", { send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: commandId, attempt_id: String(body?.result?.attempt_id || body?.error?.details?.attempt_id || "").slice(0, 160), profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId, action: pending.action, handled: true, result_kind: body.error ? "error" : "success" }, { priority: "critical" });
       if (body.error) {
         const envelope = bridgeErrorEnvelope(body.error);
         pending.reject(new CodexProError(`Chrome extension action failed: ${String(envelope.message)}`, {
           code: String(envelope.code || "EXTENSION_ACTION_FAILED"),
-          details: envelope
+          details: { ...envelope, send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: commandId, profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId }
         }));
       }
-      else pending.resolve(body.result && typeof body.result === "object" ? body.result : { value: body.result });
+      else pending.resolve({ ...(body.result && typeof body.result === "object" ? body.result : { value: body.result }), send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: commandId });
+    } else {
+      const timedOut = state.timedOut.get(commandId);
+      if (timedOut) {
+        bridgeTrace("late_result", { send_trace_id: timedOut.sendTraceId, ipc_call_id: timedOut.ipcCallId, command_id: commandId, attempt_id: String(body?.result?.attempt_id || body?.error?.details?.attempt_id || "").slice(0, 160), profile_id: timedOut.profileId, task_id: timedOut.taskId, conversation_id: timedOut.conversationId, action: timedOut.action, handled: false, ignored: true, result_kind: body.error ? "error" : "success", late_by_ms: Math.max(0, Date.now() - timedOut.timedOutAt) }, { priority: "critical" });
+        state.timedOut.delete(commandId);
+      }
     }
     sendJson(req, res, 200, { ok: true });
     return;
@@ -1122,6 +1195,7 @@ export function ensureBrowserExtensionBridge(options: BrowserExtensionBridgeOpti
   const state = {} as BridgeState;
   state.profiles = new Map();
   state.pending = new Map();
+  state.timedOut = new Map();
   state.profileListeners = new Set();
   state.streamListeners = new Set();
   state.connectorInfo = options.connectorInfo;
@@ -1595,7 +1669,7 @@ async function runBrowserExtensionCommandCore(
     throw new CodexProError("The selected Chrome profile bridge is offline. Open that profile and verify the CodexPro extension is enabled.");
   }
   const waitingForReconnect = Date.now() - profile.lastSeen > PROFILE_TTL_MS;
-  const timeoutMs = action === "setup_chatgpt"
+  const timeoutMs = TEST_COMMAND_TIMEOUT_MS > 0 ? TEST_COMMAND_TIMEOUT_MS : action === "setup_chatgpt"
     ? SETUP_COMMAND_TIMEOUT_MS
     : action === "check_chatgpt"
       ? CHECK_COMMAND_TIMEOUT_MS
@@ -1625,7 +1699,7 @@ async function runBrowserExtensionCommandCore(
   };
   let pendingRecord: PendingResult;
   const result = new Promise<Record<string, any>>((resolve, reject) => {
-    pendingRecord = { resolve, reject, timeoutMs, waitingForReconnect, dispatchedAtMs: 0, profileId: profile.id, action };
+    pendingRecord = { resolve, reject, timeoutMs, waitingForReconnect, dispatchedAtMs: 0, profileId: profile.id, action, sendTraceId: String(commandArgs.send_trace_id || "").slice(0, 160), ipcCallId: String(commandArgs.ipc_call_id || "").slice(0, 160), taskId: String(commandArgs.task_id || "").slice(0, 160), conversationId: String(commandArgs.conversation_id || "").slice(0, 180) };
     state.pending.set(command.id, pendingRecord);
     armPendingCommandTimeout(
       state,
@@ -1637,7 +1711,9 @@ async function runBrowserExtensionCommandCore(
         : `Timed out waiting for Chrome profile ${profile.label}.`
     );
   });
-  if (!deliver(state, profile, command)) profile.queued.push(command);
+  const deliveredImmediately = deliver(state, profile, command);
+  if (!deliveredImmediately) profile.queued.push(command);
+  bridgeTrace("bridge_queued", { send_trace_id: pendingRecord!.sendTraceId, ipc_call_id: pendingRecord!.ipcCallId, command_id: command.id, profile_id: profile.id, task_id: pendingRecord!.taskId, conversation_id: pendingRecord!.conversationId, action, delivered_immediately: deliveredImmediately }, { priority: "critical" });
   const resolved = await result;
   const completedAtMs = Date.now();
   const dispatchedAtMs = pendingRecord!.dispatchedAtMs || completedAtMs;
