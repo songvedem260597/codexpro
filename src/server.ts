@@ -6,10 +6,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CodexProConfig } from "./config.js";
 import { WorkspaceManager, PathGuard, CodexProError, type Workspace } from "./guard.js";
-import { repoTree, readTextFile, writeTextFile, editTextFile } from "./fsOps.js";
-import { applyWorkspacePatch, decodeGitQuotedPath, patchTouchedPaths } from "./patchOps.js";
-import { viewWorkspaceImage } from "./imageOps.js";
-import { searchWorkspace } from "./searchOps.js";
+import { readTextFile, writeTextFile, editTextFile } from "./fsOps.js";
+import { decodeGitQuotedPath } from "./patchOps.js";
+
+
 import { runBash } from "./bashOps.js";
 import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, workspaceSummary } from "./workspaceOps.js";
@@ -18,14 +18,15 @@ import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
 import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_URI, descriptorOptionsForConfig, registerToolCardResource, toolCardMeta, usesToolCard } from "./toolCardRegistration.js";
 import { CODEXPRO_GLOBAL_RULES_FILE, readGlobalRulesSnapshot, readGlobalRulesSnapshotSync, withGlobalRules } from "./globalRules.js";
-import { redactStructured } from "./redact.js";
+
 import { errorResult, errorText, textResult } from "./toolResults.js";
 import { createToolRegistrationRuntime } from "./toolRegistration.js";
 import { createRepoTaskRuntime } from "./repoTaskRuntime.js";
 import { registerRepoTaskTools } from "./repoTaskTools.js";
 import { registerHandoffTools } from "./handoffTools.js";
 import { registerBrowserControlTool } from "./browserControlTool.js";
-import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
+import { registerWorkspaceFileTools } from "./workspaceFileTools.js";
+import { inspectWorkspace, reviewWorkspaceChanges } from "./analysis/index.js";
 import { projectCompactGraph } from "./analysis/projection.js";
 
 
@@ -34,7 +35,7 @@ import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 
 import { createWorkerJobToolDefinitions } from "./workerJobTools.js";
-import { claimWorkspacePaths, readWorkspaceCoordinationStatus, readWorkspaceTaskCoordinationStatus, recordWorkspacePathsTouched, releaseWorkspacePaths } from "./workspaceCoordination.js";
+import { readWorkspaceCoordinationStatus, readWorkspaceTaskCoordinationStatus } from "./workspaceCoordination.js";
 import { shouldRegisterTool, toolNamesForMode } from "./toolSurface.js";
 
 
@@ -207,26 +208,6 @@ function diffStats(diff: string): { additions: number; deletions: number; change
     if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
   }
   return { additions, deletions, changed: Boolean(diff.trim()) };
-}
-
-async function mutationCodexGraphImpact(config: CodexProConfig, guard: PathGuard, workspace: Workspace, changedPaths: string[]) {
-  if (!config.analysisEnabled || !changedPaths.length) return undefined;
-  try {
-    return await reviewWorkspaceChanges(config, guard, workspace, { changedPaths });
-  } catch {
-    return undefined;
-  }
-}
-
-function compactMutationCodexGraphImpact(impact: Awaited<ReturnType<typeof reviewWorkspaceChanges>> | undefined) {
-  if (!impact) return undefined;
-  return {
-    dependent_files: impact.dependentFiles.slice(0, 40),
-    related_tests: impact.relatedTests.slice(0, 40),
-    risk_signals: impact.riskSignals,
-    graph_diff: impact.graphDiff,
-    warnings: impact.warnings.slice(-8)
-  };
 }
 
 async function requireCodexGraphForWorkspace(config: CodexProConfig, guard: PathGuard, workspace: Workspace) {
@@ -1219,353 +1200,23 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
     }
   );
 
-  registerCodexTool(
+  registerWorkspaceFileTools({
     config,
     server,
-    "tree",
-    {
-      title: "File Tree",
-      description: "List files and directories inside the workspace, excluding blocked paths.",
-      inputSchema: {
-        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
-        path: z.string().optional().describe("Directory relative to workspace root. Default: ."),
-        max_depth: z.number().int().min(1).max(12).optional().describe("Maximum depth. Default: 4."),
-        include_hidden: z.boolean().optional().describe("Include dotfiles/dotfolders that are not blocked. Default: false."),
-        max_entries: z.number().int().min(1).max(3000).optional().describe("Maximum entries. Default: 800.")
-      },
-      annotations: READ_ONLY_ANNOTATIONS,
-      _meta: {
-        ...toolCardMeta(),
-        "openai/toolInvocation/invoking": "Listing workspace files...",
-        "openai/toolInvocation/invoked": "Workspace files listed"
-      }
+    workspaces,
+    guard,
+    registerCodexTool,
+    helpers: {
+      workspaceForTool,
+      assertWriteToolAllowed,
+      assertTaskChecklistReady,
+      workspaceTaskContextForServer,
+      diffBlock,
+      parseBool,
+      limitInt
     },
-    async (args) => {
-      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
-      const result = await repoTree(config, guard, workspace, {
-        path: args.path ?? ".",
-        maxDepth: limitInt(args.max_depth, 4, 1, 12),
-        includeHidden: parseBool(args.include_hidden, false),
-        maxEntries: limitInt(args.max_entries, 800, 1, 3000)
-      });
-      return textResult(result.text, { workspace_id: workspace.id, root: workspace.root, ...result });
-    }
-  );
-
-  registerCodexTool(
-    config,
-    server,
-    "search",
-    {
-      title: "Search Files",
-      description: "Use this for targeted verification or code lookup. Prefer one specific final search instead of repeated broad verification searches.",
-      inputSchema: {
-        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
-        query: z.string().describe("Text or regex to search for."),
-        regex: z.boolean().optional().describe("Treat query as a regular expression. Requires ripgrep. Default: false."),
-        path: z.string().optional().describe("Directory or file relative to workspace root. Default: ."),
-        glob: z.string().optional().describe("Optional glob, for example src/**/*.ts."),
-        include_hidden: z.boolean().optional().describe("Include hidden files that are not blocked. Default: false."),
-        max_results: z.number().int().min(1).max(2000).optional().describe("Maximum results. Default from config."),
-        intent: z.enum(["auto", "text", "symbol", "references", "impact"]).optional().describe("Optional structured search intent. Omit for legacy lexical behavior."),
-        symbol: z.string().optional().describe("Optional symbol query. Uses repository analysis and overrides query text."),
-        include_tests: z.boolean().optional().describe("Include related tests in structured results. Default: false.")
-      },
-      annotations: READ_ONLY_ANNOTATIONS,
-      _meta: {
-        ...toolCardMeta(),
-        "openai/toolInvocation/invoking": "Searching workspace...",
-        "openai/toolInvocation/invoked": "Workspace search complete"
-      }
-    },
-    async (args) => {
-      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
-      const result = await searchWorkspace(config, guard, workspace, {
-        query: args.query,
-        regex: parseBool(args.regex, false),
-        root: args.path ?? ".",
-        glob: args.glob,
-        includeHidden: parseBool(args.include_hidden, false),
-        maxResults: limitInt(args.max_results, config.maxSearchResults, 1, config.maxSearchResults),
-        intent: args.intent,
-        symbol: args.symbol,
-        includeTests: args.include_tests === undefined ? undefined : parseBool(args.include_tests, false)
-      });
-      const structured: Record<string, unknown> = {
-        workspace_id: workspace.id,
-        root: workspace.root,
-        matches: result.matches,
-        truncated: result.truncated,
-        used: result.used
-      };
-      if (result.analysis) structured.analysis = result.analysis;
-      return textResult(result.text, structured);
-    }
-  );
-
-  registerCodexTool(
-    config,
-    server,
-    "read",
-    {
-      title: "Read File",
-      description: "Read a specific text file with line numbers. Avoid rereading files after write/edit/apply_patch unless exact final content is needed.",
-      inputSchema: {
-        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
-        path: z.string().describe("File path relative to workspace root."),
-        start_line: z.number().int().min(1).optional().describe("First line to read. Default: 1."),
-        end_line: z.number().int().min(1).optional().describe("Last line to read. Default: end of file."),
-        max_bytes: z.number().int().min(1000).max(2000000).optional().describe("Maximum file bytes. Capped by server config.")
-      },
-      annotations: READ_ONLY_ANNOTATIONS,
-      _meta: {
-        ...toolCardMeta(),
-        "openai/toolInvocation/invoking": "Reading file...",
-        "openai/toolInvocation/invoked": "File read"
-      }
-    },
-    async (args) => {
-      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
-      const result = await readTextFile(config, guard, workspace, args.path, {
-        startLine: args.start_line,
-        endLine: args.end_line,
-        maxBytes: args.max_bytes
-      });
-      const text = `# Read File\n\nPath: ${result.path}\nLines: ${result.startLine}-${result.endLine} of ${result.totalLines}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\n\n\`\`\`text\n${result.text}\n\`\`\``;
-      return textResult(text, { workspace_id: workspace.id, root: workspace.root, ...result });
-    }
-  );
-
-  registerCodexTool(
-    config,
-    server,
-    "view_image",
-    {
-      title: "View Image",
-      description: "Inspect a PNG, JPEG, GIF, or WebP image from the active workspace. Returns native MCP image content plus dimensions and SHA-256.",
-      inputSchema: {
-        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
-        path: z.string().describe("Image path relative to workspace root."),
-        max_bytes: z.number().int().min(4096).max(2000000).optional().describe("Maximum image bytes. Default: at least 1 MB, capped at 2 MB.")
-      },
-      annotations: READ_ONLY_ANNOTATIONS
-    },
-    async (args) => {
-      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
-      const result = await viewWorkspaceImage(config, guard, workspace, args.path, args.max_bytes);
-      const dimensions = result.width && result.height ? `${result.width}x${result.height}` : "unknown";
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Image: ${result.path}\nType: ${result.mimeType}\nDimensions: ${dimensions}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}`
-          },
-          { type: "image", data: result.data, mimeType: result.mimeType }
-        ],
-        structuredContent: redactStructured({
-          workspace_id: workspace.id,
-          root: workspace.root,
-          path: result.path,
-          mime_type: result.mimeType,
-          width: result.width ?? null,
-          height: result.height ?? null,
-          bytes: result.bytes,
-          sha256: result.sha256
-        })
-      };
-    }
-  );
-
-  registerCodexTool(
-    config,
-    server,
-    "write",
-    {
-      title: "Write File",
-      description: "Create or overwrite a meaningful text file inside the workspace. New files use an atomic rename; existing files retain their inode and metadata. Returns a unified diff; pass the SHA from read when overwriting shared files.",
-      inputSchema: {
-        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
-        path: z.string().describe("File path relative to workspace root."),
-        content: z.string().describe("Complete file contents to write."),
-        create_dirs: z.boolean().optional().describe("Create parent directories if missing. Default: true."),
-        overwrite: z.boolean().optional().describe("Allow overwriting existing files. Default: true."),
-        expected_sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional().describe("Optional SHA-256 from read. Fails instead of overwriting if another session changed the file.")
-      },
-      annotations: LOCAL_WRITE_ANNOTATIONS,
-      _meta: {
-        ...toolCardMeta(),
-        "openai/toolInvocation/invoking": "Writing file...",
-        "openai/toolInvocation/invoked": "File written"
-      }
-    },
-    async (args) => {
-      assertTaskChecklistReady(server);
-      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
-      const resolved = guard.resolve(workspace, args.path, { forWrite: true });
-      assertWriteToolAllowed(config, resolved.relPath);
-      const taskContext = workspaceTaskContextForServer(server, workspace);
-      if (taskContext) await claimWorkspacePaths(taskContext, [resolved.relPath]);
-      const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]);
-      let result;
-      try {
-        result = await writeTextFile(config, guard, workspace, args.path, String(args.content ?? ""), {
-          createDirs: args.create_dirs !== false,
-          overwrite: args.overwrite !== false,
-          expectedSha256: args.expected_sha256
-        });
-      } catch (error) {
-        if (taskContext) await releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
-        throw error;
-      }
-      if (taskContext) {
-        if (result.diff.changed) await recordWorkspacePathsTouched(taskContext, [resolved.relPath]);
-        else await releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
-      }
-      if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
-      const codexGraphAfter = result.diff.changed ? await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]) : codexGraphBefore;
-      const text = `# Write File\n\nPath: ${result.path}\nExisted before: ${result.existed}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
-      return textResult(text, {
-        workspace_id: workspace.id,
-        root: workspace.root,
-        path: result.path,
-        existed: result.existed,
-        codexgraph: { before: compactMutationCodexGraphImpact(codexGraphBefore), after: compactMutationCodexGraphImpact(codexGraphAfter) },
-        bytes: result.bytes,
-        sha256: result.sha256,
-        additions: result.diff.additions,
-        deletions: result.diff.deletions,
-        diff: result.diff.diff
-      });
-    }
-  );
-
-  registerCodexTool(
-    config,
-    server,
-    "edit",
-    {
-      title: "Edit File",
-      description: "Apply a targeted exact text replacement while retaining the existing file inode and metadata. Returns a unified diff; pass the SHA from read to reject stale multi-session edits.",
-      inputSchema: {
-        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
-        path: z.string().describe("File path relative to workspace root."),
-        old_text: z.string().describe("Exact text to replace. Must match once unless replace_all=true."),
-        new_text: z.string().describe("Replacement text."),
-        replace_all: z.boolean().optional().describe("Replace all occurrences. Default: false."),
-        expected_replacements: z.number().int().min(1).optional().describe("Fail if actual replacement count differs."),
-        expected_sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional().describe("Optional SHA-256 from read. Fails if another session changed the file.")
-      },
-      annotations: LOCAL_WRITE_ANNOTATIONS,
-      _meta: {
-        ...toolCardMeta(),
-        "openai/toolInvocation/invoking": "Editing file...",
-        "openai/toolInvocation/invoked": "File edited"
-      }
-    },
-    async (args) => {
-      assertTaskChecklistReady(server);
-      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
-      const resolved = guard.resolve(workspace, args.path, { forWrite: true });
-      assertWriteToolAllowed(config, resolved.relPath);
-      const taskContext = workspaceTaskContextForServer(server, workspace);
-      if (taskContext) await claimWorkspacePaths(taskContext, [resolved.relPath]);
-      const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]);
-      let result;
-      try {
-        result = await editTextFile(config, guard, workspace, args.path, String(args.old_text ?? ""), String(args.new_text ?? ""), {
-          replaceAll: parseBool(args.replace_all, false),
-          expectedReplacements: args.expected_replacements,
-          expectedSha256: args.expected_sha256
-        });
-      } catch (error) {
-        if (taskContext) await releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
-        throw error;
-      }
-      if (taskContext) {
-        if (result.diff.changed) await recordWorkspacePathsTouched(taskContext, [resolved.relPath]);
-        else await releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
-      }
-      if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
-      const codexGraphAfter = result.diff.changed ? await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath]) : codexGraphBefore;
-      const text = `# Edit File\n\nPath: ${result.path}\nReplacements: ${result.replacements}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
-      return textResult(text, {
-        workspace_id: workspace.id,
-        root: workspace.root,
-        path: result.path,
-        replacements: result.replacements,
-        codexgraph: { before: compactMutationCodexGraphImpact(codexGraphBefore), after: compactMutationCodexGraphImpact(codexGraphAfter) },
-        bytes: result.bytes,
-        sha256: result.sha256,
-        additions: result.diff.additions,
-        deletions: result.diff.deletions,
-        diff: result.diff.diff
-      });
-    }
-  );
-
-  registerCodexTool(
-    config,
-    server,
-    "apply_patch",
-    {
-      title: "Apply Patch",
-      description:
-        "Apply one unified diff patch inside the workspace. Paths are validated before applying. Prefer edit for tiny replacements and apply_patch for multi-file diffs.",
-      inputSchema: {
-        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
-        patch: z.string().describe("Unified diff patch to apply. File paths must stay inside the workspace and avoid blocked paths.")
-      },
-      annotations: LOCAL_WRITE_ANNOTATIONS,
-      _meta: {
-        ...toolCardMeta(),
-        "openai/toolInvocation/invoking": "Applying patch...",
-        "openai/toolInvocation/invoked": "Patch applied"
-      }
-    },
-    async (args) => {
-      assertTaskChecklistReady(server);
-      const workspace = workspaceForTool(server, workspaces, args.workspace_id);
-      const patchText = String(args.patch ?? "");
-      const codexGraphPaths = patchTouchedPaths(patchText);
-      const taskContext = workspaceTaskContextForServer(server, workspace);
-      if (taskContext && codexGraphPaths.length) await claimWorkspacePaths(taskContext, codexGraphPaths);
-      const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, codexGraphPaths);
-      let result;
-      try {
-        result = await applyWorkspacePatch(config, guard, workspace, patchText, (touchedPath) => assertWriteToolAllowed(config, touchedPath));
-      } catch (error) {
-        if (taskContext && codexGraphPaths.length) await releaseWorkspacePaths(taskContext, codexGraphPaths, { onlyUntouched: true });
-        throw error;
-      }
-      if (taskContext && codexGraphPaths.length) {
-        if (result.changed) await recordWorkspacePathsTouched(taskContext, codexGraphPaths);
-        else await releaseWorkspacePaths(taskContext, codexGraphPaths, { onlyUntouched: true });
-      }
-      if (result.changed) invalidateWorkspaceAnalysis(workspace.id);
-      const codexGraphAfter = result.changed ? await mutationCodexGraphImpact(config, guard, workspace, result.paths) : codexGraphBefore;
-      const text = [
-        "# Apply Patch",
-        "",
-        `Paths: ${result.paths.join(", ")}`,
-        `Diff stats: +${result.additions} -${result.deletions}`,
-        result.stderr ? `stderr: ${result.stderr}` : "",
-        result.diff ? diffBlock(result.diff) : "No diff output."
-      ].filter(Boolean).join("\n");
-      return textResult(text, {
-        workspace_id: workspace.id,
-        root: workspace.root,
-        paths: result.paths,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        additions: result.additions,
-        deletions: result.deletions,
-        changed: result.changed,
-        codexgraph: { before: compactMutationCodexGraphImpact(codexGraphBefore), after: compactMutationCodexGraphImpact(codexGraphAfter) },
-        diff: result.diff
-      });
-    }
-  );
-
+    annotations: { readOnly: READ_ONLY_ANNOTATIONS, localWrite: LOCAL_WRITE_ANNOTATIONS }
+  });
   registerCodexTool(
     config,
     server,
