@@ -29,7 +29,6 @@ import {
   effectiveWriteMode,
   expandHome,
   optionalChoice,
-  optionalWriteOption,
   optionBool,
   optionValue,
   parseArgs,
@@ -43,7 +42,6 @@ import {
   bashSessionOptions,
   bashTranscriptOption,
   codexSessionsOption,
-  toolCardsCliArgs,
   toolCardsProfileEntry
 } from './cli-runtime-options.mjs';
 import {
@@ -58,6 +56,7 @@ import {
 import { createCliProcessRuntime } from './cli-process-runtime.mjs';
 import { createCliTunnelExecutables } from './cli-tunnel-executables.mjs';
 import { createCliTunnelRuntime } from './cli-tunnel-runtime.mjs';
+import { createCliSetupWizard } from './cli-setup-wizard.mjs';
 import { createHandoffRuntimeLauncher } from './handoff-runtime-launcher.mjs';
 import { cloudflaredOutputLevel, createRuntimeLifecycleLogger } from './runtime-lifecycle-log.mjs';
 import { superviseQuickTunnel } from './quick-tunnel-supervisor.mjs';
@@ -94,41 +93,6 @@ function packageVersion() {
 function isLoopbackHost(host) {
   return host === '127.0.0.1' || host === 'localhost' || host === '::1';
 }
-
-function profileSummary(profile) {
-  if (!profile?.tunnel) return '';
-  if (profile.tunnel === 'ngrok' && profile.hostname) return `Saved ngrok URL: ${profile.hostname}`;
-  if (profile.tunnel === 'cloudflare-named' && profile.hostname) return `Saved Cloudflare URL: ${profile.hostname}`;
-  if (profile.tunnel === 'tailscale' && profile.hostname) return `Saved Tailscale Funnel URL: ${profile.hostname}`;
-  if (profile.tunnel === 'cloudflare') return 'Saved Cloudflare quick-tunnel setup';
-  if (profile.tunnel === 'none') return 'Saved local-only setup';
-  return '';
-}
-
-function profileOneLine(profile, index = 0) {
-  const prefix = index ? `${index}. ` : '';
-  const tunnel = profile.tunnel ?? 'cloudflare';
-  const host = profile.hostname ? ` -> ${profile.hostname}` : '';
-  const port = profile.port ? ` :${profile.port}` : '';
-  return `${prefix}${profile.root}  ${tunnel}${host}${port}`;
-}
-
-function printSavedProfileHint(profile) {
-  const summary = profileSummary(profile);
-  if (!summary) return;
-  printBox('Saved setup found', [
-    summary,
-    'From this folder, future launches only need: codexpro start',
-    'Use codexpro setup when you want to change the port, mode, tool mode, tunnel, hostname, or token.'
-  ]);
-}
-
-
-
-
-
-
-
 
 function managerMaxSubagentsSetting() {
   try {
@@ -304,6 +268,22 @@ const {
   spawnSyncPortable,
   logRuntimeLifecycle,
   redactForLog
+});
+
+const {
+  profileSummary,
+  profileOneLine,
+  normalizeSetupChoice,
+  ask,
+  collectTunnelPreference,
+  profileFromPreference,
+  maybeConfigureFirstRun,
+  runSetupWizard
+} = createCliSetupWizard({
+  normalizePublicHostname,
+  normalizePort,
+  stableToken,
+  shellCommandPreview
 });
 
 function createConnectorDetails(endpoint, token, localBase = '') {
@@ -674,389 +654,6 @@ async function runDoctor(argv) {
     return;
   }
   statusLine('ok', warnings ? `Ready with ${warnings} warning${warnings === 1 ? '' : 's'}.` : 'Ready.');
-}
-
-function normalizeSetupChoice(value, allowed, fallback) {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) return fallback;
-  const match = allowed.find((item) => item === normalized || item.startsWith(normalized));
-  return match ?? fallback;
-}
-
-async function ask(rl, question, fallback = '') {
-  const suffix = fallback ? ` ${paint('dim', `[${fallback}]`)}` : '';
-  const hint = fallback ? `${paint('dim', '> Enter to proceed with default')}\n` : '';
-  const answer = await rl.question(`${paint('cyan', '?')} ${question}${suffix}\n${hint}> `);
-  return answer.trim() || fallback;
-}
-
-function tunnelChoiceFromProfile(profile, fallback = 'cloudflare') {
-  if (profile?.tunnel === 'ngrok') return 'ngrok';
-  if (profile?.tunnel === 'cloudflare-named') return 'stable';
-  if (profile?.tunnel === 'tailscale') return 'tailscale';
-  if (profile?.tunnel === 'none') return 'local';
-  if (profile?.tunnel === 'cloudflare') return 'cloudflare';
-  return fallback;
-}
-
-function tunnelModeFromChoice(choice) {
-  if (choice === 'quick' || choice === 'cloudflare') return 'cloudflare';
-  if (choice === 'stable') return 'cloudflare-named';
-  if (choice === 'tailscale') return 'tailscale';
-  if (choice === 'local') return 'none';
-  return choice;
-}
-
-function hasExplicitTunnelInput(args) {
-  return Boolean(
-    args.tunnel ||
-    args.noProfile ||
-    process.env.CODEXPRO_TUNNEL
-  );
-}
-
-async function collectTunnelPreference(rl, defaults, profile, options = {}) {
-  const defaultTunnel = options.defaultTunnel ?? tunnelChoiceFromProfile(profile, 'cloudflare');
-  const tunnelAnswer = await ask(rl, 'Tunnel: cloudflare, ngrok, tailscale, stable, or local?', defaultTunnel);
-  const tunnelChoice = normalizeSetupChoice(tunnelAnswer, ['cloudflare', 'quick', 'ngrok', 'tailscale', 'stable', 'local'], defaultTunnel);
-  const tunnel = tunnelModeFromChoice(tunnelChoice);
-  let hostname = '';
-  let tunnelName = '';
-  let ngrokConfig = '';
-  let cloudflareConfig = '';
-  let cloudflareTokenFile = '';
-
-  if (tunnel === 'ngrok') {
-    hostname = await ask(
-      rl,
-      'Ngrok domain or URL, without /mcp',
-      optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'NGROK_DOMAIN'], '')
-    );
-    if (!hostname) throw new Error('Ngrok setup needs your reserved domain, for example name.ngrok-free.dev.');
-    hostname = normalizePublicHostname(hostname);
-    ngrokConfig = optionValue(defaults, profile, 'ngrokConfig', ['NGROK_CONFIG', 'CODEXPRO_NGROK_CONFIG'], '');
-  } else if (tunnel === 'cloudflare-named') {
-    hostname = await ask(
-      rl,
-      'Stable Cloudflare hostname, without /mcp',
-      optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME'], '')
-    );
-    if (!hostname) throw new Error('Stable public URL setup needs a real hostname, for example codexpro.yourdomain.com.');
-    hostname = normalizePublicHostname(hostname);
-    tunnelName = await ask(rl, 'Cloudflare tunnel name', optionValue(defaults, profile, 'tunnelName', ['CODEXPRO_TUNNEL_NAME', 'CLOUDFLARE_TUNNEL_NAME'], 'codexpro'));
-    cloudflareConfig = optionValue(defaults, profile, 'cloudflareConfig', ['CODEXPRO_CLOUDFLARE_CONFIG', 'CLOUDFLARE_TUNNEL_CONFIG'], '');
-    cloudflareTokenFile = optionValue(defaults, profile, 'cloudflareTokenFile', ['CODEXPRO_CLOUDFLARE_TUNNEL_TOKEN_FILE', 'CLOUDFLARE_TUNNEL_TOKEN_FILE'], '');
-  } else if (tunnel === 'tailscale') {
-    hostname = await ask(
-      rl,
-      'Tailscale Funnel hostname, without /mcp',
-      optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'TAILSCALE_FUNNEL_HOSTNAME'], '')
-    );
-    if (!hostname) throw new Error('Tailscale setup needs your Funnel hostname, for example machine.tailnet.ts.net.');
-    hostname = normalizePublicHostname(hostname);
-  }
-
-  return {
-    tunnel,
-    hostname,
-    tunnelName,
-    ngrokConfig,
-    cloudflareConfig,
-    cloudflareTokenFile
-  };
-}
-
-function applyTunnelPreferenceToArgs(args, preference) {
-  args.tunnel = preference.tunnel;
-  if (preference.hostname) args.hostname = preference.hostname;
-  if (preference.tunnelName) args.tunnelName = preference.tunnelName;
-  if (preference.ngrokConfig) args.ngrokConfig = preference.ngrokConfig;
-  if (preference.cloudflareConfig) args.cloudflareConfig = preference.cloudflareConfig;
-  if (preference.cloudflareTokenFile) args.cloudflareTokenFile = preference.cloudflareTokenFile;
-}
-
-function profileFromPreference(root, args, profile, preference) {
-  const mode = optionValue(args, profile, 'mode', ['CODEXPRO_MODE'], 'agent');
-  const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], '8787'));
-  const bash = optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], '');
-  const bashTranscript = bashTranscriptOption(args, profile);
-  const codexSessions = codexSessionsOption(args, profile);
-  const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
-  const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
-  const write = optionalWriteOption(args, profile, mode);
-  const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
-  const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
-  const existingToken = optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], '');
-  const token = preference.tunnel === 'none' ? existingToken : stableToken(existingToken);
-  const allowedRoots = configuredProjectRoots(root, args, profile);
-  return {
-    port,
-    mode,
-    tunnel: preference.tunnel,
-    ...(preference.hostname ? { hostname: preference.hostname } : {}),
-    ...(preference.tunnelName ? { tunnelName: preference.tunnelName } : {}),
-    ...(preference.ngrokConfig ? { ngrokConfig: preference.ngrokConfig } : {}),
-    ...(preference.cloudflareConfig ? { cloudflareConfig: preference.cloudflareConfig } : {}),
-    ...(preference.cloudflareTokenFile ? { cloudflareTokenFile: preference.cloudflareTokenFile } : {}),
-    ...(token ? { token } : {}),
-    ...(bash ? { bash } : {}),
-    ...(bashTranscript !== 'compact' ? { bashTranscript } : {}),
-    ...(codexSessions !== 'off' ? { codexSessions } : {}),
-    ...(codexDir ? { codexDir } : {}),
-    ...(bashSession ? { bashSession } : {}),
-    ...(requireBashSession ? { requireBashSession: true } : {}),
-    ...(write ? { write } : {}),
-    ...(toolMode ? { toolMode } : {}),
-    ...(widgetDomain ? { widgetDomain } : {}),
-    ...toolCardsProfileEntry(args, profile),
-    ...(allowedRoots.length ? { allowedRoots } : {}),
-    ...(args.noInstallCloudflared ? { noInstallCloudflared: true } : {}),
-    root
-  };
-}
-
-async function maybeConfigureFirstRun(root, args, profile) {
-  if (profile.profilePath || args.headless || !process.stdin.isTTY || !process.stdout.isTTY || process.env.CI || hasExplicitTunnelInput(args)) {
-    return profile;
-  }
-
-  const reusableProfiles = listWorkspaceProfiles().filter((item) => item.root !== root);
-  if (reusableProfiles.length) {
-    const shown = reusableProfiles.slice(0, 9);
-    printBox('Saved setups', [
-      'No saved settings exist for this workspace, but CodexPro found saved setups from other workspaces.',
-      ...shown.map((item, index) => profileOneLine(item, index + 1)),
-      'Use a number to reuse one here, or type new to choose a fresh tunnel.'
-    ]);
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      const answer = await ask(rl, 'Use saved setup number, or new?', shown.length === 1 ? '1' : 'new');
-      const normalized = answer.trim().toLowerCase();
-      const selectedIndex = Number(normalized);
-      if (Number.isInteger(selectedIndex) && selectedIndex >= 1 && selectedIndex <= shown.length) {
-        const selected = shown[selectedIndex - 1];
-        const payload = reusableProfilePayload(selected, {
-          port: String(optionValue(args, selected, 'port', ['CODEXPRO_PORT'], selected.port ?? '8787')),
-          mode: optionValue(args, selected, 'mode', ['CODEXPRO_MODE'], selected.mode ?? 'agent')
-        });
-        const savedPath = saveWorkspaceProfile(root, payload);
-        statusLine('ok', `Saved workspace settings from ${selected.root}: ${savedPath}`);
-        return loadWorkspaceProfile(root);
-      }
-    } finally {
-      rl.close();
-    }
-  }
-
-  printBox('First run setup', [
-    'No saved tunnel preference exists for this workspace.',
-    'Choose once now. CodexPro will reuse this choice on future codexpro start runs until you change or delete it with codexpro settings.'
-  ]);
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const preference = await collectTunnelPreference(rl, args, profile, { defaultTunnel: 'cloudflare' });
-    applyTunnelPreferenceToArgs(args, preference);
-    const saveAnswer = await ask(rl, 'Save this as the default for this workspace?', 'yes');
-    if (!['n', 'no'].includes(saveAnswer.trim().toLowerCase())) {
-      const savedPath = saveWorkspaceProfile(root, profileFromPreference(root, args, profile, preference));
-      statusLine('ok', `Saved workspace settings: ${savedPath}`);
-      return loadWorkspaceProfile(root);
-    }
-    return profileFromPreference(root, args, profile, preference);
-  } finally {
-    rl.close();
-  }
-}
-
-function commandPreview(args) {
-  return shellCommandPreview(['codexpro', ...args]);
-}
-
-async function runSetupWizard(argv) {
-  if (!process.stdin.isTTY) {
-    throw new Error('codexpro setup needs an interactive terminal. Use codexpro start --root /path/to/repo for non-interactive scripts.');
-  }
-  const defaults = parseArgs(argv);
-  const defaultRoot = path.resolve(expandHome(defaults.root ?? process.env.CODEXPRO_ROOT ?? process.cwd()));
-
-  printBox('CodexPro setup', [
-    'This wizard prepares a ChatGPT connector for the folder you choose.',
-    'Press Enter to accept defaults. Stable tunnel choices are saved per workspace under ~/.codexpro.'
-  ]);
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const rootInput = await ask(rl, 'Where is your project located?', defaultRoot);
-    const root = realDir(rootInput);
-    const profile = defaults.noProfile ? {} : loadWorkspaceProfile(root);
-    if (profile.profilePath) {
-      statusLine('ok', `Loaded saved profile: ${profile.profilePath}`);
-      printSavedProfileHint(profile);
-    }
-
-    const savedTunnel = optionValue(defaults, profile, 'tunnel', ['CODEXPRO_TUNNEL'], 'cloudflare');
-  const defaultTunnel = savedTunnel === 'cloudflare-named'
-      ? 'stable'
-      : savedTunnel === 'ngrok'
-        ? 'ngrok'
-        : savedTunnel === 'tailscale'
-          ? 'tailscale'
-          : savedTunnel === 'none'
-            ? 'local'
-            : 'quick';
-    const defaultPort = String(optionValue(defaults, profile, 'port', ['CODEXPRO_PORT'], '8787'));
-    const defaultMode = normalizeSetupChoice(optionValue(defaults, profile, 'mode', ['CODEXPRO_MODE'], 'agent'), ['agent', 'handoff', 'pro'], 'agent');
-
-    const port = normalizePort(await ask(rl, 'Which local port should CodexPro use?', defaultPort));
-    const modeAnswer = await ask(rl, 'Mode: agent, handoff, or pro?', defaultMode);
-    const mode = normalizeSetupChoice(modeAnswer, ['agent', 'handoff', 'pro'], defaultMode);
-
-    printBox('Public URL', [
-      'ChatGPT needs an HTTPS URL it can reach.',
-      'quick  = CodexPro creates a Cloudflare quick tunnel for demos and local work.',
-      'stable = use your own domain with a Cloudflare named tunnel so the ChatGPT app URL does not change.',
-      'ngrok  = use your ngrok free dev domain, for example https://name.ngrok-free.dev.',
-      'tailscale = use Tailscale Funnel, for example https://device.tailnet.ts.net.',
-      'local  = no tunnel, only useful for local MCP clients that can reach 127.0.0.1.'
-    ]);
-
-    const tunnelAnswer = await ask(rl, 'Public access: quick, stable, ngrok, tailscale, or local?', defaultTunnel);
-    const tunnelChoice = normalizeSetupChoice(tunnelAnswer, ['quick', 'stable', 'ngrok', 'tailscale', 'local'], defaultTunnel);
-    const args = ['start', '--root', root, '--port', port, '--mode', mode];
-    const bash = optionValue(defaults, profile, 'bash', ['CODEXPRO_BASH_MODE'], '');
-    const bashTranscript = bashTranscriptOption(defaults, profile);
-    const codexSessions = codexSessionsOption(defaults, profile);
-    const codexDir = optionValue(defaults, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
-    const write = optionalWriteOption(defaults, profile, mode);
-    const toolMode = optionalChoice('tool-mode', optionValue(defaults, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], ''), ['minimal', 'standard', 'full']);
-    const widgetDomain = optionValue(defaults, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
-    const toolCardsEntry = toolCardsProfileEntry(defaults, profile);
-    if (bash) args.push('--bash', bash);
-    if (bashTranscript !== 'compact') args.push('--bash-transcript', bashTranscript);
-    if (codexSessions !== 'off') args.push('--codex-sessions', codexSessions);
-    if (codexDir) args.push('--codex-dir', codexDir);
-    const { bashSession, requireBashSession } = bashSessionOptions(defaults, profile);
-    if (bashSession) args.push('--bash-session', bashSession);
-    if (requireBashSession) args.push('--require-bash-session');
-    if (write) args.push('--write', write);
-    if (toolMode) args.push('--tool-mode', toolMode);
-    if (widgetDomain) args.push('--widget-domain', widgetDomain);
-    args.push(...toolCardsCliArgs(defaults, profile));
-    if (defaults.noInstallCloudflared) args.push('--no-install-cloudflared');
-    if (defaults.openChatgpt) args.push('--open-chatgpt');
-    if (defaults.noCopyUrl) args.push('--no-copy-url');
-
-    let profileTunnel = 'cloudflare';
-    let profileHostname = '';
-    let profileTunnelName = '';
-    let profileNgrokConfig = '';
-    let profileCloudflareConfig = '';
-    let profileCloudflareTokenFile = '';
-    let profileToken = optionValue(defaults, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], '');
-
-    if (tunnelChoice === 'local') {
-      profileTunnel = 'none';
-      args.push('--tunnel', 'none');
-    } else if (tunnelChoice === 'stable') {
-      profileTunnel = 'cloudflare-named';
-      let hostname = await ask(
-        rl,
-        'Stable Cloudflare hostname, without /mcp',
-        optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME'], '')
-      );
-      if (!hostname) throw new Error('Stable public URL setup needs a real hostname, for example codexpro.yourdomain.com.');
-      hostname = normalizePublicHostname(hostname);
-      profileHostname = hostname;
-      const tunnelName = await ask(rl, 'Cloudflare tunnel name', optionValue(defaults, profile, 'tunnelName', ['CODEXPRO_TUNNEL_NAME', 'CLOUDFLARE_TUNNEL_NAME'], 'codexpro'));
-      profileTunnelName = tunnelName;
-      args.push('--tunnel', 'cloudflare-named', '--hostname', hostname, '--tunnel-name', tunnelName);
-      profileCloudflareConfig = optionValue(defaults, profile, 'cloudflareConfig', ['CODEXPRO_CLOUDFLARE_CONFIG', 'CLOUDFLARE_TUNNEL_CONFIG'], '');
-      profileCloudflareTokenFile = optionValue(defaults, profile, 'cloudflareTokenFile', ['CODEXPRO_CLOUDFLARE_TUNNEL_TOKEN_FILE', 'CLOUDFLARE_TUNNEL_TOKEN_FILE'], '');
-      if (profileCloudflareConfig) args.push('--cloudflare-config', profileCloudflareConfig);
-      if (profileCloudflareTokenFile) args.push('--cloudflare-token-file', profileCloudflareTokenFile);
-    } else if (tunnelChoice === 'ngrok') {
-      profileTunnel = 'ngrok';
-      let hostname = await ask(
-        rl,
-        'Ngrok domain or URL, without /mcp',
-        optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'NGROK_DOMAIN'], '')
-      );
-      if (!hostname) throw new Error('Ngrok setup needs your reserved domain, for example name.ngrok-free.dev.');
-      hostname = normalizePublicHostname(hostname);
-      profileHostname = hostname;
-      args.push('--tunnel', 'ngrok', '--hostname', hostname);
-      const ngrokConfig = optionValue(defaults, profile, 'ngrokConfig', ['NGROK_CONFIG', 'CODEXPRO_NGROK_CONFIG'], '');
-      if (ngrokConfig) {
-        profileNgrokConfig = ngrokConfig;
-        args.push('--ngrok-config', ngrokConfig);
-      }
-    } else if (tunnelChoice === 'tailscale') {
-      profileTunnel = 'tailscale';
-      let hostname = await ask(
-        rl,
-        'Tailscale Funnel hostname, without /mcp',
-        optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'TAILSCALE_FUNNEL_HOSTNAME'], '')
-      );
-      if (!hostname) throw new Error('Tailscale setup needs your Funnel hostname, for example machine.tailnet.ts.net.');
-      hostname = normalizePublicHostname(hostname);
-      profileHostname = hostname;
-      args.push('--tunnel', 'tailscale', '--hostname', hostname);
-    } else {
-      profileTunnel = 'cloudflare';
-      args.push('--tunnel', 'cloudflare');
-    }
-
-    if (profileTunnel !== 'none') {
-      profileToken = await ask(rl, 'CodexPro auth token for this workspace', stableToken(profileToken));
-      if (profileToken) args.push('--token', profileToken);
-    }
-
-    const saveDefault = defaults.noSaveConfig ? 'no' : 'yes';
-    const saveAnswer = await ask(rl, 'Save this setup for future runs from this workspace?', saveDefault);
-    const shouldSave = !['n', 'no'].includes(saveAnswer.trim().toLowerCase());
-    if (shouldSave) {
-      const allowedRoots = configuredProjectRoots(root, defaults, profile);
-      const savedPath = saveWorkspaceProfile(root, {
-        port,
-        mode,
-        tunnel: profileTunnel,
-        ...(profileHostname ? { hostname: profileHostname } : {}),
-        ...(profileTunnelName ? { tunnelName: profileTunnelName } : {}),
-        ...(profileNgrokConfig ? { ngrokConfig: profileNgrokConfig } : {}),
-        ...(profileCloudflareConfig ? { cloudflareConfig: profileCloudflareConfig } : {}),
-        ...(profileCloudflareTokenFile ? { cloudflareTokenFile: profileCloudflareTokenFile } : {}),
-        ...(profileToken ? { token: profileToken } : {}),
-        ...(bash ? { bash } : {}),
-        ...(bashTranscript !== 'compact' ? { bashTranscript } : {}),
-        ...(codexSessions !== 'off' ? { codexSessions } : {}),
-        ...(codexDir ? { codexDir } : {}),
-        ...(bashSession ? { bashSession } : {}),
-        ...(requireBashSession ? { requireBashSession: true } : {}),
-        ...(write ? { write } : {}),
-        ...(toolMode ? { toolMode } : {}),
-        ...(widgetDomain ? { widgetDomain } : {}),
-        ...toolCardsEntry,
-        ...(allowedRoots.length ? { allowedRoots } : {}),
-        ...(defaults.noInstallCloudflared ? { noInstallCloudflared: true } : {})
-      });
-      statusLine('ok', `Saved workspace profile: ${savedPath}`);
-    }
-
-    const startAnswer = await ask(rl, 'Start CodexPro now?', 'yes');
-    const shouldStart = !['n', 'no'].includes(startAnswer.trim().toLowerCase());
-    console.log('');
-    console.log(paint('bold', 'Command'));
-    console.log(`  ${commandPreview(args)}`);
-    console.log('');
-    if (!shouldStart) {
-      console.log('Setup complete. Run the command above when you are ready.');
-      return null;
-    }
-    return args;
-  } finally {
-    rl.close();
-  }
 }
 
 function printProfile(root, profile) {
