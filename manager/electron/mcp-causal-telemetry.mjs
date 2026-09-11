@@ -12,11 +12,13 @@ function normalizeCaller(value) {
   return MCP_CALLERS.has(caller) ? caller : "other";
 }
 
-export function createMcpCausalTelemetry({ now = () => Date.now() } = {}) {
+export function createMcpCausalTelemetry({ now = () => Date.now(), maxTrackedCalls = 256 } = {}) {
   let sequence = 0;
   let initializeInFlight = 0;
   let sessionsInFlight = 0;
   const sessionsByCaller = new Map();
+  const activeCalls = new Map();
+  const trackedCallLimit = Math.max(8, Math.floor(Number(maxTrackedCalls) || 256));
 
   function counters() {
     return {
@@ -42,7 +44,31 @@ export function createMcpCausalTelemetry({ now = () => Date.now() } = {}) {
       close_completed: String(call?.close_completed || ""),
       duration_ms: Math.max(0, Number(call?.duration_ms) || 0),
       ...(call?.response_read_id ? { response_read_id: String(call.response_read_id) } : {}),
-      ...(call?.runtime_freshness_iteration_id ? { runtime_freshness_iteration_id: String(call.runtime_freshness_iteration_id) } : {})
+      ...(call?.runtime_freshness_iteration_id ? { runtime_freshness_iteration_id: String(call.runtime_freshness_iteration_id) } : {}),
+      ...(call?.profile_id ? { profile_id: String(call.profile_id) } : {}),
+      ...(call?.conversation_id ? { conversation_id: String(call.conversation_id) } : {}),
+      ...(call?.task_id ? { task_id: String(call.task_id) } : {}),
+      ...(call?.session_id ? { session_id: String(call.session_id) } : {})
+    };
+  }
+
+  function flightSnapshot() {
+    const current = Number(now()) || Date.now();
+    const calls = [...activeCalls.values()]
+      .sort((left, right) => Number(left?.open_started_ms || 0) - Number(right?.open_started_ms || 0))
+      .slice(0, 12)
+      .map((call) => ({
+        ...snapshot(call),
+        age_ms: Math.max(0, current - Number(call?.open_started_ms || current))
+      }));
+    const oldest = calls[0]?.age_ms;
+    return {
+      ...counters(),
+      initialize_in_flight: initializeInFlight,
+      session_tool_in_flight: sessionsInFlight,
+      oldest_in_flight_age_ms: Number.isFinite(oldest) ? oldest : null,
+      tracked_active_calls: activeCalls.size,
+      calls
     };
   }
 
@@ -53,11 +79,15 @@ export function createMcpCausalTelemetry({ now = () => Date.now() } = {}) {
     initializeInFlight += 1;
     sessionsInFlight += 1;
     sessionsByCaller.set(caller, (sessionsByCaller.get(caller) || 0) + 1);
-    return {
+    const call = {
       mcp_call_id: `mcp_${startedAtMs.toString(36)}_${sequence.toString(36)}`,
       caller,
       response_read_id: String(metadata.response_read_id || ""),
       runtime_freshness_iteration_id: String(metadata.runtime_freshness_iteration_id || ""),
+      profile_id: String(metadata.profile_id || ""),
+      conversation_id: String(metadata.conversation_id || ""),
+      task_id: String(metadata.task_id || ""),
+      session_id: "",
       open_started: new Date(startedAtMs).toISOString(),
       open_started_ms: startedAtMs,
       initialized: "",
@@ -68,6 +98,8 @@ export function createMcpCausalTelemetry({ now = () => Date.now() } = {}) {
       initialize_pending: true,
       session_pending: true
     };
+    if (activeCalls.size < trackedCallLimit) activeCalls.set(call.mcp_call_id, call);
+    return call;
   }
 
   function markInitialized(call) {
@@ -114,6 +146,7 @@ export function createMcpCausalTelemetry({ now = () => Date.now() } = {}) {
       else sessionsByCaller.delete(call.caller);
       call.session_pending = false;
     }
+    activeCalls.delete(String(call.mcp_call_id || ""));
     call.duration_ms = Math.max(0, current - call.open_started_ms);
     return snapshot(call);
   }
@@ -121,6 +154,7 @@ export function createMcpCausalTelemetry({ now = () => Date.now() } = {}) {
   return {
     begin,
     counters,
+    flightSnapshot,
     markInitialized,
     markToolCompleted,
     markCloseStarted,

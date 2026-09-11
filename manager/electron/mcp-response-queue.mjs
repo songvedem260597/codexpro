@@ -153,5 +153,43 @@ export function createMcpResponseQueue(options = {}) {
     return promise;
   }
 
-  return { run, snapshot };
+  function flightSnapshot() {
+    const current = now();
+    const values = [...entries.values()];
+    const activeEntries = values.filter((entry) => entry.state === "active");
+    const queuedEntries = values.filter((entry) => entry.state === "queued");
+    const summarize = (entry) => {
+      const [profileId = "", conversationId = ""] = String(entry.key || "").split(":");
+      const startedAt = entry.state === "active" ? Number(entry.startedAt) || current : Number(entry.queuedAt) || current;
+      return {
+        key: String(entry.key || ""),
+        lane: String(entry.lane || ""),
+        state: String(entry.state || ""),
+        age_ms: Math.max(0, current - startedAt),
+        profile_id: profileId,
+        conversation_id: conversationId
+      };
+    };
+    const oldestActiveAgeMs = activeEntries.length
+      ? Math.max(...activeEntries.map((entry) => Math.max(0, current - (Number(entry.startedAt) || current))))
+      : null;
+    const oldestQueuedAgeMs = queuedEntries.length
+      ? Math.max(...queuedEntries.map((entry) => Math.max(0, current - (Number(entry.queuedAt) || current))))
+      : null;
+    return {
+      ...snapshot(),
+      oldest_active_age_ms: oldestActiveAgeMs,
+      oldest_queued_age_ms: oldestQueuedAgeMs,
+      entries: values
+        .sort((left, right) => {
+          const leftAt = left.state === "active" ? Number(left.startedAt) || current : Number(left.queuedAt) || current;
+          const rightAt = right.state === "active" ? Number(right.startedAt) || current : Number(right.queuedAt) || current;
+          return leftAt - rightAt;
+        })
+        .slice(0, 12)
+        .map(summarize)
+    };
+  }
+
+  return { run, snapshot, flightSnapshot };
 }

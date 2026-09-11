@@ -12,6 +12,7 @@ import { createSendTraceLogger } from "./send-trace-log.mjs";
 import "./resource-overload-runtime.mjs";
 import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
 import { createMcpCausalTelemetry } from "./mcp-causal-telemetry.mjs";
+import { createManagerHangFlightRecorder } from "./manager-hang-flight-recorder.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
 import { collectTunnelOfflineEvidence } from "./tunnel-offline-diagnostic.mjs";
 import { createInterruptionAlertTracker } from "./interruption-alert.mjs";
@@ -437,6 +438,58 @@ let latestBrowserProfileStream = { connected: false, checkedAt: "", profiles: []
 let latestWorkerJobs = [];
 let lastBrowserProfileStreamErrorAt = 0;
 const browserProfileDiagnosticState = new Map();
+let managerBrowserStreamFlightSampler = null;
+
+function managerHangRuntimeSnapshot() {
+  const cache = runtimeBaseCache;
+  if (!cache?.value) return { health_known: false, local_ok: null, health_age_ms: null, child_process_count: 0, child_pids: [] };
+  const local = cache.value.local || {};
+  const processSummaries = Array.isArray(cache.value.processes) ? cache.value.processes : [];
+  return {
+    health_known: true,
+    local_ok: Boolean(local.ok),
+    health_age_ms: Math.max(0, Date.now() - Number(cache.cachedAt || Date.now())),
+    health_latency_ms: Number(local.latency) || 0,
+    runtime_pid: Number(local?.data?.pid || 0) || null,
+    runtime_started_at: String(local?.data?.runtimeStartedAt || local?.data?.runtime_started_at || ""),
+    child_process_count: processSummaries.length,
+    child_pids: processSummaries.map((item) => Number(item?.pid) || 0).filter(Boolean)
+  };
+}
+
+function managerHangContextSnapshot() {
+  const contexts = [];
+  for (const profile of Array.isArray(latestBrowserProfileStream?.profiles) ? latestBrowserProfileStream.profiles : []) {
+    const profileId = String(profile?.profile_id || "");
+    const taskId = String(profile?.current_task_id || "");
+    const tabs = Array.isArray(profile?.conversation_tabs) ? profile.conversation_tabs : [];
+    const activeTabs = tabs.filter((tab) => tab?.busy || tab?.settling || tab?.renderer_unresponsive || String(tab?.network_state || "").toLowerCase() === "generating");
+    if (!activeTabs.length && taskId) contexts.push({ profile_id: profileId, task_id: taskId, conversation_id: "", tab_id: "" });
+    for (const tab of activeTabs) {
+      contexts.push({
+        profile_id: profileId,
+        task_id: taskId,
+        conversation_id: String(tab?.conversation_id || "") || String(tab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "",
+        tab_id: String(tab?.id || "")
+      });
+      if (contexts.length >= 12) return contexts;
+    }
+    if (contexts.length >= 12) return contexts;
+  }
+  return contexts;
+}
+
+const managerHangFlightRecorder = createManagerHangFlightRecorder({
+  home: codexProHome,
+  diagnostic,
+  samplers: {
+    mcp: () => mcpCausalTelemetry.flightSnapshot(),
+    responseReads: () => responseQueue.flightSnapshot(),
+    browserStream: () => managerBrowserStreamFlightSampler?.() || null,
+    runtime: managerHangRuntimeSnapshot,
+    context: managerHangContextSnapshot
+  }
+});
 
 function activeBrowserTaskSummaries() {
   return normalizeTerminalMessageStreamProfiles(latestBrowserProfileStream?.profiles, latestWorkerJobs)
@@ -632,6 +685,8 @@ function startBrowserProfileEventStream(win) {
       });
     }
   });
+  const browserStreamFlightSampler = () => browserStreamIpc.metrics();
+  managerBrowserStreamFlightSampler = browserStreamFlightSampler;
   const acknowledgeBrowserStream = (event, payload) => {
     if (event.sender?.id !== win.webContents.id) return;
     browserStreamIpc.acknowledge(payload?.sequence);
@@ -709,6 +764,7 @@ function startBrowserProfileEventStream(win) {
     streamMetricsTimer = null;
     streamReloadResumeTimer = null;
     browserStreamIpc.destroy();
+    if (managerBrowserStreamFlightSampler === browserStreamFlightSampler) managerBrowserStreamFlightSampler = null;
     ipcMain.off("codexpro:browser-stream-ack", acknowledgeBrowserStream);
     if (!win.webContents.isDestroyed()) {
       win.webContents.off("did-start-loading", pauseBrowserStreamOnReload);
@@ -721,6 +777,7 @@ function startBrowserProfileEventStream(win) {
   };
   controller.signal.addEventListener("abort", () => {
     browserStreamIpc.destroy();
+    if (managerBrowserStreamFlightSampler === browserStreamFlightSampler) managerBrowserStreamFlightSampler = null;
     ipcMain.off("codexpro:browser-stream-ack", acknowledgeBrowserStream);
     if (streamMetricsTimer) clearInterval(streamMetricsTimer);
     if (streamReloadResumeTimer) clearTimeout(streamReloadResumeTimer);
@@ -832,9 +889,11 @@ function createWindow() {
   let unresponsiveAt = 0;
   win.on("unresponsive", () => {
     unresponsiveAt = Date.now();
+    managerHangFlightRecorder.markRendererUnresponsive();
     diagnostic("error", "electron", "window", "Cửa sổ Manager không phản hồi", { action: "window-unresponsive" });
   });
   win.on("responsive", () => {
+    managerHangFlightRecorder.markRendererResponsive();
     if (!unresponsiveAt) return;
     diagnostic("info", "electron", "window", "Cửa sổ Manager đã phản hồi lại", {
       action: "window-responsive",
@@ -3353,7 +3412,10 @@ async function getProfileResponse(payload) {
       task_id: /^cpt_[a-f0-9]{24}$/.test(taskId) ? taskId : undefined
     }, 80000, {
       caller: "get_profile_response",
-      response_read_id: String(payload?.responseReadId || "")
+      response_read_id: String(payload?.responseReadId || ""),
+      profile_id: profileId,
+      conversation_id: conversationId,
+      task_id: /^cpt_[a-f0-9]{24}$/.test(taskId) ? taskId : ""
     });
     const responseProfileId = String(result?.profile_id || "").trim();
     const responseConversationId = String(result?.conversation_id || "").trim()
@@ -4218,6 +4280,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
+    managerHangFlightRecorder.start();
     protocol.handle("codexpro-plugin", handleAppPluginProtocol);
     diagnostic("info", "electron", "runtime", "CodexPro Manager đã khởi động", {
       action: "manager-started",
@@ -4249,6 +4312,7 @@ if (!hasSingleInstanceLock) {
     if (process.platform !== "darwin") app.quit();
   });
   app.on("before-quit", (event) => {
+    managerHangFlightRecorder.stop();
     returnToManagerShortcutRegistration?.unregister();
     returnToManagerShortcutRegistration = null;
     diagnostic("info", "electron", "runtime", "CodexPro Manager đang thoát", { action: "manager-before-quit" });

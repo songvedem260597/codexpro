@@ -48,7 +48,9 @@ export function createBrowserStreamIpcCoordinator({
     timeouts: 0,
     maxInFlight: 0,
     maxPendingKeys: 0,
-    startedAt: Number(now()) || Date.now()
+    startedAt: Number(now()) || Date.now(),
+    lastAckAt: 0,
+    lastProgressAt: Number(now()) || Date.now()
   };
 
   const rememberLatest = (update) => {
@@ -88,6 +90,7 @@ export function createBrowserStreamIpcCoordinator({
     inFlight = batch;
     counters.sends += 1;
     counters.payloadBytes += payloadBytes;
+    counters.lastProgressAt = batch.sentAt;
     counters.maxInFlight = Math.max(counters.maxInFlight, 1);
     try {
       send(payload);
@@ -125,6 +128,8 @@ export function createBrowserStreamIpcCoordinator({
       clearInFlightTimer();
       inFlight = null;
       counters.acknowledgements += 1;
+      counters.lastAckAt = Number(now()) || Date.now();
+      counters.lastProgressAt = counters.lastAckAt;
       flush();
       return true;
     },
@@ -169,13 +174,17 @@ export function createBrowserStreamIpcCoordinator({
       };
     },
     metrics() {
+      const current = Number(now()) || Date.now();
       return {
         ...counters,
         inFlight: inFlight ? 1 : 0,
         paused,
         pendingKeys: pending.size,
         currentSequence: sequence,
-        now: Number(now()) || Date.now()
+        in_flight_age_ms: inFlight ? Math.max(0, current - Number(inFlight.sentAt || current)) : null,
+        last_ack_age_ms: counters.lastAckAt ? Math.max(0, current - counters.lastAckAt) : null,
+        last_progress_age_ms: counters.lastProgressAt ? Math.max(0, current - counters.lastProgressAt) : null,
+        now: current
       };
     }
   };

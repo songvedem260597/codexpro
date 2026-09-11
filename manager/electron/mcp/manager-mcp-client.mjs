@@ -98,7 +98,10 @@ export function createManagerMcpClient(options = {}) {
     const url = `http://127.0.0.1:${config.port}/mcp`;
     const causalCall = causalTelemetry.begin(telemetryOptions?.caller, {
       runtime_freshness_iteration_id: telemetryOptions?.runtime_freshness_iteration_id,
-      response_read_id: telemetryOptions?.response_read_id
+      response_read_id: telemetryOptions?.response_read_id,
+      profile_id: telemetryOptions?.profile_id,
+      conversation_id: telemetryOptions?.conversation_id,
+      task_id: telemetryOptions?.task_id
     });
     emitCausalTelemetry("open_started", causalCall);
     const startedAt = Date.now();
@@ -112,6 +115,7 @@ export function createManagerMcpClient(options = {}) {
         params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "CodexPro Manager", version: managerVersion } }
       });
       phaseTimings.initialize_ms = Date.now() - phaseStartedAt;
+      causalCall.session_id = String(initialized.sessionId || "");
       const session = { url, token, sessionId: initialized.sessionId, nextId: 2, phaseTimings, causalTelemetryCall: causalCall };
       phaseStartedAt = Date.now();
       await mcpRequest(url, token, { jsonrpc: "2.0", method: "notifications/initialized" }, session.sessionId);
