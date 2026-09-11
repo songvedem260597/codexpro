@@ -3742,7 +3742,14 @@ ipcMain.on("codexpro:send-trace-event", (_event, payload) => {
     error_code: String(payload?.error_code || "").slice(0, 160)
   }, { eventAt: String(payload?.event_at || new Date().toISOString()) });
 });
-registerDiagnosticLogIpcHandlers({ ipcMain, codexProHome, readDiagnosticLogs, clearDiagnosticLogs, pruneDiagnosticLogs });
+registerDiagnosticLogIpcHandlers({
+  ipcMain,
+  codexProHome,
+  readDiagnosticLogs,
+  clearDiagnosticLogs,
+  pruneDiagnosticLogs,
+  getHangWatchLiveState: () => managerHangFlightRecorder.state()
+});
 diagnosticIpcHandle("codexpro:operations-performance", { category: "performance", action: "operations-performance", slowMs: 2_500 }, (_event, pids) => collectOperationsPerformance(Array.isArray(pids) ? pids : []));
 diagnosticIpcHandle("codexpro:rotate-link", {
   category: "settings",

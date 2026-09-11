@@ -44,7 +44,7 @@ import { useChatSendActions } from "./hooks/use-chat-send-actions.js";
 import { useChatRecovery } from "./hooks/use-chat-recovery.js";
 import { useChatSession } from "./hooks/use-chat-session.js";
 import { materializeTranscriptMessages, transcriptAwaitingAssistant } from "./chat-transcript.js";
-import { DiagnosticLogView } from "./diagnostic-log-view.jsx";
+import { DiagnosticsView } from "./diagnostics-view.jsx";
 import { playTaskCompletionSound } from "./task-completion-sound.js";
 import { trimMapEntries } from "./performance-retention.js";
 import { synchronizeWorkerBorderAnimations } from "./worker-border-sync.js";
@@ -811,7 +811,9 @@ function App() {
         </div>
 
         <div className="diagnostic-page" hidden={activePage !== "logs"}>
-          <DiagnosticLogView
+          <DiagnosticsView
+            api={api}
+            notify={notify}
             data={diagnosticLogs}
             filters={diagnosticFilters}
             busy={diagnosticBusy}

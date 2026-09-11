@@ -12,6 +12,7 @@ const diagnosticLogSource = fs.readFileSync(new URL("../electron/ipc/diagnostic-
 const utilityChannels = ["codexpro:copy", "codexpro:notify"];
 const diagnosticLogChannels = [
   "codexpro:get-diagnostic-logs",
+  "codexpro:get-hang-watch-diagnostics",
   "codexpro:clear-diagnostic-logs",
   "codexpro:prune-diagnostic-logs"
 ];
@@ -23,7 +24,7 @@ assert.equal((mainSource.match(/registerUtilityIpcHandlers\(/g) || []).length, 1
 assert.equal((mainSource.match(/registerDiagnosticLogIpcHandlers\(/g) || []).length, 1, "main must register diagnostic-log IPC exactly once");
 assert.equal((mainSource.match(/ipcMain\.handle\(/g) || []).length, 0, "raw ipcMain.handle registrations must stay out of main after extraction");
 assert.equal((utilitySource.match(/ipcMain\.handle\("codexpro:/g) || []).length, utilityChannels.length, "utility registrar must own exactly two raw IPC channels");
-assert.equal((diagnosticLogSource.match(/ipcMain\.handle\("codexpro:/g) || []).length, diagnosticLogChannels.length, "diagnostic-log registrar must own exactly three raw IPC channels");
+assert.equal((diagnosticLogSource.match(/ipcMain\.handle\("codexpro:/g) || []).length, diagnosticLogChannels.length, "diagnostic-log registrar must own exactly four raw IPC channels");
 assert.doesNotMatch(utilitySource, /diagnosticIpcHandle/, "utility handlers must remain raw IPC without new diagnostic wrapping");
 assert.doesNotMatch(diagnosticLogSource, /diagnosticIpcHandle/, "diagnostic-log handlers must remain raw IPC without new diagnostic wrapping");
 
@@ -37,6 +38,7 @@ for (const channel of diagnosticLogChannels) assert.equal(diagnosticLogSource.sp
 assert.match(preloadSource, /copyText: \(text\) => invoke\("codexpro:copy", text\)/, "copy preload access must stay unchanged");
 assert.match(preloadSource, /showNotification: \(payload\) => invoke\("codexpro:notify", payload\)/, "notification preload access must stay unchanged");
 assert.match(preloadSource, /getDiagnosticLogs: \(options\) => invoke\("codexpro:get-diagnostic-logs", options\)/, "diagnostic read preload access must stay unchanged");
+assert.match(preloadSource, /getHangWatchDiagnostics: \(options\) => invoke\("codexpro:get-hang-watch-diagnostics", options\)/, "Hang Watch preload access must stay read-only");
 assert.match(preloadSource, /clearDiagnosticLogs: \(\) => invoke\("codexpro:clear-diagnostic-logs"\)/, "diagnostic clear preload access must stay unchanged");
 assert.match(preloadSource, /pruneDiagnosticLogs: \(\) => invoke\("codexpro:prune-diagnostic-logs"\)/, "diagnostic prune preload access must stay unchanged");
 
