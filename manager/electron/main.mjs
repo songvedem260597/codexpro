@@ -858,6 +858,7 @@ function createWindow() {
     backgroundColor: "#090b10",
     title: "CodexPro Manager",
     show: false,
+    alwaysOnTop: false,
     webPreferences: {
       preload: path.join(here, "preload.cjs"),
       contextIsolation: true,
@@ -945,6 +946,7 @@ function createWindow() {
   });
   win.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   win.once("ready-to-show", () => {
+    win.setAlwaysOnTop(false);
     if (!smokeMode) win.show();
   });
   const devUrl = process.env.CODEXPRO_MANAGER_DEV_URL;
