@@ -4,6 +4,14 @@ export { normalizeTerminalMessageStreamProfiles };
 
 const browserProfileSignatureCache = new WeakMap();
 export const EMPTY_BROWSER_PROFILE_GRACE_MS = 15_000;
+const AUTHORITATIVE_TASK_RECOVERY_DEFAULTS = {
+  task_recovery_state: "",
+  task_recovery_message: "",
+  task_recovery_task_id: "",
+  task_recovery_attempt: 0,
+  task_recovery_rules_changed: false,
+  task_recovery_owner_binding_recovered: false
+};
 
 export function browserProfileUiSignature(profile) {
   if (!profile || typeof profile !== "object") return "";
@@ -15,9 +23,10 @@ export function browserProfileUiSignature(profile) {
   return signature;
 }
 
-export function mergeBrowserProfilePayload(previousProfiles, incomingProfiles) {
+export function mergeBrowserProfilePayload(previousProfiles, incomingProfiles, options = {}) {
   const previous = Array.isArray(previousProfiles) ? previousProfiles : [];
   const incoming = Array.isArray(incomingProfiles) ? incomingProfiles : [];
+  const authoritativeTaskRecovery = options.authoritativeTaskRecovery === true;
   if (!previous.length) return incoming;
   const previousById = new Map(previous.map((profile) => [profile.profile_id, profile]));
   let changed = previous.length !== incoming.length;
@@ -27,7 +36,13 @@ export function mergeBrowserProfilePayload(previousProfiles, incomingProfiles) {
       changed = true;
       return profile;
     }
-    const candidate = { ...prior, ...profile };
+    const recoveryReset = authoritativeTaskRecovery
+      ? Object.fromEntries(Object.entries(AUTHORITATIVE_TASK_RECOVERY_DEFAULTS)
+        .filter(([key]) => Object.hasOwn(prior, key) && !Object.hasOwn(profile, key)))
+      : null;
+    const candidate = recoveryReset
+      ? { ...prior, ...recoveryReset, ...profile }
+      : { ...prior, ...profile };
     if (browserProfileUiSignature(prior) === browserProfileUiSignature(candidate)) return prior;
     changed = true;
     return candidate;
@@ -88,7 +103,7 @@ export function mergeRuntimeStatus(previousStatus, incomingStatus) {
 
   if (workerSnapshotAvailable) {
     const normalizedProfiles = normalizeTerminalMessageStreamProfiles(incomingStatus.browserProfiles, workerJobs);
-    const browserProfiles = mergeBrowserProfilePayload(previous?.browserProfiles, normalizedProfiles);
+    const browserProfiles = mergeBrowserProfilePayload(previous?.browserProfiles, normalizedProfiles, { authoritativeTaskRecovery: true });
     return {
       ...incomingStatus,
       browserProfiles,
