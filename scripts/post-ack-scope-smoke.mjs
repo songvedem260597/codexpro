@@ -23,6 +23,8 @@ assert.match(source, /const WORKER_RUNTIME_BUILD_ID = 'send-post-ack-scope-v2';/
 assert.match(source, /async function publishExtensionRuntimeIdentity\(profile\)/, 'runtime identity publication must receive the exact worker profile');
 assert.match(source, /extensionRuntimeIdentityDetails=\{profile_id:String\(profile\?\.id\|\|''\),artifact_name:'service-worker\.js'/, 'runtime identity trace must attribute the service-worker SHA to the exact profile id');
 assert.match(source, /const profile=await profileInfo\(\);[\s\S]*?publishExtensionRuntimeIdentity\(profile\)/, 'poll loop must publish identity for the same profile that produced the heartbeat');
+assert.match(source, /async function extensionRuntimeIdentity\(profile\)[\s\S]*?runtime_build_id:WORKER_RUNTIME_BUILD_ID/, 'runtime identity helper must bind exact worker build id to the service-worker SHA');
+assert.match(source, /if\(action==='list_tabs'\)[\s\S]*?runtime_identity:await extensionRuntimeIdentity\(profile\)/, 'list_tabs must expose exact running service-worker identity from the targeted worker');
 
 // Current helper returns this lexical stability source in addition to the historical post-ACK fields.
 const stabilitySource = 'post_ack_scope_smoke';

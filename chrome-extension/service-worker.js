@@ -40,17 +40,21 @@ function tracePayload(command,event,details={}){
 function postTrace(command,event,details={}){
   try{void fetch(`${BRIDGE}/trace`,{method:'POST',headers:HEADERS,body:JSON.stringify(tracePayload(command,event,details))}).catch(()=>{});}catch{}
 }
+async function extensionRuntimeIdentity(profile){
+  if(extensionRuntimeIdentityDetails)return extensionRuntimeIdentityDetails;
+  const response=await fetch(chrome.runtime.getURL('service-worker.js'));
+  if(!response.ok)throw new Error(`Runtime identity read failed: HTTP ${response.status}`);
+  const bytes=await response.arrayBuffer();
+  const digest=await crypto.subtle.digest('SHA-256',bytes);
+  const sha256=[...new Uint8Array(digest)].map(value=>value.toString(16).padStart(2,'0')).join('');
+  extensionRuntimeIdentityDetails={profile_id:String(profile?.id||''),artifact_name:'service-worker.js',artifact_sha256:sha256,artifact_size:bytes.byteLength,extension_version_label:String(chrome.runtime.getManifest()?.version||''),runtime_build_id:WORKER_RUNTIME_BUILD_ID};
+  return extensionRuntimeIdentityDetails;
+}
 async function publishExtensionRuntimeIdentity(profile){
   if(extensionRuntimeIdentityPublished)return;
   try{
-    if(!extensionRuntimeIdentityDetails){
-      const response=await fetch(chrome.runtime.getURL('service-worker.js'));
-      const bytes=await response.arrayBuffer();
-      const digest=await crypto.subtle.digest('SHA-256',bytes);
-      const sha256=[...new Uint8Array(digest)].map(value=>value.toString(16).padStart(2,'0')).join('');
-      extensionRuntimeIdentityDetails={profile_id:String(profile?.id||''),artifact_name:'service-worker.js',artifact_sha256:sha256,artifact_size:bytes.byteLength,extension_version_label:String(chrome.runtime.getManifest()?.version||'')};
-    }
-    const body=tracePayload(null,'runtime_identity',extensionRuntimeIdentityDetails);
+    const details=await extensionRuntimeIdentity(profile);
+    const body=tracePayload(null,'runtime_identity',details);
     const sent=await fetch(`${BRIDGE}/trace`,{method:'POST',headers:HEADERS,body:JSON.stringify(body)});
     if(sent.ok)extensionRuntimeIdentityPublished=true;
   }catch{}
@@ -2528,7 +2532,10 @@ async function execute(command) {
   if(action==='check_chatgpt')return {action,...await checkConnectorInstalled()};
   if(action==='setup_chatgpt')return {action,...await installConnector()};
   if(action==='register_watchdog_tab'){const registered=await registerVisualWatchdogTab(Number(args.target_id),String(args.conversation_id||''));return {action,ok:true,...registered};}
-  if(action==='list_tabs')return {action,tabs:await tabList({includeWatchdog:true}),tab_audit:await tabAuditSnapshot(80)};
+  if(action==='list_tabs'){
+    const profile=await profileInfo();
+    return {action,tabs:await tabList({includeWatchdog:true}),tab_audit:await tabAuditSnapshot(80),runtime_identity:await extensionRuntimeIdentity(profile)};
+  }
   if(action==='stop_chat_generation'){
     const requestedId=Number(args.target_id);
     const conversationId=String(args.conversation_id||'').trim();
