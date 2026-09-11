@@ -40,7 +40,7 @@ function tracePayload(command,event,details={}){
 function postTrace(command,event,details={}){
   try{void fetch(`${BRIDGE}/trace`,{method:'POST',headers:HEADERS,body:JSON.stringify(tracePayload(command,event,details))}).catch(()=>{});}catch{}
 }
-async function publishExtensionRuntimeIdentity(){
+async function publishExtensionRuntimeIdentity(profile){
   if(extensionRuntimeIdentityPublished)return;
   try{
     if(!extensionRuntimeIdentityDetails){
@@ -48,7 +48,7 @@ async function publishExtensionRuntimeIdentity(){
       const bytes=await response.arrayBuffer();
       const digest=await crypto.subtle.digest('SHA-256',bytes);
       const sha256=[...new Uint8Array(digest)].map(value=>value.toString(16).padStart(2,'0')).join('');
-      extensionRuntimeIdentityDetails={artifact_name:'service-worker.js',artifact_sha256:sha256,artifact_size:bytes.byteLength,extension_version_label:String(chrome.runtime.getManifest()?.version||'')};
+      extensionRuntimeIdentityDetails={profile_id:String(profile?.id||''),artifact_name:'service-worker.js',artifact_sha256:sha256,artifact_size:bytes.byteLength,extension_version_label:String(chrome.runtime.getManifest()?.version||'')};
     }
     const body=tracePayload(null,'runtime_identity',extensionRuntimeIdentityDetails);
     const sent=await fetch(`${BRIDGE}/trace`,{method:'POST',headers:HEADERS,body:JSON.stringify(body)});
@@ -3678,7 +3678,7 @@ async function pollLoop() {
     while(true){
       try{
         const profile=await profileInfo();
-        void publishExtensionRuntimeIdentity();
+        void publishExtensionRuntimeIdentity(profile);
         if(!profile.enabled){await publishPendingWorkerDisable(profile).catch(()=>{});await new Promise(resolve=>setTimeout(resolve,2000));continue;}
         let [tabs,recentConversations]=await Promise.all([tabList(),recentConversationList(3)]);
         const tabCleanup=await cleanupChatGptTabs(tabs,recentConversations);

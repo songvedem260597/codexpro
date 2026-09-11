@@ -20,6 +20,9 @@ assert.equal(definitions.length, 1, 'post-ACK helper must have exactly one defin
 assert.ok(definitions[0].parent === ast, 'post-ACK helper must be top-level, not nested in a tab callback');
 assert.equal(calls.length, 1, 'successful send path must have exactly one post-ACK helper callsite');
 assert.match(source, /const WORKER_RUNTIME_BUILD_ID = 'send-post-ack-scope-v2';/, 'runtime identity must advance when the service worker artifact changes');
+assert.match(source, /async function publishExtensionRuntimeIdentity\(profile\)/, 'runtime identity publication must receive the exact worker profile');
+assert.match(source, /extensionRuntimeIdentityDetails=\{profile_id:String\(profile\?\.id\|\|''\),artifact_name:'service-worker\.js'/, 'runtime identity trace must attribute the service-worker SHA to the exact profile id');
+assert.match(source, /const profile=await profileInfo\(\);[\s\S]*?publishExtensionRuntimeIdentity\(profile\)/, 'poll loop must publish identity for the same profile that produced the heartbeat');
 
 // Current helper returns this lexical stability source in addition to the historical post-ACK fields.
 const stabilitySource = 'post_ack_scope_smoke';
