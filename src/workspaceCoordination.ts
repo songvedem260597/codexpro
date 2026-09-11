@@ -614,7 +614,7 @@ export async function withVerifiedWorkspaceTaskResume<T>(
         throw new CodexProError("WORKSPACE_TASK_RESUME_WRITER_CONFLICT: another active task may write this worktree or owns this worker.", { code: "WORKSPACE_TASK_RESUME_WRITER_CONFLICT", details: { other_task_id: other.taskId } });
       }
     }
-    for (const relPath of uniquePaths([...current.claimedPaths, ...current.touchedPaths])) {
+    for (const relPath of uniquePaths(current.claimedPaths)) {
       if (claimOwner(state, relPath) !== current.taskId) {
         throw new CodexProError("WORKSPACE_TASK_RESUME_CLAIM_CONFLICT: source claim is missing or belongs to another task.", { code: "WORKSPACE_TASK_RESUME_CLAIM_CONFLICT", details: { path: relPath } });
       }

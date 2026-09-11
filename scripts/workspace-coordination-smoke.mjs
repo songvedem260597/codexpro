@@ -23,7 +23,9 @@ const {
   resolveWorkspaceTaskRootByTaskId,
   recordWorkspacePathsTouched,
   registerWorkspaceTask,
-  releaseWorkspacePaths
+  releaseWorkspacePaths,
+  verifyWorkspaceTaskResume,
+  withVerifiedWorkspaceTaskResume
 } = await import(pathToFileURL(path.join(projectRoot, "dist", "workspaceCoordination.js")).href);
 const { runBash } = await import(pathToFileURL(path.join(projectRoot, "dist", "bashOps.js")).href);
 
@@ -40,6 +42,8 @@ const TASK_J = { taskId: "cpt_444444444444444444444444", workerId: "worker:j", t
 const TASK_K = { taskId: "cpt_555555555555555555555555", workerId: "worker:k", title: "Unowned verification task", root: repoRoot };
 const TASK_L = { taskId: "cpt_666666666666666666666666", workerId: "worker:l", title: "Authoritative root fallback task", root: repoRoot };
 const TASK_M_ID = "cpt_777777777777777777777777";
+const TASK_N = { taskId: "cpt_888888888888888888888888", workerId: "worker:n", title: "Released touched resume task", root: repoRoot };
+const TASK_O = { taskId: "cpt_999999999999999999999999", workerId: "worker:o", title: "Released path competitor", root: repoRoot };
 const gitExecutable = process.platform === "win32" ? "git.exe" : "git";
 
 function git(args, cwd = repoRoot) {
@@ -73,6 +77,18 @@ function writeCoordinationTaskFixture(root, taskId, workerId) {
     integrationQueue: []
   }, null, 2)}\n`, "utf8");
   return file;
+}
+
+function mutateCoordinationState(root, mutate) {
+  const { file } = coordinationStatePath(root);
+  const state = JSON.parse(fs.readFileSync(file, "utf8"));
+  mutate(state);
+  fs.writeFileSync(file, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+async function resumeWorkspaceTask(task) {
+  const verified = await verifyWorkspaceTaskResume(task);
+  return await withVerifiedWorkspaceTaskResume(task, verified, async () => true);
 }
 
 function taskContext(task, record) {
@@ -511,6 +527,72 @@ try {
     "a task with no task-owned commit must not integrate the base HEAD"
   );
   await finalizeWorkspaceTask(TASK_E, "cancelled");
+
+  const registeredN = await registerWorkspaceTask(TASK_N);
+  const registeredO = await registerWorkspaceTask(TASK_O);
+  await claimWorkspacePaths(TASK_N, ["resume-active.txt"]);
+  assert.equal(await resumeWorkspaceTask(TASK_N), true, "an active claimed path with the correct durable claim must resume");
+  await assert.rejects(
+    claimWorkspacePaths(TASK_O, ["resume-active.txt"]),
+    /WORKSPACE_PATH_CONFLICT/,
+    "normal competing-writer protection must still reject an actively claimed path"
+  );
+
+  const { file: resumeCoordinationFile } = coordinationStatePath(repoRoot);
+  const activeClaimState = fs.readFileSync(resumeCoordinationFile, "utf8");
+  mutateCoordinationState(repoRoot, (state) => {
+    delete state.claims["resume-active.txt"];
+  });
+  await assert.rejects(
+    resumeWorkspaceTask(TASK_N),
+    /WORKSPACE_TASK_RESUME_CLAIM_CONFLICT/,
+    "an active claimed path missing from durable claims must still fail closed"
+  );
+  fs.writeFileSync(resumeCoordinationFile, activeClaimState, "utf8");
+
+  mutateCoordinationState(repoRoot, (state) => {
+    state.claims["resume-active.txt"].taskId = TASK_O.taskId;
+  });
+  await assert.rejects(
+    resumeWorkspaceTask(TASK_N),
+    /WORKSPACE_TASK_RESUME_CLAIM_CONFLICT/,
+    "an active claimed path owned by another task must still fail closed"
+  );
+  fs.writeFileSync(resumeCoordinationFile, activeClaimState, "utf8");
+
+  const releasedStabilityPaths = [
+    "scripts/real-runtime-stability-gate-smoke.mjs",
+    "scripts/real-runtime-stability-gate.mjs",
+    "scripts/real-runtime-stability-lib.mjs"
+  ];
+  await claimWorkspacePaths(TASK_N, releasedStabilityPaths);
+  await recordWorkspacePathsTouched(TASK_N, releasedStabilityPaths);
+  await releaseWorkspacePaths(TASK_N, releasedStabilityPaths);
+  const releasedState = readWorkspaceCoordination(repoRoot);
+  const releasedTask = releasedState.tasks[TASK_N.taskId];
+  assert.ok(releasedStabilityPaths.every((relPath) => releasedTask.touchedPaths.includes(relPath)), "released stability paths must remain in touchedPaths history");
+  assert.ok(releasedStabilityPaths.every((relPath) => !releasedTask.claimedPaths.includes(relPath)), "released stability paths must leave active claimedPaths");
+  assert.ok(releasedStabilityPaths.every((relPath) => !releasedState.claims[relPath]), "released stability paths must leave no durable active claim");
+  assert.equal(await resumeWorkspaceTask(TASK_N), true, "touched-only released stability paths must not block resume");
+
+  await claimWorkspacePaths(TASK_O, [releasedStabilityPaths[0]]);
+  assert.equal(await resumeWorkspaceTask(TASK_N), true, "a foreign claim on a touched-only released path must not block historical-task resume");
+  await assert.rejects(
+    recordWorkspacePathsTouched(TASK_N, [releasedStabilityPaths[0]]),
+    /WORKSPACE_TOUCH_NOT_CLAIMED/,
+    "a resumed task must not re-touch a released path without reacquiring its claim"
+  );
+  await assert.rejects(
+    claimWorkspacePaths(TASK_N, [releasedStabilityPaths[0]]),
+    /WORKSPACE_PATH_CONFLICT/,
+    "normal claim acquisition must still respect a competing owner"
+  );
+  await releaseWorkspacePaths(TASK_O, [releasedStabilityPaths[0]]);
+  await claimWorkspacePaths(TASK_N, [releasedStabilityPaths[0]]);
+  await recordWorkspacePathsTouched(TASK_N, [releasedStabilityPaths[0]]);
+  assert.equal(readWorkspaceCoordination(repoRoot).claims[releasedStabilityPaths[0]]?.taskId, TASK_N.taskId, "re-touch must succeed only after normal claim reacquisition");
+  await finalizeWorkspaceTask(TASK_O, "cancelled");
+  await finalizeWorkspaceTask(TASK_N, "cancelled");
 
   const afterFinalize = readWorkspaceCoordination(repoRoot);
   assert.equal(Object.keys(afterFinalize.claims).length, 0, "terminal tasks must release all path claims");
