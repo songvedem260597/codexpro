@@ -25,7 +25,10 @@ assert.match(composer, /export function ChatRequestComposer\(/, "chat composer m
 assert.match(composer, /function SendDebugEvidence\(/, "send debug evidence must stay colocated with the chat composer");
 assert.match(composer, /const \[draft, setDraft\] = useState\(/, "composer draft must be local state");
 assert.match(composer, /const draftRef = useRef\(String\(initialDraft \|\| ""\)\)/, "composer must track the live draft independently while a previous send waits for ACK");
-assert.match(composer, /const submittedDraft = draft[\s\S]*?onSend\(submittedDraft\)[\s\S]*?draftRef\.current === submittedDraft/, "a completed send may clear only the exact draft it submitted, never text typed for the next follow-up");
+assert.match(composer, /const submit = useCallback\(async \(sendTiming = \{\}\) => \{[\s\S]*?if \(!canSend \|\| sendingRef\.current\) return;[\s\S]*?sendingRef\.current = true;[\s\S]*?onSend\(submittedDraft, \{ \.\.\.sendTiming, submitEnteredAt \}\)/, "click and Enter must acquire the duplicate-send lock synchronously before the async send starts");
+assert.match(composer, /const submittedDraft = draft[\s\S]*?onSend\(submittedDraft, \{ \.\.\.sendTiming, submitEnteredAt \}\)[\s\S]*?draftRef\.current === submittedDraft/, "a completed send may clear only the exact draft it submitted, never text typed for the next follow-up");
+assert.match(composer, /trigger: "enter", acceptedAt: performance\.now\(\)/, "Enter must timestamp T0 at the accepted keyboard event");
+assert.match(composer, /trigger: "click", acceptedAt: performance\.now\(\)/, "Send click must timestamp T0 at the accepted click event");
 assert.match(composer, /onDraftSnapshot\(normalized\)/, "composer must snapshot draft without lifting render state");
 assert.match(composer, /onDraftActivityChange\(Boolean\(normalized\.trim\(\)\)\)/, "typing must mark the composer active so background transcript pinning cannot move the reader viewport");
 assert.match(composer, /\[profileId, draftResetVersion\]/, "composer must reset local draft when switching profiles");
@@ -33,7 +36,15 @@ assert.doesNotMatch(composer, /setRequestDrafts/, "composer must not update App 
 
 assert.match(mainSource, /const requestDraftsRef = useRef\(\{\}\)/, "App must keep draft snapshots in a ref");
 assert.doesNotMatch(mainSource, /setRequestDrafts/, "legacy App draft setter must not return");
-assert.match(sendActionsSource, /async function sendRequest\(profile, draftOverride = null\)/, "sendRequest must accept the composer draft directly");
+assert.match(sendActionsSource, /async function sendRequest\(profile, draftOverride = null, sendTiming = \{\}\)/, "sendRequest must accept the composer draft and cheap T0-T3 timing metadata directly");
+assert.match(modalSource, /onSend=\{\(nextDraft, sendTiming\) => sendRequest\(profile, nextDraft, \{ \.\.\.sendTiming, onSendEnteredAt: performance\.now\(\) \}\)\}/, "ChatModal must timestamp T2 without scheduling unrelated work before sendRequest");
+assert.match(sendActionsSource, /event: "renderer_send_started"[\s\S]*?event: "renderer_send_api_invoked"/, "send trace must expose renderer entry and API invocation stages");
+assert.match(sendActionsSource, /renderer_pre_send_ms:/, "renderer send trace must expose local pre-send timing");
+assert.match(sendActionsSource, /click_to_send_api_ms:/, "renderer send trace must expose bounded T0-to-T5 timing");
+const apiInvocationStart = sendActionsSource.indexOf('const sendApiInvokedAt = performance.now();');
+const apiInvocationCall = sendActionsSource.indexOf('const sendPromise = api.sendProfileRequest(', apiInvocationStart);
+assert.ok(apiInvocationStart >= 0 && apiInvocationCall > apiInvocationStart, "T5 trace must be emitted immediately before api.sendProfileRequest");
+assert.doesNotMatch(sendActionsSource.slice(apiInvocationStart, apiInvocationCall), /\bawait\b/, "no refresh, diagnostic, persistence, or response promise may block between T5 timestamping and api.sendProfileRequest invocation");
 
 assert.match(modalSource, /<ChatRequestComposer/, "chat modal must render the isolated composer");
 assert.match(modalSource, /const canSendBase = !sending && profile\.connected[\s\S]*?!selectedRecoveringNetworkAbort[\s\S]*?!rolloverCreating/, "manual follow-up send eligibility must depend on the send lock and transport safety, not on the assistant being idle");

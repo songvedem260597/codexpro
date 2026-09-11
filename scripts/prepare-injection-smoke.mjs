@@ -55,7 +55,7 @@ const composer = {
 const waiting = vm.createContext({
   Date: { now: () => now },
   location: {origin:'https://chatgpt.com',pathname:'/c/expected'},
-  document: {querySelector: () => ready ? composer : null},
+  document: {querySelector: () => ready ? composer : null,querySelectorAll:()=>[]},
   getComputedStyle: () => ({display:'block',visibility:'visible'}),
   setTimeout(callback) { now=3000; ready=true; callback(); }
 });
@@ -64,6 +64,21 @@ const resumed = await waiting.sendChatRequestPage('test', [], 'late', 2000, null
 assert.equal(resumed.expired, true);
 assert.equal(mutations, 0);
 console.log('prepare-injection-smoke: PASS (deadline crossed during await)');
+
+let composerLookups = 0;
+const limitContainer={innerText:"You've reached the maximum length for this conversation. Start new chat",textContent:"You've reached the maximum length for this conversation. Start new chat",parentElement:null};
+const limitControl={innerText:'Start new chat',textContent:'Start new chat',parentElement:limitContainer,getBoundingClientRect:()=>({width:100,height:20}),getAttribute:()=>''};
+const limitContext=vm.createContext({
+  Date,
+  location:{origin:'https://chatgpt.com',pathname:'/c/expected'},
+  document:{querySelectorAll:()=>[limitControl],querySelector:()=>{composerLookups++;return null;}},
+  getComputedStyle:()=>({display:'block',visibility:'visible'}),
+  setTimeout
+});
+vm.runInContext(prepareSource,limitContext);
+const limited=await limitContext.sendChatRequestPage('test',[],'limit',Date.now()+1000,null,'expected');
+assert.equal(limited.conversation_limit_reached,true);
+assert.equal(composerLookups,0,'conversation limit must stop the consolidated prepare before composer discovery or mutation');
 
 const cleanupSource=source.slice(source.indexOf('async function cleanupChatRequestDraftPage('),source.indexOf('async function readChatResponsePage('));
 const editedComposer={isContentEditable:true,innerText:'user edited draft',dataset:{codexproDraftAttempt:'old',codexproDraftText:'original'},closest:()=>null,getBoundingClientRect:()=>({width:100,height:20}),focus(){throw new Error('must not focus user draft');}};

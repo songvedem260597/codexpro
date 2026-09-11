@@ -271,7 +271,7 @@ export function ChatModal({ profile, settings, projects, busy, state, refs, acti
             }}
             onClose={close}
             onOpenChrome={() => openProfile(profile)}
-            onSend={(nextDraft) => sendRequest(profile, nextDraft)}
+            onSend={(nextDraft, sendTiming) => sendRequest(profile, nextDraft, { ...sendTiming, onSendEnteredAt: performance.now() })}
           />
         </article>
       </div>

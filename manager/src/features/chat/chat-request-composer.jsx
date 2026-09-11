@@ -83,12 +83,13 @@ export function ChatRequestComposer({
 
   const canSend = canSendBase && Boolean(draft.trim() || attachments.length);
 
-  const submit = useCallback(async () => {
+  const submit = useCallback(async (sendTiming = {}) => {
+    const submitEnteredAt = performance.now();
     if (!canSend || sendingRef.current) return;
     const submittedDraft = draft;
     sendingRef.current = true;
     try {
-      const submitted = await onSend(submittedDraft);
+      const submitted = await onSend(submittedDraft, { ...sendTiming, submitEnteredAt });
       if (submitted && draftRef.current === submittedDraft) updateDraft("");
     } finally {
       sendingRef.current = false;
@@ -113,7 +114,7 @@ export function ChatRequestComposer({
             if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.nativeEvent?.isComposing || event.repeat) return;
             if (!canSend) return;
             event.preventDefault();
-            void submit();
+            void submit({ trigger: "enter", acceptedAt: performance.now() });
           }}
           disabled={disabled}
         />
@@ -146,7 +147,7 @@ export function ChatRequestComposer({
         <div className="request-card-actions">
           <button type="button" className="button secondary" onClick={onClose}>Đóng</button>
           <button type="button" className="button secondary" onClick={onOpenChrome} disabled={!canOpenChrome}>Mở Chrome</button>
-          <button type="button" className="button primary" onClick={() => void submit()} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy || selectedSettling ? "Gửi thêm" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
+          <button type="button" className="button primary" onClick={() => void submit({ trigger: "click", acceptedAt: performance.now() })} disabled={!canSend}>{sending ? (isNewChat ? "Đang tạo chat…" : attachments.length ? "Đang tải file + gửi…" : "Đang gửi…") : rolloverCreating ? "Đang chuyển chat…" : selectedBusy || selectedSettling ? "Gửi thêm" : isNewChat ? "Tạo chat + gửi" : "Gửi tin nhắn"}</button>
         </div>
       </div>
     </>

@@ -1406,7 +1406,24 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
   const normalizedText=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').trim();
   const comparableText=value=>normalizedText(value).replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
   const composerText=element=>element?.isContentEditable?normalizedText(element.innerText||element.textContent||''):normalizedText(element?.value||'');
+  const conversationLimit=()=>{
+    const limitPattern=/(?:you(?:'|’)?ve reached the maximum length for this conversation|maximum length for this conversation|đ(?:ã|a) (?:đạt|chạm|tới).*?(?:độ dài|do dai).*?(?:tối đa|toi da).*?(?:cuộc trò chuyện|đoạn chat))/i;
+    const startNewChatPattern=/(?:start new chat|bắt đầu (?:một )?(?:cuộc trò chuyện|đoạn chat) mới)/i;
+    for(const control of document.querySelectorAll('button,a,[role="button"]')){
+      if(!visible(control))continue;
+      const label=String(control.innerText||control.textContent||control.getAttribute?.('aria-label')||'').trim();
+      if(!startNewChatPattern.test(label))continue;
+      let node=control;
+      for(let depth=0;node&&depth<6;depth+=1,node=node.parentElement){
+        const message=String(node.innerText||node.textContent||'').replace(/\u200b/g,'').trim();
+        if(message.length<=1400&&limitPattern.test(message))return {reached:true,message:message.slice(0,500),button_label:label};
+      }
+    }
+    return {reached:false,message:'',button_label:''};
+  };
   if(location.origin!=='https://chatgpt.com'||(!location.pathname.startsWith('/c/')&&location.pathname!=='/'))return {ok:false,error:'Tab đã chọn không phải ChatGPT.'};
+  const initialConversationLimit=conversationLimit();
+  if(initialConversationLimit.reached)return {ok:false,error:'CONVERSATION_LIMIT_REACHED: '+initialConversationLimit.message,conversation_limit_reached:true,conversation_limit_message:initialConversationLimit.message,cleanup_skipped:true};
   const composerSelectors=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'];
   const findComposer=()=>composerSelectors.map(selector=>document.querySelector(selector)).find(element=>visible(element));
   const composerRootFor=element=>element?.closest('form')||element?.closest('[data-type="unified-composer"]')||element?.parentElement;
@@ -1902,6 +1919,24 @@ async function focusChatComposerForSubmitPage(attemptId='',expectedText='') {
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
   const composerText=element=>element?.isContentEditable?String(element.innerText||element.textContent||''):String(element?.value||'');
+  let blockingModalDismissed=false;
+  for(let guardAttempt=0;guardAttempt<6;guardAttempt+=1){
+    const current=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+    const draftOwned=Boolean(current&&(current.dataset.codexproDraftAttempt===attemptId||expectedText&&normalized(composerText(current))===normalized(expectedText)));
+    if(!draftOwned)return {ok:false,error:'Composer của attempt không còn giữ đúng draft trước trusted Enter.'};
+    const dialogs=[document.querySelector('#modal-subscription-failure'),...document.querySelectorAll('[role="dialog"]')].filter((element,index,array)=>element&&array.indexOf(element)===index&&visible(element));
+    const modal=dialogs.find(element=>{
+      if(element.id==='modal-subscription-failure')return true;
+      const text=normalized(element.innerText||element.textContent||'');
+      return /review payment method|plus plan failed to renew|payment method.*pay now|xem lai phuong thuc thanh toan|gia han.*plus.*that bai/i.test(text);
+    });
+    if(!modal)break;
+    const close=['button[data-testid="close-button"]','button[aria-label="Close"]','button[aria-label="Đóng"]','button[aria-label="Dong"]'].map(selector=>modal.querySelector(selector)).find(element=>visible(element)&&!element.disabled&&element.getAttribute?.('aria-disabled')!=='true');
+    if(!close)return {ok:false,error:'Modal thanh toán đang chặn composer nhưng không tìm thấy nút đóng an toàn.'};
+    close.click();blockingModalDismissed=true;
+    await new Promise(resolve=>setTimeout(resolve,120));
+    if(guardAttempt===5)return {ok:false,error:'Modal thanh toán liên tục xuất hiện lại; dừng trước khi phát Enter để tránh trạng thái gửi không chắc chắn.'};
+  }
   const marked=document.querySelector(`[data-codexpro-submit-attempt="${CSS.escape(attemptId)}"]`);
   const current=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
   const recovered=Boolean(!marked&&current&&normalized(composerText(current))===normalized(expectedText));
@@ -1915,11 +1950,11 @@ async function focusChatComposerForSubmitPage(attemptId='',expectedText='') {
   const selection=getSelection(),range=document.createRange();
   range.selectNodeContents(composer);range.collapse(false);selection.removeAllRanges();selection.addRange(range);
   for(let focusAttempt=0;focusAttempt<15;focusAttempt+=1){
-    if(document.activeElement===composer)return {ok:true,focused:true,focus_wait_ms:focusAttempt*50,composer_recovered_after_react:recovered};
+    if(document.activeElement===composer)return {ok:true,focused:true,focus_wait_ms:focusAttempt*50,composer_recovered_after_react:recovered,blocking_modal_dismissed:blockingModalDismissed};
     await new Promise(resolve=>setTimeout(resolve,50));
     composer.focus({preventScroll:true});
   }
-  return {ok:true,focused:document.activeElement===composer,selection_inside:Boolean(getSelection()?.anchorNode&&composer.contains(getSelection().anchorNode)),focus_wait_ms:750,composer_recovered_after_react:recovered};
+  return {ok:true,focused:document.activeElement===composer,selection_inside:Boolean(getSelection()?.anchorNode&&composer.contains(getSelection().anchorNode)),focus_wait_ms:750,composer_recovered_after_react:recovered,blocking_modal_dismissed:blockingModalDismissed};
 }
 
 function dismissKnownBlockingChatModalPage(attemptId='',expectedText='') {
@@ -2651,15 +2686,13 @@ async function execute(command) {
     const rendererSendRecovery=await timedSendPhase('renderer_preflight_ms',()=>ensureChatRendererReadyForSend(tab,Math.max(250,Math.min(RENDERER_SEND_PREFLIGHT_TIMEOUT_MS,remainingCommandMs()-1000))));
     tab=rendererSendRecovery.tab;
     rendererSendDiagnostics={renderer_preflight:rendererSendRecovery.renderer_preflight,renderer_wake_attempted:Boolean(rendererSendRecovery.renderer_wake_attempted),renderer_wake_succeeded:Boolean(rendererSendRecovery.renderer_wake_succeeded),renderer_wake_probe:rendererSendRecovery.renderer_wake_probe||null,renderer_wake_errors:Array.isArray(rendererSendRecovery.renderer_wake_errors)?rendererSendRecovery.renderer_wake_errors:[]};
-    const [networkCaptureProbe,requestState,domActivity,staleAttachmentOwnership,conversationLimit]=await Promise.all([
+    const [networkCaptureProbe,requestState,domActivity,staleAttachmentOwnership]=await Promise.all([
       timedSendPhase('network_capture_probe_ms',()=>chatNetworkStreamCapture(tab.id,targetConversationId)),
       timedSendPhase('network_state_ms',()=>chatRequestState(tab.id,conversationId)),
       timedSendPhase('dom_activity_ms',()=>newChat?Promise.resolve({available:false,busy:false,source:'',activity_text:''}):chatDomActivityState(tab.id,conversationId,{maxAgeMs:750})),
-      timedSendPhase('attachment_ownership_ms',()=>chatAttachmentOwnership(tab.id,targetConversationId)),
-      timedSendPhase('conversation_limit_ms',()=>newChat?Promise.resolve({reached:false,message:'',button_label:''}):probeConversationLimit(tab.id,0))
+      timedSendPhase('attachment_ownership_ms',()=>chatAttachmentOwnership(tab.id,targetConversationId))
     ]);
     const networkCaptureInstalled=Boolean(networkCaptureProbe?.capture_installed||networkCaptureProbe?.available);
-    if(conversationLimit.reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(conversationLimit.message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
     const followupWhileGenerating=Boolean(allowBusyFollowup&&(requestState.busy&&requestState.network_state==='generating'||networkCaptureProbe?.in_progress===true));
     if(requestState.busy&&!allowBusyFollowup)throw new Error('Đoạn chat đang xử lý yêu cầu khác.');
     if(domActivity.busy&&!allowBusyFollowup){
@@ -2791,12 +2824,14 @@ async function execute(command) {
           attachments.length?'Chrome renderer không phản hồi khi chuẩn bị file đính kèm.':'Chrome renderer không phản hồi khi chuẩn bị tin nhắn.'
         ));
         const prepareResult=injected?.result;
+        if(prepareResult?.conversation_limit_reached)throw new Error('CONVERSATION_LIMIT_REACHED: '+(prepareResult.conversation_limit_message||'ChatGPT báo đoạn chat đã đạt giới hạn độ dài.'));
         const recoverablePrepareFailure=prepareResult?.ok===false&&!prepareResult.cleanup_skipped&&(prepareResult.expired||/không tìm thấy ô nhập|ô nhập chatgpt.*biến mất|renderer/i.test(String(prepareResult.error||'')));
         if(recoverablePrepareFailure)throw new Error('PREPARE_RECOVERABLE: '+String(prepareResult.error||'ChatGPT chưa sẵn sàng để nhập tin nhắn.'));
         preparationRecovery={...preparationRecovery,prepare_attempts:prepareAttempt+1,prepare_recovered:prepareAttempt>0};
         break;
       }catch(error){
         const prepareError=String(error?.message||error).slice(0,500);
+        if(prepareError.startsWith('CONVERSATION_LIMIT_REACHED:')){pendingConversationByTab.delete(tab.id);throw error;}
         prepareErrors.push(prepareError);
         postTrace(command,'prepare_error',{attempt_id:attemptId,tab_id:tab.id,conversation_id:newChat?'':conversationId,stage_outcome:'error',error_code:String(error?.code||prepareError.match(/^([A-Z][A-Z0-9_]+):/)?.[1]||'PREPARE_ERROR').slice(0,160)});
         const prepareRecovery=classifyChatPrepareRecovery(prepareError,prepareAttempt,oneShotRecovery);
@@ -4175,50 +4210,26 @@ async function submitChatAttachmentButtonTab(tabId,attemptId,expectedText='') {
 
 async function trustedSubmitChatComposerTab(tabId,attemptId,expectedText='') {
   if(!attemptId)throw new Error('Trusted composer attempt không hợp lệ.');
-  let blockingModalDismissed=false;
-  const settleBlockingModal=async()=>{
-    let sawDismissal=false,quietChecks=0;
-    for(let guardAttempt=0;guardAttempt<6;guardAttempt+=1){
-      const [result]=await chrome.scripting.executeScript({injectImmediately:true,target:{tabId},func:dismissKnownBlockingChatModalPage,args:[attemptId,expectedText]});
-      if(result?.result?.ok!==true)throw new Error(result?.result?.error||'Không xử lý được modal đang chặn composer ChatGPT.');
-      if(result?.result?.dismissed){blockingModalDismissed=true;sawDismissal=true;quietChecks=0;await new Promise(resolve=>setTimeout(resolve,120));continue;}
-      if(!sawDismissal)return;
-      quietChecks+=1;
-      if(quietChecks>=2)return;
-      await new Promise(resolve=>setTimeout(resolve,120));
-    }
-    throw new Error('Modal thanh toán liên tục xuất hiện lại; dừng trước khi phát Enter để tránh trạng thái gửi không chắc chắn.');
-  };
-  try{await settleBlockingModal();}
-  catch(error){throw new Error('TRUSTED_ENTER_PRE_DISPATCH: '+String(error?.message||error));}
-  const [focused]=await chrome.scripting.executeScript({injectImmediately:true,target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
-  if(focused?.result?.ok!==true)throw new Error('TRUSTED_ENTER_PRE_DISPATCH: '+(focused?.result?.error||'Không xác minh được composer ChatGPT trước khi gửi bằng Enter.'));
   let tracker;
   try{tracker=await startCdpChatNetworkTracker(tabId);}
   catch(error){throw new Error('TRUSTED_ENTER_PRE_DISPATCH: '+String(error?.message||error));}
   const target={tabId};
   let focusEmulationEnabled=false;
   let keyDispatchStarted=false;
-  let refocusedResult=null;
+  let focusedResult=null;
   try{
     await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:true});
     focusEmulationEnabled=true;
-    // Focus ownership is verified explicitly below; no fixed healthy-path settle delay.
-    await settleBlockingModal();
-    const [refocused]=await chrome.scripting.executeScript({injectImmediately:true,target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
-    refocusedResult=refocused?.result||null;
-    if(refocused?.result?.ok!==true||refocused?.result?.focused!==true&&refocused?.result?.selection_inside!==true)throw new Error(refocused?.result?.error||'Composer mất focus trong background focus emulation lifecycle.');
-    // Focus ownership is verified explicitly below; no fixed healthy-path settle delay.
-    await settleBlockingModal();
-    const [finalFocus]=await chrome.scripting.executeScript({injectImmediately:true,target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
-    if(finalFocus?.result?.ok!==true||finalFocus?.result?.focused!==true&&finalFocus?.result?.selection_inside!==true)throw new Error(finalFocus?.result?.error||'Composer mất focus ngay trước trusted Enter dispatch.');
+    const [focused]=await chrome.scripting.executeScript({injectImmediately:true,target:{tabId},func:focusChatComposerForSubmitPage,args:[attemptId,expectedText]});
+    focusedResult=focused?.result||null;
+    if(focusedResult?.ok!==true||focusedResult?.focused!==true&&focusedResult?.selection_inside!==true)throw new Error(focusedResult?.error||'Composer mất focus ngay trước trusted Enter dispatch.');
     keyDispatchStarted=true;
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'char',key:'Enter',code:'Enter',text:'\r',unmodifiedText:'\r',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
     await chrome.debugger.sendCommand(target,'Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});
   }catch(error){if(focusEmulationEnabled)await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});await tracker.cleanup();throw new Error((keyDispatchStarted?'TRUSTED_ENTER_DISPATCH_UNCERTAIN: ':'TRUSTED_ENTER_PRE_DISPATCH: ')+String(error?.message||error));}
   if(focusEmulationEnabled)await chrome.debugger.sendCommand(target,'Emulation.setFocusEmulationEnabled',{enabled:false}).catch(()=>{});
-  return {dispatched:true,page_brought_to_front:false,background_submit:true,focus_emulation_used:true,blocking_modal_dismissed:blockingModalDismissed,composer_recovered_after_react:Boolean(focused?.result?.composer_recovered_after_react),composer_refocused_after_react:Boolean(refocusedResult?.composer_recovered_after_react),cdp_tracker_armed:true,cdp_network_acknowledged:false,cdp_generation_endpoint:'',cdp_request_id:'',cdp_tracker_timeout:false};
+  return {dispatched:true,page_brought_to_front:false,background_submit:true,focus_emulation_used:true,blocking_modal_dismissed:Boolean(focusedResult?.blocking_modal_dismissed),composer_recovered_after_react:Boolean(focusedResult?.composer_recovered_after_react),composer_refocused_after_react:Boolean(focusedResult?.composer_recovered_after_react),cdp_tracker_armed:true,cdp_network_acknowledged:false,cdp_generation_endpoint:'',cdp_request_id:'',cdp_tracker_timeout:false};
 }
 
 async function trustedKeyTab(tabId,key) {

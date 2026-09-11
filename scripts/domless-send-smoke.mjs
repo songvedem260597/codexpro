@@ -495,8 +495,10 @@ assert.doesNotMatch(strictSubmitAckSource, /sentinel/, "sentinel chat-requiremen
 assert.match(sendBlock, /lateLifecycleEvidence=recentChatPostEvidence\(tab\.id,networkAckStartedAfterMs\)\.filter\(isChatSubmissionAckEvidence\)/, "late send ACK must reject sentinel preparation traffic just like the early ACK path");
 assert.match(sendBlock, /submitted_by:'trusted-enter'/);
 assert.match(sendBlock, /submitted_by:'trusted-click-fallback'/);
-assert.match(sendBlock, /Promise\.all\(\[[\s\S]*?probeConversationLimit\(tab\.id,0\)[\s\S]*?if\(conversationLimit\.reached\)throw new Error\('CONVERSATION_LIMIT_REACHED:/, "send preflight must perform an immediate full-conversation check before touching its old composer");
-assert.ok(sendBlock.indexOf("if(conversationLimit.reached)") < sendBlock.indexOf("sendChatRequestPage"), "the old conversation must be rejected before any draft or attachment is injected");
+const sendPrepareSourceForLatency = extractFunction("sendChatRequestPage");
+assert.match(sendPrepareSourceForLatency, /const initialConversationLimit=conversationLimit\(\)[\s\S]*?conversation_limit_reached:true[\s\S]*?const composerSelectors=/, "conversation-limit detection must run inside the same prepare injection before composer discovery or mutation");
+assert.doesNotMatch(sendBlock, /timedSendPhase\('conversation_limit_ms'|probeConversationLimit\(tab\.id,0\)/, "healthy send preflight must not spend a separate renderer round trip on conversation-limit detection");
+assert.match(sendBlock, /prepareResult\?\.conversation_limit_reached[\s\S]*?CONVERSATION_LIMIT_REACHED:/, "the consolidated prepare result must still enforce conversation-limit rollover safety");
 assert.doesNotMatch(sendBlock, /chrome\.tabs\.update\(tab\.id,\{active:true\}\)/, "background send must not activate the target tab");
 assert.doesNotMatch(sendBlock, /restorePreviouslyActiveTab/, "background send must not need to restore tabs because it never activates them");
 assert.match(sendBlock, /SEND_UNCERTAIN:/);
@@ -520,20 +522,29 @@ assert.match(sendBlock, /submission_state:'failed'.*PREPARE_FAILED:/s, "a second
 assert.match(worker, /const ATTACHMENT_PREPARE_TIMEOUT_MS = 60000;/, "attachment preparation must allow ChatGPT enough time to render and stabilize uploaded files");
 assert.match(sendBlock, /const prepareTimeoutMs=attachments\.length\?ATTACHMENT_PREPARE_TIMEOUT_MS:DOM_PREPARE_TIMEOUT_MS;/, "attachment sends must use the dedicated preparation deadline");
 assert.match(sendBlock, /submitted_by:'prepare-timeout'.*send_uncertain:false.*ATTACHMENT_PREPARE_TIMEOUT/s, "a timeout before trusted input dispatch is definitely unsent and safe to retry");
-assert.match(worker, /normalized\(composerText\(current\)\)===normalized\(expectedText\)/, "trusted Enter must recover a React-replaced composer only when its draft exactly matches the owned payload");
-assert.match(worker, /ok:true,focused:document\.activeElement===composer/, "the first ownership check must not require a background tab to already own keyboard focus");
-assert.match(worker, /refocused\?\.result\?\.focused!==true/, "trusted Enter must require focus after bringing the page to the foreground");
-assert.match(worker, /focusAttempt<15.*setTimeout\(resolve,50\)/s, "foreground focus verification must tolerate a bounded Chrome/React focus race");
+const trustedSubmitSourceForLatency = extractFunction("trustedSubmitChatComposerTab");
+const consolidatedFocusSource = extractFunction("focusChatComposerForSubmitPage");
+const trustedSubmitRendererRoundTrips = (trustedSubmitSourceForLatency.match(/chrome\.scripting\.executeScript/g) || []).length;
+assert.equal(trustedSubmitRendererRoundTrips, 1, "healthy text submit must use exactly one renderer injection after prepare");
+assert.match(trustedSubmitSourceForLatency, /startCdpChatNetworkTracker\(tabId\)[\s\S]*?Emulation\.setFocusEmulationEnabled[\s\S]*?func:focusChatComposerForSubmitPage[\s\S]*?Input\.dispatchKeyEvent/, "network tracking, focus verification, and trusted Enter ordering must remain intact");
+assert.doesNotMatch(trustedSubmitSourceForLatency, /settleBlockingModal|dismissKnownBlockingChatModalPage|const \[refocused\]|const \[finalFocus\]/, "healthy trusted Enter must not fan out into redundant renderer verification round trips");
+assert.match(consolidatedFocusSource, /draftOwned[\s\S]*?expectedText&&normalized\(composerText\(current\)\)===normalized\(expectedText\)/, "trusted Enter must recover a React-replaced composer only when its draft exactly matches the owned payload");
+assert.match(consolidatedFocusSource, /modal-subscription-failure/, "the consolidated final readiness check must still detect the blocking subscription modal");
+assert.match(consolidatedFocusSource, /button\[data-testid="close-button"\]/, "the consolidated modal check must use only the explicit safe close control");
+assert.doesNotMatch(consolidatedFocusSource, /plan-upgrade-payment-method|Pay now/, "the consolidated modal check must never activate payment actions");
+assert.match(consolidatedFocusSource, /ok:true,focused:document\.activeElement===composer/, "the consolidated final readiness check must verify focus on the intended composer");
+assert.match(consolidatedFocusSource, /focusAttempt<15.*setTimeout\(resolve,50\)/s, "foreground focus verification must tolerate a bounded Chrome/React focus race");
+
 const blockingModalSource = extractFunction("dismissKnownBlockingChatModalPage");
 assert.match(blockingModalSource, /modal-subscription-failure/, "send recovery must recognize ChatGPT's subscription failure modal");
 assert.match(blockingModalSource, /draftOwned/, "a blocking modal may only be dismissed while the exact CodexPro draft is still owned");
 assert.match(blockingModalSource, /button\[data-testid="close-button"\]/, "blocking modal recovery must use the modal's explicit close control");
 assert.doesNotMatch(blockingModalSource, /plan-upgrade-payment-method|\.click\(\).*Pay now/s, "blocking modal recovery must never activate payment actions");
-assert.match(worker, /sawDismissal[\s\S]*?if\(!sawDismissal\)return;[\s\S]*?quietChecks>=2/, "healthy sends must skip modal quiet waits, while an actually dismissed modal still requires a bounded quiet stability window");
-assert.match(worker, /Modal thanh toán liên tục xuất hiện lại; dừng trước khi phát Enter/, "a repeatedly reopening modal must fail while the send is still definitely unsent");
-assert.match(worker, /TRUSTED_ENTER_PRE_DISPATCH:/, "trusted Enter must distinguish a definitely-unsent pre-dispatch failure");
-assert.match(worker, /TRUSTED_ENTER_DISPATCH_UNCERTAIN:/, "trusted Enter must preserve ambiguity after key dispatch starts");
-assert.match(worker, /let refocusedResult=null/, "trusted Enter metadata must retain the refocus result outside the dispatch block");
+assert.match(consolidatedFocusSource, /guardAttempt<6[\s\S]*?close\.click\(\);blockingModalDismissed=true;[\s\S]*?setTimeout\(resolve,120\)/, "only an actually present blocking modal may pay a bounded quiet wait inside the single readiness injection");
+assert.match(consolidatedFocusSource, /Modal thanh toán liên tục xuất hiện lại; dừng trước khi phát Enter/, "a repeatedly reopening modal must fail while the send is still definitely unsent");
+assert.match(trustedSubmitSourceForLatency, /TRUSTED_ENTER_PRE_DISPATCH:/, "trusted Enter must distinguish a definitely-unsent pre-dispatch failure");
+assert.match(trustedSubmitSourceForLatency, /TRUSTED_ENTER_DISPATCH_UNCERTAIN:/, "trusted Enter must preserve ambiguity after key dispatch starts");
+assert.match(trustedSubmitSourceForLatency, /let focusedResult=null/, "trusted Enter metadata must retain the consolidated focus result outside the dispatch block");
 assert.match(worker, /const heartbeat=setInterval\([\s\S]*?chrome\.storage\.local\.get\('workerEnabled'\)[\s\S]*?tabInventory\(\)[\s\S]*?workerEnabled===false\?null:fetch\(`\$\{BRIDGE\}\/register`/, "long extension commands must keep enabled profiles alive and reconcile tabs without resurrecting a disabled worker");
 assert.match(worker, /network_generation_endpoint/, "generation ACK must expose the matched endpoint");
 assert.match(worker, /network_recent_posts/, "safe POST path diagnostics must be exposed without request bodies");
@@ -616,20 +627,46 @@ assert.match(trustedClickSource, /modal-subscription-failure/, "trusted click mu
 assert.match(trustedClickSource, /point\?\.blocked/, "trusted click must stop before mouse dispatch when the modal reappears");
 
 const enterSource = extractFunction("trustedSubmitChatComposerTab");
-assert.ok(enterSource.indexOf("settleBlockingModal") < enterSource.indexOf("focusChatComposerForSubmitPage"), "blocking modal stability must be checked before the first composer focus attempt");
-assert.match(enterSource, /focusChatComposerForSubmitPage/, "trusted Enter must focus the prepared composer without locating Send");
+const finalReadinessSource = extractFunction("focusChatComposerForSubmitPage");
+assert.match(enterSource, /focusChatComposerForSubmitPage/, "trusted Enter must run the consolidated final readiness check without locating Send");
 assert.match(enterSource, /Input\.dispatchKeyEvent/, "trusted Enter must use CDP keyboard input");
 assert.doesNotMatch(enterSource, /Page\.bringToFront/, "trusted Enter must not bring the Chrome profile to the foreground");
 assert.match(enterSource, /Emulation\.setFocusEmulationEnabled/, "trusted Enter must emulate focus without depending on the OS foreground window");
-assert.match(enterSource, /dismissKnownBlockingChatModalPage/, "trusted Enter must dismiss a known safe blocking modal before dispatch");
-assert.match(enterSource, /const \[finalFocus\]/, "trusted Enter must verify composer focus again immediately before dispatch");
-assert.ok(enterSource.indexOf("const [finalFocus]") < enterSource.indexOf("keyDispatchStarted=true"), "final focus verification must happen while the attempt is still definitely unsent");
-assert.match(enterSource, /blocking_modal_dismissed:blockingModalDismissed/, "send diagnostics must report modal recovery");
+assert.match(finalReadinessSource, /modal-subscription-failure[\s\S]*?close\.click\(\)/, "the single readiness injection must dismiss only the known safe blocking modal before dispatch");
+assert.equal((enterSource.match(/chrome\.scripting\.executeScript/g)||[]).length,1,"trusted Enter must use one renderer injection for modal, composer ownership and focus verification");
+assert.ok(enterSource.indexOf("func:focusChatComposerForSubmitPage") < enterSource.indexOf("keyDispatchStarted=true"), "final readiness verification must happen while the attempt is still definitely unsent");
+assert.match(enterSource, /blocking_modal_dismissed:Boolean\(focusedResult\?\.blocking_modal_dismissed\)/, "send diagnostics must report modal recovery");
 assert.match(enterSource, /background_submit:true/, "trusted Enter must report background submission metadata");
 assert.match(enterSource, /cdp_tracker_armed:true/, "trusted Enter must return after dispatch while leaving the CDP tracker armed");
 assert.doesNotMatch(enterSource, /await tracker\.started/, "trusted Enter must not hide the dispatch result behind a second network wait");
-assert.match(enterSource, /const \[refocused\]/, "trusted Enter must re-focus the composer after bringing a background page forward");
+assert.doesNotMatch(enterSource, /const \[refocused\]|const \[finalFocus\]/, "trusted Enter must not repeat renderer focus injections on the healthy path");
 assert.doesNotMatch(enterSource, /dispatchMouseEvent|composer-submit-button|send-button/, "trusted Enter must not depend on mouse or Send DOM");
+
+let slowRendererRoundTrips=0;
+const slowRendererChrome={
+  scripting:{executeScript:async()=>{slowRendererRoundTrips+=1;await new Promise(resolve=>setTimeout(resolve,15));return [{result:{ok:true,focused:true,selection_inside:true,blocking_modal_dismissed:false}}];}},
+  debugger:{sendCommand:async()=>({})}
+};
+const slowRendererTrustedSubmit=Function('chrome','startCdpChatNetworkTracker','focusChatComposerForSubmitPage',`async ${enterSource}; return trustedSubmitChatComposerTab;`)(slowRendererChrome,async()=>({cleanup:async()=>{}}),()=>({ok:true,focused:true}));
+const slowRendererSubmitResult=await slowRendererTrustedSubmit(77,'attempt-latency','hello');
+assert.equal(slowRendererSubmitResult.dispatched,true);
+assert.equal(slowRendererRoundTrips,1,'even a fake slow renderer must be crossed exactly once on the healthy trusted-Enter path');
+
+let unsafeFocusCalls=0;
+const guardedComposer={isContentEditable:true,innerText:'hello',dataset:{codexproDraftAttempt:'attempt-modal'},getBoundingClientRect:()=>({width:100,height:20}),scrollIntoView(){},focus(){unsafeFocusCalls+=1;}};
+const blockingModal={innerText:'Plus plan failed to renew',textContent:'Plus plan failed to renew',getBoundingClientRect:()=>({width:100,height:40}),querySelector:()=>null};
+const guardedDocument={
+  activeElement:null,
+  querySelector(selector){if(selector==='#modal-subscription-failure')return blockingModal;if(selector.startsWith('[data-codexpro-submit-attempt='))return guardedComposer;if(selector==='#prompt-textarea')return guardedComposer;return null;},
+  querySelectorAll:()=>[],
+  createRange:()=>({selectNodeContents(){},collapse(){}})
+};
+const emptySelection={anchorNode:null,removeAllRanges(){},addRange(){}};
+const guardedFocus=Function('document','getComputedStyle','getSelection','CSS','setTimeout',`async ${finalReadinessSource}; return focusChatComposerForSubmitPage;`)(guardedDocument,()=>({display:'block',visibility:'visible'}),()=>emptySelection,{escape:String},setTimeout);
+const guardedFocusResult=await guardedFocus('attempt-modal','hello');
+assert.equal(guardedFocusResult.ok,false,'an obstructing modal without a safe close control must stop before trusted Enter');
+assert.match(guardedFocusResult.error,/không tìm thấy nút đóng an toàn/);
+assert.equal(unsafeFocusCalls,0,'unsafe modal obstruction must stop before focusing or dispatching the composer');
 const trustedKeySource = extractFunction("trustedKeyTab");
 assert.match(trustedKeySource, /Emulation\.setFocusEmulationEnabled/, "generic trusted keys must work in a background tab without raising its Chrome window");
 

@@ -184,9 +184,22 @@ export function useChatSendActions({
     }
   }
 
-  async function sendRequest(profile, draftOverride = null) {
+  async function sendRequest(profile, draftOverride = null, sendTiming = {}) {
+    const sendRequestEnteredAt = performance.now();
     const sendTraceId = `send_${Date.now().toString(36)}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
-    api.sendTraceEvent?.({ event: "renderer_send_started", send_trace_id: sendTraceId, profile_id: String(profile?.profile_id || "") });
+    const acceptedAt = Number(sendTiming?.acceptedAt);
+    const submitEnteredAt = Number(sendTiming?.submitEnteredAt);
+    const onSendEnteredAt = Number(sendTiming?.onSendEnteredAt);
+    const rendererTiming = (endAt = performance.now()) => ({
+      trigger: String(sendTiming?.trigger || "unknown"),
+      click_to_submit_ms: Number.isFinite(acceptedAt) && Number.isFinite(submitEnteredAt) ? Math.max(0, submitEnteredAt - acceptedAt) : 0,
+      submit_to_on_send_ms: Number.isFinite(submitEnteredAt) && Number.isFinite(onSendEnteredAt) ? Math.max(0, onSendEnteredAt - submitEnteredAt) : 0,
+      on_send_to_send_request_ms: Number.isFinite(onSendEnteredAt) ? Math.max(0, sendRequestEnteredAt - onSendEnteredAt) : 0,
+      click_to_send_request_ms: Number.isFinite(acceptedAt) ? Math.max(0, sendRequestEnteredAt - acceptedAt) : 0,
+      renderer_pre_send_ms: Math.max(0, endAt - sendRequestEnteredAt),
+      click_to_send_api_ms: Number.isFinite(acceptedAt) ? Math.max(0, endAt - acceptedAt) : 0
+    });
+    api.sendTraceEvent?.({ event: "renderer_send_started", send_trace_id: sendTraceId, profile_id: String(profile?.profile_id || ""), ...rendererTiming(sendRequestEnteredAt) });
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
     const requestedConversationId = String(requestTargets[profile.profile_id] ?? defaultTarget ?? NEW_CHAT_TARGET);
@@ -344,7 +357,10 @@ export function useChatSendActions({
       };
       setRequestFiles((current) => ({ ...current, [profile.profile_id]: [] }));
       const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
-      const result = await api.sendProfileRequest({ send_trace_id: sendTraceId, profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, allowBusyFollowup: !newChat, taskMode: logicalAdjustment ? "adjustment" : "new", previousTaskId: logicalAdjustment?.taskId || "", scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
+      const sendApiInvokedAt = performance.now();
+      api.sendTraceEvent?.({ event: "renderer_send_api_invoked", send_trace_id: sendTraceId, profile_id: String(profile?.profile_id || ""), ...rendererTiming(sendApiInvokedAt) });
+      const sendPromise = api.sendProfileRequest({ send_trace_id: sendTraceId, profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, allowBusyFollowup: !newChat, taskMode: logicalAdjustment ? "adjustment" : "new", previousTaskId: logicalAdjustment?.taskId || "", scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
+      const result = await sendPromise;
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence(result) }));
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
