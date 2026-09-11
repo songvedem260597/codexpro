@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CodexProError } from "./guard.js";
+import { getBrowserExtensionProfileTaskBinding, setBrowserExtensionProfileTask } from "./browserExtensionBridge.js";
 import { listWorkerContextCheckpoints } from "./workerContext.js";
 import {
   finalizeWorkerJob,
@@ -242,6 +243,10 @@ export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies):
               title: record.title,
               root: record.root
             }, coordinationStatus);
+          }
+          if (record.status === "completed") {
+            const binding = getBrowserExtensionProfileTaskBinding(gateProfileId);
+            if (binding?.taskId === record.jobId) setBrowserExtensionProfileTask(gateProfileId, "", "");
           }
           return textResult(`# Worker Job Finalized\n\n${record.jobId}: ${record.status}`, {
             finalized: true,

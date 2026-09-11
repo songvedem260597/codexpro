@@ -1479,6 +1479,16 @@ export function setBrowserExtensionProfileTask(profileId: string, taskId: string
   const normalizedTaskId = String(taskId || "").trim();
   const taskTitle = String(title || "").trim();
   if (!id) return;
+  if (normalizedTaskId) {
+    const durableJob = readWorkerJob(normalizedTaskId);
+    if (durableJob?.status === "completed" || durableJob?.completionConfirmed === true) {
+      if (profilePendingTasks.get(id)?.taskId === normalizedTaskId) profilePendingTasks.delete(id);
+      if (profileTaskIds.get(id) === normalizedTaskId) {
+        setBrowserExtensionProfileTask(id, "", "");
+      }
+      return;
+    }
+  }
   const pendingTask = profilePendingTasks.get(id);
   const pendingCleared = Boolean(pendingTask && (!normalizedTaskId || pendingTask.taskId === normalizedTaskId));
   if (pendingCleared) profilePendingTasks.delete(id);

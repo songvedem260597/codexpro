@@ -490,7 +490,11 @@ export async function prepareWorkerJob(input: {
 }): Promise<WorkerJobRecord> {
   await discardStalePreparedWorkerJobs({ workerId: input.workerId, excludeJobId: input.jobId });
   const preparedAt = new Date().toISOString();
-  return await updateWorkerJob(input.jobId, (current) => ({
+  return await updateWorkerJob(input.jobId, (current) => {
+    if (current?.status === "completed" || current?.completionConfirmed === true) {
+      throw new Error(`WORKER_JOB_COMPLETED_TERMINAL: Task ${input.jobId} is completed and cannot be prepared again.`);
+    }
+    return ({
     version: 1,
     policyVersion: WORKER_POLICY_VERSION,
     jobId: input.jobId,
@@ -522,11 +526,12 @@ export async function prepareWorkerJob(input: {
     blockedAt: current?.blockedAt,
     blockedPart: current?.blockedPart,
     blockedReason: current?.blockedReason,
-    completionConfirmed: current?.completionConfirmed === true,
+    completionConfirmed: false,
     completionConfirmedAt: current?.completionConfirmedAt,
     completionEvidence: current?.completionEvidence,
     events: [...(current?.events || []), event("prepared", { worker_id: input.workerId, scope: input.scope, root: input.root })]
-  }));
+    });
+  });
 }
 
 async function bootstrapWorkerJobRecord(input: {
@@ -548,6 +553,9 @@ async function bootstrapWorkerJobRecord(input: {
 }): Promise<WorkerJobRecord> {
   return await updateWorkerJob(input.jobId, (current) => {
     if (current && workerOwnerKey(current.workerId) !== workerOwnerKey(input.workerId)) throw new Error("Worker job owner mismatch.");
+    if (current?.status === "completed" || current?.completionConfirmed === true) {
+      throw new Error(`WORKER_JOB_COMPLETED_TERMINAL: Task ${input.jobId} is completed and cannot be bootstrapped again.`);
+    }
     const taskSize = normalizeTaskSize(input.taskSize);
     const requiredObligations = [
       ...(input.kind === "code" ? ["global_rules", "agents_chain", "codexgraph"] : ["job_title"]),
