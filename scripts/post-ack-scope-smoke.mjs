@@ -7,15 +7,19 @@ const source = readFileSync(new URL('../chrome-extension/service-worker.js', imp
 const ast = ts.createSourceFile('service-worker.js', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 const name = 'stabilizeSubmittedSendAfterAck';
 const definitions = [];
+const calls = [];
 
 function visit(node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === name) definitions.push(node);
+  if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name) calls.push(node);
   ts.forEachChild(node, visit);
 }
 
 visit(ast);
 assert.equal(definitions.length, 1, 'post-ACK helper must have exactly one definition');
 assert.ok(definitions[0].parent === ast, 'post-ACK helper must be top-level, not nested in a tab callback');
+assert.equal(calls.length, 1, 'successful send path must have exactly one post-ACK helper callsite');
+assert.match(source, /const WORKER_RUNTIME_BUILD_ID = 'send-post-ack-scope-v2';/, 'runtime identity must advance when the service worker artifact changes');
 
 // Current helper returns this lexical stability source in addition to the historical post-ACK fields.
 const stabilitySource = 'post_ack_scope_smoke';

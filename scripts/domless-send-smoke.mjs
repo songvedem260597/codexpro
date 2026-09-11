@@ -455,13 +455,13 @@ assert.equal(postAckStabilized.followup_while_generating, true, "post-ACK stabil
 assert.doesNotMatch(postAckStabilizeSource, /trustedSubmit|dispatchKeyEvent|dispatchMouseEvent|sendChatRequestPage/, "post-ACK stabilization must have no path that can submit the request a second time");
 
 const workerExtensionCurrentSource = extractFunctionFrom(managerMain, "workerExtensionCurrent", "the Manager backend");
-const workerExtensionCurrent = Function("WORKER_EXTENSION_VERSION", "WORKER_EXTENSION_BUILD_ID", `${workerExtensionCurrentSource}; return workerExtensionCurrent;`)("0.5.126", "send-post-ack-scope-v1");
+const workerExtensionCurrent = Function("WORKER_EXTENSION_VERSION", "WORKER_EXTENSION_BUILD_ID", `${workerExtensionCurrentSource}; return workerExtensionCurrent;`)("0.5.126", "send-post-ack-scope-v2");
 assert.equal(workerExtensionCurrent({ extension_version: "0.5.125", extension_build_id: "old-build" }), false, "older version with old build must remain stale");
 assert.equal(workerExtensionCurrent({ extension_version: "0.5.126" }), false, "same-version runtime with missing build id must be stale");
 assert.equal(workerExtensionCurrent({ extension_version: "0.5.126", extension_build_id: "stale-same-version" }), false, "same-version stale runtime must be rejected when build id differs");
-assert.equal(workerExtensionCurrent({ extension_version: "0.5.126", extension_build_id: "send-post-ack-scope-v1" }), true, "exact version and build id must be accepted without a reload");
+assert.equal(workerExtensionCurrent({ extension_version: "0.5.126", extension_build_id: "send-post-ack-scope-v2" }), true, "exact version and build id must be accepted without a reload");
 assert.equal(workerExtensionCurrent({ extension_version: "0.5.127", extension_build_id: "future-but-unexpected" }), false, "newer version must not be considered current without the expected build identity");
-assert.equal(workerExtensionCurrent({ extension_version: "0.5.125", extension_build_id: "send-post-ack-scope-v1" }), false, "wrong extension version must remain stale even when build id matches");
+assert.equal(workerExtensionCurrent({ extension_version: "0.5.125", extension_build_id: "send-post-ack-scope-v2" }), false, "wrong extension version must remain stale even when build id matches");
 assert.match(managerMain, /const outdated = connectedProfiles\.filter\(\(profile\) => !workerExtensionCurrent\(profile, targetVersion\)\)/, "Manager bulk update must classify build-id mismatches as stale");
 assert.match(managerMain, /profile\.connected && workerExtensionCurrent\(profile, targetVersion\)/, "Manager update confirmation must require the exact runtime version and build id heartbeat");
 
