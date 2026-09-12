@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "CodexPro Local Source Reader",
-  "version": "0.3.3",
-  "description": "Upload full or changed local source snapshots as ZIP archives, advance baseline only after ChatGPT network confirmation, keep re-uploadable history, and persist upload diagnostics.",
+  "version": "0.4.0",
+  "description": "Upload full or changed local source snapshots plus unfinished CodexPro task-tracking snapshots, advance source baseline only after ChatGPT network confirmation, keep re-uploadable history, and persist upload diagnostics.",
   "content_scripts": [
     {
       "matches": [
@@ -23,6 +23,7 @@
       "js": [
         "zip-upload.js",
         "content.js",
+        "task-upload.js",
         "diagnostics-ui.js"
       ],
       "run_at": "document_idle",
