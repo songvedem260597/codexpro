@@ -6,8 +6,14 @@
   const MAX_FILE_BYTES = 3 * 1024 * 1024;
   const MAX_FILES = 5000;
   const STATUS_ID = 'codexpro-local-source-status';
-  const BASELINE_STORAGE_KEY = 'codexproLocalSourceReaderBaselinesV1';
-  const BASELINE_VERSION = 1;
+  const BASELINE_STORAGE_KEY = 'codexproLocalSourceReaderBaselinesV2';
+  const BASELINE_VERSION = 2;
+  const HISTORY_DB_NAME = 'codexproLocalSourceReaderV2';
+  const HISTORY_DB_VERSION = 1;
+  const HISTORY_STORE = 'snapshots';
+  const HISTORY_LIMIT_PER_PROJECT = 12;
+  const UPLOAD_TIMEOUT_MS = 120000;
+  const NETWORK_GLOBAL_KEY = '__CODEXPRO_LOCAL_SOURCE_UPLOAD_NETWORK_V1__';
 
   const SKIP_DIRS = new Set([
     '.git', '.hg', '.svn', 'node_modules', 'bower_components',
@@ -44,9 +50,12 @@
   const state = {
     busy: false,
     host: null,
-    button: null,
+    changesButton: null,
     fullButton: null,
-    status: null
+    historyButton: null,
+    history: null,
+    status: null,
+    lastProjectName: ''
   };
 
   function normalizePath(path) {
@@ -79,8 +88,114 @@
       window.localStorage.setItem(BASELINE_STORAGE_KEY, JSON.stringify(store));
       return true;
     } catch (error) {
-      console.warn('[Local Source Snapshot] could not persist baseline', error);
+      console.warn('[Local Source Snapshot] could not persist confirmed baseline', error);
       return false;
+    }
+  }
+
+  function openHistoryDb() {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) {
+        reject(new Error('IndexedDB không khả dụng; không thể lưu lịch sử snapshot.'));
+        return;
+      }
+      const request = indexedDB.open(HISTORY_DB_NAME, HISTORY_DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        let store;
+        if (!db.objectStoreNames.contains(HISTORY_STORE)) {
+          store = db.createObjectStore(HISTORY_STORE, { keyPath: 'id' });
+        } else {
+          store = request.transaction.objectStore(HISTORY_STORE);
+        }
+        if (!store.indexNames.contains('projectKey')) store.createIndex('projectKey', 'projectKey', { unique: false });
+        if (!store.indexNames.contains('createdAtMs')) store.createIndex('createdAtMs', 'createdAtMs', { unique: false });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('Không mở được IndexedDB.'));
+    });
+  }
+
+  async function withHistoryStore(mode, run) {
+    const db = await openHistoryDb();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(HISTORY_STORE, mode);
+        const store = tx.objectStore(HISTORY_STORE);
+        let result;
+        try { result = run(store, tx); }
+        catch (error) { reject(error); return; }
+        tx.oncomplete = () => resolve(result);
+        tx.onerror = () => reject(tx.error || new Error('IndexedDB transaction thất bại.'));
+        tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction bị hủy.'));
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  async function putHistory(record) {
+    await withHistoryStore('readwrite', (store) => { store.put(record); });
+    await pruneHistory(record.projectKey);
+    return record;
+  }
+
+  async function getHistory(id) {
+    const db = await openHistoryDb();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(HISTORY_STORE, 'readonly');
+        const request = tx.objectStore(HISTORY_STORE).get(id);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error || new Error('Không đọc được history item.'));
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  async function listHistory(projectName = '', limit = 20) {
+    const projectKey = projectStorageKey(projectName);
+    const db = await openHistoryDb();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(HISTORY_STORE, 'readonly');
+        const store = tx.objectStore(HISTORY_STORE);
+        const request = projectKey ? store.index('projectKey').getAll(projectKey) : store.getAll();
+        request.onsuccess = () => {
+          const rows = Array.isArray(request.result) ? request.result : [];
+          rows.sort((a, b) => Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0));
+          resolve(rows.slice(0, Math.max(1, limit)));
+        };
+        request.onerror = () => reject(request.error || new Error('Không đọc được lịch sử upload.'));
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  async function pruneHistory(projectKey) {
+    if (!projectKey) return;
+    const db = await openHistoryDb();
+    try {
+      const rows = await new Promise((resolve, reject) => {
+        const tx = db.transaction(HISTORY_STORE, 'readonly');
+        const request = tx.objectStore(HISTORY_STORE).index('projectKey').getAll(projectKey);
+        request.onsuccess = () => resolve(Array.isArray(request.result) ? request.result : []);
+        request.onerror = () => reject(request.error || new Error('Không đọc được lịch sử để dọn.'));
+      });
+      rows.sort((a, b) => Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0));
+      const stale = rows.slice(HISTORY_LIMIT_PER_PROJECT);
+      if (!stale.length) return;
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(HISTORY_STORE, 'readwrite');
+        const store = tx.objectStore(HISTORY_STORE);
+        for (const item of stale) store.delete(item.id);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error || new Error('Không dọn được lịch sử cũ.'));
+      });
+    } finally {
+      db.close();
     }
   }
 
@@ -150,11 +265,16 @@
 
   function setBusy(busy, label = 'Đang đọc source…') {
     state.busy = busy;
-    if (state.button) {
-      state.button.disabled = busy;
-      if (busy) state.button.textContent = label;
+    for (const button of [state.changesButton, state.fullButton, state.historyButton]) {
+      if (button) button.disabled = busy;
     }
-    if (state.fullButton) state.fullButton.disabled = busy;
+    if (busy && state.changesButton) state.changesButton.textContent = label;
+  }
+
+  function resetButtonLabels() {
+    if (state.changesButton) state.changesButton.textContent = 'Upload thay đổi';
+    if (state.fullButton) state.fullButton.textContent = 'Upload Full';
+    if (state.historyButton) state.historyButton.textContent = 'Lịch sử';
   }
 
   function fallbackHash(bytes) {
@@ -182,9 +302,11 @@
   }
 
   async function buildSnapshot(rootHandle, options = {}) {
-    const storedBaseline = options.forceFull ? null : loadBaseline(rootHandle.name);
-    const mode = storedBaseline ? 'DELTA' : 'FULL';
-    const previousFiles = storedBaseline?.files && typeof storedBaseline.files === 'object' ? storedBaseline.files : {};
+    const mode = options.mode === 'FULL' ? 'FULL' : 'DELTA';
+    const confirmedBaseline = options.baseline || null;
+    if (mode === 'DELTA' && !confirmedBaseline) throw new Error('Chưa có baseline đã được ChatGPT xác nhận. Hãy bấm Upload Full trước.');
+
+    const previousFiles = confirmedBaseline?.files && typeof confirmedBaseline.files === 'object' ? confirmedBaseline.files : {};
     const changed = [];
     const skipped = [];
     const blockedChanges = [];
@@ -197,9 +319,7 @@
     async function noteBlocked(path, reason, file = null) {
       skipped.push(`${path} [${reason}]`);
       const previous = previousFiles[path];
-      if (!storedBaseline || !file || metadataChanged(previous, file)) {
-        blockedChanges.push(`${path} [${reason}]`);
-      }
+      if (mode === 'FULL' || !file || metadataChanged(previous, file)) blockedChanges.push(`${path} [${reason}]`);
     }
 
     async function walk(dirHandle, prefix = '') {
@@ -270,11 +390,11 @@
 
     await walk(rootHandle);
 
-    const deleted = storedBaseline
+    const deleted = mode === 'DELTA'
       ? Object.keys(previousFiles).filter((path) => !seenSourcePaths.has(path)).sort((a, b) => a.localeCompare(b))
       : [];
 
-    const previousRevision = Number(storedBaseline?.revision) || 0;
+    const previousRevision = Number(confirmedBaseline?.revision) || 0;
     const nextRevision = previousRevision + 1;
     const nextFiles = mode === 'FULL' ? { ...currentFiles } : { ...previousFiles, ...currentFiles };
     for (const path of deleted) delete nextFiles[path];
@@ -284,6 +404,8 @@
       projectName: rootHandle.name,
       revision: nextRevision,
       updatedAt: new Date().toISOString(),
+      confirmedAt: '',
+      confirmedSnapshotId: '',
       files: nextFiles
     };
 
@@ -298,7 +420,9 @@
         skippedCount: skipped.length,
         currentTextBytes,
         changedTextBytes: 0,
-        baseline: storedBaseline
+        previousRevision,
+        nextRevision,
+        baseline: confirmedBaseline
       };
     }
 
@@ -308,7 +432,8 @@
           `Project: ${rootHandle.name}`,
           `Created: ${new Date().toISOString()}`,
           'Mode: FULL BASELINE / READ-ONLY',
-          `Baseline revision: ${nextRevision}`,
+          `Previous confirmed baseline revision: ${previousRevision}`,
+          `Candidate baseline revision: ${nextRevision}`,
           `Included files: ${changed.length}`,
           `Included text: ${formatBytes(changedTextBytes)}`,
           '',
@@ -331,8 +456,8 @@
           `Project: ${rootHandle.name}`,
           `Created: ${new Date().toISOString()}`,
           'Mode: CHANGES ONLY / READ-ONLY',
-          `Previous baseline revision: ${previousRevision}`,
-          `New baseline revision: ${nextRevision}`,
+          `Previous confirmed baseline revision: ${previousRevision}`,
+          `Candidate baseline revision: ${nextRevision}`,
           `Changed/new files: ${changed.length}`,
           `Deleted files: ${deleted.length}`,
           `Changed text: ${formatBytes(changedTextBytes)}`,
@@ -360,12 +485,10 @@
         ];
 
     const chunks = [header.join('\n')];
-    for (const item of changed) {
-      chunks.push(`===== FILE: ${item.path} =====\n${item.text}\n===== END FILE: ${item.path} =====\n`);
-    }
+    for (const item of changed) chunks.push(`===== FILE: ${item.path} =====\n${item.text}\n===== END FILE: ${item.path} =====\n`);
     chunks.push('===== SOURCE CONTENT END =====\n');
 
-    const suffix = mode === 'FULL' ? 'local-source-snapshot' : `local-source-delta-r${nextRevision}`;
+    const suffix = mode === 'FULL' ? `local-source-full-r${nextRevision}` : `local-source-delta-r${nextRevision}`;
     return {
       file: new File(chunks, `${rootHandle.name}-${suffix}.txt`, { type: 'text/plain' }),
       mode,
@@ -430,91 +553,276 @@
     }
   }
 
-  function downloadFallback(file) {
-    const url = URL.createObjectURL(file);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = file.name;
-    anchor.style.display = 'none';
-    document.documentElement.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  function networkMonitor() {
+    const monitor = globalThis[NETWORK_GLOBAL_KEY];
+    if (!monitor || typeof monitor.waitForSnapshot !== 'function') {
+      throw new Error('Network monitor chưa được nạp. Reload extension và reload ChatGPT trước khi upload.');
+    }
+    return monitor;
   }
 
-  async function handleClick(options = {}) {
-    if (state.busy) return;
-    const forceFull = options.forceFull === true;
-    setBusy(true, forceFull ? 'Đang tạo full snapshot…' : 'Đang đọc source…');
-    setStatus(
-      forceFull
-        ? 'Chọn project để upload FULL và đặt lại baseline.'
-        : 'Chọn project. Lần đầu upload full; các lần sau chỉ attach file code thay đổi.'
-    );
+  async function attachAndConfirm(file) {
+    const monitor = networkMonitor();
+    const startedAt = Date.now() - 100;
+    const attached = await attachToChatGPT(file);
+    if (!attached) throw new Error('ChatGPT chưa nhận được file vào composer. Baseline chưa thay đổi.');
+    setStatus(`Đã attach ${file.name}. Đang chờ ChatGPT network xác nhận upload…`);
+    return await monitor.waitForSnapshot(file, startedAt, UPLOAD_TIMEOUT_MS);
+  }
 
-    try {
-      if (typeof window.showDirectoryPicker !== 'function') {
-        throw new Error('Chrome/Edge hiện tại không hỗ trợ showDirectoryPicker trong trang này.');
+  function historyId() {
+    return `${Date.now().toString(36)}-${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)}`;
+  }
+
+  function snapshotSummary(snapshot) {
+    return snapshot.mode === 'FULL'
+      ? `${snapshot.changedCount} files full · ${formatBytes(snapshot.changedTextBytes)}`
+      : `${snapshot.changedCount} file đổi/mới · ${snapshot.deletedCount} file xóa · ${formatBytes(snapshot.changedTextBytes)}`;
+  }
+
+  function createHistoryRecord(projectName, snapshot) {
+    const id = historyId();
+    return {
+      id,
+      projectName,
+      projectKey: projectStorageKey(projectName),
+      mode: snapshot.mode,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      createdAtMs: Date.now(),
+      updatedAt: new Date().toISOString(),
+      fileName: snapshot.file.name,
+      mimeType: snapshot.file.type || 'text/plain',
+      fileSize: snapshot.file.size,
+      fileBlob: snapshot.file.slice(0, snapshot.file.size, snapshot.file.type || 'text/plain'),
+      summary: snapshotSummary(snapshot),
+      fileCount: snapshot.fileCount,
+      changedCount: snapshot.changedCount,
+      deletedCount: snapshot.deletedCount,
+      blockedChangeCount: snapshot.blockedChangeCount || 0,
+      previousRevision: snapshot.previousRevision,
+      nextRevision: snapshot.nextRevision,
+      candidateBaseline: snapshot.nextBaseline,
+      network: null,
+      error: '',
+      retryCount: 0,
+      lastRetryAt: '',
+      lastRetryNetwork: null
+    };
+  }
+
+  function confirmedBaselineFromRecord(record, network) {
+    return {
+      ...(record.candidateBaseline || {}),
+      version: BASELINE_VERSION,
+      projectName: record.projectName,
+      revision: Number(record.nextRevision) || Number(record.candidateBaseline?.revision) || 1,
+      confirmedAt: new Date().toISOString(),
+      confirmedSnapshotId: record.id,
+      confirmedEndpoint: String(network?.endpoint || ''),
+      confirmedFileId: String(network?.fileId || '')
+    };
+  }
+
+  function canAdvanceBaselineFromRecord(record) {
+    const current = loadBaseline(record.projectName);
+    const currentRevision = Number(current?.revision) || 0;
+    return currentRevision === Number(record.previousRevision || 0);
+  }
+
+  async function markRecordFailed(record, error) {
+    record.status = 'failed';
+    record.updatedAt = new Date().toISOString();
+    record.error = String(error?.message || error || 'Upload failed');
+    await putHistory(record).catch(() => {});
+  }
+
+  async function markRecordConfirmed(record, network, options = {}) {
+    record.status = 'confirmed';
+    record.updatedAt = new Date().toISOString();
+    record.confirmedAt = new Date().toISOString();
+    record.network = network;
+    record.error = '';
+
+    let baselineSaved = true;
+    let baselineAdvanced = false;
+    if (options.advanceBaseline !== false) {
+      if (!canAdvanceBaselineFromRecord(record)) {
+        baselineSaved = false;
+      } else {
+        baselineSaved = saveBaseline(record.projectName, confirmedBaselineFromRecord(record, network));
+        baselineAdvanced = baselineSaved;
       }
+    }
+
+    record.baselineAdvanced = baselineAdvanced;
+    record.baselineAdvanceSkipped = options.advanceBaseline !== false && !baselineAdvanced;
+    await putHistory(record);
+    return { baselineSaved, baselineAdvanced };
+  }
+
+  async function handleUpload(mode) {
+    if (state.busy) return;
+    const full = mode === 'FULL';
+    setBusy(true, full ? 'Đang tạo Full…' : 'Đang tìm thay đổi…');
+    setStatus(full ? 'Chọn project để upload toàn bộ source.' : 'Chọn project để upload chỉ những file khác với baseline đã xác nhận.');
+
+    let record = null;
+    try {
+      if (typeof window.showDirectoryPicker !== 'function') throw new Error('Chrome/Edge hiện tại không hỗ trợ showDirectoryPicker trong trang này.');
 
       const rootHandle = await window.showDirectoryPicker({ mode: 'read' });
-      const baseline = forceFull ? null : loadBaseline(rootHandle.name);
-      setStatus(
-        forceFull
-          ? `Đang quét full ${rootHandle.name}…`
-          : baseline
-            ? `Đã nhớ baseline r${baseline.revision || 1}. Đang tìm file thay đổi trong ${rootHandle.name}…`
-            : `Chưa có baseline cho ${rootHandle.name}. Đang quét full lần đầu…`
-      );
+      state.lastProjectName = rootHandle.name;
+      const confirmedBaseline = loadBaseline(rootHandle.name);
+      if (!full && !confirmedBaseline) throw new Error(`Chưa có baseline đã xác nhận cho ${rootHandle.name}. Bấm Upload Full trước.`);
 
-      const snapshot = await buildSnapshot(rootHandle, { forceFull });
+      setStatus(full
+        ? `Đang quét FULL ${rootHandle.name}${confirmedBaseline ? ` từ baseline r${confirmedBaseline.revision}` : ''}…`
+        : `Baseline đã xác nhận r${confirmedBaseline.revision}. Đang tìm file thay đổi trong ${rootHandle.name}…`);
 
-      if (snapshot.fileCount === 0) {
-        throw new Error('Không tìm thấy source text phù hợp sau khi lọc.');
-      }
+      const snapshot = await buildSnapshot(rootHandle, { mode, baseline: confirmedBaseline });
+      if (snapshot.fileCount === 0) throw new Error('Không tìm thấy source text phù hợp sau khi lọc.');
 
       if (snapshot.unchanged) {
-        state.button.textContent = '✓ Không có thay đổi';
-        setStatus(
-          `${snapshot.fileCount} source files · không có file code thay đổi từ baseline · không tạo attachment`,
-          'success'
-        );
+        if (state.changesButton) state.changesButton.textContent = '✓ 0 file thay đổi';
+        setStatus(`${snapshot.fileCount} source files · 0 file thay đổi so với baseline đã xác nhận r${snapshot.previousRevision}.`, 'success');
         return;
       }
 
-      const summary = snapshot.mode === 'FULL'
-        ? `${snapshot.changedCount} files full · ${formatBytes(snapshot.changedTextBytes)}`
-        : `${snapshot.changedCount} file đổi/mới · ${snapshot.deletedCount} file xóa · ${formatBytes(snapshot.changedTextBytes)}`;
-      setStatus(`${summary}. Đang attach 1 file duy nhất…`);
-      const attached = await attachToChatGPT(snapshot.file);
+      record = createHistoryRecord(rootHandle.name, snapshot);
+      await putHistory(record);
+      await renderHistory();
 
-      if (attached) {
-        const baselineSaved = saveBaseline(rootHandle.name, snapshot.nextBaseline);
-        state.button.textContent = snapshot.mode === 'FULL' ? '✓ Full source đã attach' : '✓ Changes đã attach';
-        setStatus(
-          `${summary} · baseline r${snapshot.nextRevision} ${baselineSaved ? 'đã ghi nhớ' : 'KHÔNG lưu được'} · 1 attachment · không gửi chat trung gian`,
-          baselineSaved ? 'success' : 'warning'
-        );
-      } else {
-        downloadFallback(snapshot.file);
-        state.button.textContent = 'Snapshot đã tạo';
-        setStatus(
-          'ChatGPT đổi UI nên auto-attach chưa tìm thấy input. Snapshot đã tải xuống; baseline CHƯA cập nhật để tránh bỏ sót thay đổi. Kéo file vào chat hoặc thử lại.',
-          'warning'
-        );
+      setStatus(`${record.summary} · snapshot đã lưu lịch sử · đang attach…`);
+      const network = await attachAndConfirm(snapshot.file);
+      const result = await markRecordConfirmed(record, network, { advanceBaseline: true });
+
+      if (!result.baselineAdvanced) {
+        throw new Error('Upload đã được ChatGPT xác nhận nhưng baseline đã thay đổi bởi một snapshot khác. Không ghi đè baseline cũ; xem Lịch sử để kiểm tra.');
       }
+
+      if (full && state.fullButton) state.fullButton.textContent = '✓ Full đã xác nhận';
+      if (!full && state.changesButton) state.changesButton.textContent = '✓ Changes đã xác nhận';
+      setStatus(`${record.summary} · ChatGPT network SUCCESS · baseline r${record.nextRevision} đã xác nhận · có thể upload thay đổi tiếp theo.`, 'success');
+      await renderHistory();
     } catch (error) {
-      if (error && error.name === 'AbortError') {
-        state.button.textContent = '📂 Upload source';
+      if (record && record.status !== 'confirmed') await markRecordFailed(record, error);
+      if (error?.name === 'AbortError') {
         setStatus('Đã hủy chọn thư mục.');
       } else {
         console.error('[Local Source Snapshot]', error);
-        state.button.textContent = '📂 Thử lại';
-        setStatus(error instanceof Error ? error.message : String(error), 'error');
+        setStatus(`${error instanceof Error ? error.message : String(error)} Baseline đã xác nhận vẫn giữ nguyên.`, 'error');
       }
+      await renderHistory().catch(() => {});
     } finally {
       setBusy(false);
+      setTimeout(resetButtonLabels, 1800);
     }
+  }
+
+  async function reuploadHistory(id) {
+    if (state.busy) return;
+    setBusy(true, 'Đang upload lại…');
+    try {
+      const record = await getHistory(id);
+      if (!record || !record.fileBlob || !record.fileName) throw new Error('Snapshot lịch sử không còn dữ liệu để upload lại.');
+
+      record.retryCount = Number(record.retryCount || 0) + 1;
+      record.lastRetryAt = new Date().toISOString();
+      record.updatedAt = new Date().toISOString();
+      await putHistory(record);
+
+      const file = new File([record.fileBlob], record.fileName, { type: record.mimeType || 'text/plain' });
+      setStatus(`Upload lại ${record.fileName} từ lịch sử. Đang chờ ChatGPT network xác nhận…`);
+      const network = await attachAndConfirm(file);
+      record.lastRetryNetwork = network;
+      record.lastRetryConfirmedAt = new Date().toISOString();
+
+      const wasConfirmed = record.status === 'confirmed';
+      if (wasConfirmed) {
+        record.updatedAt = new Date().toISOString();
+        record.error = '';
+        await putHistory(record);
+        setStatus(`Upload lại thành công · ChatGPT network SUCCESS · baseline không đổi r${loadBaseline(record.projectName)?.revision || record.nextRevision}.`, 'success');
+      } else if (canAdvanceBaselineFromRecord(record)) {
+        const result = await markRecordConfirmed(record, network, { advanceBaseline: true });
+        if (!result.baselineAdvanced) throw new Error('Snapshot upload lại đã thành công nhưng không thể cập nhật baseline.');
+        setStatus(`Retry thành công · snapshot #${record.nextRevision} đã được xác nhận · baseline hiện là r${record.nextRevision}.`, 'success');
+      } else {
+        record.status = 'confirmed';
+        record.baselineAdvanced = false;
+        record.baselineAdvanceSkipped = true;
+        record.network = network;
+        record.error = '';
+        record.updatedAt = new Date().toISOString();
+        await putHistory(record);
+        setStatus('Snapshot lịch sử đã upload lại thành công nhưng baseline mới hơn đang tồn tại, nên không rollback baseline.', 'warning');
+      }
+      await renderHistory();
+    } catch (error) {
+      setStatus(`${error instanceof Error ? error.message : String(error)} Baseline không thay đổi.`, 'error');
+    } finally {
+      setBusy(false);
+      resetButtonLabels();
+    }
+  }
+
+  function statusGlyph(status) {
+    if (status === 'confirmed') return '✓';
+    if (status === 'failed') return '!';
+    return '…';
+  }
+
+  async function renderHistory() {
+    if (!state.history) return;
+    let rows = [];
+    try { rows = await listHistory('', 20); }
+    catch (error) {
+      state.history.innerHTML = `<div class="history-empty">Không đọc được lịch sử: ${escapeHtml(error?.message || error)}</div>`;
+      return;
+    }
+
+    if (!rows.length) {
+      state.history.innerHTML = '<div class="history-empty">Chưa có snapshot upload nào.</div>';
+      return;
+    }
+
+    state.history.innerHTML = rows.map((row) => {
+      const revision = `r${Number(row.previousRevision || 0)}→r${Number(row.nextRevision || 0)}`;
+      const when = row.createdAt ? new Date(row.createdAt).toLocaleString() : '';
+      const retry = Number(row.retryCount || 0) ? ` · retry ${row.retryCount}` : '';
+      const network = row.network?.endpoint ? ` · ${escapeHtml(row.network.endpoint)}` : '';
+      const err = row.error ? `<div class="history-error">${escapeHtml(row.error)}</div>` : '';
+      return `<div class="history-row" data-status="${escapeHtml(row.status || 'pending')}">
+        <div class="history-head"><strong>${statusGlyph(row.status)} ${escapeHtml(row.mode || '')} ${revision}</strong><span>${escapeHtml(when)}</span></div>
+        <div>${escapeHtml(row.projectName || '')} · ${escapeHtml(row.summary || formatBytes(row.fileSize || 0))}${retry}${network}</div>
+        ${err}
+        <button class="history-retry" type="button" data-history-id="${escapeHtml(row.id)}">Upload lại</button>
+      </div>`;
+    }).join('');
+
+    state.history.querySelectorAll('[data-history-id]').forEach((button) => {
+      button.addEventListener('click', () => reuploadHistory(button.getAttribute('data-history-id')));
+    });
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+  }
+
+  function toggleHistory() {
+    if (!state.history) return;
+    const open = state.history.hidden;
+    state.history.hidden = !open;
+    if (open) void renderHistory();
+  }
+
+  function describePersistedState() {
+    const entries = Object.values(readBaselineStore()).filter((entry) => entry?.version === BASELINE_VERSION);
+    if (!entries.length) return 'Chưa có baseline network-confirmed · hãy Upload Full trước';
+    entries.sort((a, b) => Date.parse(String(b.confirmedAt || b.updatedAt || '')) - Date.parse(String(a.confirmedAt || a.updatedAt || '')));
+    const latest = entries[0];
+    return `Baseline đã xác nhận: ${latest.projectName || 'project'} r${latest.revision || 1} · Upload thay đổi luôn so với baseline này`;
   }
 
   function mount() {
@@ -527,44 +835,67 @@
 
     const style = document.createElement('style');
     style.textContent = `
-      .panel{font:12px/1.35 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:rgba(20,20,20,.96);color:#fff;border:1px solid rgba(255,255,255,.16);border-radius:12px;padding:8px;box-shadow:0 10px 30px rgba(0,0,0,.28);max-width:330px}
-      .actions{display:flex;gap:6px;align-items:stretch}
-      button{all:unset;box-sizing:border-box;cursor:pointer;background:#fff;color:#111;border-radius:9px;padding:9px 12px;font-weight:700;display:block;text-align:center;min-width:155px}
-      button.secondary{min-width:auto;background:#2d2d2d;color:#ddd;border:1px solid rgba(255,255,255,.14);font-weight:600}
+      .panel{font:12px/1.35 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:rgba(20,20,20,.97);color:#fff;border:1px solid rgba(255,255,255,.16);border-radius:12px;padding:8px;box-shadow:0 10px 30px rgba(0,0,0,.28);max-width:430px}
+      .actions{display:flex;gap:6px;align-items:stretch;flex-wrap:wrap}
+      button{all:unset;box-sizing:border-box;cursor:pointer;background:#fff;color:#111;border-radius:9px;padding:9px 12px;font-weight:700;display:block;text-align:center}
+      button.primary{min-width:150px}
+      button.secondary{background:#2d2d2d;color:#ddd;border:1px solid rgba(255,255,255,.14);font-weight:600}
       button:hover{background:#ececec} button.secondary:hover{background:#3a3a3a} button:disabled{opacity:.65;cursor:wait}
-      .status{margin-top:7px;color:#b9b9b9;max-width:310px;word-break:break-word}
+      .status{margin-top:7px;color:#b9b9b9;max-width:410px;word-break:break-word}
       .status[data-kind="success"]{color:#a7f3d0}.status[data-kind="warning"]{color:#fde68a}.status[data-kind="error"]{color:#fca5a5}
+      .history{margin-top:8px;border-top:1px solid rgba(255,255,255,.12);padding-top:6px;max-height:300px;overflow:auto}
+      .history-row{padding:7px;border-radius:8px;background:rgba(255,255,255,.05);margin-top:6px;color:#d8d8d8}
+      .history-row[data-status="confirmed"]{border-left:3px solid #6ee7b7}.history-row[data-status="failed"]{border-left:3px solid #fca5a5}.history-row[data-status="pending"]{border-left:3px solid #fde68a}
+      .history-head{display:flex;justify-content:space-between;gap:10px}.history-head span{color:#888;font-size:10px}.history-error{color:#fca5a5;margin-top:4px;word-break:break-word}.history-empty{color:#999;padding:6px}
+      .history-retry{margin-top:6px;padding:5px 8px;background:#303030;color:#eee;border:1px solid rgba(255,255,255,.12);font-size:11px}
     `;
 
     const panel = document.createElement('div');
     panel.className = 'panel';
     const actions = document.createElement('div');
     actions.className = 'actions';
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = '📂 Upload source';
-    button.title = 'Lần đầu: full source. Lần sau: chỉ file thay đổi.';
-    button.addEventListener('click', () => handleClick({ forceFull: false }));
+
+    const changesButton = document.createElement('button');
+    changesButton.type = 'button';
+    changesButton.className = 'primary';
+    changesButton.textContent = 'Upload thay đổi';
+    changesButton.title = 'Chỉ upload file khác với baseline đã được ChatGPT network xác nhận.';
+    changesButton.addEventListener('click', () => handleUpload('DELTA'));
+
     const fullButton = document.createElement('button');
     fullButton.type = 'button';
     fullButton.className = 'secondary';
-    fullButton.textContent = 'Full lại';
-    fullButton.title = 'Upload lại toàn bộ source và đặt lại baseline, ví dụ khi chuyển sang chat mới.';
-    fullButton.addEventListener('click', () => handleClick({ forceFull: true }));
+    fullButton.textContent = 'Upload Full';
+    fullButton.title = 'Upload toàn bộ source. Baseline chỉ đổi sau khi ChatGPT xác nhận network success.';
+    fullButton.addEventListener('click', () => handleUpload('FULL'));
+
+    const historyButton = document.createElement('button');
+    historyButton.type = 'button';
+    historyButton.className = 'secondary';
+    historyButton.textContent = 'Lịch sử';
+    historyButton.title = 'Xem snapshot cũ và upload lại đúng snapshot đó.';
+    historyButton.addEventListener('click', toggleHistory);
+
     const status = document.createElement('div');
     status.className = 'status';
     status.id = STATUS_ID;
-    status.textContent = 'Read-only · lần đầu full · lần sau chỉ file đổi';
+    status.textContent = describePersistedState();
 
-    actions.append(button, fullButton);
-    panel.append(actions, status);
+    const history = document.createElement('div');
+    history.className = 'history';
+    history.hidden = true;
+
+    actions.append(changesButton, fullButton, historyButton);
+    panel.append(actions, status, history);
     shadow.append(style, panel);
     document.documentElement.appendChild(host);
 
     state.host = host;
-    state.button = button;
+    state.changesButton = changesButton;
     state.fullButton = fullButton;
+    state.historyButton = historyButton;
     state.status = status;
+    state.history = history;
   }
 
   mount();

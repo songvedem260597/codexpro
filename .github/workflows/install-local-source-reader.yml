@@ -5,13 +5,14 @@ on:
   push:
     branches:
       - feature/local-source-readonly
+      - fix/local-source-upload-history
     paths:
       - .github/workflows/install-local-source-reader.yml
       - tools/local-source-reader/**
 
 jobs:
   install:
-    name: Install read-only extension on local PC
+    name: Install local source reader on local PC
     runs-on: self-hosted
     timeout-minutes: 10
 
@@ -19,7 +20,7 @@ jobs:
       - name: Checkout extension branch
         uses: actions/checkout@v7.0.0
         with:
-          ref: feature/local-source-readonly
+          ref: ${{ github.ref_name }}
 
       - name: Copy extension to fixed local folder
         shell: powershell
@@ -39,9 +40,14 @@ jobs:
 
           $manifest = Join-Path $target 'manifest.json'
           $content = Join-Path $target 'content.js'
+          $network = Join-Path $target 'upload-network.js'
           if (-not (Test-Path $manifest)) { throw 'Installed manifest.json missing.' }
           if (-not (Test-Path $content)) { throw 'Installed content.js missing.' }
+          if (-not (Test-Path $network)) { throw 'Installed upload-network.js missing.' }
 
+          $manifestJson = Get-Content -Raw $manifest | ConvertFrom-Json
           Write-Host "LOCAL_SOURCE_READER_INSTALL=PASS"
+          Write-Host "LOCAL_SOURCE_READER_VERSION=$($manifestJson.version)"
+          Write-Host "LOCAL_SOURCE_READER_BRANCH=${{ github.ref_name }}"
           Write-Host "LOCAL_SOURCE_READER_PATH=$target"
           Write-Host "LOCAL_SOURCE_READER_USERPROFILE=$env:USERPROFILE"
