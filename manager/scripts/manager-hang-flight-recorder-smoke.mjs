@@ -27,6 +27,8 @@ function harness(root, overrides = {}) {
     mcp: null,
     reads: null,
     browser: null,
+    processTree: [],
+    renderer: null,
     runtime: null,
     context: []
   };
@@ -49,6 +51,8 @@ function harness(root, overrides = {}) {
       mcp: () => state.mcp,
       responseReads: () => state.reads,
       browserStream: () => state.browser,
+      processTree: () => state.processTree,
+      renderer: () => state.renderer,
       runtime: () => state.runtime,
       context: () => state.context
     },
@@ -85,6 +89,21 @@ try {
   assert.equal(healthyState.active_incident, null, "healthy sampling must not open an incident");
   assert.ok(healthyState.history.length <= healthyState.max_snapshots, "ring buffer must stay bounded");
   assert.ok(healthyState.history.every((snapshot) => snapshot.wall_time_ms >= healthy.wall() - 1_250), "old snapshots must rotate out of the rolling history");
+  healthy.state.processTree = [{ pid: 42, type: "Tab", creationTime: 1234, cpu: { percentCPU: 12.5, idleWakeupsPerSecond: 7 }, memory: { workingSetSize: 100, peakWorkingSetSize: 120, privateBytes: 80, sharedBytes: 20 } }];
+  healthy.state.renderer = { pid: 42, sampled_at: "2026-09-12T00:00:00.000Z", sample_age_ms: 1500, js_heap_used_bytes: 12_000, js_heap_total_bytes: 20_000, js_heap_limit_bytes: 100_000, js_heap_embedder_bytes: 4_000, js_heap_backing_storage_bytes: 2_000, dom_node_count: 321, document_hidden: false, visibility_state: "visible", heap_source: "cdp.Runtime.getHeapUsage", heap_precise: true, heap_error: "" };
+  healthy.state.runtime = { health_known: true, local_ok: true, health_latency_ms: 17, runtime_pid: 77, runtime_metrics: { rss_bytes: 90_000, heap_used_bytes: 30_000, heap_total_bytes: 50_000, external_bytes: 4_000, array_buffers_bytes: 2_000, cpu_user_micros: 700, cpu_system_micros: 300, event_loop_delay_peak_ms: 14, event_loop_delay_mean_ms: 3, active_request_count: 2, active_mcp_session_count: 1, active_resource_count: 9 } };
+  const metricsSnapshot = healthy.recorder.sampleNow();
+  assert.equal(metricsSnapshot.process_tree[0].private_bytes, 80 * 1024, "Electron privateBytes must be normalized from KiB to bytes");
+  assert.equal(metricsSnapshot.process_tree[0].working_set_bytes, 100 * 1024);
+  assert.equal(metricsSnapshot.renderer.js_heap_used_bytes, 12_000);
+  assert.equal(metricsSnapshot.renderer.js_heap_embedder_bytes, 4_000);
+  assert.equal(metricsSnapshot.renderer.js_heap_backing_storage_bytes, 2_000);
+  assert.equal(metricsSnapshot.renderer.heap_source, "cdp.Runtime.getHeapUsage");
+  assert.equal(metricsSnapshot.renderer.heap_precise, true);
+  assert.equal(metricsSnapshot.renderer.dom_node_count, 321);
+  assert.equal(metricsSnapshot.runtime.rss_bytes, 90_000);
+  assert.equal(metricsSnapshot.runtime.event_loop_delay_peak_ms, 14);
+  assert.equal(metricsSnapshot.runtime.active_mcp_session_count, 1);
 
   const rendererRoot = await makeRoot("renderer");
   const renderer = harness(rendererRoot);

@@ -13,6 +13,7 @@ import "./resource-overload-runtime.mjs";
 import { createMcpResponseQueue } from "./mcp-response-queue.mjs";
 import { createMcpCausalTelemetry } from "./mcp-causal-telemetry.mjs";
 import { createManagerHangFlightRecorder } from "./manager-hang-flight-recorder.mjs";
+import { collectRendererMemoryMetrics } from "./renderer-memory-metrics.mjs";
 import { createRuntimeHealthDiagnosticTracker } from "./runtime-health-diagnostic.mjs";
 import { collectTunnelOfflineEvidence } from "./tunnel-offline-diagnostic.mjs";
 import { createInterruptionAlertTracker } from "./interruption-alert.mjs";
@@ -93,6 +94,10 @@ const WORKER_JOB_HISTORY_LIMIT = 200;
 const codexProHome = process.env.CODEXPRO_HOME
   ? path.resolve(process.env.CODEXPRO_HOME)
   : path.join(os.homedir(), ".codexpro");
+const managerDiagnosticLogPath = path.join(codexProHome, "manager-diagnostic.jsonl");
+const runtimeLifecycleLogPath = path.join(codexProHome, "runtime-lifecycle.jsonl");
+let latestManagerRendererMetrics = null;
+const managerRendererMetricTimers = new WeakMap();
 const managerSendTraceLogger = createSendTraceLogger({ home: codexProHome, component: "manager", runId: MANAGER_RUN_ID });
 const sendTrace = (event, details = {}, options = {}) => {
   try { managerSendTraceLogger.emit(event, details, options); } catch {}
@@ -442,6 +447,50 @@ let lastBrowserProfileStreamErrorAt = 0;
 const browserProfileDiagnosticState = new Map();
 let managerBrowserStreamFlightSampler = null;
 
+function managerProcessTreeSnapshot() {
+  try {
+    return app.getAppMetrics();
+  } catch {
+    return [];
+  }
+}
+
+function managerRendererMetricsSnapshot() {
+  if (!latestManagerRendererMetrics) return null;
+  return {
+    ...latestManagerRendererMetrics,
+    sample_age_ms: Math.max(0, Date.now() - Number(latestManagerRendererMetrics.sampled_at_ms || Date.now()))
+  };
+}
+
+function startManagerRendererMetricsSampler(win) {
+  const rendererPid = win.webContents.getOSProcessId();
+  const previousTimer = managerRendererMetricTimers.get(win);
+  if (previousTimer) clearInterval(previousTimer);
+  const sample = async () => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+    try {
+      const value = await collectRendererMemoryMetrics(win.webContents);
+      const sampledAtMs = Date.now();
+      latestManagerRendererMetrics = {
+        pid: value?.pid || rendererPid,
+        sampled_at: new Date(sampledAtMs).toISOString(),
+        sampled_at_ms: sampledAtMs,
+        ...value
+      };
+    } catch {}
+  };
+  void sample();
+  const timer = setInterval(() => { void sample(); }, 15_000);
+  timer.unref?.();
+  managerRendererMetricTimers.set(win, timer);
+  win.webContents.once("destroyed", () => {
+    clearInterval(timer);
+    if (managerRendererMetricTimers.get(win) === timer) managerRendererMetricTimers.delete(win);
+    if (latestManagerRendererMetrics?.pid === rendererPid) latestManagerRendererMetrics = null;
+  });
+}
+
 function managerHangRuntimeSnapshot() {
   const cache = runtimeBaseCache;
   if (!cache?.value) return { health_known: false, local_ok: null, health_age_ms: null, child_process_count: 0, child_pids: [] };
@@ -454,6 +503,7 @@ function managerHangRuntimeSnapshot() {
     health_latency_ms: Number(local.latency) || 0,
     runtime_pid: Number(local?.data?.pid || 0) || null,
     runtime_started_at: String(local?.data?.runtimeStartedAt || local?.data?.runtime_started_at || ""),
+    runtime_metrics: local?.data?.runtimeMetrics && typeof local.data.runtimeMetrics === "object" ? local.data.runtimeMetrics : {},
     child_process_count: processSummaries.length,
     child_pids: processSummaries.map((item) => Number(item?.pid) || 0).filter(Boolean)
   };
@@ -488,6 +538,8 @@ const managerHangFlightRecorder = createManagerHangFlightRecorder({
     mcp: () => mcpCausalTelemetry.flightSnapshot(),
     responseReads: () => responseQueue.flightSnapshot(),
     browserStream: () => managerBrowserStreamFlightSampler?.() || null,
+    processTree: managerProcessTreeSnapshot,
+    renderer: managerRendererMetricsSnapshot,
     runtime: managerHangRuntimeSnapshot,
     context: managerHangContextSnapshot
   }
@@ -959,6 +1011,7 @@ function createWindow() {
   if (devUrl) void win.loadURL(devUrl);
   else void win.loadFile(path.join(here, "..", "dist", "index.html"), process.env.CODEXPRO_MANAGER_SMOKE_PAGE === "requests" ? { query: { page: "requests" } } : undefined);
   win.webContents.on("did-finish-load", () => {
+    startManagerRendererMetricsSampler(win);
     if (process.env.CODEXPRO_MANAGER_SMOKE_FLIGHT_RECORDER !== "1") startBrowserProfileEventStream(win);
   });
 
@@ -4362,7 +4415,12 @@ if (!hasSingleInstanceLock) {
       architecture: process.arch,
       electron_version: process.versions.electron,
       chrome_version: process.versions.chrome,
-      node_version: process.versions.node
+      node_version: process.versions.node,
+      codexpro_home: codexProHome,
+      hang_checkpoint_path: managerHangFlightRecorder.checkpointPath,
+      hang_incident_directory: managerHangFlightRecorder.incidentDirectory,
+      manager_diagnostic_log_path: managerDiagnosticLogPath,
+      runtime_lifecycle_log_path: runtimeLifecycleLogPath
     });
     createWindow();
     returnToManagerShortcutRegistration = registerReturnToManagerShortcut({

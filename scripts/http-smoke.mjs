@@ -902,6 +902,15 @@ try {
     throw new Error(`healthz must expose the loaded runtime build and start time: ${JSON.stringify(authorizedJson)}`);
   }
 
+  if (!Number.isInteger(Number(authorizedJson.pid)) || Number(authorizedJson.pid) <= 0) {
+    throw new Error(`healthz must expose the live runtime pid: ${JSON.stringify(authorizedJson)}`);
+  }
+  for (const key of ['rss_bytes', 'heap_used_bytes', 'heap_total_bytes', 'external_bytes', 'array_buffers_bytes', 'cpu_user_micros', 'cpu_system_micros', 'event_loop_delay_peak_ms', 'event_loop_delay_mean_ms', 'active_request_count', 'active_mcp_session_count', 'active_resource_count']) {
+    if (!Number.isFinite(Number(authorizedJson.runtimeMetrics?.[key])) || Number(authorizedJson.runtimeMetrics?.[key]) < 0) {
+      throw new Error(`healthz runtimeMetrics.${key} must be a non-negative number: ${JSON.stringify(authorizedJson.runtimeMetrics)}`);
+    }
+  }
+
   for (const header of [`bearer ${token}`, `Bearer    ${token}`]) {
     const variant = await fetch(`${baseUrl}/healthz`, {
       headers: { Authorization: header }

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import express, { type NextFunction, type Request, type Response } from "express";
 import cors from "cors";
@@ -1503,6 +1504,29 @@ async function main(): Promise<void> {
   const logRequests = process.env.CODEXPRO_LOG_REQUESTS === "1";
   const authFailureWindow = new Map<string, { count: number; resetAt: number }>();
   const authFailureLimit = 10;
+  const runtimeEventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+  runtimeEventLoopDelay.enable();
+  let runtimeEventLoopPeakMs = 0;
+  let runtimeEventLoopMeanMs = 0;
+  const runtimeEventLoopSampleTimer = setInterval(() => {
+    runtimeEventLoopPeakMs = Number((Math.max(0, Number(runtimeEventLoopDelay.max) || 0) / 1_000_000).toFixed(2));
+    runtimeEventLoopMeanMs = Number((Math.max(0, Number(runtimeEventLoopDelay.mean) || 0) / 1_000_000).toFixed(2));
+    runtimeEventLoopDelay.reset();
+  }, 2_000);
+  runtimeEventLoopSampleTimer.unref();
+  let activeRequestCount = 0;
+  app.use((_req, res, next) => {
+    activeRequestCount += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      activeRequestCount = Math.max(0, activeRequestCount - 1);
+    };
+    res.once("finish", release);
+    res.once("close", release);
+    next();
+  });
 
   function tokenMatches(value: unknown): boolean {
     if (!config.authToken || typeof value !== "string") return false;
@@ -1671,6 +1695,30 @@ async function main(): Promise<void> {
     pruneTransports(sessionId);
   }
 
+  function runtimeSelfMetrics() {
+    const memory = process.memoryUsage();
+    const cpu = process.cpuUsage();
+    let activeResourceCount = 0;
+    try {
+      activeResourceCount = process.getActiveResourcesInfo?.().length || 0;
+    } catch {}
+    return {
+      pid: process.pid,
+      rss_bytes: Math.max(0, Number(memory.rss) || 0),
+      heap_used_bytes: Math.max(0, Number(memory.heapUsed) || 0),
+      heap_total_bytes: Math.max(0, Number(memory.heapTotal) || 0),
+      external_bytes: Math.max(0, Number(memory.external) || 0),
+      array_buffers_bytes: Math.max(0, Number(memory.arrayBuffers) || 0),
+      cpu_user_micros: Math.max(0, Number(cpu.user) || 0),
+      cpu_system_micros: Math.max(0, Number(cpu.system) || 0),
+      event_loop_delay_peak_ms: runtimeEventLoopPeakMs,
+      event_loop_delay_mean_ms: runtimeEventLoopMeanMs,
+      active_request_count: Math.max(0, activeRequestCount),
+      active_mcp_session_count: transports.size,
+      active_resource_count: Math.max(0, activeResourceCount)
+    };
+  }
+
   const pruneTimer = setInterval(pruneTransports, Math.min(config.httpSessionTtlMs, 60_000));
   pruneTimer.unref();
 
@@ -1688,6 +1736,8 @@ async function main(): Promise<void> {
       name: "CodexPro",
       runtimeStartedAt: RUNTIME_STARTED_AT,
       runtimeBuildId: RUNTIME_BUILD_ID,
+      pid: process.pid,
+      runtimeMetrics: runtimeSelfMetrics(),
       defaultRoot: config.defaultRoot,
       allowedRoots: config.allowedRoots,
       bashMode: config.bashMode,

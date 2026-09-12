@@ -116,8 +116,55 @@ function normalizeRuntime(value) {
     health_latency_ms: nullableAge(source.health_latency_ms),
     runtime_pid: Math.max(0, finite(source.runtime_pid)) || null,
     runtime_started_at: clean(source.runtime_started_at, 80),
+    rss_bytes: Math.max(0, finite(source.runtime_metrics?.rss_bytes)),
+    heap_used_bytes: Math.max(0, finite(source.runtime_metrics?.heap_used_bytes)),
+    heap_total_bytes: Math.max(0, finite(source.runtime_metrics?.heap_total_bytes)),
+    external_bytes: Math.max(0, finite(source.runtime_metrics?.external_bytes)),
+    array_buffers_bytes: Math.max(0, finite(source.runtime_metrics?.array_buffers_bytes)),
+    cpu_user_micros: Math.max(0, finite(source.runtime_metrics?.cpu_user_micros)),
+    cpu_system_micros: Math.max(0, finite(source.runtime_metrics?.cpu_system_micros)),
+    event_loop_delay_peak_ms: Math.max(0, finite(source.runtime_metrics?.event_loop_delay_peak_ms)),
+    event_loop_delay_mean_ms: Math.max(0, finite(source.runtime_metrics?.event_loop_delay_mean_ms)),
+    active_request_count: Math.max(0, finite(source.runtime_metrics?.active_request_count)),
+    active_mcp_session_count: Math.max(0, finite(source.runtime_metrics?.active_mcp_session_count)),
+    active_resource_count: Math.max(0, finite(source.runtime_metrics?.active_resource_count)),
     child_process_count: Math.max(0, finite(source.child_process_count ?? pids.length)),
     child_pids: pids
+  };
+}
+
+function normalizeProcessTree(value) {
+  const list = Array.isArray(value) ? value : [];
+  return list.slice(0, 32).map((item) => ({
+    pid: Math.max(0, finite(item?.pid)),
+    type: clean(item?.type, 80),
+    creation_time_ms: Math.max(0, finite(item?.creation_time_ms ?? item?.creationTime)),
+    cpu_percent: Math.max(0, finite(item?.cpu_percent ?? item?.cpu?.percentCPU)),
+    cpu_idle_wakeups_per_second: Math.max(0, finite(item?.cpu_idle_wakeups_per_second ?? item?.cpu?.idleWakeupsPerSecond)),
+    working_set_bytes: Math.max(0, finite(item?.working_set_bytes ?? item?.memory?.workingSetSize) * (item?.working_set_bytes != null ? 1 : 1024)),
+    peak_working_set_bytes: Math.max(0, finite(item?.peak_working_set_bytes ?? item?.memory?.peakWorkingSetSize) * (item?.peak_working_set_bytes != null ? 1 : 1024)),
+    private_bytes: Math.max(0, finite(item?.private_bytes ?? item?.memory?.privateBytes) * (item?.private_bytes != null ? 1 : 1024)),
+    shared_bytes: Math.max(0, finite(item?.shared_bytes ?? item?.memory?.sharedBytes) * (item?.shared_bytes != null ? 1 : 1024))
+  })).filter((item) => item.pid || item.type);
+}
+
+function normalizeRendererMetrics(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    pid: Math.max(0, finite(source.pid)) || null,
+    sampled_at: clean(source.sampled_at, 80),
+    sample_age_ms: nullableAge(source.sample_age_ms),
+    js_heap_used_bytes: Math.max(0, finite(source.js_heap_used_bytes)),
+    js_heap_total_bytes: Math.max(0, finite(source.js_heap_total_bytes)),
+    js_heap_limit_bytes: Math.max(0, finite(source.js_heap_limit_bytes)),
+    js_heap_embedder_bytes: Math.max(0, finite(source.js_heap_embedder_bytes)),
+    js_heap_backing_storage_bytes: Math.max(0, finite(source.js_heap_backing_storage_bytes)),
+    dom_node_count: Math.max(0, finite(source.dom_node_count)),
+    document_hidden: Boolean(source.document_hidden),
+    visibility_state: clean(source.visibility_state, 40),
+    heap_source: clean(source.heap_source, 80),
+    heap_precise: source.heap_precise === true,
+    heap_error: clean(source.heap_error, 500)
   };
 }
 
@@ -278,8 +325,10 @@ export function createManagerHangFlightRecorder(options = {}) {
       renderer: {
         responsive: rendererResponsive,
         last_unresponsive_at: lastUnresponsiveAtMs ? iso(lastUnresponsiveAtMs) : "",
-        last_responsive_at: lastResponsiveAtMs ? iso(lastResponsiveAtMs) : ""
+        last_responsive_at: lastResponsiveAtMs ? iso(lastResponsiveAtMs) : "",
+        ...normalizeRendererMetrics(safeCall(samplers.renderer, null))
       },
+      process_tree: normalizeProcessTree(safeCall(samplers.processTree, [])),
       mcp: normalizeMcp(safeCall(samplers.mcp, null)),
       response_reads: normalizeResponseReads(safeCall(samplers.responseReads, null)),
       browser_stream: normalizeBrowserStream(safeCall(samplers.browserStream, null)),
