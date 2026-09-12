@@ -20,6 +20,7 @@ CODEXPRO_MCP_REPORT.md
 *.local.md
 *.local.json
 *.log
+.manager-smoke-*.json
 .qa-*
 SOCIAL_POSTS.md
 LAUNCH_COPY.md

@@ -10,7 +10,10 @@ const manager = ["../manager/src/main.jsx", "../manager/src/hooks/use-chat-recov
 const managerSession = readFileSync(new URL("../manager/src/hooks/use-chat-session.js", import.meta.url), "utf8");
 const managerMain = readFileSync(new URL("../manager/electron/main.mjs", import.meta.url), "utf8");
 const bridge = readFileSync(new URL("../src/browserExtensionBridge.ts", import.meta.url), "utf8");
-const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
+const server = [
+  readFileSync(new URL("../src/server.ts", import.meta.url), "utf8"),
+  readFileSync(new URL("../src/browserControlTool.ts", import.meta.url), "utf8")
+].join("\n");
 
 const taskId = "cpt_1234567890abcdef12345678";
 const conversationId = "12345678-abcd-1234-abcd-1234567890ab";

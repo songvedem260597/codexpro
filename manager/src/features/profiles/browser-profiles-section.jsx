@@ -76,7 +76,7 @@ function BrowserProfileCard({
   } : null;
 
   return (
-    <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`}>
+    <article className={`browser-profile ${profile.connected ? "is-online" : "is-offline"} is-${profileBorderState}`} data-profile-id={profile.profile_id}>
       <span className="worker-active-border" aria-hidden="true" />
       <WorkerIcon state={workerState} customImages={settings.workerImageDataUrls} />
       <div className="profile-main">

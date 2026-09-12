@@ -6,8 +6,8 @@ import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { browserProfileRetentionState } from '../dist/browserExtensionBridge.js';
 
-const EXPECTED_EXTENSION_VERSION = '0.5.126';
-const EXPECTED_RUNTIME_BUILD_ID = 'send-post-ack-scope-v2';
+const EXPECTED_EXTENSION_VERSION = '0.5.135';
+const EXPECTED_RUNTIME_BUILD_ID = 'send-button-ack-v13';
 
 function extractFunctionFrom(source, name, label = 'source') {
   const start = source.indexOf(`function ${name}(`);
@@ -63,9 +63,9 @@ if (mode.startsWith('register-') || mode === 'disable') {
         id: 'persist-smoke-profile',
         email: 'persist@example.test',
         label: 'Persist Smoke',
-        version: '0.5.126',
+        version: '0.5.135',
         ...(mode === 'register-current'
-          ? { runtime_build_id: 'send-post-ack-scope-v2' }
+          ? { runtime_build_id: 'send-button-ack-v13' }
           : mode === 'register-stale'
             ? { runtime_build_id: 'stale-build' }
             : {}),

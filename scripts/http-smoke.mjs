@@ -689,6 +689,12 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     if (!String(read.structuredContent.text || '').includes('restart gate survived')) {
       throw new Error('rehydrated prepared task did not unlock the prepared workspace');
     }
+    const persistedAfterBegin = JSON.parse(await fs.readFile(path.join(codexProHome, 'browser-profile-tasks.json'), 'utf8'));
+    const taskAfterBegin = persistedAfterBegin?.profiles?.[profileId];
+    if (taskAfterBegin?.pending_task_id) throw new Error(`pending task gate was not cleared after begin_repo_task: ${JSON.stringify(taskAfterBegin)}`);
+    if (taskAfterBegin?.task_id !== taskId || taskAfterBegin?.task_title !== 'Resume prepared worker task') {
+      throw new Error(`active task state was not persisted after restart recovery: ${JSON.stringify(taskAfterBegin)}`);
+    }
     const finalized = await callTool(client, 'finalize_worker_job', {
       task_id: taskId,
       outcome: 'completed',
@@ -700,11 +706,9 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     await client.close();
     client = undefined;
 
-    const persistedAfterBegin = JSON.parse(await fs.readFile(path.join(codexProHome, 'browser-profile-tasks.json'), 'utf8'));
-    const taskAfterBegin = persistedAfterBegin?.profiles?.[profileId];
-    if (taskAfterBegin?.pending_task_id) throw new Error(`pending task gate was not cleared after begin_repo_task: ${JSON.stringify(taskAfterBegin)}`);
-    if (taskAfterBegin?.task_id !== taskId || taskAfterBegin?.task_title !== 'Resume prepared worker task') {
-      throw new Error(`active task state was not persisted after restart recovery: ${JSON.stringify(taskAfterBegin)}`);
+    const persistedAfterFinalize = JSON.parse(await fs.readFile(path.join(codexProHome, 'browser-profile-tasks.json'), 'utf8'));
+    if (persistedAfterFinalize?.profiles?.[profileId]) {
+      throw new Error(`completed task binding was not cleared after finalization: ${JSON.stringify(persistedAfterFinalize.profiles[profileId])}`);
     }
     const taskEvents = (await fs.readFile(path.join(codexProHome, 'profile-task-events.jsonl'), 'utf8')).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
     if (!taskEvents.some((event) => event.event === 'repo_task_prepared_rehydrated' && event.profile_id === profileId && event.task_id === taskId)) {

@@ -58,6 +58,28 @@
       && !evidence.some(isChatSubmissionAckEvidence));
   }
 
+  function decideChatSendPostClick({ attemptState = {}, evidence = [], retryClickCount = 0 } = {}) {
+    const generation = (Array.isArray(evidence) ? evidence : []).find(isChatSubmissionAckEvidence);
+    if (generation) {
+      return { action: 'submitted', acknowledged: true, ack_source: 'generation', generation_endpoint: String(generation.endpoint || ''), retry_allowed: false };
+    }
+    if (attemptState.generating_after_click === true && attemptState.generating_before_click !== true) {
+      return { action: 'submitted', acknowledged: true, ack_source: 'dom-generating', generation_endpoint: '', retry_allowed: false };
+    }
+    if (attemptState.matching_user_message_after_click === true && attemptState.composer_matches_payload_after_click !== true) {
+      return { action: 'submitted', acknowledged: true, ack_source: 'dom-user-message', generation_endpoint: '', retry_allowed: false };
+    }
+    const retryAllowed = Number(retryClickCount) < 1
+      && attemptState.composer_present_after_click === true
+      && attemptState.composer_matches_payload_after_click === true
+      && attemptState.draft_owned === true
+      && attemptState.send_button_ready === true
+      && attemptState.send_button_hit_test === true;
+    return retryAllowed
+      ? { action: 'retry', acknowledged: false, ack_source: '', generation_endpoint: '', retry_allowed: true }
+      : { action: 'uncertain', acknowledged: false, ack_source: '', generation_endpoint: '', retry_allowed: false };
+  }
+
   globalThis.CodexProNetworkPolicy = Object.freeze({
     isChatGenerationRequest,
     safeChatRequestEndpoint,
@@ -66,6 +88,7 @@
     isAttachmentUploadEndpoint,
     isRecoverableAttachmentUploadAbort,
     isCompletedAttachmentUpload,
-    shouldUseTrustedClickFallback
+    shouldUseTrustedClickFallback,
+    decideChatSendPostClick
   });
 })();

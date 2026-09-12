@@ -24,12 +24,12 @@ assert.equal(profileSafeForWorkerUpdate({activity:"idle",conversation_tabs:[]}),
 const main = await readFile(new URL("../electron/main.mjs", import.meta.url), "utf8");
 const reload = main.slice(main.indexOf("async function reloadChromeProfiles()"), main.indexOf("const profileSendOperations"));
 assert.match(reload, /availableExtensionVersion\(status.config.root/);
-assert.equal((reload.match(/versionAtLeast\(profile.extension_version, targetVersion\)/g)||[]).length, 2, "selection and confirmation share target");
+assert.equal((reload.match(/workerExtensionCurrent\(profile, targetVersion\)/g)||[]).length, 2, "selection and confirmation must share the exact version and runtime build identity target");
 assert.doesNotMatch(reload, /version: WORKER_EXTENSION_VERSION/);
 assert.match(main, /browserProfiles,\s+workerExtensionVersion,/);
 const ui = await readFile(new URL("../src/main.jsx", import.meta.url), "utf8");
 assert.match(ui, /status\?\.workerExtensionVersion \|\| WORKER_EXTENSION_VERSION/);
-assert.match(ui, /extensionReady\(profile.extension_version, workerExtensionVersion\)/);
+assert.match(ui, /extensionReady\(profile, workerExtensionVersion\)/);
 assert.match(ui, /disabled=\{Boolean\(busy\) \|\| profileSummary.reload === 0\}/);
 const card = await readFile(new URL("../src/features/profiles/browser-profiles-section.jsx", import.meta.url), "utf8");
 assert.match(card, /Có extension \{workerExtensionVersion\} mới/);

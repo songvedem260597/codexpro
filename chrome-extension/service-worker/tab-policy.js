@@ -38,6 +38,54 @@
     };
   }
 
+  async function resolveChatSendTab(options = {}) {
+    const conversationId = String(options.conversationId || '').trim();
+    const now = typeof options.now === 'function' ? options.now : Date.now;
+    const startedAt = now();
+    const getTab = options.getTab;
+    const queryTabs = options.queryTabs;
+    const recentConversationList = options.recentConversationList;
+    const createTab = options.createTab;
+    const waitForTab = options.waitForTab;
+    const isExcluded = typeof options.isExcluded === 'function' ? options.isExcluded : () => false;
+    const rememberBinding = typeof options.rememberBinding === 'function' ? options.rememberBinding : () => {};
+    let bindingValidationMs = 0;
+    const result = (tab, source, bindingHit = false, bindingSource = '') => {
+      if (tab?.id) rememberBinding(conversationId, tab.id);
+      return {
+        tab,
+        resolution_source: source,
+        binding_hit: bindingHit,
+        binding_source: bindingSource,
+        binding_validation_ms: bindingValidationMs,
+        find_tab_ms: Math.max(0, now() - startedAt)
+      };
+    };
+    const matches = tab => Boolean(tab?.id && !isExcluded(tab) && conversationIdFromUrl(tab.url) === conversationId);
+    const bindingIds = [...new Set([Number(options.requestedId), Number(options.boundId)].filter(Number.isInteger))];
+    for (const tabId of bindingIds) {
+      const validationStartedAt = now();
+      let candidate = null;
+      try { candidate = await getTab(tabId); } catch {}
+      bindingValidationMs += Math.max(0, now() - validationStartedAt);
+      if (matches(candidate)) return result(candidate, 'binding', true, tabId === Number(options.requestedId) ? 'target_id' : 'conversation_binding');
+    }
+    const tabs = await queryTabs();
+    const candidates = (Array.isArray(tabs) ? tabs : []).filter(matches);
+    const openTab = candidates.find(tab => tab.active) || candidates[0];
+    if (openTab) return result(openTab, 'open-tab');
+    const recent = await recentConversationList(3);
+    if (!recent.some(conversation => String(conversation?.id || '') === conversationId)) {
+      throw new Error('Đoạn chat không còn thuộc 3 chat gần nhất của profile này.');
+    }
+    let created = await createTab(conversationId);
+    if (!created?.id) throw new Error('Không thể mở lại tab ChatGPT của đoạn chat này.');
+    await waitForTab(created.id);
+    created = await getTab(created.id);
+    if (!matches(created)) throw new Error('CONVERSATION_TAB_VERIFY_FAILED: Tab mở lại không khớp conversation cần gửi.');
+    return result(created, 'recent-history-reopen');
+  }
+
   function planChatTabCleanup(tabs, options = {}) {
     const maxTabs = Math.max(1, Number(options.maxTabs) || 1);
     const healthFailuresToClose = Math.max(1, Number(options.healthFailuresToClose) || 1);
@@ -85,6 +133,7 @@
     isChatGptTabUrl,
     safeTabAuditUrl,
     tabAuditTabRecord,
+    resolveChatSendTab,
     planChatTabCleanup
   });
 })();

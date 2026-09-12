@@ -349,14 +349,20 @@ const completedStreamAudit = buildChatResponseAuditRecord({
 });
 assert.equal(completedStreamAudit.comparisonBasis, "network_stream", "audit must compare against the selected completed network stream instead of a shorter DOM fragment");
 assert.equal(completedStreamAudit.comparison, "match", "completed network stream content must be audited as the final Manager response");
-const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, browserControlWorker, server, workerJobToolsSource, httpSource, bridge, profileState, managerMain, managerChatCache, managerChatDiagnostics, managerPreload, managerUi, managerWorkerUpdateDialog, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
+const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyWorker, browserControlWorker, server, repoTaskToolsSource, workerJobToolsSource, httpSource, bridge, profileState, managerMain, managerChatCache, managerChatDiagnostics, managerPreload, managerUi, managerWorkerUpdateDialog, managerChatComposer, managerStyles, managerDiagnosticView, managerAppDropdown, managerChatScroll, manifestText, connectorInstaller, popupHtml, popupJs] = await Promise.all([
   readFile(join(root, "src", "browserOps.ts"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "tab-policy.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "network-policy.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "response-policy.js"), "utf8"),
   readFile(join(root, "chrome-extension", "service-worker", "browser-control.js"), "utf8"),
-  readFile(join(root, "src", "server.ts"), "utf8"),
+  Promise.all([
+    readFile(join(root, "src", "server.ts"), "utf8"),
+    readFile(join(root, "src", "repoTaskTools.ts"), "utf8"),
+    readFile(join(root, "src", "browserControlTool.ts"), "utf8"),
+    readFile(join(root, "src", "toolResults.ts"), "utf8")
+  ]).then((parts) => parts.join("\n")),
+  readFile(join(root, "src", "repoTaskTools.ts"), "utf8"),
   readFile(join(root, "src", "workerJobTools.ts"), "utf8"),
   readFile(join(root, "src", "http.ts"), "utf8"),
   readFile(join(root, "src", "browserExtensionBridge.ts"), "utf8"),
@@ -365,7 +371,9 @@ const [browserOps, worker, tabPolicyWorker, networkPolicyWorker, responsePolicyW
     readFile(join(root, "manager", "electron", "main.mjs"), "utf8"),
     readFile(join(root, "manager", "electron", "ipc", "diagnostic-ipc.mjs"), "utf8"),
     readFile(join(root, "manager", "electron", "ipc", "settings-ipc.mjs"), "utf8"),
-    readFile(join(root, "manager", "electron", "ipc", "worker-ipc.mjs"), "utf8")
+    readFile(join(root, "manager", "electron", "ipc", "worker-ipc.mjs"), "utf8"),
+    readFile(join(root, "manager", "electron", "mcp", "manager-mcp-client.mjs"), "utf8"),
+    readFile(join(root, "manager", "electron", "project-discovery.mjs"), "utf8")
   ]).then((parts) => parts.join("\n")),
   readFile(join(root, "manager", "electron", "manager-chat-cache.mjs"), "utf8"),
   readFile(join(root, "manager", "electron", "manager-chat-diagnostics.mjs"), "utf8"),
@@ -505,13 +513,13 @@ assert.equal(domHistoricalMessageStreamText.message_stream_error, false, "histor
 assert.equal(domHistoricalMessageStreamText.response_ready, true, "historical message-stream text must not block latest-turn completion");
 assert.equal(domQuotedMessageStreamText.message_stream_error, false, "assistant prose that quotes Error in message stream must not be mistaken for a live system error");
 
-assert.match(server, /task_title:[\s\S]*?words >= 4 && words <= 6/, "begin_repo_task must require a clear 4-6 word AI-generated task title");
-assert.match(server, /task_kind: z\.enum\(\["general", "code"\]\)/, "every profile task must declare whether it needs coding context");
-assert.match(server, /args\.task_kind === "code" \? await readGlobalRulesSnapshot\(\) : undefined[\s\S]*?args\.task_kind === "code" \? await requireCodexGraphForWorkspace/, "only code tasks may load global rules and CodexGraph");
-assert.match(server, /proof\.taskKind === "general"[\s\S]*?global_rules_loaded: false[\s\S]*?codexgraph_active: false/, "general tasks must retain their title without loading coding context");
-assert.match(server, /task_title_source: "ai"/, "repo task results must identify the AI task-title source");
-assert.match(server, /title: "Register Profile Task"[\s\S]*?Registering the CodexPro task[\s\S]*?CodexPro task registered/, "the universal task-title call must not be mislabeled as a repo lock");
-assert.match(server, /task_id:[\s\S]*?optional\(\)[\s\S]*?task_title:[\s\S]*?task_kind:[\s\S]*?root:[\s\S]*?optional\(\)/, "direct profile ChatGPT tasks must begin with an AI title, task kind, and a server-generated id");
+assert.match(repoTaskToolsSource, /task_title:[\s\S]*?words >= 4 && words <= 6/, "begin_repo_task must require a clear 4-6 word AI-generated task title");
+assert.match(repoTaskToolsSource, /task_kind: z\.enum\(\["general", "code"\]\)/, "every profile task must declare whether it needs coding context");
+assert.match(repoTaskToolsSource, /args\.task_kind === "code" \? await readGlobalRulesSnapshot\(\) : undefined[\s\S]*?args\.task_kind === "code" \? await requireCodexGraphForWorkspace/, "only code tasks may load global rules and CodexGraph");
+assert.match(repoTaskToolsSource, /proof\.taskKind === "general"[\s\S]*?global_rules_loaded: false[\s\S]*?codexgraph_active: false/, "general tasks must retain their title without loading coding context");
+assert.match(repoTaskToolsSource, /task_title_source: "ai"/, "repo task results must identify the AI task-title source");
+assert.match(repoTaskToolsSource, /title: "Register Profile Task"[\s\S]*?Registering the CodexPro task[\s\S]*?CodexPro task registered/, "the universal task-title call must not be mislabeled as a repo lock");
+assert.match(repoTaskToolsSource, /task_id:[\s\S]*?optional\(\)[\s\S]*?task_title:[\s\S]*?task_kind:[\s\S]*?root:[\s\S]*?optional\(\)/, "direct profile ChatGPT tasks must begin with an AI title, task kind, and a server-generated id");
 assert.match(server, /createWorkerJobToolDefinitions[\s\S]*?registerCodexTool\(config, server, tool\.name, tool\.options, tool\.handler\)/, "worker lifecycle tools must stay behind the extracted workerJobTools registrar");
 assert.doesNotMatch(server, /server,\s*"worker_job_status"/, "worker job tool definitions must not drift back into createCodexProServer");
 for (const workerToolName of ["worker_job_status", "worker_job_history", "worker_context_history", "report_worker_job_progress", "finalize_worker_job"]) {
@@ -773,7 +781,7 @@ assert.doesNotMatch(sendProfileRequestSource, /root:\\"\$\{initialWorkspaceRoot\
 assert.match(sendProfileRequestSource, /action: "send_chat_request"[\s\S]*?}, 235000\)/, "chat submission must preserve the action timeout after a reconnect wait");
 const managerSendUiSource = managerUi.slice(managerUi.indexOf("async function sendRequest(profile"), managerUi.indexOf("async function verifyRepoTaskUse"));
 assert.match(managerSendUiSource, /draftOverride !== null \? draftOverride : \(requestDraftsRef\.current\[profile\.profile_id\][\s\S]*?api\.sendProfileRequest/, "Manager send must read the composer snapshot without subscribing the full chat modal to every keystroke");
-assert.match(managerChatComposer, /const submittedDraft = draft[\s\S]*?const submitted = await onSend\(submittedDraft\);[\s\S]*?if \(submitted && draftRef\.current === submittedDraft\) updateDraft\(""\)/, "the extracted local composer must clear only the exact submitted draft after confirmation and preserve text typed for the next follow-up");
+assert.match(managerChatComposer, /const submittedDraft = draft[\s\S]*?const submitted = await onSend\(submittedDraft, \{ \.\.\.sendTiming, submitEnteredAt \}\);[\s\S]*?if \(submitted && draftRef\.current === submittedDraft\) updateDraft\(""\)/, "the extracted local composer must clear only the exact submitted draft after confirmation and preserve text typed for the next follow-up");
 assert.match(managerSendUiSource, /scope: allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "all_allowed sends must preserve scope and provide known workspace candidates to the backend");
 assert.match(managerSendUiSource, /restoreSubmittedInputs\(\)[\s\S]*?Trạng thái gửi chưa chắc chắn[\s\S]*?return false/, "an uncertain submission must preserve the local composer draft instead of silently clearing it");
 assert.match(managerSendUiSource, /rolloverTaskInProgress[\s\S]*?rolloverMessageLimit = conversationMessageLimit\(rolloverSource\)[\s\S]*?shouldRolloverConversation\(rolloverSource, rolloverMessageLimit\)[\s\S]*?continuation_reason: "message_limit"[\s\S]*?rolloverFullConversation\(profile, conversationId,[\s\S]*?rollover_attachments: attachments/, "a conversation must stay on the current tab while its task is active, then roll the next request at its completed-task limit");
@@ -811,7 +819,9 @@ assert.match(worker, /domResponseReady\?\{canonical_busy:false,canonical_respons
 assert.match(worker, /Promise\.all\(\[[\s\S]*?timedSendPhase\('network_capture_probe_ms',\(\)=>chatNetworkStreamCapture\(tab\.id,targetConversationId\)\)[\s\S]*?timedSendPhase\('network_state_ms',\(\)=>chatRequestState\(tab\.id,conversationId\)\)[\s\S]*?chatDomActivityState\(tab\.id,conversationId,\{maxAgeMs:750\}\)[\s\S]*?chatAttachmentOwnership\(tab\.id,targetConversationId\)/, "send preflight checks must run in parallel, time each phase, and reuse only a sub-second DOM probe");
 const workerSendSource = worker.slice(worker.indexOf("if(action==='send_chat_request')"), worker.indexOf("if(action==='rename_chat')"));
 assert.doesNotMatch(workerSendSource, /chatDomActivityState\(tab\.id,conversationId,\{fresh:true\}\)/, "send must not force a duplicate DOM activity probe immediately after list_profiles");
-assert.match(workerSendSource, /waitForChatSubmitLifecycle\(tab\.id,networkAckStartedAfterMs[\s\S]*?Math\.min\(1800[\s\S]*?resultForSubmitLifecycle\(earlyLifecycleEvidence,submitResult\)/, "healthy existing-chat sends must accept bounded submit-lifecycle evidence instead of waiting for generation start");
+assert.doesNotMatch(workerSendSource, /resultForSubmitLifecycle|submission_ack_source:'submit_lifecycle'/, "sentinel/prepare lifecycle traffic must never acknowledge a ChatGPT submission");
+assert.match(workerSendSource, /observeChatSendAfterClick\([\s\S]*?POST_CLICK_VERIFICATION_MS/, "healthy sends must use the bounded post-click verifier");
+assert.match(worker, /async function observeChatSendAfterClick[\s\S]*?decideChatSendPostClick/, "post-click verification must delegate to the tested strong-signal decision policy");
 assert.doesNotMatch(workerSendSource, /Math\.min\(6000,remainingCommandMs\(\)-500\)/, "healthy sends must not retain the old six-second pre-fallback generation wait");
 assert.match(managerMain, /send_submit_lifecycle_ack_ms[\s\S]*?send_extension_total_ms[\s\S]*?bridge_extension_roundtrip_ms[\s\S]*?submission_ack_source/, "Manager diagnostics must persist the send-phase and bridge timing breakdown for latency analysis");
 assert.match(managerMain, /codexpro:browser-profiles/);
@@ -842,8 +852,8 @@ assert.match(managerUi, /const restoreOpenResponseTurnAnchor = useCallback\([\s\
 assert.match(managerUi, /useLayoutEffect\(\(\) => \{[\s\S]*?openChatTurnActive\) restoreOpenResponseTurnAnchor\(chatProfileId\)[\s\S]*?maintainResponsePosition/, "an active reopened response must restore the turn anchor before positioning the transcript");
 assert.match(managerUi, /function openChat\(profile\)[\s\S]*?resetChatViewport\(profile\.profile_id\)[\s\S]*?positionOpenChatViewport\(profile\.profile_id[\s\S]*?hydrateCachedResponse\(profile, conversationId\)\.finally/, "opening Chat must reset stale viewport state, hydrate the cached transcript, and re-evaluate the appropriate active-turn or bottom position");
 assert.match(managerUi, /const changeProjectForProfile = useCallback\(\(profile, root\) => \{[\s\S]*?requestTargetsRef\.current[\s\S]*?NEW_CHAT_TARGET[\s\S]*?setRequestResponses[\s\S]*?conversationId: NEW_CHAT_TARGET/, "changing project must detach the new task from the previous project's conversation and transcript");
-assert.match(managerUi, /openChatAwaitingAssistant[\s\S]*?pollLatestResponse[\s\S]*?completedResponseNeedsDomFallback\(canonical\)[\s\S]*?loadResponse\(profile, conversationId, true, true\)/, "Manager must fall back to the live DOM when network completion arrives before canonical contains the newest response");
-assert.match(managerUi, /tab\.connection_interrupted[\s\S]*?connectionRecoveryReads[\s\S]*?loadResponse\(profile, conversationId, true, true, true\)/, "Manager must automatically recover the exact chat when ChatGPT reports an interrupted connection");
+assert.match(managerUi, /openChatAwaitingAssistant[\s\S]*?pollLatestResponse[\s\S]*?completedResponseNeedsDomFallback\(canonical\)[\s\S]*?loadResponse\(profile, conversationId, true, true, false, false, "network_recovery"\)/, "Manager must fall back to the live DOM when network completion arrives before canonical contains the newest response");
+assert.match(managerUi, /tab\.connection_interrupted[\s\S]*?connectionRecoveryReads[\s\S]*?loadResponse\(profile, conversationId, true, true, true, false, "network_recovery"\)/, "Manager must automatically recover the exact chat when ChatGPT reports an interrupted connection");
 assert.match(worker, /connection_interrupted:Boolean\(domActivity\.connection_interrupted\)/, "profile status must expose interrupted ChatGPT renderers to Manager");
 assert.match(worker, /message_stream_error:Boolean\(domActivity\.message_stream_error\)/, "profile status must expose Error in message stream separately");
 assert.equal(worker.split("const messageStreamError=Array.from(latestTurn?.querySelectorAll?.('*')||[])").length - 1, 2, "both DOM activity and response readers must scope message-stream detection to the latest turn");
@@ -902,7 +912,7 @@ assert.match(managerUi, /String\(created\?\.repo_task_id \|\| ""\) !== taskId[\s
 assert.match(managerUi, /action: "repo-task-title-rollover"[\s\S]*?task_id_reused:[\s\S]*?action: "repo-task-title-retry"[\s\S]*?task_id_reused:/, "retry diagnostics must record task-id continuity for both same-chat and new-chat recovery");
 assert.match(managerUi, /allowBusyFollowup: !newChat/, "manual existing-chat sends must opt into serialized busy follow-up steering");
 assert.match(managerUi, /activeLogicalTaskAdjustment\([\s\S]*?taskMode: logicalAdjustment \? "adjustment" : "new"[\s\S]*?previousTaskId: logicalAdjustment\?\.taskId/, "the renderer must send the active task ID only for an in-flight message in the same conversation");
-assert.match(server, /const currentWorkerJob = readWorkerJob\(args\.task_id\)[\s\S]*?result\.worker_job_status = currentWorkerJob\.status/, "every task-bound response poll must expose durable terminal status, including polls after finalization");
+assert.match(server, /const currentWorkerJob = (?:dependencies\.)?readWorkerJob\(args\.task_id\)[\s\S]*?result\.worker_job_status = currentWorkerJob\.status/, "every task-bound response poll must expose durable terminal status, including polls after finalization");
 assert.match(managerUi, /ChatGPT đang xác minh lại một lượt bị hủy transport/, "uncertain aborted-transport recovery must still block a new send");
 assert.match(managerUi, /setRequestSendEvidence\(\(current\) => \(\{ \.\.\.current, \[profile\.profile_id\]: null \}\)\)/, "opening Chrome must clear stale send evidence");
 assert.match(managerUi, /heartbeat\|offline\|did not reconnect[\s\S]*?refreshStatus\(\)/, "a final heartbeat failure must immediately reconcile the visible profile status");
@@ -971,8 +981,8 @@ assert.match(worker, /if\(domActivity\.busy&&!allowBusyFollowup\)\{[\s\S]*?probe
 assert.match(worker, /allowBusyFollowup&&\(requestState\.busy&&requestState\.network_state==='generating'\|\|networkCaptureProbe\?\.in_progress===true\)/, "explicit manual follow-ups must accept either the live request state or an authoritative in-progress network stream");
 assert.match(worker, /async function stabilizeSubmittedSendAfterAck[\s\S]*?const SEND_POST_ACK_STABILITY_MS = 650/, "accepted sends must keep the 650 ms post-ACK gate local to the helper that consumes it");
 assert.match(worker, /const SEND_CONFIRMED_STABILITY_SOURCE = 'network_ack'[\s\S]*?send_stability_source:SEND_CONFIRMED_STABILITY_SOURCE/, "accepted sends must preserve authoritative network ACK telemetry through scoped post-ACK stabilization");
-assert.match(worker, /const WORKER_RUNTIME_BUILD_ID = 'send-post-ack-scope-v2'/, "extension heartbeat must publish the hotfix runtime build identity");
-assert.equal(manifest.version, "0.5.126");
+assert.match(worker, /const WORKER_RUNTIME_BUILD_ID = 'send-button-ack-v13'/, "extension heartbeat must publish the verified Send-button runtime build identity");
+assert.equal(manifest.version, "0.5.135");
 assert.doesNotMatch(worker, /function focusNewChatGptTab|forceChatFocus/, "audited tab creation must not add a second ad-hoc focus helper");
 assert.match(worker, /createChatGptTab\(\{url:'https:\/\/chatgpt\.com\/',active:true\},visualWatchdog\?'send_chat_request_watchdog':'send_chat_request_new',\{visualWatchdog\}\)/, "new-chat sends must explicitly distinguish normal task tabs from the dedicated Watchdog tab");
 assert.match(worker, /const assistantContentFor=assistantMessage=>[\s\S]*?fullLength>bestLength\+24\?assistantMessage:best/, "DOM transcript reads must reject a one-token markdown descendant when the full assistant wrapper contains the complete response");
@@ -1010,9 +1020,9 @@ assert.match(worker, /if\(!profile\.enabled\)[\s\S]*?setTimeout\(resolve,2000\)[
 assert.match(bridge, /enabled: boolean[\s\S]*?profile\.enabled = source\.enabled !== false[\s\S]*?profile\.enabled && browserProfileRetentionState\(profile, now\)\.visible/, "disabled profiles must be retained internally but excluded from the visible worker list");
 assert.match(server, /"forget_profile"[\s\S]*?forgetBrowserExtensionProfile\(args\.profile_id\)/, "browser control must let Manager forget a profile that cannot reconnect");
 assert.match(managerMain, new RegExp(`const WORKER_EXTENSION_VERSION = "${manifest.version.replace(/\\./g, "\\\\.")}";`), "Manager backend worker target must match the packaged extension version");
-assert.match(managerMain, /const WORKER_EXTENSION_BUILD_ID = "send-post-ack-scope-v2";/, "Manager backend must require the exact extension runtime build id");
+assert.match(managerMain, /const WORKER_EXTENSION_BUILD_ID = "send-button-ack-v13";/, "Manager backend must require the exact extension runtime build id");
 assert.match(managerMain, /confirmationDeadline[\s\S]*?workerExtensionCurrent\(profile, targetVersion\)/, "worker update must wait for a heartbeat confirming both extension version and runtime build id");
-assert.match(managerUi, /const WORKER_EXTENSION_VERSION = "0\.5\.126";[\s\S]*?const WORKER_EXTENSION_BUILD_ID = "send-post-ack-scope-v2";[\s\S]*?function extensionReady\(profile, targetVersion = WORKER_EXTENSION_VERSION\)/, "Manager UI must classify same-version build-id mismatches with an exact runtime identity helper");
+assert.match(managerUi, /const WORKER_EXTENSION_VERSION = "0\.5\.135";[\s\S]*?const WORKER_EXTENSION_BUILD_ID = "send-button-ack-v13";[\s\S]*?function extensionReady\(profile, targetVersion = WORKER_EXTENSION_VERSION\)/, "Manager UI must classify same-version build-id mismatches with an exact runtime identity helper");
 assert.match(managerUi, /const hasSafeOutdatedWorker = profiles\.some\(\(profile\) => \{[\s\S]*?if \(!profile\?\.connected \|\| extensionReady\(profile, workerExtensionVersion\)\) return false;/, "Manager auto-update must use exact runtime identity instead of version-only gating");
 assert.doesNotMatch(managerUi, /const hasSafeOutdatedWorker = profiles\.some\(\(profile\) => \{[\s\S]{0,400}?versionAtLeast\(profile\.extension_version\)/, "Manager auto-update must not treat same-version or future-version stale build ids as current");
 assert.match(bridge, /runtime_build_id[\s\S]*?extension_build_id: profile\.runtimeBuildId/, "bridge must carry runtime build identity from extension heartbeat to Manager profile summaries");

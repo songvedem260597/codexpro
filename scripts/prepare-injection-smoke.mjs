@@ -24,7 +24,7 @@ const chrome = { scripting: { executeScript: options => {
   return Promise.resolve([{ result: { prepared: true, submitted: false } }]);
 } } };
 const result = await Promise.race([
-  vm.runInNewContext(injection, { chrome, tab: { id: 1 }, text: 'test', attachments: [], attemptId: 'a', deadlineAt: Date.now()+1000, staleAttachmentOwnership: null, targetConversationId: 'expected', sendChatRequestPage() {} }),
+  vm.runInNewContext(injection, { chrome, tabId: 1, text: 'test', attachments: [], attemptId: 'a', deadlineAt: Date.now()+1000, staleAttachmentOwnership: null, expectedConversationId: 'expected', sendChatRequestPage() {} }),
   new Promise(resolve => setTimeout(() => resolve('document_idle_wait'), 30))
 ]);
 assert.notEqual(result, 'document_idle_wait', 'prepare must not wait for document_idle after a healthy CDP probe');

@@ -80,11 +80,14 @@ assert.equal(taskUnfinalizedIncidents([{ ...job, status: "completed" }], { now }
 const managerMain = fs.readFileSync(new URL("../electron/main.mjs", import.meta.url), "utf8");
 const renderer = fs.readFileSync(new URL("../src/main.jsx", import.meta.url), "utf8");
 const responseLoader = fs.readFileSync(new URL("../src/hooks/use-chat-response-loader.js", import.meta.url), "utf8");
-const server = fs.readFileSync(new URL("../../src/server.ts", import.meta.url), "utf8");
+const server = [
+  fs.readFileSync(new URL("../../src/server.ts", import.meta.url), "utf8"),
+  fs.readFileSync(new URL("../../src/browserControlTool.ts", import.meta.url), "utf8")
+].join("\n");
 assert.match(managerMain, /taskUnfinalizedIncidents\(workerJobs[\s\S]*?TASK_UNFINALIZED_REPEAT_MS/, "runtime status must persist throttled unfinalized-task incidents");
 assert.match(renderer, /useChatResponseLoader\(/, "the renderer must wire final response reads through the extracted response loader");
 assert.match(responseLoader, /responseTaskId[\s\S]*?getProfileResponse\([\s\S]*?taskId: responseTaskId/, "the response loader must correlate final response reads with the exact task id");
-assert.match(server, /args\.action === "get_chat_response"[\s\S]*?finalizeWorkerJob\([\s\S]*?outcome: terminalOutcome/, "terminal Chrome responses must finalize the durable worker job");
+assert.match(server, /args\.action === "get_chat_response"[\s\S]*?(?:dependencies\.)?finalizeWorkerJob\([\s\S]*?outcome: terminalOutcome/, "terminal Chrome responses must finalize the durable worker job");
 assert.match(server, /args\.action === "stop_chat_generation"[\s\S]*?"cancelled"/, "stopped Chrome tasks must finalize as cancelled");
 
 const diagnosticRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "codexpro-task-unfinalized-"));

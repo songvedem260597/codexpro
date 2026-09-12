@@ -52,6 +52,7 @@ export function compactToolActivityMessages(messages, { collapseArgumentPayloads
 export function sendDebugEvidence(result = {}, error = null) {
   const details = error?.details && typeof error.details === "object" ? error.details : {};
   const source = result && typeof result === "object" ? result : {};
+  const field = (name) => source[name] ?? details[name];
   const evidence = Array.isArray(source.network_evidence)
     ? source.network_evidence.slice(-12)
     : Array.isArray(details.network_evidence)
@@ -71,6 +72,26 @@ export function sendDebugEvidence(result = {}, error = null) {
     trustedEnterError: String(source.trusted_enter_error || details.trusted_enter_error || ""),
     trustedClickError: String(source.trusted_click_error || details.trusted_click_error || ""),
     fallbackReason: String(source.fallback_reason || details.fallback_reason || ""),
+    request_payload_sha256: String(field("request_payload_sha256") || ""),
+    request_payload_length: Number(field("request_payload_length")) || 0,
+    target_id: Number(field("target_id")) || 0,
+    find_tab_ms: Number(field("find_tab_ms")) || 0,
+    binding_hit: field("binding_hit") === true,
+    binding_validation_ms: Number(field("binding_validation_ms")) || 0,
+    tab_activation_ms: Number(field("tab_activation_ms")) || 0,
+    prepare_ms: Number(field("prepare_ms")) || 0,
+    prepare_transport: String(field("prepare_transport") || ""),
+    prepare_step_ms: field("prepare_step_ms") && typeof field("prepare_step_ms") === "object" ? field("prepare_step_ms") : null,
+    send_button_selector: String(field("send_button_selector") || ""),
+    send_button_hit_test: field("send_button_hit_test") === true,
+    trusted_click_ms: Number(field("trusted_click_ms")) || 0,
+    send_button_actually_clicked: field("send_button_actually_clicked") === true,
+    composer_present_after_click: field("composer_present_after_click") === true,
+    composer_matches_payload_after_click: field("composer_matches_payload_after_click") === true,
+    matching_user_message_after_click: field("matching_user_message_after_click") === true,
+    generation_ack_ms: Number(field("generation_ack_ms")) || 0,
+    generation_endpoint: String(field("generation_endpoint") || source.network_generation_endpoint || details.network_generation_endpoint || ""),
+    retry_click_count: Number(field("retry_click_count")) || 0,
     evidence
   };
 }

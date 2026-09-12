@@ -359,9 +359,11 @@ export function useChatSendActions({
       const allAllowedScope = projectRoot === ALL_ALLOWED_WORKSPACES;
       const sendApiInvokedAt = performance.now();
       api.sendTraceEvent?.({ event: "renderer_send_api_invoked", send_trace_id: sendTraceId, profile_id: String(profile?.profile_id || ""), ...rendererTiming(sendApiInvokedAt) });
-      const sendPromise = api.sendProfileRequest({ send_trace_id: sendTraceId, profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, newChat, allowBusyFollowup: !newChat, taskMode: logicalAdjustment ? "adjustment" : "new", previousTaskId: logicalAdjustment?.taskId || "", scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
+      const sendPromise = api.sendProfileRequest({ send_trace_id: sendTraceId, profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, targetId: newChat ? undefined : requestedTab?.id, newChat, allowBusyFollowup: !newChat, taskMode: logicalAdjustment ? "adjustment" : "new", previousTaskId: logicalAdjustment?.taskId || "", scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
       const result = await sendPromise;
-      setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence(result) }));
+      const debugEvidence = sendDebugEvidence(result);
+      setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: debugEvidence }));
+      if (Object.prototype.hasOwnProperty.call(window, "__codexproSmokeSendTarget")) window.__codexproSmokeSendTarget = debugEvidence;
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
       const generationState = String(result?.generation_state || result?.network_state || "idle");
       const resolvedConversationId = String(result?.conversation_id || conversationId);
@@ -476,7 +478,9 @@ export function useChatSendActions({
       const sendAcked = sendErrorDetails?.network_acknowledged === true || nestedSendErrorDetails?.network_acknowledged === true;
       const sendUncertain = !sendAcked && /BRIDGE_TIMEOUT|EXTENSION_HEARTBEAT_LOST/.test(String(err?.code || sendErrorDetails?.code || ""));
       logRendererDiagnostic(api, sendUncertain ? "warn" : "error", "chat", sendAcked ? "Đã xác nhận gửi, lỗi xử lý sau ACK" : sendUncertain ? "Trạng thái gửi ChatGPT chưa xác định" : `Gửi yêu cầu thất bại: ${message}`, { action: "send-request", profile_id: profile.profile_id, conversation_id: conversationId, project_root: projectRoot, submission_state: sendAcked ? "submitted" : sendUncertain ? "uncertain" : "failed", network_acknowledged: sendAcked, error: err });
-      setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: sendDebugEvidence({}, err) }));
+      const debugEvidence = sendDebugEvidence({}, err);
+      setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: debugEvidence }));
+      if (Object.prototype.hasOwnProperty.call(window, "__codexproSmokeSendTarget")) window.__codexproSmokeSendTarget = debugEvidence;
       const conversationLimitReached = !newChat && message.includes("CONVERSATION_LIMIT_REACHED:");
       if (conversationLimitReached) {
         const previous = requestResponses[profile.profile_id] || {};

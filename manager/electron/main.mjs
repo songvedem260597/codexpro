@@ -39,6 +39,7 @@ import { buildGitDiagramArchitecture } from "./app-plugins/gitdiagram-analyzer.m
 import { createPluginSkillBundle } from "./app-plugins/plugin-skill-bundle.mjs";
 import { registerReturnToManagerShortcut, RETURN_TO_MANAGER_ACCELERATOR } from "./return-to-manager-shortcut.mjs";
 import { acceptsLogicalTaskAdjustment } from "./logical-chat-task.mjs";
+import { boundConversationTab } from "./chat-send-target.mjs";
 import { createTaskHangTracker } from "./task-hang-tracker.mjs";
 import { createVisualWatchdogService } from "./visual-watchdog.mjs";
 import { ALL_ALLOWED_WORKSPACES, createManagerSettingsStore } from "./manager-settings-store.mjs";
@@ -63,6 +64,7 @@ import {
 } from "./request-attachments.mjs";
 import { normalizeTerminalMessageStreamProfiles } from "./terminal-message-stream-state.mjs";
 import { createBrowserStreamIpcCoordinator } from "./browser-stream-ipc.mjs";
+import { createBrowserWindowStreamTarget } from "./browser-window-stream-target.mjs";
 
 protocol.registerSchemesAsPrivileged([{
   scheme: "codexpro-plugin",
@@ -352,8 +354,8 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const WORKER_EXTENSION_VERSION = "0.5.126";
-const WORKER_EXTENSION_BUILD_ID = "send-post-ack-scope-v2";
+const WORKER_EXTENSION_VERSION = "0.5.135";
+const WORKER_EXTENSION_BUILD_ID = "send-button-ack-v13";
 const RUNTIME_BASE_CACHE_MS = 10000;
 const RUNTIME_BASE_FAILURE_CACHE_MS = 500;
 const RUNTIME_HEALTH_TIMEOUT_MS = 5500;
@@ -665,6 +667,10 @@ function cachedBrowserProfileForSend(profileId) {
 function startBrowserProfileEventStream(win) {
   browserProfileStreamControllers.get(win)?.abort();
   const controller = new AbortController();
+  // Electron destroys the BrowserWindow wrapper before emitting "closed".
+  // Capture WebContents once while the window is alive and gate later sends.
+  const streamTarget = createBrowserWindowStreamTarget(win);
+  const { webContents } = streamTarget;
   let pendingProfilePayload = null;
   let profileFlushTimer = null;
   let streamMetricsTimer = null;
@@ -673,8 +679,8 @@ function startBrowserProfileEventStream(win) {
   const browserStreamIpc = createBrowserStreamIpcCoordinator({
     ackTimeoutMs: 2_500,
     send: (payload) => {
-      if (controller.signal.aborted || win.isDestroyed() || win.webContents.isDestroyed()) return;
-      win.webContents.send("codexpro:browser-stream", payload);
+      if (controller.signal.aborted) return;
+      streamTarget.send("codexpro:browser-stream", payload);
     },
     onTimeout: ({ sequence, pendingKeys, timeoutMs }) => {
       diagnostic("warn", "manager", "stream", `Renderer browser-stream ACK quá hạn (${timeoutMs} ms)`, {
@@ -688,7 +694,7 @@ function startBrowserProfileEventStream(win) {
   const browserStreamFlightSampler = () => browserStreamIpc.metrics();
   managerBrowserStreamFlightSampler = browserStreamFlightSampler;
   const acknowledgeBrowserStream = (event, payload) => {
-    if (event.sender?.id !== win.webContents.id) return;
+    if (event.sender?.id !== webContents.id) return;
     browserStreamIpc.acknowledge(payload?.sequence);
   };
   const pauseBrowserStreamOnReload = () => {
@@ -707,11 +713,11 @@ function startBrowserProfileEventStream(win) {
     controller.abort();
   };
   ipcMain.on("codexpro:browser-stream-ack", acknowledgeBrowserStream);
-  win.webContents.on("did-start-loading", pauseBrowserStreamOnReload);
-  win.webContents.on("dom-ready", resumeBrowserStreamAfterReload);
-  win.webContents.on("did-stop-loading", resumeBrowserStreamAfterReload);
-  win.webContents.on("did-finish-load", resumeBrowserStreamAfterReload);
-  win.webContents.once("destroyed", destroyBrowserStreamOnRendererDestroyed);
+  webContents.on("did-start-loading", pauseBrowserStreamOnReload);
+  webContents.on("dom-ready", resumeBrowserStreamAfterReload);
+  webContents.on("did-stop-loading", resumeBrowserStreamAfterReload);
+  webContents.on("did-finish-load", resumeBrowserStreamAfterReload);
+  webContents.once("destroyed", destroyBrowserStreamOnRendererDestroyed);
   streamMetricsTimer = setInterval(() => {
     const current = browserStreamIpc.metrics();
     const previous = previousStreamMetrics || { ...current, sourceEvents: 0, sends: 0, acknowledgements: 0, payloadBytes: 0, now: current.startedAt };
@@ -742,12 +748,12 @@ function startBrowserProfileEventStream(win) {
     profileFlushTimer = null;
     const payload = pendingProfilePayload;
     pendingProfilePayload = null;
-    if (!payload || controller.signal.aborted || win.isDestroyed() || win.webContents.isDestroyed()) return;
+    if (!payload || controller.signal.aborted || !streamTarget.available()) return;
     if (Array.isArray(payload?.profiles)) {
       latestBrowserProfileStream = { connected: true, checkedAt: String(payload.checked_at || ""), profiles: payload.profiles };
       recordBrowserProfileTransitions(payload.profiles, payload.checked_at);
     }
-    win.webContents.send("codexpro:browser-profiles", payload);
+    streamTarget.send("codexpro:browser-profiles", payload);
   };
   const queueProfilePayload = (payload) => {
     // Full profile frames are snapshots. Keep only the newest pending snapshot so
@@ -766,12 +772,12 @@ function startBrowserProfileEventStream(win) {
     browserStreamIpc.destroy();
     if (managerBrowserStreamFlightSampler === browserStreamFlightSampler) managerBrowserStreamFlightSampler = null;
     ipcMain.off("codexpro:browser-stream-ack", acknowledgeBrowserStream);
-    if (!win.webContents.isDestroyed()) {
-      win.webContents.off("did-start-loading", pauseBrowserStreamOnReload);
-      win.webContents.off("dom-ready", resumeBrowserStreamAfterReload);
-      win.webContents.off("did-stop-loading", resumeBrowserStreamAfterReload);
-      win.webContents.off("did-finish-load", resumeBrowserStreamAfterReload);
-      win.webContents.off("destroyed", destroyBrowserStreamOnRendererDestroyed);
+    if (!webContents.isDestroyed()) {
+      webContents.off("did-start-loading", pauseBrowserStreamOnReload);
+      webContents.off("dom-ready", resumeBrowserStreamAfterReload);
+      webContents.off("did-stop-loading", resumeBrowserStreamAfterReload);
+      webContents.off("did-finish-load", resumeBrowserStreamAfterReload);
+      webContents.off("destroyed", destroyBrowserStreamOnRendererDestroyed);
     }
     pendingProfilePayload = null;
   };
@@ -783,12 +789,12 @@ function startBrowserProfileEventStream(win) {
     if (streamReloadResumeTimer) clearTimeout(streamReloadResumeTimer);
     streamMetricsTimer = null;
     streamReloadResumeTimer = null;
-    if (!win.webContents.isDestroyed()) {
-      win.webContents.off("did-start-loading", pauseBrowserStreamOnReload);
-      win.webContents.off("dom-ready", resumeBrowserStreamAfterReload);
-      win.webContents.off("did-stop-loading", resumeBrowserStreamAfterReload);
-      win.webContents.off("did-finish-load", resumeBrowserStreamAfterReload);
-      win.webContents.off("destroyed", destroyBrowserStreamOnRendererDestroyed);
+    if (!webContents.isDestroyed()) {
+      webContents.off("did-start-loading", pauseBrowserStreamOnReload);
+      webContents.off("dom-ready", resumeBrowserStreamAfterReload);
+      webContents.off("did-stop-loading", resumeBrowserStreamAfterReload);
+      webContents.off("did-finish-load", resumeBrowserStreamAfterReload);
+      webContents.off("destroyed", destroyBrowserStreamOnRendererDestroyed);
     }
   }, { once: true });
   browserProfileStreamControllers.set(win, controller);
@@ -1288,11 +1294,11 @@ function createWindow() {
           }
           const clickProbe = await win.webContents.executeJavaScript(`(() => {
             const cards = [...document.querySelectorAll('.browser-profile')];
-            const card = cards.find((item) => ${JSON.stringify(preferredProfile)} && item.querySelector('code')?.textContent?.includes(${JSON.stringify(preferredProfile)}))
+            const card = cards.find((item) => ${JSON.stringify(preferredProfile)} && item.dataset.profileId?.startsWith(${JSON.stringify(preferredProfile)}))
               || cards.find((item) => !item.querySelector('.profile-chat')?.disabled);
             const button = card?.querySelector('.profile-chat:not(:disabled)');
             button?.click();
-            return { cardFound: Boolean(card), buttonFound: Boolean(button), profile: card?.querySelector('code')?.textContent || '' };
+            return { cardFound: Boolean(card), buttonFound: Boolean(button), profile: card?.dataset.profileId || '' };
           })()`, true);
           await new Promise((resolve) => setTimeout(resolve, 1400));
           chatModalProbe = await win.webContents.executeJavaScript(`(() => {
@@ -1550,8 +1556,9 @@ function createWindow() {
             const currentTextarea = finalCard?.querySelector('textarea');
             const toast = document.querySelector('.toast')?.textContent?.trim() || '';
             const error = finalCard?.querySelector('.request-send-error')?.textContent?.trim() || document.querySelector('.error-banner')?.textContent?.trim() || document.querySelector('.error')?.textContent?.trim() || '';
+            const normalizedSmokeText = (value) => String(value || '').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/\s+/g, ' ').trim();
             const userMessages = [...(finalCard?.querySelectorAll('.chat-transcript-message.is-user .user-message-text') || [])].map((node) => node.textContent?.trim() || '').filter(Boolean);
-            const userMessageVisible = userMessages.some((message) => message.includes(${JSON.stringify(sendText)}));
+            const userMessageVisible = userMessages.some((message) => normalizedSmokeText(message) === normalizedSmokeText(${JSON.stringify(sendText)}));
             const attachmentExpected = ${JSON.stringify(Boolean(sendAttachmentPath))};
             const attachmentPrepared = !attachmentExpected || attachmentsBeforeSend.length > 0;
             const attachmentCleared = (finalCard?.querySelectorAll('.request-file').length || 0) === 0;
@@ -1576,18 +1583,72 @@ function createWindow() {
             };
           })()`, true);
           sendProbe = await sendProbePromise;
+          sendProbe.pipeline = await win.webContents.executeJavaScript("window.__codexproSmokeSendTarget ? JSON.parse(JSON.stringify(window.__codexproSmokeSendTarget)) : null", true);
           if (sendConversationId && chatModalProbe?.profile) {
             await new Promise((resolve) => setTimeout(resolve, 800));
             const actual = await win.webContents.executeJavaScript(`window.codexpro.getProfileResponse(${JSON.stringify({ profileId: chatModalProbe.profile, conversationId: sendConversationId, readDom: true })}).then((value) => JSON.parse(JSON.stringify(value)))`, true);
-            const actualUserMessage = [...(actual?.messages || [])].reverse().find((message) => message?.role === "user" && String(message?.text || "").includes(sendText));
+            const expectedPayloadSha256 = String(sendProbe.pipeline?.request_payload_sha256 || "");
+            const actualPayloadSha256 = (value) => createHash("sha256").update(String(value || ""), "utf8").digest("hex");
+            const actualMatchingUserMessages = expectedPayloadSha256
+              ? (actual?.messages || []).filter((message) => message?.role === "user" && actualPayloadSha256(message?.text) === expectedPayloadSha256)
+              : [];
+            const actualUserMessage = [...actualMatchingUserMessages].reverse()[0];
             sendProbe.actualUserMessageVisible = Boolean(actualUserMessage);
+            sendProbe.actualUserMessageCount = actualMatchingUserMessages.length;
+            sendProbe.actualDuplicateCount = Math.max(0, actualMatchingUserMessages.length - 1);
             sendProbe.actualUserMessageTail = String(actualUserMessage?.text || "").slice(-300);
             sendProbe.actualNetworkState = String(actual?.network_state || "");
             sendProbe.actualNetworkStartedAt = String(actual?.network_last_started_at || "");
             const actualNetworkStartedMs = Date.parse(sendProbe.actualNetworkStartedAt) || 0;
             sendProbe.clickToNetworkMs = actualNetworkStartedMs && sendProbe.probeStartedAt ? Math.max(0, actualNetworkStartedMs - sendProbe.probeStartedAt) : null;
             sendProbe.actualBusy = Boolean(actual?.busy);
-            sendProbe.ok = Boolean(sendProbe.ok && sendProbe.actualUserMessageVisible);
+            let actualComposer = null;
+            try {
+              const targetId = Number(sendProbe.pipeline?.target_id);
+              if (Number.isInteger(targetId)) {
+                const base = await readyRuntimeBaseStatus();
+                actualComposer = await localMcpTool(base.config, base.token, "browser_control", {
+                  action: "evaluate",
+                  profile_id: chatModalProbe.profile,
+                  target_id: String(targetId),
+                  expression: `(() => {
+                    const composer = document.querySelector('#prompt-textarea')
+                      || document.querySelector('[contenteditable="true"][data-lexical-editor="true"]')
+                      || document.querySelector('textarea[data-id="root"]')
+                      || document.querySelector('textarea[placeholder]');
+                    if (!composer) return { present: false, text: '' };
+                    return {
+                      present: true,
+                      text: composer.isContentEditable
+                        ? String(composer.innerText || composer.textContent || '')
+                        : String(composer.value || '')
+                    };
+                  })()`
+                }, 10_000);
+              }
+            } catch (error) {
+              actualComposer = { ok: false, error: String(error?.message || error).slice(0, 300) };
+            }
+            const actualComposerValue = actualComposer?.value && typeof actualComposer.value === "object" ? actualComposer.value : null;
+            const actualComposerText = String(actualComposerValue?.text || "").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\s+/g, " ").trim();
+            const expectedComposerText = sendText.replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/\s+/g, " ").trim();
+            sendProbe.actualComposerPresent = actualComposerValue?.present === true;
+            sendProbe.actualComposerText = actualComposerText.slice(0, 500);
+            sendProbe.actualComposerMatchesPayload = Boolean(actualComposerValue?.present === true && actualComposerText === expectedComposerText);
+            sendProbe.actualComposerInspectionError = String(actualComposer?.error || "");
+            sendProbe.actualComposerVerified = Boolean(actualComposerValue && typeof actualComposerValue.present === "boolean");
+            sendProbe.ok = Boolean(
+              sendProbe.ok
+              && sendProbe.pipeline?.state === "submitted"
+              && sendProbe.pipeline?.send_button_actually_clicked === true
+              && sendProbe.pipeline?.networkAck === true
+              && (/^\/(?:backend-api|backend-anon)\/(?:f\/)?(?:conversation|steer_turn)(?:\/|$)/.test(String(sendProbe.pipeline?.generation_endpoint || ""))
+                || /^\/backend-api\/(?:f\/)?(?:codex\/)?responses(?:\/|$)/.test(String(sendProbe.pipeline?.generation_endpoint || "")))
+              && sendProbe.actualUserMessageVisible
+              && sendProbe.actualComposerVerified
+              && !sendProbe.actualComposerMatchesPayload
+              && sendProbe.actualDuplicateCount === 0
+            );
           }
         }
         let pasteProbe = null;
@@ -1650,13 +1711,14 @@ function createWindow() {
           const expectedConversationId = String(beforeActiveTab?.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
           const expectedTitle = String(beforeActiveTab?.title || beforeProfile?.active_chat_title || "");
           const ui = await win.webContents.executeJavaScript(`(async () => {
-            const card = [...document.querySelectorAll('.browser-profile')].find((item) => item.querySelector('code')?.textContent?.includes(${JSON.stringify(openProfilePrefix)}));
+            const card = [...document.querySelectorAll('.browser-profile')].find((item) => item.dataset.profileId?.startsWith(${JSON.stringify(openProfilePrefix)}));
             const chatButton = card?.querySelector('.profile-chat');
             if (!chatButton) return { ok: false, error: 'Không tìm thấy nút Chat.' };
             chatButton.click();
             await new Promise((resolve) => setTimeout(resolve, 500));
             const modal = document.querySelector('.chat-modal');
-            const button = modal?.querySelector('.request-card-actions .button.secondary');
+            const button = [...(modal?.querySelectorAll('.request-card-actions .button.secondary') || [])]
+              .find((item) => item.textContent?.trim() === 'Mở Chrome');
             if (!button) return { ok: false, error: 'Không tìm thấy nút Mở Chrome trong popup.' };
             const disabledBefore = button.disabled;
             const textBefore = button.textContent?.trim() || '';
@@ -1801,10 +1863,12 @@ if($processId -gt 0){$p=Get-Process -Id $processId;[pscustomobject]@{process=$p.
         }
         const image = await win.webContents.capturePage();
         if (screenshot) fs.writeFileSync(screenshot, image.toPNG());
-        const smokeResult = { ok: true, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, inspectionUiProbe, settingsProbe, diagnosticProbe, chatModalProbe, composerLayoutProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe };
+        const smokeResultOk = process.env.CODEXPRO_MANAGER_SMOKE_SEND === "1" ? sendProbe?.ok === true : true;
+        const smokeResult = { ok: smokeResultOk, status, projectCount: projects.length, projectIdentityProbe: projects.slice(0, 20).map((project) => ({ name: project.name, localName: project.localName, repoFullName: project.repoFullName, activityAt: project.activityAt, activityTimestamp: project.activityTimestamp, activityKind: project.activityKind })), inspection: inspection ? { workspace_id: inspection.workspace_id, root: inspection.root } : null, inspectionUiProbe, settingsProbe, diagnosticProbe, chatModalProbe, composerLayoutProbe, renameProbe, sendProbe, pasteProbe, attachmentPreviewProbe, openProfileProbe, realtimeProbe, workerUpdateProbe, activeChatTitleProbe };
         const smokeResultFile = String(process.env.CODEXPRO_MANAGER_SMOKE_RESULT || "").trim();
         if (smokeResultFile) fs.writeFileSync(smokeResultFile, `${JSON.stringify(smokeResult, null, 2)}\n`, "utf8");
         console.log(JSON.stringify(smokeResult));
+        if (!smokeResultOk) process.exitCode = 1;
       } catch (error) {
         console.error(error instanceof Error ? error.stack || error.message : String(error));
         process.exitCode = 1;
@@ -2982,7 +3046,7 @@ async function sendProfileRequestUnlocked(payload) {
       throw new Error("CodexPro connector chưa được gắn đúng profile Chrome. Hãy cập nhật connector rồi gửi lại.");
     }
   }
-  const selectedConversationTab = newChat ? null : (profile.conversation_tabs || []).find((tab) => String(tab.url || "").match(/\/c\/([A-Za-z0-9-]{8,160})/)?.[1] === conversationId);
+  const selectedConversationTab = newChat ? null : boundConversationTab(profile, conversationId, payload?.targetId);
   const selectedNetworkState = String(selectedConversationTab?.network_state || "");
   if ((selectedConversationTab?.busy || selectedNetworkState === "generating") && !allowBusyFollowup) throw new Error("Đoạn chat này đang xử lý yêu cầu khác. Hãy chờ trạng thái về ĐANG RẢNH.");
   if (!newChat) {
@@ -3162,6 +3226,7 @@ async function sendProfileRequestUnlocked(payload) {
     task_id: taskId,
     profile_id: profileId,
     conversation_id: newChat ? undefined : conversationId,
+    target_id: newChat || !selectedConversationTab?.id ? undefined : String(selectedConversationTab.id),
     new_chat: newChat,
     text: taskText,
     attachments,
@@ -3192,7 +3257,7 @@ async function sendProfileRequestUnlocked(payload) {
       request_scope: requestScope
     });
   }
-  return { ...result, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_mode: recoveryAccepted ? "recovery" : adjustmentAccepted ? "adjustment" : "new", repo_task_adjustment: adjustmentAccepted, repo_task_recovery: recoveryAccepted, worker_job_status: adjustmentAccepted || recoveryAccepted ? existingWorkerJobStatus : "prepared", repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, codexpro_workspace_expanded_scope: codexProWorkspaceExpanded, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id), workflow_id: taskWorkflow?.id, workflow_version: taskWorkflow?.version };
+  return { ...result, request_payload_sha256: createHash("sha256").update(taskText, "utf8").digest("hex"), request_payload_length: taskText.length, repo_task_id: taskId, repo_task_id_reused: taskIdReused, repo_task_mode: recoveryAccepted ? "recovery" : adjustmentAccepted ? "adjustment" : "new", repo_task_adjustment: adjustmentAccepted, repo_task_recovery: recoveryAccepted, worker_job_status: adjustmentAccepted || recoveryAccepted ? existingWorkerJobStatus : "prepared", repo_task_dispatched_at: taskDispatchedAt, repo_task_scope: requestScope, repo_task_policy: "title_always_code_evidence_on_demand", repo_task_retry_count: toolRetry ? 1 : 0, repo_task_rollover_count: toolRolloverCount, manager_preflight_ms: Math.max(0, dispatchStartedAt - sendStartedAt), manager_total_ms: Math.max(0, Date.now() - sendStartedAt), workspace_select_skipped: workspaceSelectSkipped, codexpro_workspace_expanded_scope: codexProWorkspaceExpanded, runtime_connection_source: base.source, profile_preflight_source: profilePreflightSource, profile_had_chatgpt_tab: profileHadChatGptTab, chatgpt_tab_auto_opened: !profileHadChatGptTab && Boolean(result?.target_id), workflow_id: taskWorkflow?.id, workflow_version: taskWorkflow?.version };
   } finally {
     await closeLocalMcpSession(session);
   }
