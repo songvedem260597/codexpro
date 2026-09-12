@@ -22,6 +22,14 @@ import { createProjectDiscovery } from "./project-discovery.mjs";
 import { taskUnfinalizedIncidents, TASK_UNFINALIZED_REPEAT_MS } from "./task-unfinalized-diagnostic.mjs";
 import { classifyUserReportedError } from "./user-reported-error.mjs";
 import { createRuntimeRestartGuard } from "./runtime-restart-guard.mjs";
+import {
+  buildSetScheduledTaskActionPowerShell,
+  executeRuntimeReleaseActivationTransaction,
+  readPendingRuntimeRelease,
+  startGuardedRuntimeReleaseActivation,
+  validateScheduledTaskAction,
+  verifyRuntimeRelease
+} from "./runtime-release-activation.mjs";
 import { reconcileRunningTaskGates } from "./task-gate-recovery.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
 import { WorkerPluginRegistry } from "./worker-core/plugin-registry.mjs";
@@ -1970,7 +1978,7 @@ async function scheduledTask(options = {}) {
     "$a=$t.Actions | Select-Object -First 1",
     "$auto=(Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'CodexPro Manager' -ErrorAction SilentlyContinue).'CodexPro Manager'",
     "$tr=@($t.Triggers | ForEach-Object { [pscustomobject]@{ type=$_.CimClass.CimClassName; id=$_.Id; interval=$_.Repetition.Interval; delay=$_.Delay } })",
-    "[pscustomobject]@{ state=[string]$t.State; lastRunTime=if($i.LastRunTime){$i.LastRunTime.ToString('o')}else{$null}; lastTaskResult=$i.LastTaskResult; execute=$a.Execute; arguments=$a.Arguments; workingDirectory=$a.WorkingDirectory; triggers=$tr; autoStartCommand=$auto } | ConvertTo-Json -Depth 5 -Compress"
+    "[pscustomobject]@{ state=[string]$t.State; lastRunTime=if($i.LastRunTime){$i.LastRunTime.ToString('o')}else{$null}; lastTaskResult=$i.LastTaskResult; actionCount=@($t.Actions).Count; execute=$a.Execute; arguments=$a.Arguments; workingDirectory=$a.WorkingDirectory; triggers=$tr; autoStartCommand=$auto } | ConvertTo-Json -Depth 5 -Compress"
   ].join("; ");
   scheduledTaskPromise = (async () => {
     try {
@@ -3670,6 +3678,49 @@ async function waitForRuntimeBuild(expectedBuildId, initialStatus, timeoutMs = 1
   }
 }
 
+async function setCodexProScheduledTaskAction(action) {
+  await runPowerShell(buildSetScheduledTaskActionPowerShell(action), { timeoutMs: 8_000 });
+  scheduledTaskCache = null;
+  runtimeBaseCache = null;
+  const task = await scheduledTask({ forceRefresh: true });
+  const verified = validateScheduledTaskAction(task, codexProHome);
+  if (verified.workingDirectory.toLowerCase() !== String(action.workingDirectory || "").toLowerCase()
+    || verified.arguments !== String(action.arguments || "")
+    || verified.execute.toLowerCase() !== String(action.execute || "").toLowerCase()) {
+    throw new Error("CodexPro Scheduled Task action verification failed after update.");
+  }
+  return task;
+}
+
+async function verifyRunningRuntimeRelease(release, initialStatus) {
+  const status = await waitForRuntimeBuild(release.runtime_build_id, initialStatus);
+  const activeBuildId = String(status?.local?.data?.runtimeBuildId || "").trim();
+  if (!status?.local?.ok || activeBuildId !== release.runtime_build_id) {
+    throw new Error(`Staged runtime health verification failed; expected ${release.runtime_build_id}, got ${activeBuildId || "unknown"}.`);
+  }
+  const pid = Number(status?.local?.data?.pid || 0);
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error("Staged runtime health response did not expose a valid PID.");
+  const commandLine = await runPowerShell(`$p=Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\" -ErrorAction Stop; if(-not $p){throw 'runtime process missing'}; [string]$p.CommandLine`, { timeoutMs: 3_000 });
+  const expectedRuntimePath = path.join(release.release_path, "dist", "http.js").toLowerCase();
+  if (!String(commandLine || "").toLowerCase().includes(expectedRuntimePath)) {
+    throw new Error(`Runtime PID ${pid} does not execute the verified staged release.`);
+  }
+  const reverified = await verifyRuntimeRelease({ home: codexProHome, releasePath: release.release_path });
+  if (reverified.source_commit !== release.source_commit || reverified.dist_http_sha256 !== release.dist_http_sha256) {
+    throw new Error("Running runtime release identity changed after activation.");
+  }
+  return { status, pid, command_line: commandLine, release: reverified };
+}
+
+async function verifyPreviousRuntimeBuild(expectedBuildId, initialStatus) {
+  const status = await waitForRuntimeBuild(expectedBuildId, initialStatus);
+  const activeBuildId = String(status?.local?.data?.runtimeBuildId || "").trim();
+  if (!status?.local?.ok || activeBuildId !== expectedBuildId) {
+    throw new Error(`Previous runtime rollback verification failed; expected ${expectedBuildId}, got ${activeBuildId || "unknown"}.`);
+  }
+  return status;
+}
+
 function ensureFreshRuntimeAfterManagerStart() {
   if (runtimeFreshnessPromise) return runtimeFreshnessPromise;
   runtimeFreshnessPromise = (async () => {
@@ -3682,7 +3733,17 @@ function ensureFreshRuntimeAfterManagerStart() {
     }
     const base = await runtimeBaseStatus({ forceRefresh: true });
     if (!base.local.ok) return { checked: true, restarted: false, reason: "runtime-offline" };
-    const expectedBuildId = expectedRuntimeBuildId(base.config);
+    let stagedRelease = null;
+    try {
+      stagedRelease = await readPendingRuntimeRelease({ home: codexProHome });
+    } catch (error) {
+      diagnostic("error", "manager", "runtime", "Staged runtime release không hợp lệ; Manager sẽ không restart", {
+        action: "runtime-release-pending-invalid",
+        error
+      });
+      return { checked: true, restarted: false, reason: "invalid-staged-release" };
+    }
+    const expectedBuildId = stagedRelease?.runtime_build_id || expectedRuntimeBuildId(base.config);
     const activeBuildId = String(base.local.data?.runtimeBuildId || "").trim();
     if (!expectedBuildId || activeBuildId === expectedBuildId) {
       return { checked: true, restarted: false, reason: expectedBuildId ? "current" : "build-unavailable" };
@@ -3742,7 +3803,22 @@ function ensureFreshRuntimeAfterManagerStart() {
       scheduleRuntimeFreshnessRetry();
       return { checked: true, restarted: false, reason: "active-profiles", activeProfileCount: activeProfiles.length };
     }
-    const restartDecision = runtimeRestartGuard.startRestart(async () => {
+    const restartDecision = stagedRelease
+      ? startGuardedRuntimeReleaseActivation({
+          activeProfileCount: activeProfiles.length,
+          startRestart: (activate) => runtimeRestartGuard.startRestart(activate),
+          activate: () => executeRuntimeReleaseActivationTransaction({
+            home: codexProHome,
+            releasePath: stagedRelease.release_path,
+            getScheduledTask: () => scheduledTask({ forceRefresh: true }),
+            applyScheduledTaskAction: setCodexProScheduledTaskAction,
+            restoreScheduledTaskAction: setCodexProScheduledTaskAction,
+            restartRuntime: () => controlServer("restart"),
+            verifyRunningRuntime: verifyRunningRuntimeRelease,
+            verifyPreviousRuntime: (status) => verifyPreviousRuntimeBuild(activeBuildId, status)
+          })
+        })
+      : runtimeRestartGuard.startRestart(async () => {
       const restartAttempt = await controlServer("restart");
       return await waitForRuntimeBuild(expectedBuildId, restartAttempt);
     });
@@ -3775,9 +3851,10 @@ function ensureFreshRuntimeAfterManagerStart() {
       action: "runtime-build-refreshed",
       previous_build_id: activeBuildId,
       runtime_build_id: restartedBuildId,
-      runtime_started_at: String(restarted?.local?.data?.runtimeStartedAt || "")
+      runtime_started_at: String(restarted?.local?.data?.runtimeStartedAt || ""),
+      runtime_release_activation: restarted?.runtime_release_activation || null
     });
-    return { checked: true, restarted: true, runtimeBuildId: restartedBuildId };
+    return { checked: true, restarted: true, runtimeBuildId: restartedBuildId, runtimeReleaseActivation: restarted?.runtime_release_activation || null };
   })().catch((error) => {
     diagnostic("error", "manager", "runtime", `Không đồng bộ được runtime CodexPro: ${error?.message || String(error)}`, {
       action: "runtime-build-refresh-failed",
