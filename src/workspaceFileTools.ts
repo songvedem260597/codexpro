@@ -69,6 +69,12 @@ type WorkspaceFileToolsOptions = {
   dependencies?: Partial<typeof defaultDependencies>;
 };
 
+function isContextArtifactPath(config: CodexProConfig, relPath: string): boolean {
+  const normalized = String(relPath || "").replace(/\\/g, "/").replace(/^\.\//, "");
+  const contextDir = String(config.contextDir || ".ai-bridge").replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+  return normalized === contextDir || normalized.startsWith(`${contextDir}/`);
+}
+
 async function mutationCodexGraphImpact(
   config: CodexProConfig,
   guard: PathGuard,
@@ -293,7 +299,8 @@ export function registerWorkspaceFileTools(options: WorkspaceFileToolsOptions): 
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
       const taskContext = workspaceTaskContextForServer(server, workspace);
-      if (taskContext) await dependencies.claimWorkspacePaths(taskContext, [resolved.relPath]);
+      const trackTaskSource = Boolean(taskContext && !isContextArtifactPath(config, resolved.relPath));
+      if (taskContext && trackTaskSource) await dependencies.claimWorkspacePaths(taskContext, [resolved.relPath]);
       const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath], dependencies.reviewWorkspaceChanges);
       let result;
       try {
@@ -303,10 +310,10 @@ export function registerWorkspaceFileTools(options: WorkspaceFileToolsOptions): 
           expectedSha256: args.expected_sha256
         });
       } catch (error) {
-        if (taskContext) await dependencies.releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
+        if (taskContext && trackTaskSource) await dependencies.releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
         throw error;
       }
-      if (taskContext) {
+      if (taskContext && trackTaskSource) {
         if (result.diff.changed) await dependencies.recordWorkspacePathsTouched(taskContext, [resolved.relPath]);
         else await dependencies.releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
       }
@@ -359,7 +366,8 @@ export function registerWorkspaceFileTools(options: WorkspaceFileToolsOptions): 
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
       const taskContext = workspaceTaskContextForServer(server, workspace);
-      if (taskContext) await dependencies.claimWorkspacePaths(taskContext, [resolved.relPath]);
+      const trackTaskSource = Boolean(taskContext && !isContextArtifactPath(config, resolved.relPath));
+      if (taskContext && trackTaskSource) await dependencies.claimWorkspacePaths(taskContext, [resolved.relPath]);
       const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, [resolved.relPath], dependencies.reviewWorkspaceChanges);
       let result;
       try {
@@ -369,10 +377,10 @@ export function registerWorkspaceFileTools(options: WorkspaceFileToolsOptions): 
           expectedSha256: args.expected_sha256
         });
       } catch (error) {
-        if (taskContext) await dependencies.releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
+        if (taskContext && trackTaskSource) await dependencies.releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
         throw error;
       }
-      if (taskContext) {
+      if (taskContext && trackTaskSource) {
         if (result.diff.changed) await dependencies.recordWorkspacePathsTouched(taskContext, [resolved.relPath]);
         else await dependencies.releaseWorkspacePaths(taskContext, [resolved.relPath], { onlyUntouched: true });
       }
@@ -421,18 +429,19 @@ export function registerWorkspaceFileTools(options: WorkspaceFileToolsOptions): 
       const patchText = String(args.patch ?? "");
       const codexGraphPaths = dependencies.patchTouchedPaths(patchText);
       const taskContext = workspaceTaskContextForServer(server, workspace);
-      if (taskContext && codexGraphPaths.length) await dependencies.claimWorkspacePaths(taskContext, codexGraphPaths);
+      const taskSourcePaths = taskContext ? codexGraphPaths.filter((relPath) => !isContextArtifactPath(config, relPath)) : [];
+      if (taskContext && taskSourcePaths.length) await dependencies.claimWorkspacePaths(taskContext, taskSourcePaths);
       const codexGraphBefore = await mutationCodexGraphImpact(config, guard, workspace, codexGraphPaths, dependencies.reviewWorkspaceChanges);
       let result;
       try {
         result = await dependencies.applyWorkspacePatch(config, guard, workspace, patchText, (touchedPath) => assertWriteToolAllowed(config, touchedPath));
       } catch (error) {
-        if (taskContext && codexGraphPaths.length) await dependencies.releaseWorkspacePaths(taskContext, codexGraphPaths, { onlyUntouched: true });
+        if (taskContext && taskSourcePaths.length) await dependencies.releaseWorkspacePaths(taskContext, taskSourcePaths, { onlyUntouched: true });
         throw error;
       }
-      if (taskContext && codexGraphPaths.length) {
-        if (result.changed) await dependencies.recordWorkspacePathsTouched(taskContext, codexGraphPaths);
-        else await dependencies.releaseWorkspacePaths(taskContext, codexGraphPaths, { onlyUntouched: true });
+      if (taskContext && taskSourcePaths.length) {
+        if (result.changed) await dependencies.recordWorkspacePathsTouched(taskContext, taskSourcePaths);
+        else await dependencies.releaseWorkspacePaths(taskContext, taskSourcePaths, { onlyUntouched: true });
       }
       if (result.changed) dependencies.invalidateWorkspaceAnalysis(workspace.id);
       const codexGraphAfter = result.changed

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { registerWorkspaceFileTools } from "../dist/workspaceFileTools.js";
 
-const config = { maxSearchResults: 50, analysisEnabled: true };
+const config = { maxSearchResults: 50, analysisEnabled: true, contextDir: ".ai-bridge" };
 const server = {};
 const workspaces = {};
 const workspace = { id: "ws-files", root: "C:/repo", openedAt: "2026-01-01T00:00:00.000Z" };
@@ -144,17 +144,25 @@ const dependencies = {
   },
   patchTouchedPaths: (patchText) => {
     events.push("patch-paths");
+    if (patchText.includes("context-only")) return [".ai-bridge/probe.md"];
+    if (patchText.includes("mixed-context")) return ["src/a.ts", ".ai-bridge/probe.md"];
     return patchText.includes("b.ts") ? ["src/a.ts", "src/b.ts"] : ["src/a.ts"];
   },
   applyWorkspacePatch: async (_config, _guard, _workspace, patchText, writePolicy) => {
     events.push("patch");
     patchArgs = { patchText };
-    writePolicy("src/a.ts");
-    if (patchText.includes("b.ts")) writePolicy("src/b.ts");
+    const touchedPaths = patchText.includes("context-only")
+      ? [".ai-bridge/probe.md"]
+      : patchText.includes("mixed-context")
+        ? ["src/a.ts", ".ai-bridge/probe.md"]
+        : patchText.includes("b.ts")
+          ? ["src/a.ts", "src/b.ts"]
+          : ["src/a.ts"];
+    for (const touchedPath of touchedPaths) writePolicy(touchedPath);
     if (patchMode === "throw") throw new Error("patch failed");
     const changed = patchMode === "changed";
     return {
-      paths: patchText.includes("b.ts") ? ["src/a.ts", "src/b.ts"] : ["src/a.ts"],
+      paths: touchedPaths,
       stdout: "patched",
       stderr: "",
       additions: changed ? 2 : 0,
@@ -219,6 +227,13 @@ assert.equal(graphCalls, 2);
 assert.equal(result.structuredContent.codexgraph.before.dependent_files.length, 40);
 assert.equal(result.structuredContent.codexgraph.before.warnings.length, 8);
 
+// Context artifacts are writable but do not become task-owned source changes.
+events = [];
+await call("write", { path: ".ai-bridge/probe.md", content: "context" });
+assert.ok(events.includes("write:.ai-bridge/probe.md"));
+assert.ok(!events.some((event) => event.startsWith("claim:")));
+assert.ok(!events.some((event) => event.startsWith("touched:")));
+
 // write no-change releases only untouched and does not invalidate/re-review.
 writeMode = "unchanged";
 graphCalls = 0;
@@ -253,6 +268,12 @@ assert.ok(events.indexOf("checklist") < events.indexOf("edit:src/edit.ts"));
 assert.ok(events.includes("touched:src/edit.ts"));
 assert.equal(result.structuredContent.replacements, 2);
 
+events = [];
+await call("edit", { path: ".ai-bridge/probe.md", old_text: "old", new_text: "new" });
+assert.ok(events.includes("edit:.ai-bridge/probe.md"));
+assert.ok(!events.some((event) => event.startsWith("claim:")));
+assert.ok(!events.some((event) => event.startsWith("touched:")));
+
 // patch changed path claim/record + policy callback.
 patchMode = "changed";
 events = [];
@@ -264,6 +285,20 @@ assert.ok(events.includes("policy:src/b.ts"));
 assert.ok(events.includes("touched:src/a.ts,src/b.ts"));
 assert.ok(events.includes("invalidate:ws-files"));
 assert.deepEqual(result.structuredContent.paths, ["src/a.ts", "src/b.ts"]);
+
+// Patch coordination excludes context artifacts while preserving source tracking.
+events = [];
+result = await call("apply_patch", { patch: "patch mixed-context" });
+assert.ok(events.includes("claim:src/a.ts"));
+assert.ok(events.includes("touched:src/a.ts"));
+assert.ok(!events.some((event) => event.includes("claim:.ai-bridge/probe.md")));
+assert.ok(!events.some((event) => event.includes("touched:.ai-bridge/probe.md")));
+
+events = [];
+result = await call("apply_patch", { patch: "patch context-only" });
+assert.ok(events.includes("patch"));
+assert.ok(!events.some((event) => event.startsWith("claim:")));
+assert.ok(!events.some((event) => event.startsWith("touched:")));
 
 // patch failure cleanup.
 patchMode = "throw";
