@@ -14,6 +14,7 @@ export type WorkerJobTaskSize = "small" | "medium" | "large";
 export type WorkerJobScope = "workspace" | "all_allowed";
 export type WorkerJobStatus = "prepared" | "running" | "completed" | "failed" | "cancelled" | "blocked";
 export type WorkerJobProgressStage = "started" | "partial" | "all_parts_done" | "verifying" | "blocked" | "error" | "stalled";
+export type WorkerJobWaitState = "dependency" | "runtime_acceptance";
 export type WorkerJobChecklistStatus = "pending" | "in_progress" | "completed" | "blocked";
 
 export type WorkerJobChecklistItem = {
@@ -30,6 +31,9 @@ export type WorkerJobProgressReport = {
   progressPercent: number;
   summary: string;
   reason?: string;
+  waitState?: WorkerJobWaitState;
+  dependency?: string;
+  safeNextAction?: string;
   evidence?: string;
   importantFiles: string[];
   testResult?: string;
@@ -75,6 +79,9 @@ export type WorkerJobRecord = {
   lastProgressAt?: string;
   lastProgressSummary?: string;
   lastProgressReason?: string;
+  waitState?: WorkerJobWaitState;
+  dependency?: string;
+  safeNextAction?: string;
   blockedAt?: string;
   blockedPart?: string;
   blockedReason?: string;
@@ -193,6 +200,9 @@ function normalizeProgressReport(value: unknown): WorkerJobProgressReport | unde
     progressPercent: normalizeProgressPercent(source.progressPercent),
     summary,
     reason: clean(source.reason, 2000) || undefined,
+    waitState: source.waitState === "dependency" || source.waitState === "runtime_acceptance" ? source.waitState : undefined,
+    dependency: clean(source.dependency, 2000) || undefined,
+    safeNextAction: clean(source.safeNextAction, 2000) || undefined,
     evidence: clean(source.evidence, 2000) || undefined,
     importantFiles: uniqueStrings(source.importantFiles, 30),
     testResult: clean(source.testResult, 2000) || undefined,
@@ -251,6 +261,9 @@ function normalizeRecord(value: unknown): WorkerJobRecord | undefined {
     lastProgressAt: clean(source.lastProgressAt, 80) || undefined,
     lastProgressSummary: clean(source.lastProgressSummary, 2000) || undefined,
     lastProgressReason: clean(source.lastProgressReason, 2000) || undefined,
+    waitState: source.waitState === "dependency" || source.waitState === "runtime_acceptance" ? source.waitState : undefined,
+    dependency: clean(source.dependency, 2000) || undefined,
+    safeNextAction: clean(source.safeNextAction, 2000) || undefined,
     blockedAt: clean(source.blockedAt, 80) || undefined,
     blockedPart: clean(source.blockedPart, 300) || undefined,
     blockedReason: clean(source.blockedReason, 2000) || undefined,
@@ -523,6 +536,9 @@ export async function prepareWorkerJob(input: {
     lastProgressAt: current?.lastProgressAt,
     lastProgressSummary: current?.lastProgressSummary,
     lastProgressReason: current?.lastProgressReason,
+    waitState: current?.waitState,
+    dependency: current?.dependency,
+    safeNextAction: current?.safeNextAction,
     blockedAt: current?.blockedAt,
     blockedPart: current?.blockedPart,
     blockedReason: current?.blockedReason,
@@ -764,6 +780,9 @@ export async function reportWorkerJobProgress(input: {
   stage: WorkerJobProgressStage;
   summary: string;
   reason?: string;
+  waitState?: WorkerJobWaitState;
+  dependency?: string;
+  safeNextAction?: string;
   evidence?: string;
   importantFiles?: string[];
   testResult?: string;
@@ -806,6 +825,9 @@ export async function reportWorkerJobProgress(input: {
       progressPercent,
       summary,
       reason: clean(input.reason, 2000) || undefined,
+      waitState: input.waitState === "dependency" || input.waitState === "runtime_acceptance" ? input.waitState : undefined,
+      dependency: clean(input.dependency, 2000) || undefined,
+      safeNextAction: clean(input.safeNextAction, 2000) || undefined,
       evidence: clean(input.evidence, 2000) || undefined,
       importantFiles: uniqueStrings(input.importantFiles, 30),
       testResult: clean(input.testResult, 2000) || undefined,
@@ -827,6 +849,9 @@ export async function reportWorkerJobProgress(input: {
       lastProgressAt: at,
       lastProgressSummary: summary,
       lastProgressReason: report.reason,
+      waitState: report.waitState,
+      dependency: report.dependency,
+      safeNextAction: report.safeNextAction,
       blockedAt: blocking ? at : undefined,
       blockedPart: blocking ? report.blockedPart || remainingParts[0] : undefined,
       blockedReason: blocking ? report.reason || summary : undefined,
@@ -839,6 +864,9 @@ export async function reportWorkerJobProgress(input: {
         progress_percent: progressPercent,
         summary: summary.slice(0, 500),
         reason: report.reason?.slice(0, 500),
+        wait_state: report.waitState,
+        dependency: report.dependency?.slice(0, 500),
+        safe_next_action: report.safeNextAction?.slice(0, 500),
         important_files: report.importantFiles,
         test_result: report.testResult?.slice(0, 500),
         blocked_part: report.blockedPart,
@@ -1011,6 +1039,9 @@ export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Reco
       progress_percent: report.progressPercent,
       summary: report.summary,
       reason: report.reason,
+      wait_state: report.waitState,
+      dependency: report.dependency,
+      safe_next_action: report.safeNextAction,
       evidence: report.evidence,
       important_files: report.importantFiles,
       test_result: report.testResult,
@@ -1023,6 +1054,9 @@ export function workerJobPublicRecord(record: WorkerJobRecord | undefined): Reco
     last_progress_at: record.lastProgressAt,
     last_progress_summary: record.lastProgressSummary,
     last_progress_reason: record.lastProgressReason,
+    wait_state: record.waitState,
+    dependency: record.dependency,
+    safe_next_action: record.safeNextAction,
     blocked_at: record.blockedAt,
     blocked_part: record.blockedPart,
     blocked_reason: record.blockedReason,

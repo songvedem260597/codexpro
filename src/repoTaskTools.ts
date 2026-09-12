@@ -32,6 +32,7 @@ import {
   WORKER_POLICY_VERSION
 } from "./workerPolicy.js";
 import { classifiedWorkerJobPublicRecord } from "./workerJobTools.js";
+import { syncAuthoritativeTaskTracking } from "./taskTrackingReconciliation.js";
 import {
   readWorkspaceCoordination,
   registerWorkspaceTask,
@@ -655,6 +656,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
         clearActiveRepoTaskForProfile(gateProfileId);
         setActiveRepoTaskForProfile(gateProfileId, activeTask);
       }
+      await syncAuthoritativeTaskTracking({ taskId: proof.taskId, rootHint: proof.root, ownerProfile: gateProfileId }).catch(() => undefined);
       return textResult(withGlobalRules(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}\nCodexGraph: active (${codexGraph.coverage.symbolCount} symbols, ${codexGraph.coverage.relationshipCount} relationships)`, globalRules), {
         task_id: proof.taskId,
         task_title: proof.taskTitle,
@@ -800,6 +802,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
         const worktree = repoTaskWorktree(existingActive);
         assertResumeStillCurrent();
         setActiveRepoTaskForServer(server, existingActive);
+        await syncAuthoritativeTaskTracking({ taskId, rootHint: durableBefore.root, ownerProfile: profileId }).catch(() => undefined);
         return textResult(`# Repo Task Gate Ready\n\nTask: ${taskId}\nProfile: ${profileId}\n\nThe existing task gate is already valid; no task action was replayed.`, {
           resumed: true,
           gate_active: true,
@@ -971,6 +974,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
       assertResumeStillCurrent();
       setActiveRepoTaskForProfile(profileId, activeTask);
       setActiveRepoTaskForServer(server, activeTask);
+      await syncAuthoritativeTaskTracking({ taskId, rootHint: recovered.root, ownerProfile: profileId }).catch(() => undefined);
       return textResult(`# Repo Task Resumed\n\nTask: ${taskId}\nProfile: ${profileId}\nWorktree: ${recovered.worktreeRoot}\n\nThe existing task gate was restored without replaying prior task actions.`, {
         resumed: true,
         gate_active: true,
@@ -1013,6 +1017,9 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
       annotations: annotations.readOnly
     },
     async (args) => {
+      let trackingSyncError = "";
+      let trackingRecord;
+      await syncAuthoritativeTaskTracking({ taskId: args.task_id }).then((record) => { trackingRecord = record; }).catch((error) => { trackingSyncError = error instanceof Error ? error.message : String(error); });
       const proof = repoTaskProofs.get(args.task_id);
       const gateProfileId = repoTaskProfileIdForServer(server as object);
       const expected = gateProfileId ? expectedRepoTask(gateProfileId) : undefined;
@@ -1107,6 +1114,8 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
           integration_finished_at: coordinationTask?.integrationFinishedAt,
           integrated_head: coordinationTask?.integratedHead
         } : {}),
+        tracking: trackingRecord,
+        tracking_sync_error: trackingSyncError || undefined,
         policy_version: workerJob?.policyVersion || WORKER_POLICY_VERSION,
         worker_job: classifiedWorkerJobPublicRecord(workerJob)
       });

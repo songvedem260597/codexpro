@@ -6,6 +6,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { runGitProcess } from "./processOps.js";
 import { CodexProError } from "./guard.js";
 import { codexProHome } from "./profileStore.js";
+import { syncTaskTracking } from "./taskTracking.js";
 
 const COORDINATION_VERSION = 1;
 const LOCK_RETRY_MS = 25;
@@ -264,6 +265,15 @@ function normalizeTask(value: unknown): WorkspaceTaskRecord | undefined {
     updatedAt: String(source.updatedAt || nowIso()),
     ...(source.finishedAt ? { finishedAt: String(source.finishedAt) } : {})
   };
+}
+
+async function syncWorkspaceTaskTracking(root: string, task: WorkspaceTaskRecord): Promise<void> {
+  await syncTaskTracking({
+    root,
+    taskId: task.taskId,
+    workspaceTask: task,
+    ownerProfile: task.workerId
+  }).catch(() => undefined);
 }
 
 function readState(root: string): WorkspaceCoordinationState {
@@ -635,7 +645,7 @@ export async function withVerifiedWorkspaceTaskResume<T>(
 
 export async function registerWorkspaceTask(context: WorkspaceTaskContext): Promise<WorkspaceTaskRecord> {
   const root = canonicalRoot(context.root);
-  return await withState(root, async (state) => {
+  const task = await withState(root, async (state) => {
     const existing = state.tasks[context.taskId];
     const now = nowIso();
     if (existing?.status === "running") {
@@ -689,6 +699,8 @@ export async function registerWorkspaceTask(context: WorkspaceTaskContext): Prom
     state.tasks[task.taskId] = task;
     return task;
   });
+  await syncWorkspaceTaskTracking(root, task);
+  return task;
 }
 
 export async function claimWorkspacePaths(context: WorkspaceTaskContext, paths: string[]): Promise<WorkspaceTaskRecord> {
@@ -903,7 +915,7 @@ export async function preflightWorkspaceCommit(context: WorkspaceTaskContext): P
 
 export async function recordWorkspaceCommit(context: WorkspaceTaskContext): Promise<string> {
   const root = canonicalRoot(context.root);
-  return await withState(root, async (state) => {
+  const result = await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     const gitRoot = taskGitRoot(context, task);
     const head = await currentHead(gitRoot);
@@ -926,6 +938,9 @@ export async function recordWorkspaceCommit(context: WorkspaceTaskContext): Prom
     task.updatedAt = nowIso();
     return head;
   });
+  const task = readState(root).tasks[context.taskId];
+  if (task) await syncWorkspaceTaskTracking(root, task);
+  return result;
 }
 
 export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskContext, branch = ""): Promise<() => Promise<void>> {
@@ -945,6 +960,8 @@ export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskCon
     }
     task.updatedAt = nowIso();
   });
+  let trackingTask = readState(root).tasks[context.taskId];
+  if (trackingTask) await syncWorkspaceTaskTracking(root, trackingTask);
 
   while (true) {
     const acquired = await withState(root, async (state) => {
@@ -961,7 +978,11 @@ export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskCon
       task.updatedAt = nowIso();
       return true;
     });
-    if (acquired) break;
+    if (acquired) {
+      trackingTask = readState(root).tasks[context.taskId];
+      if (trackingTask) await syncWorkspaceTaskTracking(root, trackingTask);
+      break;
+    }
     if (Date.now() - startedAt >= INTEGRATION_QUEUE_WAIT_MS) {
       await withState(root, async (state) => {
         state.integrationQueue = state.integrationQueue.filter((entry) => entry.taskId !== context.taskId);
@@ -972,6 +993,8 @@ export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskCon
           task.updatedAt = nowIso();
         }
       }).catch(() => undefined);
+      trackingTask = readState(root).tasks[context.taskId];
+      if (trackingTask) await syncWorkspaceTaskTracking(root, trackingTask);
       throw new CodexProError(`WORKSPACE_INTEGRATION_QUEUE_TIMEOUT: task ${context.taskId} waited too long for workspace integration.`, {
         code: "WORKSPACE_INTEGRATION_QUEUE_TIMEOUT",
         details: { task_id: context.taskId, branch, wait_ms: INTEGRATION_QUEUE_WAIT_MS }
@@ -993,6 +1016,8 @@ export async function acquireWorkspaceIntegrationLease(context: WorkspaceTaskCon
         task.updatedAt = nowIso();
       }
     }).catch(() => undefined);
+    const trackingTask = readState(root).tasks[context.taskId];
+    if (trackingTask) await syncWorkspaceTaskTracking(root, trackingTask);
   };
 }
 
@@ -1112,7 +1137,7 @@ export async function preflightWorkspacePush(context: WorkspaceTaskContext, bran
 
 export async function recordWorkspacePush(context: WorkspaceTaskContext, branch: string): Promise<string> {
   const root = canonicalRoot(context.root);
-  return await withState(root, async (state) => {
+  const result = await withState(root, async (state) => {
     const task = requireTask(state, context.taskId);
     const gitRoot = taskGitRoot(context, task);
     const head = await currentHead(gitRoot);
@@ -1125,6 +1150,9 @@ export async function recordWorkspacePush(context: WorkspaceTaskContext, branch:
     task.updatedAt = nowIso();
     return head;
   });
+  const task = readState(root).tasks[context.taskId];
+  if (task) await syncWorkspaceTaskTracking(root, task);
+  return result;
 }
 
 function atOrAfter(left: string | undefined, right: string | undefined): boolean {
@@ -1214,6 +1242,8 @@ export async function finalizeWorkspaceTask(context: WorkspaceTaskContext, statu
       removeWorktree: status === "completed" && task.integrationStatus === "integrated"
     };
   });
+  const trackingTask = readState(root).tasks[context.taskId];
+  if (trackingTask) await syncWorkspaceTaskTracking(root, trackingTask);
   if (cleanup?.removeWorktree && cleanup.worktreeRoot && fs.existsSync(cleanup.worktreeRoot) && (await currentDirtyPaths(cleanup.worktreeRoot)).length === 0) {
     const removed = await gitRun(root, ["worktree", "remove", cleanup.worktreeRoot], 60_000);
     if (removed.status === 0 && cleanup.worktreeBranch) {

@@ -36,6 +36,7 @@ import { codexProHome } from "./profileStore.js";
 
 import { createWorkerJobToolDefinitions } from "./workerJobTools.js";
 import { readWorkspaceCoordinationStatus, readWorkspaceTaskCoordinationStatus } from "./workspaceCoordination.js";
+import { TASK_TRACKING_WORKER_RULE } from "./taskTracking.js";
 import { shouldRegisterTool, toolNamesForMode } from "./toolSurface.js";
 
 
@@ -130,7 +131,7 @@ function assertWriteToolAllowed(config: CodexProConfig, relPath: string): void {
   throw new CodexProError("write/edit/apply_patch tools are disabled because CODEXPRO_WRITE_MODE=off. handoff_to_agent and handoff_to_codex are still available for planning.");
 }
 
-function serverInstructions(config: CodexProConfig, requireRepoTask = false): string {
+export function serverInstructions(config: CodexProConfig, requireRepoTask = false): string {
   const globalRules = requireRepoTask ? undefined : readGlobalRulesSnapshotSync();
   const editInstruction =
     config.connectionTest
@@ -165,6 +166,7 @@ function serverInstructions(config: CodexProConfig, requireRepoTask = false): st
     requireRepoTask
       ? "3. Only after begin_repo_task succeeds with task_kind=code may you use open_current_workspace/open_workspace, tree, search, read, write, or bash. A general task remains workspace-gated."
       : "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
+    requireRepoTask ? TASK_TRACKING_WORKER_RULE : "",
     editInstruction,
     bashInstruction,
     "6. Prioritize correctness over minimizing tool calls or context. For non-trivial edits, use structured search with intent=impact/references to inspect CodexGraph callers, state, framework links, and related tests before changing code.",

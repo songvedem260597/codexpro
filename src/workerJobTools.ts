@@ -16,6 +16,7 @@ import {
   finalizeWorkspaceTask,
   resolveWorkspaceTaskRootByTaskId
 } from "./workspaceCoordination.js";
+import { backfillUnfinishedTaskTracking, syncAuthoritativeTaskTracking } from "./taskTrackingReconciliation.js";
 
 export type WorkerJobToolDefinition = {
   name: string;
@@ -60,6 +61,17 @@ export function classifiedWorkerJobPublicRecord(job: WorkerJobRecord | undefined
   };
 }
 
+async function syncTrackingBestEffort(input: { taskId: string; rootHint?: string; ownerProfile?: string }) {
+  try {
+    return {
+      record: await syncAuthoritativeTaskTracking(input),
+      error: ""
+    };
+  } catch (error) {
+    return { record: undefined, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies): WorkerJobToolDefinition[] {
   const { serverKey, resolveProfileId, textResult, readOnlyAnnotations, handoffWriteAnnotations } = deps;
   const gateProfileIdForTask = (taskId: string): string | undefined => resolveProfileId(serverKey, taskId) || undefined;
@@ -74,9 +86,14 @@ export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies):
         annotations: readOnlyAnnotations
       },
       handler: async (args) => {
+        let trackingSyncError = "";
+        let trackingRecord;
+        await syncAuthoritativeTaskTracking({ taskId: args.task_id }).then((record) => { trackingRecord = record; }).catch((error) => { trackingSyncError = error instanceof Error ? error.message : String(error); });
         const record = readWorkerJob(args.task_id);
         return textResult(record ? `# Worker Job\n\n${args.task_id}: ${record.status}` : `# Worker Job Missing\n\n${args.task_id} has no durable worker policy record.`, {
           found: Boolean(record),
+          tracking: trackingRecord,
+          tracking_sync_error: trackingSyncError || undefined,
           policy_version: record?.policyVersion || WORKER_POLICY_VERSION,
           job: classifiedWorkerJobPublicRecord(record)
         });
@@ -94,9 +111,19 @@ export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies):
         annotations: readOnlyAnnotations
       },
       handler: async (args) => {
+        let backfilledTaskIds: string[] = [];
+        let skippedTerminalTaskIds: string[] = [];
+        let trackingSyncError = "";
+        await backfillUnfinishedTaskTracking().then((result) => {
+          backfilledTaskIds = result.backfilled.map((item) => item.taskId);
+          skippedTerminalTaskIds = result.skippedTerminalTaskIds;
+        }).catch((error) => { trackingSyncError = error instanceof Error ? error.message : String(error); });
         const jobs = listWorkerJobs({ statuses: args.statuses, limit: args.limit });
         return textResult(`# Worker Job History\n\n${jobs.length} recent job(s).`, {
           count: jobs.length,
+          tracking_backfilled_task_ids: backfilledTaskIds,
+          tracking_skipped_terminal_task_ids: skippedTerminalTaskIds,
+          tracking_sync_error: trackingSyncError || undefined,
           jobs: jobs.map((record) => classifiedWorkerJobPublicRecord(record))
         });
       }
@@ -142,6 +169,9 @@ export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies):
           stage: z.enum(["started", "partial", "all_parts_done", "verifying", "blocked", "error", "stalled"]),
           summary: z.string().min(1).max(2000),
           reason: z.string().max(2000).optional(),
+          wait_state: z.enum(["dependency", "runtime_acceptance"]).optional(),
+          dependency: z.string().max(2000).optional(),
+          safe_next_action: z.string().max(2000).optional(),
           evidence: z.string().max(2000).optional(),
           important_files: z.array(z.string().min(1).max(300)).max(30).optional(),
           test_result: z.string().max(2000).optional(),
@@ -173,6 +203,9 @@ export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies):
             stage: args.stage,
             summary: args.summary,
             reason: args.reason,
+            waitState: args.wait_state,
+            dependency: args.dependency,
+            safeNextAction: args.safe_next_action,
             evidence: args.evidence,
             importantFiles: args.important_files,
             testResult: args.test_result,
@@ -182,8 +215,11 @@ export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies):
             remainingParts: args.remaining_parts,
             checklist: args.checklist
           });
+          const tracking = await syncTrackingBestEffort({ taskId: record.jobId, rootHint: record.root, ownerProfile: gateProfileId });
           return textResult(`# Worker Job Progress\n\n${record.jobId}: ${record.lastProgressStage || "running"} · checkpoint ${record.progressSequence}`, {
             reported: true,
+            tracking: tracking.record,
+            tracking_sync_error: tracking.error || undefined,
             policy_version: record.policyVersion,
             job: classifiedWorkerJobPublicRecord(record)
           });
@@ -219,6 +255,9 @@ export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies):
         }
         try {
           const currentJob = readWorkerJob(args.task_id);
+          if (currentJob?.kind === "code" && currentJob.root) {
+            await syncTrackingBestEffort({ taskId: currentJob.jobId, rootHint: currentJob.root, ownerProfile: gateProfileId });
+          }
           if (args.outcome === "completed" && currentJob?.kind === "code" && currentJob.root) {
             assertWorkspaceTaskCompletionReady({
               taskId: currentJob.jobId,
@@ -243,6 +282,7 @@ export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies):
               title: record.title,
               root: record.root
             }, coordinationStatus);
+            await syncTrackingBestEffort({ taskId: record.jobId, rootHint: record.root, ownerProfile: gateProfileId });
           }
           if (record.status === "completed") {
             const binding = getBrowserExtensionProfileTaskBinding(gateProfileId);
