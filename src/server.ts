@@ -35,7 +35,7 @@ import { recordMcpUsage } from "./mcpUsage.js";
 import { codexProHome } from "./profileStore.js";
 
 import { createWorkerJobToolDefinitions } from "./workerJobTools.js";
-import { readWorkspaceCoordinationStatus, readWorkspaceTaskCoordinationStatus } from "./workspaceCoordination.js";
+import { readWorkspaceCoordinationStatus, readWorkspaceTaskCoordinationStatus, summarizeLiveWorkspaceTasks } from "./workspaceCoordination.js";
 import { TASK_TRACKING_WORKER_RULE } from "./taskTracking.js";
 import { shouldRegisterTool, toolNamesForMode } from "./toolSurface.js";
 
@@ -916,8 +916,8 @@ export function createCodexProServer(config: CodexProConfig, options: { browserP
         return textResult(`# Task Coordination\n\n${args.task_id}: ${snapshot.safe_for_delivery ? "SAFE" : "BLOCKED"} for delivery.`, snapshot);
       }
       const snapshot = await readWorkspaceCoordinationStatus(workspace.root);
-      const activeTasks = snapshot.tasks.filter((task) => task.status === "running").length;
-      const conflicts = snapshot.tasks.filter((task) => task.integration_status === "conflict" || task.stale_base).length;
+      const liveSummary = summarizeLiveWorkspaceTasks(snapshot.tasks);
+      const { active_task_count: activeTasks, conflict_count: conflicts } = liveSummary;
       return textResult(`# Workspace Coordination\n\n${activeTasks} active task(s), ${snapshot.claims.length} claimed path(s), ${snapshot.integration_queue.length} queued integration(s).`, {
         ...snapshot,
         active_task_count: activeTasks,

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { isLiveCoordinationTask } from "./workspace-coordination-live.js";
 import "./workspace-coordination-panel.css";
 
 function keyForRoot(root) {
@@ -41,7 +42,7 @@ function relativeTime(value) {
 }
 
 function taskVisible(task) {
-  return task?.status === "running" || ["queued", "integrating", "conflict", "failed"].includes(String(task?.integration_status || ""));
+  return isLiveCoordinationTask(task);
 }
 
 function RepoCoordinationCard({ snapshot, projects, onOpenRepo }) {
@@ -81,7 +82,7 @@ function RepoCoordinationCard({ snapshot, projects, onOpenRepo }) {
       )}
 
       {!tasks.length ? (
-        <div className="coordination-empty">Không có task đang chạy, xếp hàng hoặc conflict trong repo này.</div>
+        <div className="coordination-empty">Không có task đang chạy, xếp hàng hoặc conflict live trong repo này.</div>
       ) : (
         <div className="coordination-task-list">
           {tasks.map((task) => {

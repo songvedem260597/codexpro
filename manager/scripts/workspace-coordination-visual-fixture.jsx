@@ -7,7 +7,7 @@ import { WorkspaceCoordinationPanel } from "../src/workspace-coordination-panel.
 const rootPath = "C:\\repo\\codexpro";
 const now = Date.now();
 const isoAgo = (seconds) => new Date(now - seconds * 1000).toISOString();
-const snapshot = {
+const liveSnapshot = {
   root: rootPath,
   current_branch: "win",
   current_head: "f0e1d2c3b4a59687",
@@ -67,6 +67,46 @@ const snapshot = {
   ]
 };
 
+const historySnapshot = {
+  root: rootPath,
+  current_branch: "win",
+  current_head: "f0e1d2c3b4a59687",
+  active_task_count: 0,
+  conflict_count: 0,
+  claims: [],
+  integration_queue: [],
+  integration_lease: null,
+  tasks: [
+    {
+      task_id: "cpt_terminal_conflict_history",
+      worker_id: "worker-history-a",
+      title: "Historical integration conflict",
+      status: "failed",
+      integration_status: "conflict",
+      stale_base: false,
+      stale_paths: [],
+      claimed_paths: [],
+      touched_paths: ["src/workspaceCoordination.ts"],
+      commit_shas: ["deadbeef"],
+      updated_at: isoAgo(3600)
+    },
+    {
+      task_id: "cpt_terminal_failed_history",
+      worker_id: "worker-history-b",
+      title: "Historical failed integration",
+      status: "completed",
+      integration_status: "failed",
+      stale_base: false,
+      stale_paths: [],
+      claimed_paths: [],
+      touched_paths: ["src/server.ts"],
+      commit_shas: ["feedface"],
+      updated_at: isoAgo(7200)
+    }
+  ]
+};
+const mode = new URLSearchParams(window.location.search).get("mode") || "live";
+const snapshot = mode === "history" ? historySnapshot : liveSnapshot;
 const api = { getWorkspaceCoordination: async () => snapshot };
 
 function Fixture() {
@@ -94,6 +134,8 @@ setTimeout(() => {
     panelScrollWidth: panel?.scrollWidth || 0,
     panelClientWidth: panel?.clientWidth || 0,
     conflictCount: document.querySelectorAll(".coordination-task.is-danger").length,
+    taskCards: document.querySelectorAll(".coordination-task").length,
+    repoHasConflict: Boolean(document.querySelector(".coordination-repo.has-conflict")),
     queueBadges: document.querySelectorAll(".coordination-badges .is-queue").length,
     overflowing: [...document.querySelectorAll(".coordination-section *")].map((element) => {
       const rect = element.getBoundingClientRect();

@@ -1707,6 +1707,14 @@ export async function readWorkspaceTaskCoordinationStatus(root: string, taskId: 
   };
 }
 
+export function summarizeLiveWorkspaceTasks(tasks: ReadonlyArray<{ status?: string; integration_status?: string; stale_base?: boolean }>) {
+  const liveTasks = tasks.filter((task) => task.status === "running");
+  return {
+    active_task_count: liveTasks.length,
+    conflict_count: liveTasks.filter((task) => task.integration_status === "conflict" || task.stale_base).length
+  };
+}
+
 export async function readWorkspaceCoordinationStatus(root: string) {
   const canonical = canonicalRoot(root);
   const state = readState(canonical);

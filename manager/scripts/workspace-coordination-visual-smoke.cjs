@@ -55,6 +55,28 @@ app.whenReady().then(async () => {
 
     const screenshotPath = path.join(os.tmpdir(), "codexpro-workspace-coordination-p2.png");
     fs.writeFileSync(screenshotPath, (await window.webContents.capturePage()).toPNG());
+
+    await withTimeout(window.loadFile(builtHtml, { query: { mode: "history" } }), 10000, "coordination history fixture load");
+    const historyDeadline = Date.now() + 8000;
+    result = null;
+    while (Date.now() < historyDeadline) {
+      result = await withTimeout(window.webContents.executeJavaScript("window.__coordinationVisualResult || null", true), 1500, "coordination history fixture result");
+      if (result?.ok) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!result?.ok) throw new Error(`Coordination history fixture did not render: ${JSON.stringify(result)}`);
+    for (const expected of ["0 active", "0 claim", "0 queue", "0 conflict", "0 task theo dõi", "Không có task đang chạy, xếp hàng hoặc conflict live trong repo này."]) {
+      if (!result.text.includes(expected)) throw new Error(`Coordination history fixture missing text: ${expected}`);
+    }
+    for (const staleText of ["Historical integration conflict", "Historical failed integration", "TÍCH HỢP LỖI"]) {
+      if (result.text.includes(staleText)) throw new Error(`Coordination history fixture leaked terminal task text: ${staleText}`);
+    }
+    if (result.taskCards !== 0 || result.conflictCount !== 0 || result.repoHasConflict) {
+      throw new Error(`Terminal recovery/history records still affected live UI: ${JSON.stringify(result)}`);
+    }
+    if (result.panelScrollWidth > result.panelClientWidth + 2 || result.overflowing?.length) throw new Error(`Coordination history panel content overflowed horizontally: ${JSON.stringify(result)}`);
+    const historyScreenshotPath = path.join(os.tmpdir(), "codexpro-workspace-coordination-history.png");
+    fs.writeFileSync(historyScreenshotPath, (await window.webContents.capturePage()).toPNG());
     console.log("workspace coordination visual smoke passed");
     console.log(`visual screenshot: ${screenshotPath}`);
     fs.rmSync(outputRoot, { recursive: true, force: true });
