@@ -50,6 +50,7 @@ assert.deepEqual(sorted.map((job) => job.job_id), [
   "cpt_000000000000000000000008"
 ], "popup should keep only real failed/unfinished tasks for the selected worker while queued tasks stay FIFO");
 assert.equal(sorted.some((job) => job.status === "completed" || job.completion_confirmed === true), false, "completed tasks must be hidden from the popup");
+assert.equal(profileTaskJobsForWorker(jobs, "profile-a", jobs[0].job_id).includes(jobs[0]), false, "current-task priority must not resurrect a completed task");
 const placeholderPreparedJob = jobs.find((job) => job.job_id === "cpt_000000000000000000000009");
 assert.equal(sorted.includes(placeholderPreparedJob), false, "uninitialized prepared placeholders must be hidden from the popup");
 assert.equal(profileTaskCanResume(placeholderPreparedJob, true), false, "uninitialized prepared placeholders must never expose resume");
