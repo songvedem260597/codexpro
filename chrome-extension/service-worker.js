@@ -3065,10 +3065,12 @@ async function execute(command) {
         generationAckStartedAfterMs=Number(trustedSubmit.click_dispatch_started_at)||Date.now();
         trustedClickBaseline=Boolean(trustedSubmit.generating_before_click);
         submitResult={...submitResult,...trustedSubmit,trusted_click_dispatched:Boolean(trustedSubmit.send_button_actually_clicked)};
-        sendAttemptDiagnostics={...sendAttemptDiagnostics,send_button_selector:String(trustedSubmit.send_button_selector||''),send_button_hit_test:Boolean(trustedSubmit.send_button_hit_test),trusted_click_ms:Number(trustedSubmit.trusted_click_ms)||Number(sendPhaseTimings.trusted_click_ms)||0,send_button_actually_clicked:Boolean(trustedSubmit.send_button_actually_clicked)};
+        sendAttemptDiagnostics={...sendAttemptDiagnostics,send_button_selector:String(trustedSubmit.send_button_selector||''),send_button_hit_test:Boolean(trustedSubmit.send_button_hit_test),send_button_verified_point_kind:String(trustedSubmit.send_button_verified_point_kind||''),trusted_click_hit_test_evidence:trustedSubmit.trusted_click_hit_test_evidence||null,trusted_click_ms:Number(trustedSubmit.trusted_click_ms)||Number(sendPhaseTimings.trusted_click_ms)||0,send_button_actually_clicked:Boolean(trustedSubmit.send_button_actually_clicked)};
         postTrace(command, trustedSubmit.send_button_actually_clicked?'submit_dispatched':'submit_error',{attempt_id:attemptId,tab_id:tab.id,conversation_id:newChat?'':conversationId,stage_outcome:trustedSubmit.send_button_actually_clicked?'trusted_send_button':'click_not_confirmed',error_code:trustedSubmit.send_button_actually_clicked?'':'TRUSTED_CLICK_NOT_CONFIRMED'});
       }catch(error){
         const trustedSubmitError=String(error?.message||error).slice(0,300);
+        const trustedClickHitTestEvidence=error?.details?.trusted_click_hit_test_evidence&&typeof error.details.trusted_click_hit_test_evidence==='object'?error.details.trusted_click_hit_test_evidence:null;
+        sendAttemptDiagnostics={...sendAttemptDiagnostics,trusted_click_hit_test_evidence:trustedClickHitTestEvidence,send_button_selector:String(trustedClickHitTestEvidence?.send_button_selector||sendAttemptDiagnostics.send_button_selector||''),send_button_hit_test:false};
         generationAckStartedAfterMs=Number(error?.details?.click_dispatch_started_at)||generationAckStartedAfterMs||0;
         const evidence=generationAckStartedAfterMs?recentChatPostEvidence(tab.id,generationAckStartedAfterMs):[];
         const definitelyNotDispatched=/TRUSTED_CLICK_NOT_DISPATCHED:.*(?:PRE_DISPATCH|HIT_TEST_FAILED)/.test(trustedSubmitError);
@@ -4343,56 +4345,113 @@ async function restoreChatTabAfterTrustedSend(activation) {
   return {restored:Boolean(restoredTabId||restoredWindowId),restored_tab_id:restoredTabId,restored_window_id:restoredWindowId};
 }
 
+function trustedSendButtonPointPage(attemptId='',expectedText='',armListener=false,allowScroll=true) {
+  const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
+  const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.opacity!=='0';};
+  const controlLabel=control=>String(control?.getAttribute?.('aria-label')||control?.innerText||control?.textContent||'').trim();
+  const isStopControl=control=>String(control?.getAttribute?.('data-testid')||'').toLowerCase()==='stop-button'||/^(?:stop(?: answering| generating| streaming)?|dừng(?: trả lời)?)$/i.test(controlLabel(control));
+  const rectValue=rect=>rect?{left:Number(rect.left)||0,top:Number(rect.top)||0,right:Number(rect.right)||0,bottom:Number(rect.bottom)||0,width:Number(rect.width)||0,height:Number(rect.height)||0}:null;
+  const nodeEvidence=node=>{
+    if(!node)return null;
+    const style=getComputedStyle(node),rect=node.getBoundingClientRect?.();
+    return {tag:String(node.tagName||''),id:String(node.id||''),classes:String(node.className||'').slice(0,500),aria:String(node.getAttribute?.('aria-label')||'').slice(0,300),pointer_events:String(style?.pointerEvents||''),position:String(style?.position||''),z_index:String(style?.zIndex||''),rect:rectValue(rect),element:String(node.outerHTML||'').slice(0,700)};
+  };
+  const ancestorEvidence=node=>{const items=[];for(let current=node,depth=0;current&&depth<8;current=current.parentElement,depth+=1){const evidence=nodeEvidence(current);if(evidence)items.push({tag:evidence.tag,id:evidence.id,classes:evidence.classes,aria:evidence.aria,position:evidence.position,z_index:evidence.z_index});}return items;};
+  if(visible(document.querySelector('#modal-subscription-failure')))return {ok:false,blocked:true,error:'Modal thanh toán đang chặn nút Send.'};
+  const generatingBeforeClick=Array.from(document.querySelectorAll('button,[role="button"]')).some(control=>visible(control)&&isStopControl(control));
+  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+  const composerText=composer?.isContentEditable?String(composer.innerText||composer.textContent||''):String(composer?.value||'');
+  const draftOwned=Boolean(composer&&(composer.dataset.codexproDraftAttempt===attemptId||expectedText&&normalized(composerText)===normalized(expectedText)));
+  if(!draftOwned||expectedText&&normalized(composerText)!==normalized(expectedText))return {ok:false,error:'Composer không còn giữ đúng payload của attempt trước trusted click.',composer_matches_payload:false,retryable:false};
+  const composerRect=rectValue(composer?.getBoundingClientRect?.());
+  const viewport={width:Number(globalThis.innerWidth)||0,height:Number(globalThis.innerHeight)||0,scroll_x:Number(globalThis.scrollX)||0,scroll_y:Number(globalThis.scrollY)||0};
+  const scopes=[composer.closest('form'),composer.closest('[data-type="unified-composer"]'),composer.parentElement].filter((scope,index,array)=>scope&&array.indexOf(scope)===index);
+  const selectors=['#composer-submit-button','button[data-testid="send-button"]','button[aria-label*="Send" i]','button[aria-label*="Gửi" i]'];
+  let firstFailure=null;
+  for(const scope of scopes){
+    for(const selector of selectors){
+      const el=scope.querySelector(selector);
+      if(!el||isStopControl(el))continue;
+      const probe=()=>{
+        const rect=el.getBoundingClientRect(),style=getComputedStyle(el);
+        const enabled=!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.hasAttribute('data-visually-disabled');
+        const pointerEvents=style.pointerEvents!=='none';
+        const isVisible=rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.opacity!=='0';
+        const fractions=[[0.5,0.5,'center'],[0.25,0.5,'left-mid'],[0.75,0.5,'right-mid'],[0.5,0.25,'top-mid'],[0.5,0.75,'bottom-mid'],[0.25,0.25,'top-left'],[0.75,0.25,'top-right'],[0.25,0.75,'bottom-left'],[0.75,0.75,'bottom-right']];
+        const candidateHits=[];let verified=null;
+        if(isVisible&&enabled&&pointerEvents){
+          for(const [fx,fy,kind] of fractions){
+            const x=rect.left+rect.width*fx,y=rect.top+rect.height*fy;
+            if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>=viewport.width||y>=viewport.height)continue;
+            const hit=document.elementFromPoint(x,y),accepted=Boolean(hit&&(hit===el||el.contains(hit)));
+            const hitEvidence=nodeEvidence(hit);
+            candidateHits.push({kind,x,y,accepted,hit:hitEvidence?{tag:hitEvidence.tag,id:hitEvidence.id,classes:hitEvidence.classes,aria:hitEvidence.aria,pointer_events:hitEvidence.pointer_events,position:hitEvidence.position,z_index:hitEvidence.z_index,rect:hitEvidence.rect}:null});
+            if(!verified&&accepted)verified={kind,x,y};
+          }
+        }
+        const center=candidateHits.find(candidate=>candidate.kind==='center')||null;
+        const centerPoint={x:rect.left+rect.width/2,y:rect.top+rect.height/2};
+        const centerNode=isVisible?document.elementFromPoint(centerPoint.x,centerPoint.y):null;
+        const centerHit=nodeEvidence(centerNode);
+        const evidence={send_button_selector:selector,button_rect:rectValue(rect),center_xy:centerPoint,center_hit_element:String(centerHit?.element||''),center_hit_tag:String(centerHit?.tag||''),center_hit_id:String(centerHit?.id||''),center_hit_classes:String(centerHit?.classes||''),center_hit_aria:String(centerHit?.aria||''),center_hit_ancestors:ancestorEvidence(centerNode),center_hit_pointer_events:String(centerHit?.pointer_events||''),center_hit_position:String(centerHit?.position||''),center_hit_z_index:String(centerHit?.z_index||''),button_pointer_events:String(style.pointerEvents||''),button_disabled:Boolean(el.disabled),button_aria_disabled:String(el.getAttribute('aria-disabled')||''),viewport,composer_rect:composerRect,covering_element_rect:center&&!center.accepted?centerHit?.rect||null:null,candidate_hits:candidateHits,verified_point:verified};
+        return {ok:Boolean(isVisible&&enabled&&pointerEvents&&verified),selector,visible:isVisible,enabled,aria_disabled:el.getAttribute('aria-disabled')||'',pointer_events:pointerEvents,bounds:{x:rect.left,y:rect.top,width:rect.width,height:rect.height},x:verified?.x,y:verified?.y,hit_test:Boolean(verified),verified_point_kind:String(verified?.kind||''),generating_before_click:generatingBeforeClick,retryable:Boolean(isVisible&&enabled&&pointerEvents&&!verified),hit_test_evidence:evidence};
+      };
+      let readiness=probe();
+      if(!readiness.ok&&readiness.retryable&&allowScroll){el.scrollIntoView({block:'nearest',inline:'nearest'});readiness=probe();readiness.scroll_attempted=true;}
+      if(!readiness.ok){firstFailure=firstFailure||readiness;continue;}
+      if(armListener){
+        el.dataset.codexproSendAttempt=attemptId;
+        const store=globalThis.__codexproTrustedSendClickV1||(globalThis.__codexproTrustedSendClickV1={});
+        store[attemptId]={clicked:false,is_trusted:false,selector,armed_at:Date.now(),verified_point:readiness.hit_test_evidence?.verified_point||null};
+        el.addEventListener('click',event=>{const record=store[attemptId];if(!record)return;record.clicked=true;record.is_trusted=event.isTrusted===true;record.clicked_at=Date.now();},{capture:true,once:true});
+      }
+      return readiness;
+    }
+  }
+  const failure=firstFailure||{};
+  const reason=failure.visible&&failure.enabled&&failure.pointer_events&&!failure.hit_test?'Send button has no verified exposed hit-test point.':!failure.enabled?'Send button is disabled.':'Không tìm thấy nút Send khả dụng bên trong composer.';
+  return {ok:false,error:reason,...failure,ok:false};
+}
+
 async function trustedActivateChatSendButtonTab(tabId,attemptId,expectedText='',onDispatchStarted=null) {
   if(!attemptId)throw new Error('Trusted send attempt không hợp lệ.');
   const trustedClickStartedAt=Date.now();
   return await withDebuggerTab(tabId,async target=>{
     const encodedAttempt=JSON.stringify(String(attemptId));
     const encodedText=JSON.stringify(String(expectedText||''));
-    const expression=`(()=>{
-      const attemptId=${encodedAttempt},expectedText=${encodedText};
-      const normalized=value=>String(value||'').replace(/[\\u200B-\\u200D\\uFEFF]/g,'').replace(/\\u00a0/g,' ').replace(/\\s+/g,' ').replace(/^@\\s*(?=CodexPro\\b)/i,'').trim();
-      const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.opacity!=='0';};
-      const controlLabel=control=>String(control?.getAttribute?.('aria-label')||control?.innerText||control?.textContent||'').trim();
-      const isStopControl=control=>String(control?.getAttribute?.('data-testid')||'').toLowerCase()==='stop-button'||/^(?:stop(?: answering| generating| streaming)?|dừng(?: trả lời)?)$/i.test(controlLabel(control));
-      if(visible(document.querySelector('#modal-subscription-failure')))return {ok:false,blocked:true,error:'Modal thanh toán đang chặn nút Send.'};
-      const generatingBeforeClick=Array.from(document.querySelectorAll('button,[role="button"]')).some(control=>visible(control)&&isStopControl(control));
-      const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
-      const composerText=composer?.isContentEditable?String(composer.innerText||composer.textContent||''):String(composer?.value||'');
-      const draftOwned=Boolean(composer&&(composer.dataset.codexproDraftAttempt===attemptId||expectedText&&normalized(composerText)===normalized(expectedText)));
-      if(!draftOwned||expectedText&&normalized(composerText)!==normalized(expectedText))return {ok:false,error:'Composer không còn giữ đúng payload của attempt trước trusted click.',composer_matches_payload:false};
-      const scopes=[composer.closest('form'),composer.closest('[data-type="unified-composer"]'),composer.parentElement].filter((scope,index,array)=>scope&&array.indexOf(scope)===index);
-      const selectors=['#composer-submit-button','button[data-testid="send-button"]','button[aria-label*="Send" i]','button[aria-label*="Gửi" i]'];
-      let firstFailure=null;
-      for(const scope of scopes){
-        for(const selector of selectors){
-          const el=scope.querySelector(selector);
-          if(!el)continue;
-          if(isStopControl(el))continue;
-          let rect=el.getBoundingClientRect();const style=getComputedStyle(el);
-          const enabled=!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.hasAttribute('data-visually-disabled');
-          const pointerEvents=style.pointerEvents!=='none';
-          let isVisible=rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.opacity!=='0';
-          let x=rect.left+rect.width/2,y=rect.top+rect.height/2;
-          let hit=isVisible?document.elementFromPoint(x,y):null;
-          let hitTest=Boolean(hit&&(hit===el||el.contains(hit)));
-          if(isVisible&&enabled&&pointerEvents&&!hitTest){el.scrollIntoView({block:'nearest',inline:'nearest'});rect=el.getBoundingClientRect();isVisible=rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.opacity!=='0';x=rect.left+rect.width/2;y=rect.top+rect.height/2;hit=isVisible?document.elementFromPoint(x,y):null;hitTest=Boolean(hit&&(hit===el||el.contains(hit)));}
-          const readiness={ok:Boolean(isVisible&&enabled&&pointerEvents&&hitTest),selector,visible:isVisible,enabled,aria_disabled:el.getAttribute('aria-disabled')||'',pointer_events:pointerEvents,bounds:{x:rect.left,y:rect.top,width:rect.width,height:rect.height},x,y,hit_test:hitTest,generating_before_click:generatingBeforeClick};
-          if(!readiness.ok){firstFailure=firstFailure||readiness;continue;}
-          el.dataset.codexproSendAttempt=attemptId;
-          const store=globalThis.__codexproTrustedSendClickV1||(globalThis.__codexproTrustedSendClickV1={});
-          store[attemptId]={clicked:false,is_trusted:false,selector,armed_at:Date.now()};
-          el.addEventListener('click',event=>{const record=store[attemptId];if(!record)return;record.clicked=true;record.is_trusted=event.isTrusted===true;record.clicked_at=Date.now();},{capture:true,once:true});
-          return readiness;
-        }
+    const probeSource=trustedSendButtonPointPage.toString();
+    const evaluatePoint=async(armListener=false,allowScroll=true)=>{
+      const expression=`(${probeSource})(${encodedAttempt},${encodedText},${armListener?'true':'false'},${allowScroll?'true':'false'})`;
+      const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression,returnByValue:true});
+      if(evaluated?.exceptionDetails){
+        const error=new Error('TRUSTED_CLICK_PRE_DISPATCH: Không kiểm tra được nút Send trong page context.');
+        error.details={trusted_click_hit_test_evidence:null};
+        throw error;
       }
-      return {ok:false,error:firstFailure&&!firstFailure.hit_test?'Send button center is covered; hit-test failed.':'Không tìm thấy nút Send khả dụng bên trong composer.',...(firstFailure||{}),ok:false};
-    })()`;
-    const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression,returnByValue:true});
-    const point=evaluated?.result?.value||null;
-    if(evaluated?.exceptionDetails)throw new Error('TRUSTED_CLICK_PRE_DISPATCH: Không kiểm tra được nút Send trong page context.');
-    if(point?.blocked)throw new Error('TRUSTED_CLICK_PRE_DISPATCH: Modal thanh toán xuất hiện lại ngay trước trusted click; chưa dispatch.');
-    if(point?.ok!==true||point?.hit_test!==true||!Number.isFinite(point?.x)||!Number.isFinite(point?.y))throw new Error('TRUSTED_CLICK_HIT_TEST_FAILED: '+String(point?.error||'Không tìm được tọa độ nút gửi ChatGPT.'));
+      return evaluated?.result?.value||null;
+    };
+    const failedPointError=(point,prefix='TRUSTED_CLICK_HIT_TEST_FAILED')=>{
+      const error=new Error(prefix+': '+String(point?.error||'Không tìm được tọa độ nút gửi ChatGPT.'));
+      error.code=prefix;
+      error.details={trusted_click_hit_test_evidence:point?.hit_test_evidence||null};
+      return error;
+    };
+    let point=null;
+    for(let probeAttempt=0;probeAttempt<3;probeAttempt+=1){
+      point=await evaluatePoint(false,true);
+      if(point?.blocked)throw failedPointError(point,'TRUSTED_CLICK_PRE_DISPATCH');
+      if(point?.ok===true&&point?.hit_test===true&&Number.isFinite(point?.x)&&Number.isFinite(point?.y))break;
+      if(point?.retryable!==true||probeAttempt===2)break;
+      await new Promise(resolve=>setTimeout(resolve,40));
+    }
+    if(point?.ok!==true||point?.hit_test!==true||!Number.isFinite(point?.x)||!Number.isFinite(point?.y))throw failedPointError(point);
+    let finalPoint=await evaluatePoint(true,false);
+    if(finalPoint?.blocked)throw failedPointError(finalPoint,'TRUSTED_CLICK_PRE_DISPATCH');
+    if(finalPoint?.ok!==true||finalPoint?.hit_test!==true||!Number.isFinite(finalPoint?.x)||!Number.isFinite(finalPoint?.y)){
+      if(finalPoint?.retryable===true){await new Promise(resolve=>setTimeout(resolve,32));finalPoint=await evaluatePoint(true,false);}
+    }
+    if(finalPoint?.ok!==true||finalPoint?.hit_test!==true||!Number.isFinite(finalPoint?.x)||!Number.isFinite(finalPoint?.y))throw failedPointError(finalPoint);
+    point=finalPoint;
     const clickDispatchStartedAt=Date.now();
     if(typeof onDispatchStarted==='function')onDispatchStarted(clickDispatchStartedAt);
     try{
@@ -4404,7 +4463,7 @@ async function trustedActivateChatSendButtonTab(tabId,attemptId,expectedText='',
     try{confirmation=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression:`(()=>{const record=globalThis.__codexproTrustedSendClickV1?.[${encodedAttempt}];return record?{clicked:record.clicked===true,is_trusted:record.is_trusted===true}:null;})()`,returnByValue:true});}
     catch(error){confirmationError=String(error?.message||error).slice(0,300);}
     const click=confirmation?.result?.value||{};
-    return {mouse_events_dispatched:true,send_button_actually_clicked:Boolean(click.clicked&&click.is_trusted),send_button_selector:String(point.selector||''),send_button_hit_test:Boolean(point.hit_test),generating_before_click:Boolean(point.generating_before_click),click_dispatch_started_at:clickDispatchStartedAt,trusted_click_confirmation_error:confirmationError,trusted_click_ms:Math.max(0,Date.now()-trustedClickStartedAt)};
+    return {mouse_events_dispatched:true,send_button_actually_clicked:Boolean(click.clicked&&click.is_trusted),send_button_selector:String(point.selector||''),send_button_hit_test:Boolean(point.hit_test),send_button_verified_point_kind:String(point.verified_point_kind||''),trusted_click_hit_test_evidence:point.hit_test_evidence||null,generating_before_click:Boolean(point.generating_before_click),click_dispatch_started_at:clickDispatchStartedAt,trusted_click_confirmation_error:confirmationError,trusted_click_ms:Math.max(0,Date.now()-trustedClickStartedAt)};
   });
 }
 

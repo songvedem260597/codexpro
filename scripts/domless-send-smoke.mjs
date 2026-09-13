@@ -516,8 +516,10 @@ assert.match(sendBlock, /submission_state:'failed'.*PREPARE_FAILED:/s, "a second
 assert.match(worker, /const ATTACHMENT_PREPARE_TIMEOUT_MS = 60000;/, "attachment preparation must allow ChatGPT enough time to render and stabilize uploaded files");
 assert.match(sendBlock, /const prepareTimeoutMs=attachments\.length\?ATTACHMENT_PREPARE_TIMEOUT_MS:DOM_PREPARE_TIMEOUT_MS;/, "attachment sends must use the dedicated preparation deadline");
 assert.match(sendBlock, /submitted_by:'prepare-timeout'.*send_uncertain:false.*ATTACHMENT_PREPARE_TIMEOUT/s, "a timeout before trusted input dispatch is definitely unsent and safe to retry");
+const trustedSendPointSourceForLatency = extractFunction("trustedSendButtonPointPage");
 const trustedSendButtonSourceForLatency = extractFunction("trustedActivateChatSendButtonTab");
-assert.match(trustedSendButtonSourceForLatency, /elementFromPoint\(x,y\)/, "trusted Send must verify that the button owns its center point before dispatch");
+assert.match(trustedSendPointSourceForLatency, /elementFromPoint\(x,y\)[\s\S]*?hit===el\|\|el\.contains\(hit\)/, "trusted Send must verify every candidate point belongs to the real button or a descendant before dispatch");
+assert.match(trustedSendButtonSourceForLatency, /finalPoint=await evaluatePoint\(true,false\)[\s\S]*?point=finalPoint[\s\S]*?Input\.dispatchMouseEvent/, "trusted Send must re-resolve the button immediately before dispatch and use only final verified coordinates");
 assert.match(trustedSendButtonSourceForLatency, /Input\.dispatchMouseEvent[\s\S]*?mousePressed[\s\S]*?Input\.dispatchMouseEvent[\s\S]*?mouseReleased/, "trusted Send must dispatch a complete CDP mouse click");
 assert.match(trustedSendButtonSourceForLatency, /click\.clicked&&click\.is_trusted/, "CDP command success alone must not claim that the Send button was clicked");
 assert.doesNotMatch(trustedSendButtonSourceForLatency, /dispatchKeyEvent/, "the primary Send-button helper must never dispatch Enter");
@@ -621,7 +623,7 @@ assert.match(clickSource, /composer-submit-button|send-button/, "Send selectors 
 assert.match(clickSource, /codexproSendAttempt/, "fallback click must be scoped to the exact send attempt");
 assert.match(clickSource, /modal-subscription-failure/, "click fallback must refuse to run behind the subscription modal");
 const trustedClickSource = extractFunction("trustedActivateChatSendButtonTab");
-assert.match(trustedClickSource, /modal-subscription-failure/, "trusted click must re-check the modal immediately before mouse dispatch");
+assert.match(trustedSendPointSourceForLatency, /modal-subscription-failure/, "trusted click point resolution must re-check the modal immediately before mouse dispatch");
 assert.match(trustedClickSource, /point\?\.blocked/, "trusted click must stop before mouse dispatch when the modal reappears");
 
 const enterSource = extractFunction("trustedSubmitChatComposerTab");

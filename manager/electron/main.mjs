@@ -4170,6 +4170,7 @@ diagnosticIpcHandle("codexpro:send-profile-request", {
       bridge_total_ms: Number(bridgeTimings.bridge_total_ms) || 0,
       submission_ack_source: String(value?.submission_ack_source || value?.network_ack_source || ''),
       submit_lifecycle_endpoint: String(value?.submit_lifecycle_endpoint || ''),
+      trusted_click_hit_test_evidence: value?.trusted_click_hit_test_evidence && typeof value.trusted_click_hit_test_evidence === "object" ? value.trusted_click_hit_test_evidence : null,
       runtime_connection_source: String(value?.runtime_connection_source || ""),
       profile_preflight_source: String(value?.profile_preflight_source || ""),
       profile_had_chatgpt_tab: Boolean(value?.profile_had_chatgpt_tab),

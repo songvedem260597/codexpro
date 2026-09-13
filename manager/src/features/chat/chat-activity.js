@@ -84,6 +84,8 @@ export function sendDebugEvidence(result = {}, error = null) {
     prepare_step_ms: field("prepare_step_ms") && typeof field("prepare_step_ms") === "object" ? field("prepare_step_ms") : null,
     send_button_selector: String(field("send_button_selector") || ""),
     send_button_hit_test: field("send_button_hit_test") === true,
+    send_button_verified_point_kind: String(field("send_button_verified_point_kind") || ""),
+    trusted_click_hit_test_evidence: field("trusted_click_hit_test_evidence") && typeof field("trusted_click_hit_test_evidence") === "object" ? field("trusted_click_hit_test_evidence") : null,
     trusted_click_ms: Number(field("trusted_click_ms")) || 0,
     send_button_actually_clicked: field("send_button_actually_clicked") === true,
     composer_present_after_click: field("composer_present_after_click") === true,

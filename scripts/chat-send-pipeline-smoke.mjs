@@ -169,9 +169,12 @@ const clearedDecision = networkPolicy.decideChatSendPostClick({
 assert.equal(clearedDecision.action, "uncertain", "a cleared/disappeared composer without positive ACK must stay uncertain");
 assert.equal(clearedDecision.retry_allowed, false, "a cleared/disappeared composer must never be retried");
 
+const trustedPointSource = extractFunction(workerSource, "trustedSendButtonPointPage");
 const trustedClickSource = extractFunction(workerSource, "trustedActivateChatSendButtonTab");
-assert.match(trustedClickSource, /if\(isVisible&&enabled&&pointerEvents&&!hitTest\)\{el\.scrollIntoView\([\s\S]{0,420}document\.elementFromPoint/, "trusted Send may scroll only after the first center hit-test fails, then it must re-run elementFromPoint");
-assert.doesNotMatch(trustedClickSource, /el\.scrollIntoView\([^)]*\);\s*const rect=/, "trusted Send must not force a transcript scroll before its first hit-test");
+assert.match(trustedPointSource, /\[0\.5,0\.5,'center'\][\s\S]*?\[0\.25,0\.5,'left-mid'\][\s\S]*?\[0\.75,0\.5,'right-mid'\]/, "trusted Send must probe a bounded set of points inside the actual button rect, starting with center");
+assert.match(trustedPointSource, /document\.elementFromPoint\(x,y\)[\s\S]{0,220}hit===el\|\|el\.contains\(hit\)/, "every candidate point must pass elementFromPoint against the real Send button or a descendant");
+assert.match(trustedPointSource, /readiness\.retryable&&allowScroll[\s\S]{0,180}scrollIntoView[\s\S]{0,180}probe\(\)/, "scroll recovery may run only after no verified point exists, and it must re-probe afterward");
+assert.match(trustedClickSource, /evaluatePoint\(false,true\)[\s\S]*?finalPoint=await evaluatePoint\(true,false\)[\s\S]*?point=finalPoint[\s\S]*?Input\.dispatchMouseEvent/, "trusted Send must re-resolve and re-hit-test immediately before CDP mouse dispatch");
 const mouseEvents = [];
 let runtimeEvaluations = 0;
 const clickChrome = {
@@ -179,7 +182,7 @@ const clickChrome = {
     async sendCommand(_target, method, params) {
       if (method === "Runtime.evaluate") {
         runtimeEvaluations += 1;
-        return runtimeEvaluations === 1
+        return runtimeEvaluations <= 2
           ? { result: { value: { ok: true, x: 120, y: 80, selector: "#composer-submit-button", hit_test: true, generating_before_click: true } } }
           : { result: { value: { clicked: true, is_trusted: true } } };
       }
@@ -190,7 +193,7 @@ const clickChrome = {
   }
 };
 const withClickDebugger = async (tabId, operation) => await operation({ tabId });
-const trustedClick = Function("chrome", "withDebuggerTab", `${trustedClickSource}; return trustedActivateChatSendButtonTab;`)(clickChrome, withClickDebugger);
+const trustedClick = Function("chrome", "withDebuggerTab", `${trustedPointSource}; ${trustedClickSource}; return trustedActivateChatSendButtonTab;`)(clickChrome, withClickDebugger);
 const clickResult = await trustedClick(42, "attempt-button-primary", "hello");
 assert.equal(clickResult.send_button_actually_clicked, true, "CDP success is not enough; the trusted page click observer must confirm the Send button received the click");
 assert.equal(clickResult.send_button_hit_test, true);
@@ -209,9 +212,197 @@ const blockedChrome = {
     }
   }
 };
-const blockedClick = Function("chrome", "withDebuggerTab", `${trustedClickSource}; return trustedActivateChatSendButtonTab;`)(blockedChrome, withClickDebugger);
+const blockedClick = Function("chrome", "withDebuggerTab", `${trustedPointSource}; ${trustedClickSource}; return trustedActivateChatSendButtonTab;`)(blockedChrome, withClickDebugger);
 await assert.rejects(() => blockedClick(42, "attempt-covered", "hello"), /covered|hit.?test/i);
 assert.equal(blockedMouseEvents, 0, "a failed elementFromPoint hit-test must stop before any mouse dispatch");
+
+function trustedSendPageFixture({ centerCovered = false, fullyCovered = false, disabled = false, ariaDisabled = false } = {}) {
+  const pageGlobal = { innerWidth: 1000, innerHeight: 800, scrollX: 0, scrollY: 0 };
+  const overlay = {
+    tagName: "DIV",
+    id: "composer-overlay",
+    className: "composer-overlay",
+    outerHTML: '<div id="composer-overlay" class="composer-overlay" aria-label="Composer overlay"></div>',
+    parentElement: null,
+    getAttribute(name) { return name === "aria-label" ? "Composer overlay" : ""; },
+    getBoundingClientRect() { return { left: 116, top: 72, width: 16, height: 16, right: 132, bottom: 88 }; }
+  };
+  const button = {
+    tagName: "BUTTON",
+    id: "composer-submit-button",
+    className: "composer-submit-btn",
+    dataset: {},
+    disabled,
+    parentElement: null,
+    getAttribute(name) {
+      if (name === "aria-disabled") return ariaDisabled ? "true" : "false";
+      if (name === "aria-label") return "Send prompt";
+      if (name === "data-testid") return "send-button";
+      return "";
+    },
+    hasAttribute() { return false; },
+    getBoundingClientRect() { return { left: 100, top: 60, width: 40, height: 40, right: 140, bottom: 100 }; },
+    contains(node) { return node === this; },
+    scrollIntoView() {},
+    addEventListener() {}
+  };
+  const root = { querySelector() { return button; } };
+  const composer = {
+    tagName: "DIV",
+    id: "prompt-textarea",
+    isContentEditable: true,
+    innerText: "hello",
+    textContent: "hello",
+    dataset: { codexproDraftAttempt: "attempt-exposed-point" },
+    parentElement: root,
+    closest() { return root; },
+    getBoundingClientRect() { return { left: 20, top: 20, width: 400, height: 100, right: 420, bottom: 120 }; }
+  };
+  const document = {
+    querySelector(selector) {
+      if (selector === "#modal-subscription-failure") return null;
+      if (selector.includes("prompt-textarea") || selector.includes("contenteditable") || selector.includes("textarea")) return composer;
+      return null;
+    },
+    querySelectorAll() { return []; },
+    elementFromPoint(x, y) {
+      if (fullyCovered) return overlay;
+      if (centerCovered && Math.abs(x - 120) < 0.01 && Math.abs(y - 80) < 0.01) return overlay;
+      return button;
+    }
+  };
+  const getComputedStyle = element => ({
+    display: "block",
+    visibility: "visible",
+    opacity: "1",
+    pointerEvents: "auto",
+    position: element === overlay ? "absolute" : "relative",
+    zIndex: element === overlay ? "20" : "auto"
+  });
+  return { pageGlobal, document, getComputedStyle, button, overlay };
+}
+
+const exposedFixture = trustedSendPageFixture({ centerCovered: true });
+let exposedRuntimeEvaluations = 0;
+const exposedMouseEvents = [];
+const exposedChrome = {
+  debugger: {
+    async sendCommand(_target, method, params) {
+      if (method === "Runtime.evaluate") {
+        exposedRuntimeEvaluations += 1;
+        if (exposedRuntimeEvaluations <= 2) {
+          const value = Function("document", "getComputedStyle", "globalThis", `return ${params.expression};`)(
+            exposedFixture.document,
+            exposedFixture.getComputedStyle,
+            exposedFixture.pageGlobal
+          );
+          return { result: { value } };
+        }
+        return { result: { value: { clicked: true, is_trusted: true } } };
+      }
+      if (method === "Input.dispatchMouseEvent") exposedMouseEvents.push({ type: params.type, x: params.x, y: params.y });
+      return {};
+    }
+  }
+};
+const exposedClick = Function("chrome", "withDebuggerTab", `${trustedPointSource}; ${trustedClickSource}; return trustedActivateChatSendButtonTab;`)(exposedChrome, withClickDebugger);
+const exposedResult = await exposedClick(42, "attempt-exposed-point", "hello");
+assert.equal(exposedResult.send_button_actually_clicked, true, "a center-covered Send button must use another verified exposed point inside the same button");
+assert.equal(exposedResult.send_button_hit_test, true);
+assert.equal(exposedMouseEvents.length, 3, "an alternate verified point must still dispatch exactly one trusted CDP click");
+assert.notDeepEqual(
+  { x: exposedMouseEvents[0].x, y: exposedMouseEvents[0].y },
+  { x: 120, y: 80 },
+  "the trusted click must not reuse the covered center coordinates"
+);
+
+function fixtureTrustedClick(fixture, attemptId = "attempt-fixture") {
+  const mouse = [];
+  const chrome = {
+    debugger: {
+      async sendCommand(_target, method, params) {
+        if (method === "Runtime.evaluate") {
+          if (String(params.expression).includes("__codexproTrustedSendClickV1?.[")) return { result: { value: { clicked: true, is_trusted: true } } };
+          const value = Function("document", "getComputedStyle", "globalThis", `return ${params.expression};`)(fixture.document, fixture.getComputedStyle, fixture.pageGlobal);
+          return { result: { value } };
+        }
+        if (method === "Input.dispatchMouseEvent") mouse.push({ type: params.type, x: params.x, y: params.y });
+        return {};
+      }
+    }
+  };
+  const click = Function("chrome", "withDebuggerTab", `${trustedPointSource}; ${trustedClickSource}; return trustedActivateChatSendButtonTab;`)(chrome, withClickDebugger);
+  return { mouse, click: () => click(42, attemptId, "hello") };
+}
+
+const centerFixture = trustedSendPageFixture();
+const centerHarness = fixtureTrustedClick(centerFixture, "attempt-center");
+const centerResult = await centerHarness.click();
+assert.equal(centerResult.send_button_verified_point_kind, "center", "an exposed center remains the preferred trusted click point");
+assert.deepEqual(centerHarness.mouse.map(event => event.type), ["mouseMoved", "mousePressed", "mouseReleased"]);
+
+const fullyCoveredHarness = fixtureTrustedClick(trustedSendPageFixture({ fullyCovered: true }), "attempt-fully-covered");
+let fullyCoveredError = null;
+try { await fullyCoveredHarness.click(); } catch (error) { fullyCoveredError = error; }
+assert.ok(fullyCoveredError, "an entirely covered Send button must fail closed");
+assert.match(String(fullyCoveredError.message), /no verified exposed hit-test point|hit.?test/i);
+assert.equal(fullyCoveredHarness.mouse.length, 0, "entire-button coverage must stop before trusted mouse dispatch");
+assert.equal(fullyCoveredError?.details?.trusted_click_hit_test_evidence?.center_hit_id, "composer-overlay", "failure diagnostics must identify the exact covering element");
+assert.equal(fullyCoveredError?.details?.trusted_click_hit_test_evidence?.center_hit_pointer_events, "auto");
+assert.deepEqual(fullyCoveredError?.details?.trusted_click_hit_test_evidence?.covering_element_rect, { left: 116, top: 72, right: 132, bottom: 88, width: 16, height: 16 });
+
+for (const [label, fixture] of [
+  ["disabled", trustedSendPageFixture({ disabled: true })],
+  ["aria-disabled", trustedSendPageFixture({ ariaDisabled: true })]
+]) {
+  const harness = fixtureTrustedClick(fixture, `attempt-${label}`);
+  await assert.rejects(harness.click, /disabled|hit.?test/i, `${label} Send button must not be clicked`);
+  assert.equal(harness.mouse.length, 0, `${label} Send button must stop before CDP mouse dispatch`);
+}
+
+let replacementEval = 0;
+const replacementMouse = [];
+const replacementChrome = {
+  debugger: {
+    async sendCommand(_target, method, params) {
+      if (method === "Runtime.evaluate") {
+        replacementEval += 1;
+        if (replacementEval === 1) return { result: { value: { ok: true, x: 120, y: 80, selector: "#composer-submit-button", hit_test: true, verified_point_kind: "center" } } };
+        if (replacementEval === 2) return { result: { value: { ok: true, x: 220, y: 180, selector: "#composer-submit-button", hit_test: true, verified_point_kind: "center" } } };
+        return { result: { value: { clicked: true, is_trusted: true } } };
+      }
+      if (method === "Input.dispatchMouseEvent") replacementMouse.push({ type: params.type, x: params.x, y: params.y });
+      return {};
+    }
+  }
+};
+const replacementClick = Function("chrome", "withDebuggerTab", `${trustedPointSource}; ${trustedClickSource}; return trustedActivateChatSendButtonTab;`)(replacementChrome, withClickDebugger);
+await replacementClick(42, "attempt-replaced", "hello");
+assert.deepEqual({ x: replacementMouse[0].x, y: replacementMouse[0].y }, { x: 220, y: 180 }, "button replacement/layout shift must use the final re-resolved coordinates, never stale prepare coordinates");
+assert.equal(replacementMouse.length, 3, "re-resolve must still emit exactly one trusted click");
+
+let shiftedEval = 0;
+let shiftedMouseEvents = 0;
+const shiftedEvidence = { send_button_selector: "#composer-submit-button", center_hit_id: "unrelated-overlay", center_hit_tag: "DIV", center_hit_classes: "unrelated-overlay", center_hit_pointer_events: "auto", center_hit_position: "fixed", center_hit_z_index: "999", covering_element_rect: { left: 100, top: 60, right: 140, bottom: 100, width: 40, height: 40 } };
+const shiftedChrome = {
+  debugger: {
+    async sendCommand(_target, method) {
+      if (method === "Runtime.evaluate") {
+        shiftedEval += 1;
+        if (shiftedEval === 1) return { result: { value: { ok: true, x: 120, y: 80, selector: "#composer-submit-button", hit_test: true } } };
+        return { result: { value: { ok: false, error: "Send button has no verified exposed hit-test point.", hit_test: false, retryable: true, hit_test_evidence: shiftedEvidence } } };
+      }
+      if (method === "Input.dispatchMouseEvent") shiftedMouseEvents += 1;
+      return {};
+    }
+  }
+};
+const shiftedClick = Function("chrome", "withDebuggerTab", `${trustedPointSource}; ${trustedClickSource}; return trustedActivateChatSendButtonTab;`)(shiftedChrome, withClickDebugger);
+let shiftedError = null;
+try { await shiftedClick(42, "attempt-layout-shift", "hello"); } catch (error) { shiftedError = error; }
+assert.ok(shiftedError, "a final layout shift that covers the button must fail closed");
+assert.equal(shiftedMouseEvents, 0, "stale coordinates must never be dispatched after a final hit-test failure");
+assert.equal(shiftedError?.details?.trusted_click_hit_test_evidence?.center_hit_id, "unrelated-overlay");
 
 const inspectAttemptSource = extractFunction(workerSource, "inspectChatSendAttemptPage");
 let sendButtonLabel = "Send prompt";
@@ -498,5 +689,20 @@ assert.deepEqual({
   generation_endpoint: "/backend-api/f/conversation",
   retry_click_count: 0
 }, "Manager send evidence must retain every requested pipeline telemetry field separately");
+
+const hitTestTelemetry = sendDebugEvidence({
+  send_button_verified_point_kind: "left-mid",
+  trusted_click_hit_test_evidence: {
+    send_button_selector: "#composer-submit-button",
+    center_hit_id: "composer-overlay",
+    center_hit_tag: "DIV",
+    covering_element_rect: { left: 116, top: 72, right: 132, bottom: 88, width: 16, height: 16 },
+    verified_point: { kind: "left-mid", x: 110, y: 80 }
+  }
+});
+assert.equal(hitTestTelemetry.send_button_verified_point_kind, "left-mid", "Manager evidence must retain the verified alternative hit point kind");
+assert.equal(hitTestTelemetry.trusted_click_hit_test_evidence?.center_hit_id, "composer-overlay", "Manager evidence must retain the exact covering element id");
+assert.deepEqual(hitTestTelemetry.trusted_click_hit_test_evidence?.covering_element_rect, { left: 116, top: 72, right: 132, bottom: 88, width: 16, height: 16 });
+assert.match(managerSource, /trusted_click_hit_test_evidence/, "Manager diagnostic result details must persist trusted hit-test evidence for production failures");
 
 console.log("chat send pipeline smoke PASS");
