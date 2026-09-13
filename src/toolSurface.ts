@@ -5,6 +5,7 @@ const MINIMAL_TOOL_NAMES = [
   "server_config",
   "codexpro_self_test",
   "prepare_repo_task",
+  "recover_repo_task",
   "begin_repo_task",
   "resume_repo_task",
   "repo_task_status",
@@ -44,6 +45,7 @@ const FULL_TOOL_NAMES = [
   "server_config",
   "codexpro_self_test",
   "prepare_repo_task",
+  "recover_repo_task",
   "begin_repo_task",
   "resume_repo_task",
   "repo_task_status",
@@ -85,6 +87,7 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   "codexpro",
   "codexpro_self_test",
   "prepare_repo_task",
+  "recover_repo_task",
   "resume_repo_task",
   "report_worker_job_progress",
   "finalize_worker_job",
@@ -112,8 +115,10 @@ export function toolNamesForMode(config: CodexProConfig, requireRepoTask = false
         ? [...MINIMAL_TOOL_NAMES]
         : [...STANDARD_TOOL_NAMES];
   if (requireRepoTask) {
-    const prepareIndex = names.indexOf("prepare_repo_task");
-    if (prepareIndex !== -1) names.splice(prepareIndex, 1);
+    for (const managerOnlyTool of ["prepare_repo_task", "recover_repo_task"]) {
+      const toolIndex = names.indexOf(managerOnlyTool);
+      if (toolIndex !== -1) names.splice(toolIndex, 1);
+    }
   }
   if (config.bashMode === "off") {
     const bashIndex = names.indexOf("bash");

@@ -500,6 +500,12 @@ export async function prepareWorkerJob(input: {
   workerId: string;
   root?: string;
   scope: WorkerJobScope;
+  terminalRecovery?: {
+    coordinationRoot: string;
+    worktreeRoot: string;
+    worktreeBranch?: string;
+    worktreeHead?: string;
+  };
 }): Promise<WorkerJobRecord> {
   await discardStalePreparedWorkerJobs({ workerId: input.workerId, excludeJobId: input.jobId });
   const preparedAt = new Date().toISOString();
@@ -507,6 +513,18 @@ export async function prepareWorkerJob(input: {
     if (current?.status === "completed" || current?.completionConfirmed === true) {
       throw new Error(`WORKER_JOB_COMPLETED_TERMINAL: Task ${input.jobId} is completed and cannot be prepared again.`);
     }
+    const recoveryEvent = input.terminalRecovery
+      ? event("terminal_recovery_prepared", {
+          previous_status: current?.status,
+          previous_finished_at: current?.finishedAt,
+          previous_summary: current?.summary,
+          previous_error: current?.error,
+          coordination_root: input.terminalRecovery.coordinationRoot,
+          worktree_root: input.terminalRecovery.worktreeRoot,
+          worktree_branch: input.terminalRecovery.worktreeBranch,
+          worktree_head: input.terminalRecovery.worktreeHead
+        })
+      : undefined;
     return ({
     version: 1,
     policyVersion: WORKER_POLICY_VERSION,
@@ -519,11 +537,17 @@ export async function prepareWorkerJob(input: {
     kind: current?.kind,
     taskSize: current?.taskSize,
     workspaceId: current?.workspaceId,
+    startedAt: current?.startedAt,
     preparedAt: current?.preparedAt || preparedAt,
     fifoQueuedAt: current?.fifoQueuedAt || preparedAt,
     updatedAt: preparedAt,
     agentsFiles: current?.agentsFiles || [],
+    rulesHash: current?.rulesHash,
+    rulesPath: current?.rulesPath,
+    agentsHash: current?.agentsHash,
     codexGraphActive: current?.codexGraphActive || false,
+    codexGraphSymbolCount: current?.codexGraphSymbolCount,
+    codexGraphRelationshipCount: current?.codexGraphRelationshipCount,
     requiredObligations: current?.requiredObligations || [],
     completedObligations: current?.completedObligations || [],
     progressSequence: current?.progressSequence || 0,
@@ -545,7 +569,11 @@ export async function prepareWorkerJob(input: {
     completionConfirmed: false,
     completionConfirmedAt: current?.completionConfirmedAt,
     completionEvidence: current?.completionEvidence,
-    events: [...(current?.events || []), event("prepared", { worker_id: input.workerId, scope: input.scope, root: input.root })]
+    events: [
+      ...(current?.events || []),
+      ...(recoveryEvent ? [recoveryEvent] : []),
+      event("prepared", { worker_id: input.workerId, scope: input.scope, root: input.root })
+    ].slice(-MAX_EVENTS)
     });
   });
 }

@@ -51,6 +51,9 @@ assert.match(taskResume, /workerJobResumeCheckpointText\(job, workerContexts\)/,
 assert.match(taskResume, /newChat:\s*true/, "task resume must create a new chat instead of reopening a remembered conversation id");
 assert.match(taskResume, /requireIdleProfile:\s*!hangRecovery/, "confirmed hang recovery must be allowed to create a new chat before discarding the stale busy tab");
 assert.match(taskResume, /text:\s*workerJobResumeCheckpointText\(job, workerContexts\)[\s\S]*?recoveryReason,/, "task resume must forward recovery reason separately from canonical checkpoint text");
+assert.match(taskResume, /previousStatus === "failed" && codeTask[\s\S]*?"recover_repo_task"/, "failed code-task continuation must pass through official terminal lifecycle recovery");
+assert.match(taskResume, /preparedFailedLifecycle[\s\S]*?"recover_repo_task"/, "prepared WorkerJob plus failed WorkspaceTask split state must also pass through official terminal lifecycle recovery");
+assert.match(taskResume, /projectRoot:\s*recoveryRoot/, "terminal all_allowed continuation must carry the recovered worktree root into canonical dispatch");
 const canonicalRecovery = between(managerMain, "async function sendProfileRequestUnlocked", "async function sendProfileRequest(payload)");
 assert.match(canonicalRecovery, /recoveryCheckpointText = `\$\{workerJobResumeCheckpointText\(workerJob, recoveryContexts\)\}/, "every recovery-mode send must replace renderer transcript handoff with canonical worker/task checkpoints");
 assert.match(canonicalRecovery, /const requestedRecoveryReason = String\(payload\?\.recoveryReason \|\| ""\)\.trim\(\)\.slice\(0, 600\)/, "recovery reason must use a dedicated bounded field instead of transcript text");
@@ -58,6 +61,7 @@ assert.match(canonicalRecovery, /requestedRecoveryReason[\s\S]*?Lý do phục h�
 assert.match(canonicalRecovery, /task_id:\s*previousTaskId/, "recovery-mode checkpoint lookup must be scoped to the exact current Task ID");
 assert.match(canonicalRecovery, /recoveryContexts = Array\.isArray\(contextResult\?\.checkpoints\) \? contextResult\.checkpoints\.slice\(-3\) : \[\]/, "canonical recovery must cap restored task checkpoints at three before prompt construction");
 assert.match(canonicalRecovery, /recoveryCheckpointText[\s\S]*?\.join\("\\n"\)/, "recovery-mode prompt must use canonical checkpoint text rather than the renderer transcript payload");
+assert.match(canonicalRecovery, /recoveryAccepted && initialWorkspaceRoot[\s\S]*?root":"\$\{initialWorkspaceRoot\.replace/, "canonical recovery prompt must pin begin_repo_task to the recovered execution root");
 
 const rolloverPrompt = conversationUtils.slice(conversationUtils.indexOf("export function buildConversationRolloverPrompt"));
 assert.match(rolloverPrompt, /continuation_reason \|\| ""\) === "recovery"/, "handoff prompt must distinguish recovery from conversation-limit rollover");

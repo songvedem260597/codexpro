@@ -72,7 +72,12 @@ assert.match(profileActionsSource, /api\.resumeProfileTask\(\{ profileId: profil
 assert.match(preloadSource, /resumeProfileTask: \(payload\) => invokeResult\("codexpro:resume-profile-task", payload\)/, "preload must expose resumeProfileTask");
 assert.match(electronSource, /WORKER_NOT_IDLE: Chỉ có thể tiếp tục task khi worker đang ở trạng thái ĐANG RẢNH/, "backend must re-check worker idle state");
 assert.match(electronSource, /RESUMABLE_BROWSER_TASK_STATUSES = new Set\(\["prepared", "running", "failed", "cancelled", "blocked"\]\)/, "backend must limit resumable task statuses");
-assert.match(electronSource, /\["failed", "cancelled", "blocked"\]\.includes\(previousStatus\)[\s\S]*prepare_repo_task/, "terminal tasks must be prepared again with the same Task ID");
+assert.match(electronSource, /previousStatus === "failed" && codeTask[\s\S]*?"recover_repo_task"[\s\S]*?profile_id: profileId[\s\S]*?task_id: taskId/, "failed code tasks must use official Manager terminal recovery with the same Task ID and owner");
+assert.match(electronSource, /preparedFailedLifecycle = previousStatus === "prepared" && codeTask && lastFailedFinalization > lastTerminalRecovery/, "Manager must recover the failed authoritative lifecycle even when an earlier all_allowed re-prepare already left WorkerJob prepared and unbound");
+assert.match(electronSource, /\(previousStatus === "failed" && codeTask\) \|\| preparedFailedLifecycle/, "both terminal and prepared split-state failures must use the same official recovery primitive");
+assert.match(electronSource, /recovered\?\.recovered !== true[\s\S]*?String\(recovered\?\.task_id \|\| ""\) !== taskId[\s\S]*?String\(recovered\?\.profile_id \|\| ""\) !== profileId/, "Manager must reject incomplete or identity-mismatched recovery results");
+assert.match(electronSource, /projectRoot: recoveryRoot/, "terminal all_allowed recovery must dispatch the authoritative existing worktree root");
+assert.match(electronSource, /recoveryAccepted && initialWorkspaceRoot[\s\S]*?Không chọn repo\/root khác, không tạo task ID mới, không tạo worktree mới/, "recovery prompt must bind begin_repo_task to the authoritative worktree and forbid replacement state");
 assert.match(electronSource, /existingWorkerJobStatus === "prepared"[\s\S]*begin_repo_task đúng Task ID/, "re-prepared task must call begin_repo_task before workspace tools");
 assert.match(electronSource, /previousTaskId: taskId[\s\S]*taskMode: "recovery"|taskMode: "recovery"[\s\S]*previousTaskId: taskId/, "resume must reuse the original Task ID via recovery mode");
 for (const className of ["profile-task-button", "profile-task-modal", "profile-task-list", "profile-task-resume"]) {

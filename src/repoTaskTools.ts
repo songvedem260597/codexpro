@@ -35,6 +35,7 @@ import { classifiedWorkerJobPublicRecord } from "./workerJobTools.js";
 import { syncAuthoritativeTaskTracking } from "./taskTrackingReconciliation.js";
 import {
   readWorkspaceCoordination,
+  recoverWorkspaceTask,
   registerWorkspaceTask,
   resolveWorkspaceTaskRootByTaskId,
   verifyWorkspaceTaskResume,
@@ -66,6 +67,7 @@ const defaultDependencies = {
   workerJobHasLegacyStaleCancellation,
   classifiedWorkerJobPublicRecord,
   readWorkspaceCoordination,
+  recoverWorkspaceTask,
   registerWorkspaceTask,
   resolveWorkspaceTaskRootByTaskId,
   verifyWorkspaceTaskResume,
@@ -92,6 +94,17 @@ type ResumeResult = {
 };
 
 const repoTaskResumeTails = new Map<string, Promise<ResumeResult>>();
+type RecoveryResult = {
+  taskId: string;
+  profileId: string;
+  scope: "workspace" | "all_allowed";
+  coordinationRoot: string;
+  worktreeRoot: string;
+  worktreeBranch?: string;
+  worktreeHead: string;
+  workerJob: WorkerJobRecord;
+};
+const repoTaskRecoveryTails = new Map<string, Promise<RecoveryResult>>();
 
 type RepoTaskProof = {
   taskId: string;
@@ -206,6 +219,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
     workerJobHasLegacyStaleCancellation,
     classifiedWorkerJobPublicRecord,
     readWorkspaceCoordination,
+    recoverWorkspaceTask,
     registerWorkspaceTask,
     resolveWorkspaceTaskRootByTaskId,
     verifyWorkspaceTaskResume,
@@ -346,6 +360,148 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
     }
   );
 
+  if (!requireRepoTask) registerCodexTool(
+    config,
+    server,
+    "recover_repo_task",
+    {
+      title: "Recover Existing Repo Task",
+      description: "Manager-only control-plane action. Atomically reactivate the authoritative failed workspace task, restore its existing claims, then prepare the same WorkerJob against its original worktree without recreating task history.",
+      inputSchema: {
+        profile_id: z.string().regex(WORKER_PROFILE_ID_PATTERN).describe("Exact existing task owner profile."),
+        task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).describe("Exact existing failed task id to recover.")
+      },
+      annotations: { ...annotations.handoffWrite, idempotentHint: true }
+    },
+    async (args) => {
+      const taskId = String(args.task_id || "").trim();
+      const profileId = String(args.profile_id || "").trim();
+      const normalizeOwner = (value: string) => String(value || "").trim().replace(/^browser:/, "");
+      const durableBefore = readWorkerJob(taskId);
+      if (!durableBefore) {
+        throw new CodexProError(`REPO_TASK_RECOVERY_JOB_MISSING: ${taskId} has no durable WorkerJob.`, {
+          code: "REPO_TASK_RECOVERY_JOB_MISSING",
+          details: { task_id: taskId, profile_id: profileId }
+        });
+      }
+      if (normalizeOwner(durableBefore.workerId) !== normalizeOwner(profileId)) {
+        throw new CodexProError("REPO_TASK_RECOVERY_OWNER_MISMATCH: durable WorkerJob belongs to another owner.", {
+          code: "REPO_TASK_RECOVERY_OWNER_MISMATCH",
+          details: { task_id: taskId, durable_worker_id: durableBefore.workerId, profile_id: profileId }
+        });
+      }
+      if (durableBefore.status === "completed" || durableBefore.completionConfirmed === true) {
+        throw new CodexProError(`REPO_TASK_RECOVERY_COMPLETED: ${taskId} is completed and cannot be recovered.`, {
+          code: "REPO_TASK_RECOVERY_COMPLETED",
+          details: { task_id: taskId, status: durableBefore.status, completion_confirmed: durableBefore.completionConfirmed }
+        });
+      }
+      if (durableBefore.kind !== "code" || !["failed", "cancelled", "blocked", "prepared"].includes(durableBefore.status)) {
+        throw new CodexProError(`REPO_TASK_RECOVERY_NOT_TERMINAL: ${taskId} is not a recoverable terminal code task.`, {
+          code: "REPO_TASK_RECOVERY_NOT_TERMINAL",
+          details: { task_id: taskId, status: durableBefore.status, kind: durableBefore.kind || null }
+        });
+      }
+      const persistedOwners = getBrowserExtensionTaskOwners(taskId);
+      const foreignPersistedOwners = persistedOwners.filter((owner) => owner.profile_id !== profileId);
+      if (foreignPersistedOwners.length || persistedOwners.length > 1) {
+        throw new CodexProError("REPO_TASK_RECOVERY_OWNER_AMBIGUOUS: task is persisted against a different or ambiguous profile owner.", {
+          code: "REPO_TASK_RECOVERY_OWNER_AMBIGUOUS",
+          details: { task_id: taskId, profile_id: profileId, persisted_profile_ids: persistedOwners.map((owner) => owner.profile_id) }
+        });
+      }
+      const runningBlocker = listWorkerJobs({ statuses: ["running"], limit: 200 }).find((job) => (
+        job.jobId !== taskId && normalizeOwner(job.workerId) === normalizeOwner(profileId)
+      ));
+      if (runningBlocker) {
+        throw new CodexProError("REPO_TASK_RECOVERY_PROFILE_BUSY: owner profile is already running another task.", {
+          code: "REPO_TASK_RECOVERY_PROFILE_BUSY",
+          details: { task_id: taskId, profile_id: profileId, running_task_id: runningBlocker.jobId }
+        });
+      }
+
+      const tailKey = `${profileId}:${taskId}`;
+      let recoveryPromise = repoTaskRecoveryTails.get(tailKey);
+      const joinedConcurrentRecovery = Boolean(recoveryPromise);
+      if (!recoveryPromise) {
+        recoveryPromise = (async () => {
+          const currentJob = readWorkerJob(taskId);
+          if (!currentJob || normalizeOwner(currentJob.workerId) !== normalizeOwner(profileId)
+            || currentJob.status === "completed" || currentJob.completionConfirmed === true
+            || currentJob.kind !== "code" || !["failed", "cancelled", "blocked", "prepared"].includes(currentJob.status)) {
+            throw new CodexProError("REPO_TASK_RECOVERY_CHANGED: WorkerJob changed before coordination recovery began.", {
+              code: "REPO_TASK_RECOVERY_CHANGED",
+              details: { task_id: taskId, profile_id: profileId, status: currentJob?.status || "missing" }
+            });
+          }
+          const recovered = await recoverWorkspaceTask({ taskId, workerId: profileId });
+          const worktreeRoot = String(recovered.task.worktreeRoot || "").trim();
+          if (!worktreeRoot) {
+            throw new CodexProError("REPO_TASK_RECOVERY_WORKTREE_MISSING: recovered task has no authoritative worktree.", {
+              code: "REPO_TASK_RECOVERY_WORKTREE_MISSING",
+              details: { task_id: taskId, coordination_root: recovered.root }
+            });
+          }
+          const scope = currentJob.scope === "all_allowed" ? "all_allowed" : "workspace";
+          const prepared = await prepareWorkerJob({
+            jobId: taskId,
+            workerId: profileId,
+            root: worktreeRoot,
+            scope,
+            terminalRecovery: {
+              coordinationRoot: recovered.root,
+              worktreeRoot,
+              worktreeBranch: recovered.task.worktreeBranch,
+              worktreeHead: recovered.worktreeHead
+            }
+          });
+          const expected = rememberExpectedRepoTask(profileId, { taskId, root: worktreeRoot, scope });
+          setBrowserExtensionProfilePendingTask(profileId, taskId, worktreeRoot, scope, expected.preparedAt || Date.now());
+          recordBrowserProfileTaskEvent("repo_task_terminal_recovered", {
+            profile_id: profileId,
+            task_id: taskId,
+            coordination_root: recovered.root,
+            worktree_root: worktreeRoot,
+            worktree_branch: recovered.task.worktreeBranch,
+            worktree_head: recovered.worktreeHead,
+            scope,
+            policy_version: prepared.policyVersion
+          });
+          return {
+            taskId,
+            profileId,
+            scope,
+            coordinationRoot: recovered.root,
+            worktreeRoot,
+            worktreeBranch: recovered.task.worktreeBranch,
+            worktreeHead: recovered.worktreeHead,
+            workerJob: prepared
+          };
+        })();
+        repoTaskRecoveryTails.set(tailKey, recoveryPromise);
+        recoveryPromise.finally(() => {
+          if (repoTaskRecoveryTails.get(tailKey) === recoveryPromise) repoTaskRecoveryTails.delete(tailKey);
+        }).catch(() => undefined);
+      }
+      const recovered = await recoveryPromise;
+      return textResult(`# Repo Task Recovered\n\nTask: ${taskId}\nProfile: ${profileId}\nWorktree: ${recovered.worktreeRoot}\n\nThe existing failed task and its claims were restored without creating a new task or worktree.`, {
+        recovered: true,
+        recovery_deduplicated: joinedConcurrentRecovery,
+        prepared: true,
+        task_id: taskId,
+        profile_id: profileId,
+        scope: recovered.scope,
+        root: recovered.worktreeRoot,
+        root_unbound: false,
+        coordination_root: recovered.coordinationRoot,
+        worktree_root: recovered.worktreeRoot,
+        worktree_branch: recovered.worktreeBranch,
+        worktree_head: recovered.worktreeHead,
+        worker_job: classifiedWorkerJobPublicRecord(recovered.workerJob)
+      });
+    }
+  );
+
   registerCodexTool(
     config,
     server,
@@ -383,7 +539,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
         if (persistedOwner) {
           const recoveredExpected = rememberExpectedRepoTask(persistedOwner.profile_id, {
             taskId: persistedOwner.task_id,
-            root: persistedOwner.scope === "workspace" ? persistedOwner.root || undefined : undefined,
+            root: persistedOwner.root || undefined,
             scope: persistedOwner.scope
           });
           preparedOwner = { profileId: persistedOwner.profile_id, expected: recoveredExpected };
@@ -406,7 +562,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
             profileId: queuedJob.workerId.replace(/^browser:/, ""),
             expected: {
               taskId: queuedJob.jobId,
-              root: queuedJob.scope === "workspace" ? queuedJob.root || undefined : undefined,
+              root: queuedJob.root || undefined,
               scope: queuedJob.scope,
               preparedAt: Date.parse(queuedJob.fifoQueuedAt || queuedJob.preparedAt) || Date.now()
             }
@@ -499,14 +655,14 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
       if (!requestedRoot && !managerAllAllowed) {
         requestedRoot = getBrowserExtensionProfileWorkspaceBinding(gateProfileId) || expected?.root || config.defaultRoot;
       }
-      const workspace = args.task_kind === "code" ? workspaces.openWorkspace(requestedRoot) : undefined;
-      const resolvedRoot = workspace?.root || (requestedRoot ? path.resolve(requestedRoot) : "");
-      if (managerPrepared && expected?.root && !sameResolvedRoot(resolvedRoot, expected.root)) {
+      const requestedWorkspace = args.task_kind === "code" ? workspaces.openWorkspace(requestedRoot) : undefined;
+      const resolvedRequestedRoot = requestedWorkspace?.root || (requestedRoot ? path.resolve(requestedRoot) : "");
+      if (managerPrepared && expected?.root && !sameResolvedRoot(resolvedRequestedRoot, expected.root)) {
         throw new CodexProError(
           `REPO_TASK_ROOT_MISMATCH: begin_repo_task must open the exact workspace prepared by CodexPro Manager: ${expected.root}`,
           {
             code: "REPO_TASK_ROOT_MISMATCH",
-            details: { profile_id: gateProfileId, task_id: taskId, expected_root: expected.root, received_root: resolvedRoot }
+            details: { profile_id: gateProfileId, task_id: taskId, expected_root: expected.root, received_root: resolvedRequestedRoot }
           }
         );
       }
@@ -518,11 +674,13 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
             taskId,
             workerId: gateProfileId || preparedJob.workerId,
             preparedJob,
-            requestedRoot: resolvedRoot,
+            requestedRoot: resolvedRequestedRoot,
             scope
           });
         }
       }
+      const workspace = requestedWorkspace;
+      const resolvedRoot = workspace?.root || resolvedRequestedRoot;
       if (gateProfileId && !managerPrepared) {
         expected = rememberExpectedRepoTask(gateProfileId, { taskId, root: resolvedRoot, scope: "workspace" });
       }
@@ -555,7 +713,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
         agentsSha256,
         codexGraph
       };
-      const durableJob = await bootstrapWorkerJob({
+      const bootstrapDurableJob = () => bootstrapWorkerJob({
         jobId: proof.taskId,
         workerId: gateProfileId || `direct.${proof.taskId}`,
         title: proof.taskTitle,
@@ -572,6 +730,13 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
         codexGraphSymbolCount: proof.codexGraph?.coverage.symbolCount,
         codexGraphRelationshipCount: proof.codexGraph?.coverage.relationshipCount
       });
+      const durableJob = preparedLifecycleRecovery
+        ? await withVerifiedWorkspaceTaskResume(
+            { taskId: proof.taskId, workerId: gateProfileId, root: preparedLifecycleRecovery.root },
+            await verifyWorkspaceTaskResume({ taskId: proof.taskId, workerId: gateProfileId, root: preparedLifecycleRecovery.root }),
+            bootstrapDurableJob
+          )
+        : await bootstrapDurableJob();
       if (managerPrepared && gateProfileId && expected && expectedRepoTask(gateProfileId)?.taskId !== proof.taskId) {
         expected = rememberExpectedRepoTask(gateProfileId, {
           taskId: proof.taskId,

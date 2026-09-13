@@ -175,6 +175,7 @@ const rendererSource = fs.readFileSync(path.join(managerRoot, "src", "main.jsx")
 const runtimeStatusSource = fs.readFileSync(path.join(managerRoot, "src", "hooks", "use-runtime-status.js"), "utf8");
 const responseCacheSource = fs.readFileSync(path.join(managerRoot, "src", "hooks", "use-chat-response-cache.js"), "utf8");
 const mainProcessSource = fs.readFileSync(path.join(managerRoot, "electron", "main.mjs"), "utf8");
+const projectDiscoverySource = fs.readFileSync(path.join(managerRoot, "electron", "project-discovery.mjs"), "utf8");
 const chatCacheSource = fs.readFileSync(path.join(managerRoot, "electron", "manager-chat-cache.mjs"), "utf8");
 assert.match(runtimeStatusSource, /onBrowserProfiles\?\.\(\(payload\) => \{[\s\S]*?normalizeTerminalMessageStreamProfiles\(incomingProfiles, current\.workerJobs\)/, "realtime profile events must normalize terminal message-stream settling before they can overwrite corrected status");
 assert.match(mainProcessSource, /const browserProfilesRaw = normalizeTerminalMessageStreamProfiles\(browserProfileSnapshot\.profiles, workerJobs\)/, "main-process status must normalize terminal stream state before worker and hang-tracker decisions");
@@ -187,7 +188,7 @@ assert.match(rendererSource, /loadResponseMarkdownModule\(\)[\s\S]{0,80}\}, 120\
 assert.match(chatCacheSource, /let managerChatCacheIndex = null;/, "chat cache store must keep a lookup index");
 assert.match(chatCacheSource, /if \(managerChatCacheEntries && managerChatCacheIndex\) return managerChatCacheEntries;/, "chat cache store must avoid rereading the cache file after warmup");
 assert.match(mainProcessSource, /setImmediate\(\(\) => readManagerChatCache\(\)\)/, "main process must warm the persistent chat cache after window creation");
-assert.match(mainProcessSource, /insideRepository: true/, "project discovery must inspect direct child folders of a Git repo for nested projects");
-assert.match(mainProcessSource, /if \(item\.insideRepository\) continue;/, "nested project discovery must stop after one bounded child level");
+assert.match(projectDiscoverySource, /insideRepository: true/, "project discovery must inspect direct child folders of a Git repo for nested projects");
+assert.match(projectDiscoverySource, /if \(item\.insideRepository\) continue;/, "nested project discovery must stop after one bounded child level");
 
 console.log("UI performance smoke OK");

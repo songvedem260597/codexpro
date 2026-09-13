@@ -72,6 +72,7 @@ function makeFixture({ profileId = "profile-a", requireRepoTask = true, workspac
   const registered = new Map();
   const counters = {
     prepare: 0,
+    recoverWorkspace: 0,
     bootstrap: 0,
     resume: 0,
     graph: 0,
@@ -83,7 +84,10 @@ function makeFixture({ profileId = "profile-a", requireRepoTask = true, workspac
   let selectedBrowserProfile = profileId;
   let workspaceIdResolver = () => workspaceId;
   let resumeBarrier;
+  let recoveryBarrier;
+  let recoveryFailure;
   let recoveryResolution;
+  const operationOrder = [];
 
   const workspaces = {
     openWorkspace(root) {
@@ -129,17 +133,21 @@ function makeFixture({ profileId = "profile-a", requireRepoTask = true, workspac
     },
     prepareWorkerJob: async (input) => {
       counters.prepare += 1;
+      operationOrder.push("prepare-worker");
+      const current = jobs.get(input.jobId);
       const job = makeJob({
         jobId: input.jobId,
         workerId: input.workerId,
         status: "prepared",
         scope: input.scope,
         root: input.root || "",
-        title: "Prepared Manager Task",
-        kind: "general",
-        workspaceId: "",
-        codexGraphActive: false,
-        events: [{ at: now, type: "prepared", details: {} }]
+        title: current?.title || "Prepared Manager Task",
+        kind: current?.kind || "general",
+        workspaceId: current?.workspaceId || "",
+        codexGraphActive: current?.codexGraphActive || false,
+        progressPercent: current?.progressPercent || 0,
+        progressReports: current?.progressReports || [],
+        events: [...(current?.events || []), { at: now, type: input.terminalRecovery ? "terminal_recovery_prepared" : "prepared", details: {} }]
       });
       jobs.set(input.jobId, job);
       return job;
@@ -182,6 +190,24 @@ function makeFixture({ profileId = "profile-a", requireRepoTask = true, workspac
     workerJobHasLegacyStaleCancellation: () => false,
     classifiedWorkerJobPublicRecord: (job) => job ? { job_id: job.jobId, status: job.status, policy_version: job.policyVersion } : undefined,
     readWorkspaceCoordination: (root) => coordinationByRoot.get(root) ?? { tasks: {} },
+    recoverWorkspaceTask: async ({ taskId, workerId }) => {
+      counters.recoverWorkspace += 1;
+      operationOrder.push("recover-coordination");
+      if (recoveryBarrier) await recoveryBarrier.promise;
+      if (recoveryFailure) throw recoveryFailure;
+      return recoveryResolution ?? {
+        root: repoRoot,
+        task: {
+          taskId,
+          workerId,
+          status: "running",
+          worktreeRoot,
+          worktreeBranch: `codexpro/task/${taskId}`,
+          integrationStatus: "idle"
+        },
+        worktreeHead: "0123456789012345678901234567890123456789"
+      };
+    },
     registerWorkspaceTask: async (input) => {
       counters.registerWorkspace += 1;
       const task = { taskId: input.taskId, status: "running", worktreeRoot, worktreeBranch: `codexpro/task/${input.taskId}`, integrationStatus: "idle" };
@@ -225,10 +251,13 @@ function makeFixture({ profileId = "profile-a", requireRepoTask = true, workspac
     workspaceBindings,
     coordinationByRoot,
     counters,
+    operationOrder,
     workspaces,
     dependencies,
     setWorkspaceIdResolver(fn) { workspaceIdResolver = fn; },
     setResumeBarrier(barrier) { resumeBarrier = barrier; },
+    setRecoveryBarrier(barrier) { recoveryBarrier = barrier; },
+    setRecoveryFailure(error) { recoveryFailure = error; },
     setRecoveryResolution(value) { recoveryResolution = value; },
     selectedBrowserProfile: () => selectedBrowserProfile
   };
@@ -241,7 +270,7 @@ function expectCode(error, code) {
 try {
   // PREPARE: workspace, all_allowed, exact missing-root failure, pending binding, event payload.
   const manager = makeFixture({ profileId: "", requireRepoTask: false });
-  assert.deepEqual([...manager.registered.keys()].slice(0, 4), ["prepare_repo_task", "begin_repo_task", "resume_repo_task", "repo_task_status"]);
+  assert.deepEqual([...manager.registered.keys()].slice(0, 5), ["prepare_repo_task", "recover_repo_task", "begin_repo_task", "resume_repo_task", "repo_task_status"]);
   await assert.rejects(
     manager.registered.get("prepare_repo_task").handler({ profile_id: "profile-p", task_id: "cpt_111111111111111111111111", scope: "workspace" }),
     (error) => expectCode(error, "REPO_TASK_ROOT_REQUIRED") && error.message === "REPO_TASK_ROOT_REQUIRED: workspace-scoped Manager tasks must prepare an exact root."
@@ -268,8 +297,91 @@ try {
   assert.equal(preparedAll.structuredContent.root_unbound, true);
   assert.equal(preparedAll.structuredContent.scope, "all_allowed");
 
+  // RECOVER: coordination must commit first, then the same all_allowed WorkerJob is prepared at its existing worktree.
+  const terminal = makeFixture({ profileId: "", requireRepoTask: false });
+  const terminalId = "cpt_141414141414141414141414";
+  terminal.jobs.set(terminalId, makeJob({
+    jobId: terminalId,
+    workerId: "profile-terminal",
+    status: "prepared",
+    scope: "all_allowed",
+    root: "",
+    kind: "code",
+    progressPercent: 95,
+    progressReports: [{ sequence: 1, at: now, stage: "error", summary: "integration failed", progressPercent: 95, completedParts: ["implementation"], remainingParts: ["delivery"], checklist: [] }],
+    events: [{ at: now, type: "bootstrapped", details: {} }, { at: now, type: "finalized", details: { status: "failed" } }]
+  }));
+  const terminalRecovered = await terminal.registered.get("recover_repo_task").handler({
+    profile_id: "profile-terminal",
+    task_id: terminalId
+  });
+  assert.equal(terminalRecovered.structuredContent.recovered, true);
+  assert.equal(terminalRecovered.structuredContent.task_id, terminalId);
+  assert.equal(terminalRecovered.structuredContent.profile_id, "profile-terminal");
+  assert.equal(terminalRecovered.structuredContent.scope, "all_allowed");
+  assert.equal(path.resolve(terminalRecovered.structuredContent.root), path.resolve(worktreeRoot));
+  assert.equal(terminalRecovered.structuredContent.root_unbound, false);
+  assert.deepEqual(terminal.operationOrder, ["recover-coordination", "prepare-worker"]);
+  assert.equal(terminal.counters.recoverWorkspace, 1);
+  assert.equal(terminal.counters.prepare, 1);
+  assert.equal(terminal.counters.registerWorkspace, 0);
+  assert.equal(terminal.jobs.get(terminalId)?.progressPercent, 95);
+  assert.equal(terminal.jobs.get(terminalId)?.progressReports.length, 1);
+  assert.equal(terminal.runtime.expectedRepoTask("profile-terminal")?.root, path.resolve(worktreeRoot));
+  assert.equal(terminal.pendingOwners.get(terminalId)?.root, path.resolve(worktreeRoot));
+
+  const wrongRecoveryOwner = makeFixture({ profileId: "", requireRepoTask: false });
+  const wrongOwnerId = "cpt_151515151515151515151515";
+  wrongRecoveryOwner.jobs.set(wrongOwnerId, makeJob({ jobId: wrongOwnerId, workerId: "profile-owner", status: "failed", kind: "code" }));
+  await assert.rejects(
+    wrongRecoveryOwner.registered.get("recover_repo_task").handler({ profile_id: "profile-other", task_id: wrongOwnerId }),
+    (error) => expectCode(error, "REPO_TASK_RECOVERY_OWNER_MISMATCH")
+  );
+  assert.equal(wrongRecoveryOwner.counters.recoverWorkspace, 0);
+  assert.equal(wrongRecoveryOwner.counters.prepare, 0);
+
+  const completedRecovery = makeFixture({ profileId: "", requireRepoTask: false });
+  const completedRecoveryId = "cpt_161616161616161616161616";
+  completedRecovery.jobs.set(completedRecoveryId, makeJob({ jobId: completedRecoveryId, workerId: "profile-completed", status: "completed", kind: "code", completionConfirmed: true }));
+  await assert.rejects(
+    completedRecovery.registered.get("recover_repo_task").handler({ profile_id: "profile-completed", task_id: completedRecoveryId }),
+    (error) => expectCode(error, "REPO_TASK_RECOVERY_COMPLETED")
+  );
+  assert.equal(completedRecovery.counters.recoverWorkspace, 0);
+  assert.equal(completedRecovery.counters.prepare, 0);
+
+  const coordinationFailure = makeFixture({ profileId: "", requireRepoTask: false });
+  const coordinationFailureId = "cpt_171717171717171717171717";
+  coordinationFailure.jobs.set(coordinationFailureId, makeJob({ jobId: coordinationFailureId, workerId: "profile-failure", status: "failed", kind: "code" }));
+  coordinationFailure.setRecoveryFailure(new CodexProError("WORKSPACE_TASK_RECOVERY_CLAIM_CONFLICT: fixture", { code: "WORKSPACE_TASK_RECOVERY_CLAIM_CONFLICT" }));
+  await assert.rejects(
+    coordinationFailure.registered.get("recover_repo_task").handler({ profile_id: "profile-failure", task_id: coordinationFailureId }),
+    (error) => expectCode(error, "WORKSPACE_TASK_RECOVERY_CLAIM_CONFLICT")
+  );
+  assert.deepEqual(coordinationFailure.operationOrder, ["recover-coordination"]);
+  assert.equal(coordinationFailure.counters.prepare, 0, "WorkerJob must not be prepared before coordination recovery commits");
+
+  const concurrentRecovery = makeFixture({ profileId: "", requireRepoTask: false });
+  const concurrentRecoveryId = "cpt_181818181818181818181818";
+  concurrentRecovery.jobs.set(concurrentRecoveryId, makeJob({ jobId: concurrentRecoveryId, workerId: "profile-concurrent-recovery", status: "failed", kind: "code", scope: "all_allowed", root: "" }));
+  let releaseRecovery;
+  concurrentRecovery.setRecoveryBarrier({ promise: new Promise((resolve) => { releaseRecovery = resolve; }) });
+  const firstRecovery = concurrentRecovery.registered.get("recover_repo_task").handler({ profile_id: "profile-concurrent-recovery", task_id: concurrentRecoveryId });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const secondRecovery = concurrentRecovery.registered.get("recover_repo_task").handler({ profile_id: "profile-concurrent-recovery", task_id: concurrentRecoveryId });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(concurrentRecovery.counters.recoverWorkspace, 1);
+  assert.equal(concurrentRecovery.counters.prepare, 0);
+  releaseRecovery();
+  const [firstTerminalRecovery, secondTerminalRecovery] = await Promise.all([firstRecovery, secondRecovery]);
+  assert.equal(firstTerminalRecovery.structuredContent.recovered, true);
+  assert.equal(secondTerminalRecovery.structuredContent.recovery_deduplicated, true);
+  assert.equal(concurrentRecovery.counters.recoverWorkspace, 1);
+  assert.equal(concurrentRecovery.counters.prepare, 1);
+
   // BEGIN: Manager-prepared code task, memory status, and exact runtime binding.
   const beginFixture = makeFixture({ profileId: "profile-a", requireRepoTask: true });
+  assert.equal(beginFixture.registered.has("recover_repo_task"), false, "terminal recovery must remain Manager-only");
   const beginId = "cpt_222222222222222222222222";
   beginFixture.runtime.rememberExpectedRepoTask("profile-a", { taskId: beginId, root: repoRoot, scope: "workspace" });
   const begun = await beginFixture.registered.get("begin_repo_task").handler({

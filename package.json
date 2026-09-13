@@ -76,6 +76,7 @@
     "send-trace:smoke": "tsx scripts/send-trace-regression.mts",
     "flight-recorder:smoke": "npm run build && node scripts/browser-flight-recorder-smoke.mjs",
     "task-restart-recovery:smoke": "node scripts/task-restart-recovery-smoke.mjs",
+    "terminal-recovery:smoke": "npm run build && node scripts/repo-task-tools-smoke.mjs && node scripts/prepared-worker-recovery-smoke.mjs && node scripts/terminal-all-allowed-recovery-smoke.mjs",
     "subagent:live": "node scripts/opencode-subagent-live-smoke.mjs",
     "audit:live": "node scripts/native-audit-live-smoke.mjs",
     "browser:e2e": "node scripts/browser-agent-live-e2e.mjs",

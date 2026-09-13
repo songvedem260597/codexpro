@@ -3153,8 +3153,10 @@ async function sendProfileRequestUnlocked(payload) {
     }
     if (adjustmentAccepted || recoveryAccepted) {
       requestScope = workerJob.scope === "all_allowed" ? "all_allowed" : "workspace";
-      if (requestScope === "workspace" && workerJob.root) {
+      if ((requestScope === "workspace" || recoveryAccepted) && workerJob.root) {
         initialWorkspaceRoot = path.resolve(String(workerJob.root));
+        if (!fs.existsSync(initialWorkspaceRoot) || !fs.statSync(initialWorkspaceRoot).isDirectory()) throw new Error("Workspace đã bind cho task phục hồi không còn tồn tại.");
+        if (!allowedRoots.some((root) => pathInside(initialWorkspaceRoot, root))) throw new Error("Workspace đã bind cho task phục hồi nằm ngoài vùng được CodexPro cấp quyền.");
         selectedProject = { root: initialWorkspaceRoot };
       }
     } else if (adjustmentRequested) {
@@ -3192,7 +3194,17 @@ async function sendProfileRequestUnlocked(payload) {
   } else {
     sendTrace("task_gate_completed", { send_trace_id: sendTraceId, ipc_call_id: ipcCallId, profile_id: profileId, conversation_id: newChat ? "" : conversationId, task_id: taskId, gate_mode: recoveryAccepted ? "recovery_active_task" : "adjustment_active_task" });
   }
-  const taskScopeLines = codexProWorkspaceExpanded
+  const taskScopeLines = recoveryAccepted && initialWorkspaceRoot
+    ? [
+        `Worktree authoritative của task hiện có đã được CodexPro Manager khôi phục và bind: ${initialWorkspaceRoot}`,
+        `Task ID bắt buộc: ${taskId}`,
+        existingWorkerJobStatus === "prepared"
+          ? `BẮT BUỘC gọi tool MCP CodexPro "codexpro" với action="begin_repo_task" và args={"task_id":"${taskId}","task_title":"<giữ nguyên tên task đã lưu>","task_kind":"code","task_size":"<giữ nguyên task size đã lưu>","root":"${initialWorkspaceRoot.replace(/\\/g, "\\\\")}","scope":"${requestScope}"} trước khi dùng tool workspace.`
+          : "Task gate đã running: không gọi begin_repo_task lần nữa; tiếp tục dùng đúng worktree authoritative ở trên.",
+        "Không chọn repo/root khác, không tạo task ID mới, không tạo worktree mới và không gọi prepare_repo_task; lifecycle recovery chính thức đã chuẩn bị chính task này.",
+        "Sau begin_repo_task, tiếp tục từ provenance/checkpoint hiện có và chỉ sửa code nếu reconciliation phát hiện conflict thật sự."
+      ]
+    : codexProWorkspaceExpanded
     ? [
         `Workspace chính đã được CodexPro Manager chọn cho yêu cầu này: ${selectedProject.root}`,
         "Vì workspace chính là CodexPro, Manager tự kèm quyền truy cập TẤT CẢ VÙNG ĐƯỢC CẤP QUYỀN để có thể đọc/đối chiếu source tham chiếu bên ngoài repo chính khi cần.",
@@ -3251,6 +3263,7 @@ async function sendProfileRequestUnlocked(payload) {
         existingWorkerJobStatus === "prepared"
           ? `Task đang được chuẩn bị lại để tiếp tục: hãy gọi begin_repo_task đúng Task ID ${taskId} với task title/kind/workspace đã lưu trước khi dùng tool workspace.`
           : "Task đã begin_repo_task: không gọi begin_repo_task lần nữa và không thay đổi task gate hiện tại.",
+        ...taskScopeLines,
         "Hãy kiểm tra trạng thái workspace/repo hiện tại, không lặp lại thao tác đã hoàn thành, rồi tiếp tục từ checkpoint gần nhất trong nội dung dưới đây.",
         "Chỉ coi task hoàn tất khi phần việc còn lại đã trả phản hồi cuối.",
         ...taskStatusProtocolLines,
@@ -3360,6 +3373,7 @@ async function resumeProfileTask(payload) {
 
   const scope = job.scope === "all_allowed" ? "all_allowed" : "workspace";
   const root = String(job.root || "").trim();
+  let recoveryRoot = root;
   if (scope === "workspace" && !root) throw new Error("Task cũ không còn thông tin workspace để tiếp tục an toàn.");
   let workerContexts = [];
   try {
@@ -3373,14 +3387,32 @@ async function resumeProfileTask(payload) {
   } catch {
     workerContexts = [];
   }
-  if (["failed", "cancelled", "blocked"].includes(previousStatus)) {
-    const prepared = await localMcpTool(base.config, base.token, "prepare_repo_task", {
-      profile_id: profileId,
-      task_id: taskId,
-      ...(scope === "workspace" ? { root } : {}),
-      scope
-    }, 15000);
-    if (prepared?.prepared !== true || String(prepared?.task_id || "") !== taskId) throw new Error("CodexPro không thể chuẩn bị lại task cũ để tiếp tục.");
+  const codeTask = String(workerJobField(job, "kind", "kind") || "") === "code";
+  const lifecycleEvents = Array.isArray(job.events) ? job.events : [];
+  const lastFailedFinalization = lifecycleEvents.map((entry) => (
+    entry?.type === "finalized" && String(entry?.details?.outcome || entry?.details?.status || "") === "failed" ? 1 : 0
+  )).lastIndexOf(1);
+  const lastTerminalRecovery = lifecycleEvents.map((entry) => entry?.type === "terminal_recovery_prepared" ? 1 : 0).lastIndexOf(1);
+  const preparedFailedLifecycle = previousStatus === "prepared" && codeTask && lastFailedFinalization > lastTerminalRecovery;
+  if (["failed", "cancelled", "blocked"].includes(previousStatus) || preparedFailedLifecycle) {
+    if ((previousStatus === "failed" && codeTask) || preparedFailedLifecycle) {
+      const recovered = await localMcpTool(base.config, base.token, "recover_repo_task", {
+        profile_id: profileId,
+        task_id: taskId
+      }, 30000);
+      recoveryRoot = String(recovered?.worktree_root || recovered?.root || "").trim();
+      if (recovered?.recovered !== true || recovered?.prepared !== true || String(recovered?.task_id || "") !== taskId || String(recovered?.profile_id || "") !== profileId || !recoveryRoot) {
+        throw new Error("CodexPro không thể khôi phục authoritative lifecycle cho task cũ.");
+      }
+    } else {
+      const prepared = await localMcpTool(base.config, base.token, "prepare_repo_task", {
+        profile_id: profileId,
+        task_id: taskId,
+        ...(scope === "workspace" ? { root } : {}),
+        scope
+      }, 15000);
+      if (prepared?.prepared !== true || String(prepared?.task_id || "") !== taskId) throw new Error("CodexPro không thể chuẩn bị lại task cũ để tiếp tục.");
+    }
   }
 
   const result = await sendProfileRequest({
@@ -3391,7 +3423,7 @@ async function resumeProfileTask(payload) {
     text: workerJobResumeCheckpointText(job, workerContexts),
     recoveryReason,
     scope,
-    projectRoot: scope === "workspace" ? root : "",
+    projectRoot: recoveryRoot,
     workspaceCandidates: [],
     requireIdleProfile: !hangRecovery
   });

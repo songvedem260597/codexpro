@@ -324,6 +324,10 @@ export type ResolvedWorkspaceTaskRoot = {
   task: WorkspaceTaskRecord;
 };
 
+export type RecoveredWorkspaceTask = ResolvedWorkspaceTaskRoot & {
+  worktreeHead: string;
+};
+
 function persistedWorkspaceTaskMatches(taskId: string): ResolvedWorkspaceTaskRoot[] {
   let entries: fs.Dirent[] = [];
   try {
@@ -592,7 +596,186 @@ export async function verifyWorkspaceTaskResume(context: WorkspaceTaskContext): 
       details: { task_id: context.taskId, workspace_root: root, worktree_root: recordedWorktree }
     });
   }
+  const worktreeHead = await currentHead(recordedWorktree);
+  const recordedCheckpoint = task.commitShas.at(-1);
+  if (recordedCheckpoint && worktreeHead !== recordedCheckpoint) {
+    throw new CodexProError("WORKSPACE_TASK_HEAD_MISMATCH: task worktree HEAD no longer matches its latest recorded commit.", {
+      code: "WORKSPACE_TASK_HEAD_MISMATCH",
+      details: { task_id: context.taskId, expected_head: recordedCheckpoint, current_head: worktreeHead || null }
+    });
+  }
   return { ...task, worktreeRoot: canonicalRoot(recordedWorktree) };
+}
+
+function rootsOverlap(left: string, right: string): boolean {
+  const relative = path.relative(canonicalRoot(left), canonicalRoot(right));
+  return !relative || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+async function verifyFailedWorkspaceTaskRecovery(
+  resolved: ResolvedWorkspaceTaskRoot,
+  workerId: string
+): Promise<RecoveredWorkspaceTask> {
+  const { root, task } = resolved;
+  if (task.status === "completed") {
+    throw new CodexProError(`WORKSPACE_TASK_RECOVERY_COMPLETED: ${task.taskId} is completed and cannot be recovered.`, {
+      code: "WORKSPACE_TASK_RECOVERY_COMPLETED",
+      details: { task_id: task.taskId, workspace_root: root }
+    });
+  }
+  if (task.status !== "failed") {
+    throw new CodexProError(`WORKSPACE_TASK_RECOVERY_NOT_FAILED: ${task.taskId} is ${task.status}, not failed.`, {
+      code: "WORKSPACE_TASK_RECOVERY_NOT_FAILED",
+      details: { task_id: task.taskId, workspace_root: root, status: task.status }
+    });
+  }
+  if (normalizeTaskOwner(task.workerId) !== normalizeTaskOwner(workerId)) {
+    throw new CodexProError("WORKSPACE_TASK_RECOVERY_OWNER_MISMATCH: workspace task belongs to another worker.", {
+      code: "WORKSPACE_TASK_RECOVERY_OWNER_MISMATCH",
+      details: { task_id: task.taskId, expected_worker_id: task.workerId, received_worker_id: workerId, workspace_root: root }
+    });
+  }
+
+  const recordedWorktree = String(task.worktreeRoot || "").trim();
+  if (!recordedWorktree || !fs.existsSync(recordedWorktree)) {
+    throw new CodexProError(`WORKSPACE_TASK_RECOVERY_WORKTREE_MISSING: recorded worktree is missing for ${task.taskId}.`, {
+      code: "WORKSPACE_TASK_RECOVERY_WORKTREE_MISSING",
+      details: { task_id: task.taskId, worktree_root: recordedWorktree || null, workspace_root: root }
+    });
+  }
+  const expectedWorktree = worktreeDir(root, task.taskId);
+  if (!sameFsPath(recordedWorktree, expectedWorktree)) {
+    throw new CodexProError("WORKSPACE_TASK_RECOVERY_WORKTREE_MISMATCH: recorded worktree path does not match the task identity.", {
+      code: "WORKSPACE_TASK_RECOVERY_WORKTREE_MISMATCH",
+      details: { task_id: task.taskId, worktree_root: recordedWorktree, expected_worktree_root: expectedWorktree }
+    });
+  }
+  const canonicalWorktree = canonicalRoot(recordedWorktree);
+  const top = await gitText(canonicalWorktree, ["rev-parse", "--show-toplevel"]);
+  if (!top || !sameFsPath(top, canonicalWorktree)) {
+    throw new CodexProError("WORKSPACE_TASK_RECOVERY_WORKTREE_INVALID: recorded worktree is not the original Git worktree.", {
+      code: "WORKSPACE_TASK_RECOVERY_WORKTREE_INVALID",
+      details: { task_id: task.taskId, worktree_root: recordedWorktree, git_toplevel: top || null }
+    });
+  }
+  const branch = await currentBranch(canonicalWorktree);
+  if (!task.worktreeBranch || branch !== task.worktreeBranch) {
+    throw new CodexProError("WORKSPACE_TASK_RECOVERY_BRANCH_MISMATCH: task worktree branch changed.", {
+      code: "WORKSPACE_TASK_RECOVERY_BRANCH_MISMATCH",
+      details: { task_id: task.taskId, expected_branch: task.worktreeBranch || null, current_branch: branch || null }
+    });
+  }
+  const resolveGitDir = (cwd: string, value: string) => canonicalRoot(path.isAbsolute(value) ? value : path.resolve(cwd, value));
+  const primaryCommonDirRaw = await gitText(root, ["rev-parse", "--git-common-dir"]);
+  const worktreeCommonDirRaw = await gitText(canonicalWorktree, ["rev-parse", "--git-common-dir"]);
+  if (!primaryCommonDirRaw || !worktreeCommonDirRaw
+    || !sameFsPath(resolveGitDir(root, primaryCommonDirRaw), resolveGitDir(canonicalWorktree, worktreeCommonDirRaw))) {
+    throw new CodexProError("WORKSPACE_TASK_RECOVERY_REPOSITORY_MISMATCH: task worktree is no longer attached to the original repository.", {
+      code: "WORKSPACE_TASK_RECOVERY_REPOSITORY_MISMATCH",
+      details: { task_id: task.taskId, workspace_root: root, worktree_root: recordedWorktree }
+    });
+  }
+  const worktreeHead = await currentHead(canonicalWorktree);
+  if (!worktreeHead) {
+    throw new CodexProError("WORKSPACE_TASK_RECOVERY_HEAD_MISSING: task worktree HEAD could not be resolved.", {
+      code: "WORKSPACE_TASK_RECOVERY_HEAD_MISSING",
+      details: { task_id: task.taskId, worktree_root: recordedWorktree }
+    });
+  }
+  const recordedCheckpoint = task.commitShas.at(-1);
+  if (recordedCheckpoint && worktreeHead !== recordedCheckpoint) {
+    throw new CodexProError("WORKSPACE_TASK_RECOVERY_HEAD_MISMATCH: task worktree HEAD no longer matches its latest recorded commit.", {
+      code: "WORKSPACE_TASK_RECOVERY_HEAD_MISMATCH",
+      details: { task_id: task.taskId, expected_head: recordedCheckpoint, current_head: worktreeHead }
+    });
+  }
+  return { root, task: { ...task, worktreeRoot: canonicalWorktree }, worktreeHead };
+}
+
+export async function recoverWorkspaceTask(input: {
+  taskId: string;
+  workerId: string;
+}): Promise<RecoveredWorkspaceTask> {
+  const resolved = resolveWorkspaceTaskRootByTaskId({
+    taskId: input.taskId,
+    workerId: input.workerId,
+    requireUniqueMatch: true
+  });
+  const verified = await verifyFailedWorkspaceTaskRecovery(resolved, input.workerId);
+  const expectedTask = JSON.stringify(verified.task);
+  const release = await acquireStateLock(verified.root);
+  let recoveredTask: WorkspaceTaskRecord;
+  try {
+    const state = readState(verified.root);
+    cleanupStaleState(state);
+    const task = state.tasks[input.taskId];
+    if (!task || JSON.stringify({ ...task, worktreeRoot: task.worktreeRoot ? canonicalRoot(task.worktreeRoot) : undefined }) !== expectedTask) {
+      throw new CodexProError("WORKSPACE_TASK_RECOVERY_CHANGED: task changed during recovery verification; retry after checking its owner.", {
+        code: "WORKSPACE_TASK_RECOVERY_CHANGED",
+        details: { task_id: input.taskId, workspace_root: verified.root, status: task?.status || "missing" }
+      });
+    }
+    const lockedWorktreeBranch = await currentBranch(verified.task.worktreeRoot!);
+    const lockedWorktreeHead = await currentHead(verified.task.worktreeRoot!);
+    if (lockedWorktreeBranch !== verified.task.worktreeBranch || lockedWorktreeHead !== verified.worktreeHead) {
+      throw new CodexProError("WORKSPACE_TASK_RECOVERY_GIT_CHANGED: task worktree identity changed during recovery verification.", {
+        code: "WORKSPACE_TASK_RECOVERY_GIT_CHANGED",
+        details: {
+          task_id: task.taskId,
+          expected_branch: verified.task.worktreeBranch,
+          current_branch: lockedWorktreeBranch || null,
+          expected_head: verified.worktreeHead,
+          current_head: lockedWorktreeHead || null
+        }
+      });
+    }
+
+    for (const other of Object.values(state.tasks)) {
+      if (other.taskId === task.taskId || other.status !== "running") continue;
+      const otherRoot = other.worktreeRoot || verified.root;
+      if (normalizeTaskOwner(other.workerId) === normalizeTaskOwner(task.workerId)
+        || rootsOverlap(task.worktreeRoot!, otherRoot) || rootsOverlap(otherRoot, task.worktreeRoot!)) {
+        throw new CodexProError("WORKSPACE_TASK_RECOVERY_WRITER_CONFLICT: another active task may write this worktree or owns this worker.", {
+          code: "WORKSPACE_TASK_RECOVERY_WRITER_CONFLICT",
+          details: { task_id: task.taskId, other_task_id: other.taskId }
+        });
+      }
+    }
+    for (const relPath of uniquePaths(task.claimedPaths)) {
+      const owner = claimOwner(state, relPath);
+      if (owner && owner !== task.taskId) {
+        throw new CodexProError("WORKSPACE_TASK_RECOVERY_CLAIM_CONFLICT: a task-owned path is claimed by another active task.", {
+          code: "WORKSPACE_TASK_RECOVERY_CLAIM_CONFLICT",
+          details: { task_id: task.taskId, owner_task_id: owner, path: relPath }
+        });
+      }
+    }
+    if (state.integrationLease && state.integrationLease.taskId !== task.taskId) {
+      throw new CodexProError("WORKSPACE_TASK_RECOVERY_INTEGRATION_BUSY: another task owns the live integration lease.", {
+        code: "WORKSPACE_TASK_RECOVERY_INTEGRATION_BUSY",
+        details: { task_id: task.taskId, integration_task_id: state.integrationLease.taskId }
+      });
+    }
+
+    const now = nowIso();
+    for (const relPath of uniquePaths(task.claimedPaths)) {
+      const key = canonicalPathKey(relPath);
+      const existing = state.claims[key];
+      state.claims[key] = { taskId: task.taskId, claimedAt: existing?.claimedAt || now, updatedAt: now };
+    }
+    task.status = "running";
+    delete task.finishedAt;
+    if (["failed", "conflict", "queued", "integrating"].includes(String(task.integrationStatus || ""))) task.integrationStatus = "idle";
+    state.integrationQueue = state.integrationQueue.filter((entry) => entry.taskId !== task.taskId);
+    if (state.integrationLease?.taskId === task.taskId) delete state.integrationLease;
+    task.updatedAt = now;
+    recoveredTask = { ...task, claimedPaths: [...task.claimedPaths], touchedPaths: [...task.touchedPaths], commitShas: [...task.commitShas] };
+    await writeState(verified.root, state);
+  } finally {
+    await release();
+  }
+  await syncWorkspaceTaskTracking(verified.root, recoveredTask!);
+  return { root: verified.root, task: recoveredTask!, worktreeHead: verified.worktreeHead };
 }
 
 // Git verification happens before locking; no long-running subprocess may
