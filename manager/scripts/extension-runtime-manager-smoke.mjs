@@ -5,6 +5,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { extensionIdFromManifestKey } from "../electron/extension-runtime-activation.mjs";
 import {
+  chromeActivationArguments,
   commandLineExtensionRoots,
   createManagerExtensionRuntimeController,
   findChromeProfileBinding,
@@ -102,6 +103,10 @@ try {
     commandLineExtensionRoots(`chrome.exe "--load-extension=${artifactRoot}" --no-first-run`),
     [artifactRoot]
   );
+  const activationArguments = chromeActivationArguments(binding, artifactRoot);
+  assert.ok(activationArguments.includes(`--profile-directory=${binding.profileDirectory}`));
+  assert.ok(activationArguments.includes(`--load-extension=${fs.realpathSync(artifactRoot)}`));
+  assert.ok(activationArguments.includes("--restore-last-session"));
   assert.throws(
     () => selectChromeProcessCohort([...processes, { ...processes[0], ProcessId: 300 }], binding, userDataRoot),
     (error) => error?.code === "EXTENSION_CHROME_PROCESS_AMBIGUOUS"

@@ -196,6 +196,17 @@ export function commandLineExtensionRoots(commandLine) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
+export function chromeActivationArguments(binding, extensionRoot) {
+  return [
+    `--user-data-dir=${binding.userDataRoot}`,
+    `--profile-directory=${binding.profileDirectory}`,
+    `--load-extension=${fs.realpathSync(extensionRoot)}`,
+    "--restore-last-session",
+    "--no-first-run",
+    "--no-default-browser-check"
+  ];
+}
+
 export function selectChromeProcessCohort(processes, binding, defaultUserDataRoot = defaultChromeUserDataRoots()[0]) {
   const rows = (Array.isArray(processes) ? processes : []).map((item) => ({
     processId: Number(item.processId ?? item.ProcessId),
@@ -503,13 +514,7 @@ export function createManagerExtensionRuntimeController(options = {}) {
     if (!managedTestingBrowser || !fs.existsSync(managedTestingBrowser)) {
       throw managerError("EXTENSION_TESTING_BROWSER_MISSING", "Validated Manager Chrome for Testing is unavailable for profile restart.");
     }
-    const args = [
-      `--user-data-dir=${binding.userDataRoot}`,
-      `--profile-directory=${binding.profileDirectory}`,
-      `--load-extension=${fs.realpathSync(extensionRoot)}`,
-      "--no-first-run",
-      "--no-default-browser-check"
-    ];
+    const args = chromeActivationArguments(binding, extensionRoot);
     const child = spawnChrome(managedTestingBrowser, args);
     if (!child || child.pid === undefined) {
       throw managerError("EXTENSION_CHROME_START_FAILED", "Chrome launch did not return a process handle.");
