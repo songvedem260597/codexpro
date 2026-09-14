@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env CODEXPRO_MANAGER_DEV_URL=http://127.0.0.1:5173 electron .\"",
     "build": "vite build",
+    "extension-runtime": "node electron/extension-runtime-activation-cli.mjs",
+    "test:extension-runtime": "node scripts/extension-runtime-manager-smoke.mjs && node scripts/extension-runtime-activation-smoke.mjs",
     "test:startup": "electron scripts/renderer-startup-smoke.cjs",
     "postbuild": "npm run test:startup",
     "test:markdown": "node scripts/markdown-response-smoke.mjs",
