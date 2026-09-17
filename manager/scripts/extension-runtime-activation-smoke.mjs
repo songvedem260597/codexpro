@@ -239,6 +239,21 @@ try {
   await rejectsCode(activateExtensionRuntime(offlineStaleIdentity), "EXTENSION_RUNTIME_AMBIGUOUS");
   assert.equal(offlineStaleIdentity.calls.stop, 0, "offline source bootstrap with a stale live SHA must fail closed");
 
+  // An interrupted activation may leave a lock whose owner PID no longer
+  // exists. The next sanctioned activation must recover that dead-owner lock,
+  // while live-owner locks remain protected by the concurrency test below.
+  const staleLock = makeHarness(path.join(sandbox, "stale-lock"));
+  const staleLockRoot = path.join(staleLock.home, "extension-runtime-slots", PROFILE_ID);
+  fs.mkdirSync(staleLockRoot, { recursive: true });
+  fs.writeFileSync(path.join(staleLockRoot, "activation.lock"), `${JSON.stringify({
+    version: 1,
+    pid: 2147483647,
+    task_id: TASK_ID,
+    acquired_at: new Date().toISOString()
+  })}\n`);
+  const staleLockActivated = await activateExtensionRuntime(staleLock);
+  assert.equal(staleLockActivated.liveSha256, staleLock.shaB, "dead-owner activation lock must be recovered by the controller");
+
   // L: restart failure cannot report activation success and attempts restoration of A.
   const restartFailure = makeHarness(path.join(sandbox, "restart-failure"));
   restartFailure.startProfile = async () => {

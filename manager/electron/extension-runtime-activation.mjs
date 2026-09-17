@@ -168,7 +168,34 @@ function runtimeSlotPaths(home, targetProfileId) {
   };
 }
 
-function acquireProfileLock(paths, request) {
+function activationLockOwnerIsAlive(lockPath) {
+  let lock;
+  try {
+    lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  } catch {
+    return true;
+  }
+  const pid = Number(lock?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    return cause?.code !== "ESRCH";
+  }
+}
+
+function recoverStaleActivationLock(paths) {
+  if (activationLockOwnerIsAlive(paths.lockPath)) return false;
+  try {
+    fs.unlinkSync(paths.lockPath);
+    return true;
+  } catch (cause) {
+    return cause?.code === "ENOENT";
+  }
+}
+
+function acquireProfileLock(paths, request, allowStaleRecovery = true) {
   fs.mkdirSync(paths.profileRoot, { recursive: true });
   let descriptor;
   try {
@@ -181,6 +208,9 @@ function acquireProfileLock(paths, request) {
     })}\n`);
   } catch (cause) {
     if (cause?.code === "EEXIST") {
+      if (allowStaleRecovery && recoverStaleActivationLock(paths)) {
+        return acquireProfileLock(paths, request, false);
+      }
       throw activationError("EXTENSION_ACTIVATION_BUSY", `An extension activation is already running for profile ${paths.profileId}.`);
     }
     throw activationError("EXTENSION_ACTIVATION_LOCK_FAILED", "Could not acquire the extension activation lock.", cause);
