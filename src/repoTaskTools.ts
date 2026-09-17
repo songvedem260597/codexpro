@@ -822,7 +822,19 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
         setActiveRepoTaskForProfile(gateProfileId, activeTask);
       }
       await syncAuthoritativeTaskTracking({ taskId: proof.taskId, rootHint: proof.root, ownerProfile: gateProfileId }).catch(() => undefined);
-      return textResult(withGlobalRules(`# Repo Task Verified\n\nTask: ${proof.taskId}\nRoot: ${proof.root}\nWorkspace: ${proof.workspaceId}\nScope: ${proof.scope}\nCodexGraph: active (${codexGraph.coverage.symbolCount} symbols, ${codexGraph.coverage.relationshipCount} relationships)`, globalRules), {
+      return textResult(withGlobalRules([
+        `# Repo Task Verified`,
+        ``,
+        `Task: ${proof.taskId}`,
+        `Root: ${proof.root}`,
+        `Workspace: ${proof.workspaceId}`,
+        `Scope: ${proof.scope}`,
+        `CodexGraph: active (${codexGraph.coverage.symbolCount} symbols, ${codexGraph.coverage.relationshipCount} relationships)`,
+        ``,
+        `# Mandatory Repository Instructions`,
+        ``,
+        codexContext?.text || "No repository-specific AGENTS.md instructions were loaded."
+      ].join("\n"), globalRules), {
         task_id: proof.taskId,
         task_title: proof.taskTitle,
         task_title_source: "ai",
@@ -855,6 +867,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
         agents_loaded: true,
         agents_files: proof.agentsFiles,
         agents_sha256: proof.agentsSha256,
+        repository_instructions: codexContext?.text || "",
         codexgraph_active: true,
         codexgraph: codexGraph,
         policy_version: durableJob.policyVersion,

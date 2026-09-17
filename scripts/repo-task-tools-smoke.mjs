@@ -398,6 +398,8 @@ try {
   assert.equal(begun.structuredContent.root, path.resolve(repoRoot));
   assert.equal(begun.structuredContent.task_source, "manager");
   assert.equal(begun.structuredContent.codexgraph_active, true);
+  assert.match(begun.structuredContent.repository_instructions, /AGENTS fixture/, "begin_repo_task must return the repository instruction text for worker injection");
+  assert.match(begun.content?.[0]?.text || "", /Mandatory Repository Instructions[\s\S]*AGENTS fixture/, "Chrome tool results must expose repository instructions in the task bootstrap text");
   assert.equal(beginFixture.counters.bootstrap, 1);
   assert.equal(beginFixture.counters.graph, 1);
   assert.equal(beginFixture.counters.context, 1);

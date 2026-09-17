@@ -184,6 +184,7 @@ try {
           global_rules_loaded: true,
           agents_loaded: true,
           agents_files: ["AGENTS.md"],
+          repository_instructions: "# Fixture repository instructions\nFIXTURE_REPO_ONLY_RULE",
           codexgraph_active: true,
           policy_version: "worker-policy-v1",
           task_title: "Đọc tài liệu dự án",
@@ -228,6 +229,7 @@ try {
   assert.equal(completionRequests[0].body.tool_choice, "auto", "thinking models must not receive unsupported tool_choice=required");
   assert.equal(completionRequests[1].body.tools[0].function.name, "read");
   assert.equal(completionRequests[1].body.tools.some((tool) => tool.function.name === "begin_repo_task" || tool.function.name === "finalize_worker_job"), false, "provider must not receive MCP lifecycle tools after bootstrap");
+  assert.match(completionRequests[1].body.messages.filter((message) => message.role === "system").map((message) => message.content).join("\n"), /Mandatory Repository Instructions[\s\S]*FIXTURE_REPO_ONLY_RULE/, "API worker provider prompt must include the current repository instructions");
   assert.match(completionRequests[2].body.messages.findLast((message) => message.role === "tool")?.content || "", /MCP-only content/);
 
   const failingProvider = createOpenAICompatibleProvider({ baseUrl, model: "fixture/error", getApiKey: async () => secret });

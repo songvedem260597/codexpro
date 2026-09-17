@@ -34,6 +34,7 @@ function toolResultText(value, maxChars) {
 
 function bootstrapMessage(result) {
   const job = result?.worker_job && typeof result.worker_job === "object" ? result.worker_job : {};
+  const repositoryInstructions = clean(result?.repository_instructions, 60_000);
   return [
     "CodexPro MCP policy bootstrap succeeded.",
     `Task: ${clean(result?.task_title || job.title, 120)}`,
@@ -44,7 +45,8 @@ function bootstrapMessage(result) {
     `Rules hash: ${clean(result?.global_rules_sha256 || job.rules_hash, 200) || "not required"}`,
     `AGENTS files: ${Array.isArray(result?.agents_files) ? result.agents_files.join(", ") : "not required"}`,
     `CodexGraph: ${result?.codexgraph_active ? "active" : "not required"}`,
-    "All repository actions must use the MCP tools supplied with this conversation."
+    "All repository actions must use the MCP tools supplied with this conversation.",
+    ...(repositoryInstructions ? ["", "# Mandatory Repository Instructions", "", repositoryInstructions] : [])
   ].join("\n");
 }
 
