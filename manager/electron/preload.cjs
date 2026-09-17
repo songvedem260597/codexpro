@@ -58,6 +58,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   logDiagnostic: (payload) => ipcRenderer.send("codexpro:log-diagnostic", payload),
   sendTraceEvent,
   getDiagnosticLogs: (options) => invoke("codexpro:get-diagnostic-logs", options),
+  getSendTrace: (options) => invoke("codexpro:get-send-trace", options),
   getHangWatchDiagnostics: (options) => invoke("codexpro:get-hang-watch-diagnostics", options),
   clearDiagnosticLogs: () => invoke("codexpro:clear-diagnostic-logs"),
   pruneDiagnosticLogs: () => invoke("codexpro:prune-diagnostic-logs"),

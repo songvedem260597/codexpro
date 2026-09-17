@@ -44,6 +44,88 @@ function safeLine(record) {
   return line;
 }
 
+const TRACE_READ_COMPONENTS = ["manager", "bridge"];
+const TRACE_DETAIL_KEYS = [
+  "submission_state", "terminal_outcome", "ack_source", "network_acknowledged",
+  "error_code", "stage_outcome", "tab_status", "tab_loading", "location_path",
+  "target_path_matches", "composer_visible", "composer_selector", "composer_wait_ms",
+  "remaining_deadline_ms", "message_length", "delivered_immediately", "action", "result_kind"
+];
+
+function traceEventStatus(record) {
+  const event = String(record?.event || "");
+  const details = record?.details && typeof record.details === "object" ? record.details : {};
+  const stageOutcome = String(details.stage_outcome || "").toLowerCase();
+  const terminalOutcome = String(details.terminal_outcome || "").toLowerCase();
+  const submissionState = String(details.submission_state || "").toLowerCase();
+  if (event.includes("timeout") || stageOutcome === "timeout") return "TIMEOUT";
+  if (event.includes("error") || event.includes("rejected") || ["error", "failed", "rejected"].includes(stageOutcome) || terminalOutcome === "failed" || (event === "send_finished" && submissionState === "failed")) return "FAIL";
+  if (event.endsWith("_started") || event === "renderer_send_started") return "START";
+  return "PASS";
+}
+
+export async function readSendTraceTimeline(home, options = {}) {
+  const sendTraceId = String(options?.send_trace_id || options?.sendTraceId || "").trim().slice(0, 160);
+  if (!sendTraceId) return { send_trace_id: "", events: [], status: "EMPTY", total_ms: 0, last_successful_stage: "", first_failed_stage: "" };
+  const maxEvents = Math.max(1, Math.min(500, Number(options?.limit) || 250));
+  const records = [];
+  for (const component of TRACE_READ_COMPONENTS) {
+    const current = path.join(home, `send-trace-${component}.jsonl`);
+    for (const candidate of [`${current}.1`, current]) {
+      let text = "";
+      try { text = await fs.promises.readFile(candidate, "utf8"); }
+      catch (error) { if (error?.code !== "ENOENT") throw error; continue; }
+      for (const line of text.split(/\r?\n/)) {
+        if (!line || !line.includes(sendTraceId)) continue;
+        try {
+          const record = JSON.parse(line);
+          if (String(record?.details?.send_trace_id || "") !== sendTraceId) continue;
+          records.push(record);
+        } catch {}
+      }
+    }
+  }
+  records.sort((left, right) => Date.parse(left?.event_at || left?.received_at || 0) - Date.parse(right?.event_at || right?.received_at || 0) || Number(left?.writer_sequence || 0) - Number(right?.writer_sequence || 0));
+  const selected = records.slice(-maxEvents);
+  const startedMs = selected.length ? Date.parse(selected[0]?.event_at || selected[0]?.received_at || 0) : 0;
+  const events = selected.map((record) => {
+    const details = record?.details && typeof record.details === "object" ? record.details : {};
+    const eventMs = Date.parse(record?.event_at || record?.received_at || 0);
+    const relevant = {};
+    for (const key of TRACE_DETAIL_KEYS) if (details[key] !== undefined && details[key] !== "") relevant[key] = details[key];
+    return {
+      timestamp: String(record?.event_at || record?.received_at || ""),
+      delta_ms: Number.isFinite(eventMs) && Number.isFinite(startedMs) ? Math.max(0, eventMs - startedMs) : 0,
+      component: String(details.source_component || record?.writer_component || ""),
+      event: String(record?.event || ""),
+      status: traceEventStatus(record),
+      send_trace_id: sendTraceId,
+      ipc_call_id: String(details.ipc_call_id || ""),
+      attempt_id: String(details.attempt_id || ""),
+      command_id: String(details.command_id || ""),
+      profile_id: String(details.profile_id || ""),
+      conversation_id: String(details.conversation_id || ""),
+      tab_id: Number(details.tab_id) || 0,
+      relevant
+    };
+  });
+  const firstFailure = events.find((event) => event.status === "FAIL" || event.status === "TIMEOUT") || null;
+  const totalMs = events.length > 1 ? Math.max(0, Number(events.at(-1)?.delta_ms || 0)) : 0;
+  const sendFinished = [...events].reverse().find((event) => event.event === "send_finished");
+  const terminalSuccess = sendFinished?.relevant?.terminal_outcome === "success" || sendFinished?.relevant?.submission_state === "submitted";
+  const status = terminalSuccess ? "SUCCESS" : firstFailure ? "FAILURE" : "IN_PROGRESS";
+  const firstFailureIndex = !terminalSuccess && firstFailure ? events.indexOf(firstFailure) : events.length;
+  const lastSuccess = events.slice(0, firstFailureIndex).filter((event) => event.status === "PASS").at(-1) || null;
+  return {
+    send_trace_id: sendTraceId,
+    status,
+    total_ms: totalMs,
+    last_successful_stage: String(lastSuccess?.event || ""),
+    first_failed_stage: terminalSuccess ? "" : String(firstFailure?.event || ""),
+    events
+  };
+}
+
 export function createSendTraceLogger({ home, component, runId }) {
   const startedMono = performance.now();
   const file = path.join(home, `send-trace-${component}.jsonl`);

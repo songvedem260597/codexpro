@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { registerDiagnosticLogIpcHandlers } from "../electron/ipc/diagnostic-log-ipc.mjs";
 import { registerUtilityIpcHandlers } from "../electron/ipc/utility-ipc.mjs";
@@ -12,6 +14,7 @@ const diagnosticLogSource = fs.readFileSync(new URL("../electron/ipc/diagnostic-
 const utilityChannels = ["codexpro:copy", "codexpro:notify"];
 const diagnosticLogChannels = [
   "codexpro:get-diagnostic-logs",
+  "codexpro:get-send-trace",
   "codexpro:get-hang-watch-diagnostics",
   "codexpro:clear-diagnostic-logs",
   "codexpro:prune-diagnostic-logs"
@@ -24,7 +27,7 @@ assert.equal((mainSource.match(/registerUtilityIpcHandlers\(/g) || []).length, 1
 assert.equal((mainSource.match(/registerDiagnosticLogIpcHandlers\(/g) || []).length, 1, "main must register diagnostic-log IPC exactly once");
 assert.equal((mainSource.match(/ipcMain\.handle\(/g) || []).length, 0, "raw ipcMain.handle registrations must stay out of main after extraction");
 assert.equal((utilitySource.match(/ipcMain\.handle\("codexpro:/g) || []).length, utilityChannels.length, "utility registrar must own exactly two raw IPC channels");
-assert.equal((diagnosticLogSource.match(/ipcMain\.handle\("codexpro:/g) || []).length, diagnosticLogChannels.length, "diagnostic-log registrar must own exactly four raw IPC channels");
+assert.equal((diagnosticLogSource.match(/ipcMain\.handle\("codexpro:/g) || []).length, diagnosticLogChannels.length, "diagnostic-log registrar must own exactly the expected raw IPC channels");
 assert.doesNotMatch(utilitySource, /diagnosticIpcHandle/, "utility handlers must remain raw IPC without new diagnostic wrapping");
 assert.doesNotMatch(diagnosticLogSource, /diagnosticIpcHandle/, "diagnostic-log handlers must remain raw IPC without new diagnostic wrapping");
 
@@ -38,6 +41,7 @@ for (const channel of diagnosticLogChannels) assert.equal(diagnosticLogSource.sp
 assert.match(preloadSource, /copyText: \(text\) => invoke\("codexpro:copy", text\)/, "copy preload access must stay unchanged");
 assert.match(preloadSource, /showNotification: \(payload\) => invoke\("codexpro:notify", payload\)/, "notification preload access must stay unchanged");
 assert.match(preloadSource, /getDiagnosticLogs: \(options\) => invoke\("codexpro:get-diagnostic-logs", options\)/, "diagnostic read preload access must stay unchanged");
+assert.match(preloadSource, /getSendTrace: \(options\) => invoke\("codexpro:get-send-trace", options\)/, "send-trace preload access must use the dedicated read-only IPC channel");
 assert.match(preloadSource, /getHangWatchDiagnostics: \(options\) => invoke\("codexpro:get-hang-watch-diagnostics", options\)/, "Hang Watch preload access must stay read-only");
 assert.match(preloadSource, /clearDiagnosticLogs: \(\) => invoke\("codexpro:clear-diagnostic-logs"\)/, "diagnostic clear preload access must stay unchanged");
 assert.match(preloadSource, /pruneDiagnosticLogs: \(\) => invoke\("codexpro:prune-diagnostic-logs"\)/, "diagnostic prune preload access must stay unchanged");
@@ -97,6 +101,8 @@ assert.deepEqual([...diagnosticCapture.handlers.keys()], diagnosticLogChannels, 
 const readOptions = { hours: 6, limit: 25 };
 assert.deepEqual(await diagnosticCapture.handlers.get("codexpro:get-diagnostic-logs")({}, readOptions), { kind: "read" });
 assert.deepEqual(await diagnosticCapture.handlers.get("codexpro:get-diagnostic-logs")({}, null), { kind: "read" });
+assert.equal((diagnosticLogSource.match(/ipcMain\.handle\("codexpro:get-send-trace"/g) || []).length, 1, "get-send-trace must be registered exactly once");
+assert.ok(!mainSource.includes('ipcMain.handle("codexpro:get-send-trace"'), "main must not duplicate-register get-send-trace");
 assert.deepEqual(await diagnosticCapture.handlers.get("codexpro:clear-diagnostic-logs")({}), { kind: "clear" });
 assert.deepEqual(await diagnosticCapture.handlers.get("codexpro:prune-diagnostic-logs")({}), { kind: "prune" });
 assert.deepEqual(diagnosticCalls, [
@@ -104,7 +110,68 @@ assert.deepEqual(diagnosticCalls, [
   ["read", home, {}],
   ["clear", home],
   ["prune", home]
-], "diagnostic-log handlers must preserve home/options forwarding and options fallback");
+], "existing diagnostic-log handlers must preserve home/options forwarding and options fallback");
+
+const traceHome = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-utility-ipc-trace-"));
+try {
+  const traceId = "send_utility_ipc_forwarding";
+  const traceLines = [
+    {
+      event: "ipc_accepted",
+      event_at: "2026-09-18T00:00:00.000Z",
+      received_at: "2026-09-18T00:00:00.000Z",
+      writer_component: "manager",
+      writer_sequence: 1,
+      details: { send_trace_id: traceId, ipc_call_id: "ipc-forwarding" }
+    },
+    {
+      event: "send_finished",
+      event_at: "2026-09-18T00:00:00.100Z",
+      received_at: "2026-09-18T00:00:00.100Z",
+      writer_component: "manager",
+      writer_sequence: 2,
+      details: { send_trace_id: traceId, ipc_call_id: "ipc-forwarding", submission_state: "submitted", terminal_outcome: "success" }
+    }
+  ];
+  fs.writeFileSync(path.join(traceHome, "send-trace-manager.jsonl"), traceLines.map((record) => JSON.stringify(record)).join("\n") + "\n", "utf8");
+
+  const traceCapture = captureHandlers();
+  registerDiagnosticLogIpcHandlers({
+    ipcMain: traceCapture.ipcMain,
+    codexProHome: traceHome,
+    readDiagnosticLogs: async () => ({ kind: "read" }),
+    clearDiagnosticLogs: async () => ({ kind: "clear" }),
+    pruneDiagnosticLogs: async () => ({ kind: "prune" })
+  });
+  const traceOptions = { send_trace_id: traceId, limit: 1 };
+  const traceResult = await traceCapture.handlers.get("codexpro:get-send-trace")({}, traceOptions);
+  assert.equal(traceResult.send_trace_id, traceId, "get-send-trace must forward the requested correlation id");
+  assert.equal(traceResult.events.length, 1, "get-send-trace must forward reader options such as limit");
+  assert.equal(traceResult.events[0]?.event, "send_finished", "trace reader must return the bounded latest event requested through IPC");
+  assert.equal(traceResult.status, "SUCCESS", "trace handler must preserve the reader result");
+
+  const traceErrorHome = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-utility-ipc-trace-error-"));
+  try {
+    fs.mkdirSync(path.join(traceErrorHome, "send-trace-manager.jsonl"));
+    const traceFailureCapture = captureHandlers();
+    registerDiagnosticLogIpcHandlers({
+      ipcMain: traceFailureCapture.ipcMain,
+      codexProHome: traceErrorHome,
+      readDiagnosticLogs: async () => ({ kind: "read" }),
+      clearDiagnosticLogs: async () => ({ kind: "clear" }),
+      pruneDiagnosticLogs: async () => ({ kind: "prune" })
+    });
+    await assert.rejects(
+      () => traceFailureCapture.handlers.get("codexpro:get-send-trace")({}, { send_trace_id: traceId }),
+      /EISDIR|EPERM|illegal operation|is a directory/i,
+      "send-trace reader errors must propagate through IPC"
+    );
+  } finally {
+    fs.rmSync(traceErrorHome, { recursive: true, force: true });
+  }
+} finally {
+  fs.rmSync(traceHome, { recursive: true, force: true });
+}
 
 const diagnosticFailureCapture = captureHandlers();
 registerDiagnosticLogIpcHandlers({

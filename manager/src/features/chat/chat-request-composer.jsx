@@ -3,7 +3,14 @@ import { formatFileSize } from "../../file-size.js";
 
 function SendDebugEvidence({ evidence }) {
   if (!evidence) return null;
+  const trace = evidence.trace && typeof evidence.trace === "object" ? evidence.trace : null;
+  const traceEvents = Array.isArray(trace?.events) ? trace.events : [];
   const rows = [
+    ["Correlation", evidence.sendTraceId || trace?.send_trace_id || "—"],
+    ["Trace status", trace?.status || "—"],
+    ["Total time", trace ? `${Number(trace.total_ms) || 0} ms` : "—"],
+    ["Last success", trace?.last_successful_stage || "—"],
+    ["First failure", trace?.first_failed_stage || "—"],
     ["Attempt", evidence.attemptId || "—"],
     ["Submission", evidence.state || "—"],
     ["Path", evidence.path || "—"],
@@ -22,6 +29,30 @@ function SendDebugEvidence({ evidence }) {
       <div className="send-debug-grid">
         {rows.map(([label, value]) => <div className="send-debug-row" key={label}><strong>{label}</strong><code>{String(value)}</code></div>)}
       </div>
+      {traceEvents.length > 0 && (
+        <>
+          <div className="send-debug-trace-head">
+            <strong>Full send trace</strong>
+            <button type="button" className="button secondary" onClick={() => void window.codexpro?.copyText?.(JSON.stringify(trace, null, 2))}>Copy trace</button>
+          </div>
+          <ol className="send-debug-timeline send-trace-timeline">
+            {traceEvents.map((item, index) => {
+              const relevant = item?.relevant && typeof item.relevant === "object"
+                ? Object.entries(item.relevant).map(([key, value]) => `${key}=${String(value)}`).join(" · ")
+                : "";
+              const ids = [item.ipc_call_id && `ipc=${item.ipc_call_id}`, item.attempt_id && `attempt=${item.attempt_id}`, item.command_id && `command=${item.command_id}`, item.tab_id && `tab=${item.tab_id}`].filter(Boolean).join(" · ");
+              return (
+                <li key={`${item.timestamp || index}-${item.component || "trace"}-${item.event || index}`}>
+                  <time>{item.timestamp ? new Date(item.timestamp).toLocaleTimeString("vi-VN", { hour12: false, fractionalSecondDigits: 3 }) : "—"}</time>
+                  <code>{item.status || "EVENT"}</code>
+                  <strong>{item.event || "event"}</strong>
+                  <span>{` +${Number(item.delta_ms) || 0}ms · ${item.component || "unknown"}`}{ids ? ` · ${ids}` : ""}{relevant ? ` · ${relevant}` : ""}</span>
+                </li>
+              );
+            })}
+          </ol>
+        </>
+      )}
       {evidence.evidence?.length > 0 && (
         <ol className="send-debug-timeline">
           {evidence.evidence.map((item, index) => (

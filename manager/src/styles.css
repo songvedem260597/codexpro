@@ -529,6 +529,13 @@ section { margin-bottom: 38px; }
 .send-debug-timeline { margin: 0; padding: 8px 12px 10px 30px; border-top: 1px solid #223047; }
 .send-debug-timeline li { margin: 4px 0; padding-left: 3px; }
 .send-debug-timeline time, .send-debug-timeline code { margin-right: 7px; color: #79a7ff; }
+.send-debug-trace-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-top: 1px solid #223047; background: #0d1520; }
+.send-debug-trace-head strong { color: #d8e4f6; font-size: 11px; text-transform: uppercase; }
+.send-debug-trace-head .button { min-height: 28px; padding: 4px 9px; font-size: 11px; }
+.send-trace-timeline { max-height: 280px; overflow: auto; }
+.send-trace-timeline li { display: grid; grid-template-columns: auto auto minmax(130px, auto) 1fr; gap: 6px; align-items: baseline; }
+.send-trace-timeline li > strong { color: #d8e4f6; font-size: 11px; }
+.send-trace-timeline li > span { min-width: 0; overflow-wrap: anywhere; color: #91a0b8; }
 .request-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 11px; }
 .request-card-foot > span { color: #687489; font-size: 12px; }
 .request-card-actions { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }

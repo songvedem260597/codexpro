@@ -81,8 +81,27 @@
     }
     prepareSteps.limit_scan_ms = Date.now() - prepareStartedAt;
 
+    const composerWaitStartedAt = Date.now();
+    const composerReadyDeadline = Math.min(deadlineAt || Date.now() + 5000, Date.now() + 5000);
     let composer = findComposer();
-    if (!composer) return { ok: false, error: 'Không tìm thấy ô nhập đang hiển thị trong đoạn chat.' };
+    while (!composer && !expired() && targetMatches(expectedConversationId) && location.origin === 'https://chatgpt.com' && Date.now() < composerReadyDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      composer = findComposer();
+    }
+    prepareSteps.composer_wait_ms = Date.now() - composerWaitStartedAt;
+    const readiness = {
+      composer_visible: Boolean(composer),
+      composer_selector: composer?.id === 'prompt-textarea' ? '#prompt-textarea' : '',
+      location_path: String(location.pathname || '').slice(0, 180),
+      target_path_matches: targetMatches(expectedConversationId),
+      composer_wait_ms: prepareSteps.composer_wait_ms,
+      remaining_deadline_ms: deadlineAt ? Math.max(0, deadlineAt - Date.now()) : 0
+    };
+    if (expired()) return { ok: false, error: 'Lần chuẩn bị text đã hết hạn khi chờ composer.', expired: true, cleanup_skipped: true, ...readiness };
+    if (location.origin !== 'https://chatgpt.com' || !targetMatches(expectedConversationId)) {
+      return { ok: false, error: 'CONVERSATION_CHANGED: Tab không còn ở đúng conversation.', target_changed: true, cleanup_skipped: true, ...readiness };
+    }
+    if (!composer) return { ok: false, error: 'Không tìm thấy ô nhập đang hiển thị trong đoạn chat.', ...readiness };
     let root = rootFor(composer);
     const staleAttemptId = String(composer.dataset.codexproDraftAttempt || root?.dataset?.codexproAttachmentAttempt || '');
     if (staleAttemptId && staleAttemptId !== attemptId) {

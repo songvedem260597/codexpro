@@ -199,6 +199,16 @@ export function useChatSendActions({
       renderer_pre_send_ms: Math.max(0, endAt - sendRequestEnteredAt),
       click_to_send_api_ms: Number.isFinite(acceptedAt) ? Math.max(0, endAt - acceptedAt) : 0
     });
+    const readFullSendTrace = async () => {
+      if (typeof api.getSendTrace !== "function") return null;
+      let latest = null;
+      for (const delayMs of [0, 40, 120]) {
+        if (delayMs) await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+        try { latest = await api.getSendTrace({ send_trace_id: sendTraceId, limit: 250 }); } catch { return latest; }
+        if (latest?.events?.some((event) => event?.event === "send_finished") || latest?.first_failed_stage) return latest;
+      }
+      return latest;
+    };
     api.sendTraceEvent?.({ event: "renderer_send_started", send_trace_id: sendTraceId, profile_id: String(profile?.profile_id || ""), ...rendererTiming(sendRequestEnteredAt) });
     const conversations = profileRequestChats(profile);
     const defaultTarget = conversations.find((chat) => chat.active)?.id ?? conversations[0]?.id;
@@ -361,7 +371,7 @@ export function useChatSendActions({
       api.sendTraceEvent?.({ event: "renderer_send_api_invoked", send_trace_id: sendTraceId, profile_id: String(profile?.profile_id || ""), ...rendererTiming(sendApiInvokedAt) });
       const sendPromise = api.sendProfileRequest({ send_trace_id: sendTraceId, profileId: profile.profile_id, conversationId: newChat ? "" : conversationId, targetId: newChat ? undefined : requestedTab?.id, newChat, allowBusyFollowup: !newChat, taskMode: logicalAdjustment ? "adjustment" : "new", previousTaskId: logicalAdjustment?.taskId || "", scope: allAllowedScope ? "all_allowed" : "workspace", projectRoot: allAllowedScope ? "" : projectRoot, workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [], text, attachments });
       const result = await sendPromise;
-      const debugEvidence = sendDebugEvidence(result);
+      const debugEvidence = { ...sendDebugEvidence(result), sendTraceId, trace: await readFullSendTrace() };
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: debugEvidence }));
       if (Object.prototype.hasOwnProperty.call(window, "__codexproSmokeSendTarget")) window.__codexproSmokeSendTarget = debugEvidence;
       const submissionState = String(result?.submission_state || (result?.network_acknowledged ? "submitted" : "uncertain"));
@@ -478,7 +488,7 @@ export function useChatSendActions({
       const sendAcked = sendErrorDetails?.network_acknowledged === true || nestedSendErrorDetails?.network_acknowledged === true;
       const sendUncertain = !sendAcked && /BRIDGE_TIMEOUT|EXTENSION_HEARTBEAT_LOST/.test(String(err?.code || sendErrorDetails?.code || ""));
       logRendererDiagnostic(api, sendUncertain ? "warn" : "error", "chat", sendAcked ? "Đã xác nhận gửi, lỗi xử lý sau ACK" : sendUncertain ? "Trạng thái gửi ChatGPT chưa xác định" : `Gửi yêu cầu thất bại: ${message}`, { action: "send-request", profile_id: profile.profile_id, conversation_id: conversationId, project_root: projectRoot, submission_state: sendAcked ? "submitted" : sendUncertain ? "uncertain" : "failed", network_acknowledged: sendAcked, error: err });
-      const debugEvidence = sendDebugEvidence({}, err);
+      const debugEvidence = { ...sendDebugEvidence({}, err), sendTraceId, trace: await readFullSendTrace() };
       setRequestSendEvidence((current) => ({ ...current, [profile.profile_id]: debugEvidence }));
       if (Object.prototype.hasOwnProperty.call(window, "__codexproSmokeSendTarget")) window.__codexproSmokeSendTarget = debugEvidence;
       const conversationLimitReached = !newChat && message.includes("CONVERSATION_LIMIT_REACHED:");

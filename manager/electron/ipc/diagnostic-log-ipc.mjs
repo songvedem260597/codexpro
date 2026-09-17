@@ -1,4 +1,5 @@
 import { readManagerHangWatchDiagnostics } from "../manager-hang-watch-diagnostics.mjs";
+import { readSendTraceTimeline } from "../send-trace-log.mjs";
 
 export function registerDiagnosticLogIpcHandlers({
   ipcMain,
@@ -14,6 +15,7 @@ export function registerDiagnosticLogIpcHandlers({
   if (typeof pruneDiagnosticLogs !== "function") throw new Error("Diagnostic log IPC registration requires pruneDiagnosticLogs.");
 
   ipcMain.handle("codexpro:get-diagnostic-logs", (_event, options) => readDiagnosticLogs(codexProHome, options || {}));
+  ipcMain.handle("codexpro:get-send-trace", (_event, options) => readSendTraceTimeline(codexProHome, options || {}));
   ipcMain.handle("codexpro:get-hang-watch-diagnostics", (_event, options) => readManagerHangWatchDiagnostics({
     codexProHome,
     liveState: typeof getHangWatchLiveState === "function" ? getHangWatchLiveState() : null,
