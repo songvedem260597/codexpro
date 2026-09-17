@@ -201,6 +201,44 @@ try {
     []
   );
 
+  // A safely disabled source worker is the sanctioned first-bootstrap state:
+  // the source root remains known from Chrome preferences, but no live bridge
+  // connection exists. Activation must start the Manager-owned isolated
+  // runtime from that trusted offline source identity.
+  const offlineBootstrap = makeHarness(path.join(sandbox, "offline-bootstrap"));
+  offlineBootstrap.runtime.connectionCount = 0;
+  offlineBootstrap.runtime.liveSha256 = "";
+  const offlineInspect = offlineBootstrap.inspectRuntime;
+  offlineBootstrap.inspectRuntime = async () => ({
+    ...await offlineInspect(),
+    runtimeKind: offlineBootstrap.runtime.connectionCount === 0 ? "source-profile" : "manager-owned-isolated"
+  });
+  const offlineStart = offlineBootstrap.startProfile;
+  offlineBootstrap.startProfile = async (args) => {
+    await offlineStart(args);
+    offlineBootstrap.runtime.connectionCount = 1;
+  };
+  const offlineActivated = await activateExtensionRuntime(offlineBootstrap);
+  assert.equal(offlineActivated.liveSha256, offlineBootstrap.shaB, "offline source bootstrap must activate the exact candidate artifact");
+  assert.equal(offlineBootstrap.calls.stop, 1, "offline source bootstrap must still pass through the sanctioned stop guard before slot replacement");
+  assert.equal(offlineBootstrap.calls.start, 1, "offline source bootstrap must start exactly one Manager-owned isolated runtime");
+  assert.equal(offlineBootstrap.runtime.connectionCount, 1, "offline source bootstrap must finish with one live extension connection");
+
+  const offlineWrongKind = makeHarness(path.join(sandbox, "offline-wrong-kind"));
+  offlineWrongKind.runtime.connectionCount = 0;
+  offlineWrongKind.runtime.liveSha256 = "";
+  const offlineWrongKindInspect = offlineWrongKind.inspectRuntime;
+  offlineWrongKind.inspectRuntime = async () => ({ ...await offlineWrongKindInspect(), runtimeKind: "manager-owned-isolated" });
+  await rejectsCode(activateExtensionRuntime(offlineWrongKind), "EXTENSION_RUNTIME_AMBIGUOUS");
+  assert.equal(offlineWrongKind.calls.stop, 0, "zero-connection Manager-owned runtime must fail before stop/replacement");
+
+  const offlineStaleIdentity = makeHarness(path.join(sandbox, "offline-stale-live-identity"));
+  offlineStaleIdentity.runtime.connectionCount = 0;
+  const offlineStaleInspect = offlineStaleIdentity.inspectRuntime;
+  offlineStaleIdentity.inspectRuntime = async () => ({ ...await offlineStaleInspect(), runtimeKind: "source-profile" });
+  await rejectsCode(activateExtensionRuntime(offlineStaleIdentity), "EXTENSION_RUNTIME_AMBIGUOUS");
+  assert.equal(offlineStaleIdentity.calls.stop, 0, "offline source bootstrap with a stale live SHA must fail closed");
+
   // L: restart failure cannot report activation success and attempts restoration of A.
   const restartFailure = makeHarness(path.join(sandbox, "restart-failure"));
   restartFailure.startProfile = async () => {

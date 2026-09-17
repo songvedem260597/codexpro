@@ -392,7 +392,11 @@ export async function activateExtensionRuntime(options) {
     if (!before || String(before.profileId || "") !== verified.targetProfileId) {
       throw activationError("EXTENSION_RUNTIME_PROFILE_MISMATCH", "Pre-activation runtime did not report the requested profile.");
     }
-    if (Number(before.connectionCount) !== 1 || !Array.isArray(before.loadedExtensionRoots) || before.loadedExtensionRoots.length !== 1) {
+    const beforeConnectionCount = Number(before.connectionCount);
+    const offlineSourceBootstrap = beforeConnectionCount === 0
+      && String(before.runtimeKind || "") === "source-profile"
+      && !normalizeSha(before.liveSha256);
+    if ((!offlineSourceBootstrap && beforeConnectionCount !== 1) || !Array.isArray(before.loadedExtensionRoots) || before.loadedExtensionRoots.length !== 1) {
       throw activationError("EXTENSION_RUNTIME_AMBIGUOUS", "Expected exactly one pre-activation extension connection and source root.");
     }
     if (String(before.extensionId || "") !== verified.artifact.extensionId) {
@@ -407,7 +411,7 @@ export async function activateExtensionRuntime(options) {
     if (previous.extensionId !== verified.artifact.extensionId) {
       throw activationError("EXTENSION_IDENTITY_MISMATCH", "Previous and candidate extension ids differ.");
     }
-    if (normalizeSha(before.liveSha256) !== previous.serviceWorkerSha256) {
+    if (!offlineSourceBootstrap && normalizeSha(before.liveSha256) !== previous.serviceWorkerSha256) {
       throw activationError("EXTENSION_PREVIOUS_RUNTIME_SHA_MISMATCH", "Reported live runtime SHA does not match its loaded source.");
     }
 
