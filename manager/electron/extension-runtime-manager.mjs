@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createManagerMcpClient } from "./mcp/manager-mcp-client.mjs";
 import { extensionIdFromManifestKey } from "./extension-runtime-activation.mjs";
 import { runGitProcess, runPowerShellProcess } from "./process-runner.mjs";
@@ -11,6 +11,7 @@ const DEFAULT_PORT = 8793;
 const DEFAULT_LIVE_WAIT_MS = 120_000;
 const PROFILE_STORAGE_SCAN_LIMIT = 64 * 1024 * 1024;
 const PROFILE_STORAGE_FILE_LIMIT = 16 * 1024 * 1024;
+const MANAGED_BROWSER_PROFILE_DIR = "extension-runtime-browser-profiles";
 
 function managerError(code, message, cause) {
   const error = new Error(message, cause ? { cause } : undefined);
@@ -27,6 +28,11 @@ function samePath(left, right) {
   const a = normalizePath(left);
   const b = normalizePath(right);
   return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function isInside(parent, child) {
+  const relative = path.relative(normalizePath(parent), normalizePath(child));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function quotePowerShell(value) {
@@ -118,6 +124,41 @@ function scanContainsProfileId(storageRoot, profileId) {
   return visit(storageRoot);
 }
 
+function seedManagerOwnedExtensionStorage(binding) {
+  const sourceRoot = String(binding?.sourceExtensionStorageRoot || "");
+  const destinationRoot = path.join(binding.profileRoot, "Local Extension Settings", binding.extensionId);
+  if (!sourceRoot || !fs.existsSync(sourceRoot) || !fs.statSync(sourceRoot).isDirectory()) {
+    throw managerError("EXTENSION_SOURCE_PROFILE_STORAGE_MISSING", "Source profile extension storage is unavailable for isolated activation bootstrap.");
+  }
+  if (!scanContainsProfileId(sourceRoot, binding.profileId)) {
+    throw managerError("EXTENSION_SOURCE_PROFILE_ID_MISSING", "Source extension storage does not contain the requested profile identity.");
+  }
+  if (fs.existsSync(destinationRoot)) {
+    if (!scanContainsProfileId(destinationRoot, binding.profileId)) {
+      throw managerError("EXTENSION_MANAGED_PROFILE_ID_MISMATCH", "Existing Manager-owned extension storage belongs to a different profile identity.");
+    }
+    return { destinationRoot, seeded: false };
+  }
+  fs.mkdirSync(path.dirname(destinationRoot), { recursive: true });
+  const stagedRoot = `${destinationRoot}.stage-${randomUUID()}`;
+  try {
+    fs.cpSync(sourceRoot, stagedRoot, {
+      recursive: true,
+      errorOnExist: true,
+      filter: (candidate) => path.basename(candidate).toUpperCase() !== "LOCK" && !fs.lstatSync(candidate).isSymbolicLink()
+    });
+    if (!scanContainsProfileId(stagedRoot, binding.profileId)) {
+      throw managerError("EXTENSION_MANAGED_PROFILE_SEED_FAILED", "Staged extension storage lost the requested profile identity.");
+    }
+    fs.renameSync(stagedRoot, destinationRoot);
+  } catch (cause) {
+    if (fs.existsSync(stagedRoot)) fs.rmSync(stagedRoot, { recursive: true, force: true });
+    if (cause?.code?.startsWith?.("EXTENSION_")) throw cause;
+    throw managerError("EXTENSION_MANAGED_PROFILE_SEED_FAILED", "Could not seed isolated extension storage.", cause);
+  }
+  return { destinationRoot, seeded: true };
+}
+
 function defaultChromeUserDataRoots() {
   const local = String(process.env.LOCALAPPDATA || "");
   if (!local) return [];
@@ -166,6 +207,46 @@ export function findChromeProfileBinding({
   return matches[0];
 }
 
+export function createManagerOwnedChromeBinding({ home, profileId, extensionId, sourceBinding }) {
+  const managerHome = normalizePath(home);
+  const exactProfileId = String(profileId || "").trim();
+  const exactExtensionId = String(extensionId || "").trim();
+  if (!managerHome || !/^[A-Za-z0-9_-]{1,128}$/.test(exactProfileId) || !/^[a-p]{32}$/.test(exactExtensionId)) {
+    throw managerError("EXTENSION_MANAGED_PROFILE_INPUT_INVALID", "Manager-owned browser profile identity is invalid.");
+  }
+  const sourceUserDataValue = String(sourceBinding?.userDataRoot || "").trim();
+  const sourceProfileValue = String(sourceBinding?.profileRoot || "").trim();
+  if (!sourceBinding || !sourceUserDataValue || !sourceProfileValue ||
+      String(sourceBinding.profileId || "") !== exactProfileId ||
+      String(sourceBinding.extensionId || "") !== exactExtensionId) {
+    throw managerError("EXTENSION_SOURCE_PROFILE_BINDING_INVALID", "Authoritative source profile binding is missing or inconsistent.");
+  }
+  const sourceUserDataRoot = normalizePath(sourceUserDataValue);
+  const sourceProfileRoot = normalizePath(sourceProfileValue);
+  const managedProfilesRoot = path.join(managerHome, MANAGED_BROWSER_PROFILE_DIR);
+  const userDataRoot = path.join(managedProfilesRoot, exactProfileId, "user-data");
+  const profileDirectory = "Default";
+  const profileRoot = path.join(userDataRoot, profileDirectory);
+  if (!isInside(managedProfilesRoot, userDataRoot) || samePath(userDataRoot, sourceUserDataRoot) ||
+      isInside(sourceUserDataRoot, userDataRoot) || isInside(userDataRoot, sourceUserDataRoot)) {
+    throw managerError("EXTENSION_REAL_USER_DATA_FORBIDDEN", "Chrome for Testing cannot use or nest inside a real Chrome User Data root.");
+  }
+  return {
+    managerOwned: true,
+    managerHome,
+    profileId: exactProfileId,
+    extensionId: exactExtensionId,
+    userDataRoot,
+    profileDirectory,
+    profileRoot,
+    securePreferencesPath: path.join(profileRoot, "Secure Preferences"),
+    sourceUserDataRoot,
+    sourceProfileRoot,
+    sourceProfileDirectory: String(sourceBinding.profileDirectory || ""),
+    sourceExtensionStorageRoot: path.join(sourceProfileRoot, "Local Extension Settings", exactExtensionId)
+  };
+}
+
 export function readChromeLoadedExtensionRoot(binding) {
   let preferences;
   try {
@@ -197,6 +278,14 @@ export function commandLineExtensionRoots(commandLine) {
 }
 
 export function chromeActivationArguments(binding, extensionRoot) {
+  const managedProfilesRoot = path.join(normalizePath(binding?.managerHome), MANAGED_BROWSER_PROFILE_DIR);
+  if (binding?.managerOwned !== true || !binding?.managerHome ||
+      !isInside(managedProfilesRoot, binding?.userDataRoot) ||
+      samePath(binding?.userDataRoot, binding?.sourceUserDataRoot) ||
+      isInside(binding?.sourceUserDataRoot, binding?.userDataRoot) ||
+      isInside(binding?.userDataRoot, binding?.sourceUserDataRoot)) {
+    throw managerError("EXTENSION_REAL_USER_DATA_FORBIDDEN", "Refusing to launch an alternate Chrome binary against real Chrome User Data.");
+  }
   return [
     `--user-data-dir=${binding.userDataRoot}`,
     `--profile-directory=${binding.profileDirectory}`,
@@ -221,7 +310,10 @@ export function selectChromeProcessCohort(processes, binding, defaultUserDataRoo
     return defaultUserDataRoot && samePath(binding.userDataRoot, defaultUserDataRoot);
   });
   if (candidates.length !== 1) {
-    throw managerError("EXTENSION_CHROME_PROCESS_AMBIGUOUS", `Expected one Chrome browser process for the profile data root; found ${candidates.length}.`);
+    throw managerError(
+      candidates.length ? "EXTENSION_CHROME_PROCESS_AMBIGUOUS" : "EXTENSION_CHROME_PROCESS_MISSING",
+      `Expected one Chrome browser process for the profile data root; found ${candidates.length}.`
+    );
   }
   const main = candidates[0];
   const selected = new Set([main.processId]);
@@ -306,6 +398,7 @@ export function createManagerExtensionRuntimeController(options = {}) {
   });
   let runtimeConfig = options.runtimeConfig || null;
   let mcp = options.mcp || null;
+  let sourceProfileBinding = null;
   let profileBinding = null;
   const managedTestingBrowserCandidate = normalizePath(
     options.activationBrowserExecutable || path.join(home, "chrome-for-testing", "current", "chrome.exe")
@@ -331,12 +424,24 @@ export function createManagerExtensionRuntimeController(options = {}) {
     return mcp;
   }
 
-  function bindingFor(profileId) {
-    if (!profileBinding || profileBinding.profileId !== profileId) {
-      profileBinding = findChromeProfileBinding({
+  function sourceBindingFor(profileId) {
+    if (!sourceProfileBinding || sourceProfileBinding.profileId !== profileId) {
+      sourceProfileBinding = findChromeProfileBinding({
         profileId,
         extensionId,
         userDataRoots: options.userDataRoots
+      });
+    }
+    return sourceProfileBinding;
+  }
+
+  function bindingFor(profileId) {
+    if (!profileBinding || profileBinding.profileId !== profileId) {
+      profileBinding = createManagerOwnedChromeBinding({
+        home,
+        profileId,
+        extensionId,
+        sourceBinding: sourceBindingFor(profileId)
       });
     }
     return profileBinding;
@@ -387,10 +492,19 @@ export function createManagerExtensionRuntimeController(options = {}) {
   async function inspectRuntimeOnce(profileId) {
     const call = await ensureMcp();
     const binding = bindingFor(profileId);
+    const sourceBinding = sourceBindingFor(profileId);
     const processes = await (options.listChromeProcesses ? options.listChromeProcesses() : listChromeProcesses(runPowerShell));
-    const cohort = selectChromeProcessCohort(processes, binding, options.defaultUserDataRoot);
-    const commandLineRoots = (samePath(cohort.executablePath, managedTestingBrowserCandidate)
-      ? commandLineExtensionRoots(cohort.main.commandLine)
+    let managedCohort = null;
+    try {
+      managedCohort = selectChromeProcessCohort(processes, binding, "");
+    } catch (error) {
+      if (error?.code !== "EXTENSION_CHROME_PROCESS_MISSING") throw error;
+    }
+    if (managedCohort && !samePath(managedCohort.executablePath, managedTestingBrowser || managedTestingBrowserCandidate)) {
+      throw managerError("EXTENSION_MANAGED_BROWSER_IDENTITY_MISMATCH", "Manager-owned browser profile is running under an unexpected executable.");
+    }
+    const commandLineRoots = (managedCohort
+      ? commandLineExtensionRoots(managedCohort.main.commandLine)
       : [])
       .filter((candidate) => {
         try {
@@ -400,9 +514,10 @@ export function createManagerExtensionRuntimeController(options = {}) {
         }
       })
       .map((candidate) => fs.realpathSync(candidate));
-    const loadedExtensionRoots = commandLineRoots.length
-      ? commandLineRoots
-      : [readChromeLoadedExtensionRoot(binding)];
+    if (managedCohort && commandLineRoots.length !== 1) {
+      throw managerError("EXTENSION_MANAGED_RUNTIME_AMBIGUOUS", "Manager-owned browser must load exactly one matching extension slot.");
+    }
+    const loadedExtensionRoots = managedCohort ? commandLineRoots : [readChromeLoadedExtensionRoot(sourceBinding)];
     const profiles = await call("browser_control", { action: "list_profiles" }, 15_000);
     const matches = connectedProfileMatches(profiles, profileId);
     let tabs = {};
@@ -416,7 +531,10 @@ export function createManagerExtensionRuntimeController(options = {}) {
       connectionCount: matches.length,
       liveSha256: String(tabs?.runtime_identity?.artifact_sha256 || "").toLowerCase(),
       extensionVersion: String(tabs?.runtime_identity?.extension_version_label || ""),
-      runtimeBuildId: String(tabs?.runtime_identity?.runtime_build_id || "")
+      runtimeBuildId: String(tabs?.runtime_identity?.runtime_build_id || ""),
+      runtimeKind: managedCohort ? "manager-owned-isolated" : "source-profile",
+      managerOwnedUserDataRoot: binding.userDataRoot,
+      sourceUserDataRoot: sourceBinding.userDataRoot
     };
   }
 
@@ -449,7 +567,7 @@ export function createManagerExtensionRuntimeController(options = {}) {
   async function inspectChromeProcessCohort(profileId) {
     const binding = bindingFor(profileId);
     const processes = await (options.listChromeProcesses ? options.listChromeProcesses() : listChromeProcesses(runPowerShell));
-    return selectChromeProcessCohort(processes, binding, options.defaultUserDataRoot);
+    return selectChromeProcessCohort(processes, binding, "");
   }
 
   async function prepareProfile(profileId) {
@@ -483,9 +601,15 @@ export function createManagerExtensionRuntimeController(options = {}) {
       throw managerError("EXTENSION_TESTING_BROWSER_IDENTITY_MISMATCH", "Manager browser runtime is not an official Google Chrome for Testing executable.");
     }
     managedTestingBrowser = candidate;
+    fs.mkdirSync(binding.profileRoot, { recursive: true });
+    const seededStorage = seedManagerOwnedExtensionStorage(binding);
     return {
       profileId,
       profileDirectory: binding.profileDirectory,
+      userDataRoot: binding.userDataRoot,
+      sourceUserDataRoot: binding.sourceUserDataRoot,
+      isolation: "manager-owned-user-data",
+      extensionStorageSeeded: seededStorage.seeded,
       executablePath: candidate,
       productVersion: String(identity.productVersion)
     };
@@ -495,7 +619,24 @@ export function createManagerExtensionRuntimeController(options = {}) {
     if (process.platform !== "win32" && options.allowNonWindows !== true) {
       throw managerError("EXTENSION_ACTIVATION_WINDOWS_REQUIRED", "Live Manager extension activation currently requires Windows Chrome.");
     }
-    const cohort = await inspectChromeProcessCohort(profileId);
+    let cohort;
+    try {
+      cohort = await inspectChromeProcessCohort(profileId);
+    } catch (error) {
+      if (error?.code !== "EXTENSION_CHROME_PROCESS_MISSING") throw error;
+      const call = await ensureMcp();
+      const profiles = await call("browser_control", { action: "list_profiles" }, 15_000);
+      if (connectedProfileMatches(profiles, profileId).length) {
+        throw managerError(
+          "EXTENSION_SOURCE_PROFILE_SHUTDOWN_REQUIRED",
+          "Close or disable the source CodexPro Chrome profile before isolated activation; Manager will not terminate real Chrome."
+        );
+      }
+      return { alreadyStopped: true, isolation: "manager-owned-user-data" };
+    }
+    if (!samePath(cohort.executablePath, managedTestingBrowser || managedTestingBrowserCandidate)) {
+      throw managerError("EXTENSION_MANAGED_BROWSER_IDENTITY_MISMATCH", "Refusing to stop a browser outside the Manager-owned isolated runtime.");
+    }
     await (options.stopChromeProcesses
       ? options.stopChromeProcesses(cohort.processIds)
       : stopChromeProcesses(cohort.processIds, runPowerShell));
@@ -503,7 +644,7 @@ export function createManagerExtensionRuntimeController(options = {}) {
     while (Date.now() < deadline) {
       const remaining = await (options.listChromeProcesses ? options.listChromeProcesses() : listChromeProcesses(runPowerShell));
       const liveIds = new Set(remaining.map((item) => Number(item.processId ?? item.ProcessId)));
-      if (cohort.processIds.every((pid) => !liveIds.has(pid))) return;
+      if (cohort.processIds.every((pid) => !liveIds.has(pid))) return { stopped: true, isolation: "manager-owned-user-data" };
       await sleep(250);
     }
     throw managerError("EXTENSION_CHROME_STOP_TIMEOUT", "Validated Chrome process cohort did not stop before timeout.");
@@ -514,6 +655,7 @@ export function createManagerExtensionRuntimeController(options = {}) {
     if (!managedTestingBrowser || !fs.existsSync(managedTestingBrowser)) {
       throw managerError("EXTENSION_TESTING_BROWSER_MISSING", "Validated Manager Chrome for Testing is unavailable for profile restart.");
     }
+    seedManagerOwnedExtensionStorage(binding);
     const args = chromeActivationArguments(binding, extensionRoot);
     const child = spawnChrome(managedTestingBrowser, args);
     if (!child || child.pid === undefined) {

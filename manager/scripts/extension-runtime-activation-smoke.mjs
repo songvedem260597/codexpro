@@ -182,6 +182,25 @@ try {
   foreignArtifact.request.expectedSha256 = foreignArtifact.shaA;
   await rejectsCode(activateExtensionRuntime(foreignArtifact), "EXTENSION_ARTIFACT_OUTSIDE_TASK_WORKTREE");
 
+  // A source-profile shutdown refusal happens before the slot changes and must not trigger rollback/start.
+  const sourceShutdownRequired = makeHarness(path.join(sandbox, "source-shutdown-required"));
+  sourceShutdownRequired.stopProfile = async () => {
+    sourceShutdownRequired.calls.stop += 1;
+    const error = new Error("source profile is still online");
+    error.code = "EXTENSION_SOURCE_PROFILE_SHUTDOWN_REQUIRED";
+    throw error;
+  };
+  const shutdownError = await activateExtensionRuntime(sourceShutdownRequired).then(() => null, (error) => error);
+  assert.equal(shutdownError.code, "EXTENSION_SOURCE_PROFILE_SHUTDOWN_REQUIRED");
+  assert.equal(shutdownError.rollback, undefined);
+  assert.equal(sourceShutdownRequired.calls.stop, 1);
+  assert.equal(sourceShutdownRequired.calls.start, 0);
+  assert.deepEqual(sourceShutdownRequired.runtime.loadedRoots, [sourceShutdownRequired.canonicalExtensionRoot]);
+  assert.deepEqual(
+    fs.readdirSync(path.join(sourceShutdownRequired.home, "extension-runtime-slots", PROFILE_ID)),
+    []
+  );
+
   // L: restart failure cannot report activation success and attempts restoration of A.
   const restartFailure = makeHarness(path.join(sandbox, "restart-failure"));
   restartFailure.startProfile = async () => {

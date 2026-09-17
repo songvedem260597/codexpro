@@ -428,9 +428,9 @@ export async function activateExtensionRuntime(options) {
     }
     assertCanonicalUnchanged(verified.canonicalRoot, canonicalDigest);
 
-    runtimeChanged = true;
     await options.stopProfile({ profileId: verified.targetProfileId, reason: "controlled-extension-activation" });
     const displacedRoot = replaceCurrentDirectory(paths, preparedRoot, transactionId);
+    runtimeChanged = true;
     preparedRoot = "";
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
     try {
@@ -501,6 +501,9 @@ export async function activateExtensionRuntime(options) {
     throw error;
   } finally {
     if (preparedRoot && fs.existsSync(preparedRoot)) fs.rmSync(preparedRoot, { recursive: true, force: true });
+    if (!runtimeChanged && previousSnapshot && fs.existsSync(previousSnapshot)) {
+      fs.rmSync(previousSnapshot, { recursive: true, force: true });
+    }
     releaseLock();
   }
 }

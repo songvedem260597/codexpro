@@ -7,6 +7,7 @@ import { extensionIdFromManifestKey } from "../electron/extension-runtime-activa
 import {
   chromeActivationArguments,
   commandLineExtensionRoots,
+  createManagerOwnedChromeBinding,
   createManagerExtensionRuntimeController,
   findChromeProfileBinding,
   parseCodexProTaskArguments,
@@ -47,6 +48,16 @@ function makeProfile(userDataRoot, directory, sourceRoot, profileId = PROFILE_ID
   return profileRoot;
 }
 
+function scanContainsProfileIdForTest(root, profileId) {
+  const needle = Buffer.from(profileId);
+  const visit = (directory) => fs.readdirSync(directory, { withFileTypes: true }).some((entry) => {
+    const absolute = path.join(directory, entry.name);
+    if (entry.isDirectory()) return visit(absolute);
+    return entry.isFile() && fs.readFileSync(absolute).includes(needle);
+  });
+  return visit(root);
+}
+
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-extension-manager-smoke-"));
 try {
   const parsed = parseCodexProTaskArguments(
@@ -73,6 +84,25 @@ try {
   });
   assert.equal(binding.profileDirectory, "Profile 57");
   assert.equal(readChromeLoadedExtensionRoot(binding), fs.realpathSync(canonicalRoot));
+
+  const sourceCookiePath = path.join(binding.profileRoot, "Network", "Cookies");
+  fs.mkdirSync(path.dirname(sourceCookiePath), { recursive: true });
+  fs.writeFileSync(sourceCookiePath, "real-user-cookie-sentinel");
+  const managedHome = path.join(sandbox, "managed-home");
+  const managedBinding = createManagerOwnedChromeBinding({
+    home: managedHome,
+    profileId: PROFILE_ID,
+    extensionId: EXTENSION_ID,
+    sourceBinding: binding
+  });
+  assert.notEqual(managedBinding.userDataRoot, binding.userDataRoot);
+  assert.equal(managedBinding.profileDirectory, "Default");
+  assert.ok(managedBinding.userDataRoot.startsWith(path.resolve(managedHome)));
+  assert.equal(managedBinding.sourceProfileRoot, binding.profileRoot);
+  assert.throws(
+    () => chromeActivationArguments(binding, artifactRoot),
+    (error) => error?.code === "EXTENSION_REAL_USER_DATA_FORBIDDEN"
+  );
 
   const duplicateRoot = path.join(sandbox, "Chrome Beta", "User Data");
   makeProfile(duplicateRoot, "Default", canonicalRoot);
@@ -103,10 +133,13 @@ try {
     commandLineExtensionRoots(`chrome.exe "--load-extension=${artifactRoot}" --no-first-run`),
     [artifactRoot]
   );
-  const activationArguments = chromeActivationArguments(binding, artifactRoot);
-  assert.ok(activationArguments.includes(`--profile-directory=${binding.profileDirectory}`));
+  const activationArguments = chromeActivationArguments(managedBinding, artifactRoot);
+  assert.ok(activationArguments.includes(`--profile-directory=${managedBinding.profileDirectory}`));
+  assert.ok(activationArguments.includes(`--user-data-dir=${managedBinding.userDataRoot}`));
+  assert.ok(!activationArguments.includes(`--user-data-dir=${binding.userDataRoot}`));
   assert.ok(activationArguments.includes(`--load-extension=${fs.realpathSync(artifactRoot)}`));
   assert.ok(activationArguments.includes("--restore-last-session"));
+  assert.equal(fs.readFileSync(sourceCookiePath, "utf8"), "real-user-cookie-sentinel");
   assert.throws(
     () => selectChromeProcessCohort([...processes, { ...processes[0], ProcessId: 300 }], binding, userDataRoot),
     (error) => error?.code === "EXTENSION_CHROME_PROCESS_AMBIGUOUS"
@@ -175,13 +208,20 @@ try {
   // Branded Chrome ignores --load-extension. Do not trust its command line as live provenance.
   assert.equal(runtime.loadedExtensionRoots[0], fs.realpathSync(canonicalRoot));
 
+  let testingProcesses = [...processes];
+  let stoppedTestingProcessIds = [];
   const testingBrowserController = createManagerExtensionRuntimeController({
     home: path.join(sandbox, "testing-browser-home"),
     canonicalExtensionRoot: canonicalRoot,
     runtimeConfig: { root: repositoryRoot, port: 8793, token: "test" },
     mcp: mcpAdapter,
     userDataRoots: [userDataRoot],
-    listChromeProcesses: async () => processes,
+    listChromeProcesses: async () => testingProcesses,
+    stopChromeProcesses: async (processIds) => {
+      stoppedTestingProcessIds = [...processIds];
+      const stopped = new Set(processIds);
+      testingProcesses = testingProcesses.filter((item) => !stopped.has(Number(item.ProcessId)));
+    },
     defaultUserDataRoot: userDataRoot,
     activationBrowserExecutable: executablePath,
     allowNonWindows: true,
@@ -193,8 +233,37 @@ try {
   });
   const preparedBrowser = await testingBrowserController.prepareProfile({ profileId: PROFILE_ID });
   assert.equal(preparedBrowser.executablePath, fs.realpathSync(executablePath));
+  assert.equal(preparedBrowser.isolation, "manager-owned-user-data");
+  assert.notEqual(preparedBrowser.userDataRoot, binding.userDataRoot);
+  assert.equal(fs.readFileSync(sourceCookiePath, "utf8"), "real-user-cookie-sentinel");
+  assert.equal(fs.existsSync(path.join(preparedBrowser.userDataRoot, "Default", "Network", "Cookies")), false);
+  assert.equal(
+    scanContainsProfileIdForTest(
+      path.join(preparedBrowser.userDataRoot, "Default", "Local Extension Settings", EXTENSION_ID),
+      PROFILE_ID
+    ),
+    true
+  );
+  await assert.rejects(
+    testingBrowserController.stopProfile({ profileId: PROFILE_ID }),
+    (error) => error?.code === "EXTENSION_SOURCE_PROFILE_SHUTDOWN_REQUIRED"
+  );
+  assert.deepEqual(stoppedTestingProcessIds, []);
+  testingProcesses.push(
+    {
+      ProcessId: 400,
+      ParentProcessId: 1,
+      CommandLine: `"${executablePath}" "--user-data-dir=${preparedBrowser.userDataRoot}" --profile-directory=Default "--load-extension=${artifactRoot}"`,
+      ExecutablePath: executablePath
+    },
+    { ProcessId: 401, ParentProcessId: 400, CommandLine: `"${executablePath}" --type=renderer`, ExecutablePath: executablePath }
+  );
   const testingRuntime = await testingBrowserController.inspectRuntime(PROFILE_ID);
   assert.equal(testingRuntime.loadedExtensionRoots[0], fs.realpathSync(artifactRoot));
+  assert.equal(testingRuntime.runtimeKind, "manager-owned-isolated");
+  await testingBrowserController.stopProfile({ profileId: PROFILE_ID });
+  assert.deepEqual(stoppedTestingProcessIds, [401, 400]);
+  assert.equal(fs.readFileSync(sourceCookiePath, "utf8"), "real-user-cookie-sentinel");
 
   const wrongBrowserController = createManagerExtensionRuntimeController({
     home: path.join(sandbox, "wrong-browser-home"),
