@@ -85,6 +85,7 @@ try {
   assert.equal(binding.profileDirectory, "Profile 57");
   assert.equal(readChromeLoadedExtensionRoot(binding), fs.realpathSync(canonicalRoot));
 
+  // Guard the real source profile: isolated activation must never copy or mutate browser cookies.
   const sourceCookiePath = path.join(binding.profileRoot, "Network", "Cookies");
   fs.mkdirSync(path.dirname(sourceCookiePath), { recursive: true });
   fs.writeFileSync(sourceCookiePath, "real-user-cookie-sentinel");
