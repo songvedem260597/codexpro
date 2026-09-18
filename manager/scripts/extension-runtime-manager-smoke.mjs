@@ -10,6 +10,7 @@ import {
   createManagerOwnedChromeBinding,
   createManagerExtensionRuntimeController,
   findChromeProfileBinding,
+  managedWorkerLifecycleBootstrapFiles,
   parseCodexProTaskArguments,
   readChromeLoadedExtensionRoot,
   selectChromeProcessCohort
@@ -58,6 +59,15 @@ function scanContainsProfileIdForTest(root, profileId) {
   return visit(root);
 }
 
+function storageTextForTest(root) {
+  return fs.readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name !== "LOCK")
+    .map((entry) => {
+      try { return fs.readFileSync(path.join(root, entry.name)).toString("latin1"); } catch { return ""; }
+    })
+    .join("\n");
+}
+
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "codexpro-extension-manager-smoke-"));
 try {
   const parsed = parseCodexProTaskArguments(
@@ -85,10 +95,22 @@ try {
   assert.equal(binding.profileDirectory, "Profile 57");
   assert.equal(readChromeLoadedExtensionRoot(binding), fs.realpathSync(canonicalRoot));
 
+  assert.throws(
+    () => findChromeProfileBinding({
+      profileId: "wrong-profile-identity",
+      extensionId: EXTENSION_ID,
+      userDataRoots: [userDataRoot]
+    }),
+    (error) => error?.code === "EXTENSION_PROFILE_BINDING_MISSING",
+    "wrong profile identity must fail closed"
+  );
+
   // Guard the real source profile: isolated activation must never copy or mutate browser cookies.
   const sourceCookiePath = path.join(binding.profileRoot, "Network", "Cookies");
   fs.mkdirSync(path.dirname(sourceCookiePath), { recursive: true });
   fs.writeFileSync(sourceCookiePath, "real-user-cookie-sentinel");
+  const sourceStorageFile = path.join(binding.profileRoot, "Local Extension Settings", EXTENSION_ID, "000001.log");
+  const sourceStorageBefore = fs.readFileSync(sourceStorageFile);
   const managedHome = path.join(sandbox, "managed-home");
   const managedBinding = createManagerOwnedChromeBinding({
     home: managedHome,
@@ -209,6 +231,67 @@ try {
   // Branded Chrome ignores --load-extension. Do not trust its command line as live provenance.
   assert.equal(runtime.loadedExtensionRoots[0], fs.realpathSync(canonicalRoot));
 
+  const missingStorageUserDataRoot = path.join(sandbox, "Missing Storage Chrome", "User Data");
+  const missingStorageProfileRoot = makeProfile(missingStorageUserDataRoot, "Profile 57", canonicalRoot);
+  const missingStorageController = createManagerExtensionRuntimeController({
+    home: path.join(sandbox, "missing-storage-managed-home"),
+    canonicalExtensionRoot: canonicalRoot,
+    runtimeConfig: { root: repositoryRoot, port: 8793, token: "test" },
+    mcp: mcpAdapter,
+    userDataRoots: [missingStorageUserDataRoot],
+    listChromeProcesses: async () => [],
+    activationBrowserExecutable: executablePath,
+    allowNonWindows: true,
+    normalizeManagedWorkerLifecycle: async () => {},
+    runPowerShell: async () => ({ stdout: JSON.stringify({
+      productName: "Google Chrome for Testing",
+      productVersion: "152.0.7977.84",
+      companyName: "Google LLC"
+    }) })
+  });
+  await missingStorageController.inspectRuntime(PROFILE_ID);
+  fs.rmSync(path.join(missingStorageProfileRoot, "Local Extension Settings", EXTENSION_ID), { recursive: true, force: true });
+  await assert.rejects(
+    missingStorageController.prepareProfile({ profileId: PROFILE_ID }),
+    (error) => error?.code === "EXTENSION_SOURCE_PROFILE_STORAGE_MISSING",
+    "missing source storage must fail closed"
+  );
+
+  const wrongManagedUserDataRoot = path.join(sandbox, "Wrong Managed Chrome", "User Data");
+  makeProfile(wrongManagedUserDataRoot, "Profile 57", canonicalRoot);
+  const wrongManagedHome = path.join(sandbox, "wrong-managed-home");
+  const wrongManagedStorage = path.join(
+    wrongManagedHome,
+    "extension-runtime-browser-profiles",
+    PROFILE_ID,
+    "user-data",
+    "Default",
+    "Local Extension Settings",
+    EXTENSION_ID
+  );
+  fs.mkdirSync(wrongManagedStorage, { recursive: true });
+  fs.writeFileSync(path.join(wrongManagedStorage, "000001.log"), "different-profile-identity");
+  const wrongManagedController = createManagerExtensionRuntimeController({
+    home: wrongManagedHome,
+    canonicalExtensionRoot: canonicalRoot,
+    runtimeConfig: { root: repositoryRoot, port: 8793, token: "test" },
+    mcp: mcpAdapter,
+    userDataRoots: [wrongManagedUserDataRoot],
+    activationBrowserExecutable: executablePath,
+    allowNonWindows: true,
+    normalizeManagedWorkerLifecycle: async () => {},
+    runPowerShell: async () => ({ stdout: JSON.stringify({
+      productName: "Google Chrome for Testing",
+      productVersion: "152.0.7977.84",
+      companyName: "Google LLC"
+    }) })
+  });
+  await assert.rejects(
+    wrongManagedController.prepareProfile({ profileId: PROFILE_ID }),
+    (error) => error?.code === "EXTENSION_MANAGED_PROFILE_ID_MISMATCH",
+    "Manager-owned wrong identity must fail closed"
+  );
+
   let testingProcesses = [...processes];
   let stoppedTestingProcessIds = [];
   const testingBrowserController = createManagerExtensionRuntimeController({
@@ -226,6 +309,7 @@ try {
     defaultUserDataRoot: userDataRoot,
     activationBrowserExecutable: executablePath,
     allowNonWindows: true,
+    normalizeManagedWorkerLifecycle: async () => {},
     runPowerShell: async () => ({ stdout: JSON.stringify({
       productName: "Google Chrome for Testing",
       productVersion: "152.0.7977.84",
@@ -238,6 +322,7 @@ try {
   assert.notEqual(preparedBrowser.userDataRoot, binding.userDataRoot);
   assert.equal(fs.readFileSync(sourceCookiePath, "utf8"), "real-user-cookie-sentinel");
   assert.equal(fs.existsSync(path.join(preparedBrowser.userDataRoot, "Default", "Network", "Cookies")), false);
+  assert.equal(fs.readFileSync(sourceStorageFile).equals(sourceStorageBefore), true, "prepareProfile must not mutate source extension storage");
   assert.equal(
     scanContainsProfileIdForTest(
       path.join(preparedBrowser.userDataRoot, "Default", "Local Extension Settings", EXTENSION_ID),
@@ -314,6 +399,80 @@ try {
   await assert.rejects(
     wrongOwnerController.loadTask(TASK_ID),
     (error) => error?.code === "EXTENSION_TASK_OWNER_PROVENANCE_MISMATCH"
+  );
+
+  const disabledUserDataRoot = path.join(sandbox, "Chrome Disabled", "User Data");
+  const disabledProfileRoot = makeProfile(disabledUserDataRoot, "Profile 57", canonicalRoot);
+  const disabledSourceStorage = path.join(disabledProfileRoot, "Local Extension Settings", EXTENSION_ID);
+  const disabledSourceLog = path.join(disabledSourceStorage, "000001.log");
+  fs.appendFileSync(
+    disabledSourceLog,
+    Buffer.from("active=false;workerDisablePending=true;workerEnabled=false;")
+  );
+  const disabledSourceBefore = fs.readFileSync(disabledSourceLog);
+  const disabledCookiePath = path.join(disabledProfileRoot, "Network", "Cookies");
+  fs.mkdirSync(path.dirname(disabledCookiePath), { recursive: true });
+  fs.writeFileSync(disabledCookiePath, "disabled-source-cookie-sentinel");
+  const bootstrapFiles = managedWorkerLifecycleBootstrapFiles({
+    manifestKey: KEY,
+    callbackUrl: "http://127.0.0.1:45678/bootstrap-test"
+  });
+  assert.match(bootstrapFiles.script, /workerEnabled:true/);
+  assert.match(bootstrapFiles.script, /workerEnabledUpdatedAt:Date\.now\(\)/);
+  assert.match(bootstrapFiles.script, /workerDisablePending:false/);
+  assert.doesNotMatch(bootstrapFiles.script, /\bactive\s*:/, "isolated bootstrap must not override active routing state");
+
+  const disabledController = createManagerExtensionRuntimeController({
+    home: path.join(sandbox, "disabled-managed-home"),
+    canonicalExtensionRoot: canonicalRoot,
+    runtimeConfig: { root: repositoryRoot, port: 8793, token: "test" },
+    mcp: mcpAdapter,
+    userDataRoots: [disabledUserDataRoot],
+    defaultUserDataRoot: disabledUserDataRoot,
+    activationBrowserExecutable: executablePath,
+    allowNonWindows: true,
+    normalizeManagedWorkerLifecycle: async ({ binding }) => {
+      const managedStorage = path.join(binding.profileRoot, "Local Extension Settings", EXTENSION_ID);
+      const managedLog = path.join(managedStorage, "000001.log");
+      const current = fs.readFileSync(managedLog, "latin1")
+        .replace("workerEnabled=false", "workerEnabled=true ")
+        .replace("workerDisablePending=true", "workerDisablePending=false");
+      fs.writeFileSync(managedLog, Buffer.from(current, "latin1"));
+    },
+    runPowerShell: async () => ({ stdout: JSON.stringify({
+      productName: "Google Chrome for Testing",
+      productVersion: "152.0.7977.84",
+      companyName: "Google LLC"
+    }) })
+  });
+  const preparedDisabled = await disabledController.prepareProfile({ profileId: PROFILE_ID });
+  const disabledManagedStorage = path.join(
+    preparedDisabled.userDataRoot,
+    "Default",
+    "Local Extension Settings",
+    EXTENSION_ID
+  );
+  const disabledManagedText = storageTextForTest(disabledManagedStorage);
+  assert.equal(
+    scanContainsProfileIdForTest(disabledManagedStorage, PROFILE_ID),
+    true,
+    "isolated storage must preserve exact profile identity"
+  );
+  const isolatedCanRegister = !disabledManagedText.includes("workerEnabled=false");
+  assert.equal(
+    isolatedCanRegister,
+    true,
+    "isolated runtime must not inherit source workerEnabled=false because profileInfo/pollLoop suppress bridge registration when disabled"
+  );
+  assert.equal(
+    fs.readFileSync(disabledSourceLog).equals(disabledSourceBefore),
+    true,
+    "seeding must not mutate source extension storage"
+  );
+  assert.equal(
+    fs.readFileSync(disabledCookiePath, "utf8"),
+    "disabled-source-cookie-sentinel",
+    "seeding must not mutate source cookies"
   );
 
   console.log("extension-runtime-manager-smoke: ok");

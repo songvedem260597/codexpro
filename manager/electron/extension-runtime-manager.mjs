@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { createManagerMcpClient } from "./mcp/manager-mcp-client.mjs";
 import { extensionIdFromManifestKey } from "./extension-runtime-activation.mjs";
@@ -12,6 +13,8 @@ const DEFAULT_LIVE_WAIT_MS = 120_000;
 const PROFILE_STORAGE_SCAN_LIMIT = 64 * 1024 * 1024;
 const PROFILE_STORAGE_FILE_LIMIT = 16 * 1024 * 1024;
 const MANAGED_BROWSER_PROFILE_DIR = "extension-runtime-browser-profiles";
+const MANAGED_LIFECYCLE_BOOTSTRAP_DIR = "extension-runtime-storage-bootstrap";
+const MANAGED_LIFECYCLE_BOOTSTRAP_TIMEOUT_MS = 15_000;
 
 function managerError(code, message, cause) {
   const error = new Error(message, cause ? { cause } : undefined);
@@ -41,6 +44,31 @@ function quotePowerShell(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function managedWorkerLifecycleBootstrapFiles({ manifestKey, callbackUrl }) {
+  const key = String(manifestKey || "").trim();
+  const callback = String(callbackUrl || "").trim();
+  if (!key || !/^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]+$/.test(callback)) {
+    throw managerError("EXTENSION_MANAGED_BOOTSTRAP_INPUT_INVALID", "Managed extension lifecycle bootstrap input is invalid.");
+  }
+  return {
+    manifest: JSON.stringify({
+      manifest_version: 3,
+      name: "CodexPro Manager Storage Bootstrap",
+      version: "1.0.0",
+      key,
+      permissions: ["storage"],
+      host_permissions: ["http://127.0.0.1/*"]
+    }, null, 2),
+    html: "<!doctype html><meta charset=\"utf-8\"><script src=\"bootstrap.js\"></script>",
+    script: [
+      "(async()=>{",
+      "  await chrome.storage.local.set({workerEnabled:true,workerEnabledUpdatedAt:Date.now(),workerDisablePending:false});",
+      `  await fetch(${JSON.stringify(callback)},{method:"POST",cache:"no-store"});`,
+      "})().catch(()=>{});"
+    ].join("\n")
+  };
 }
 
 export function parseCodexProTaskArguments(argumentsText = "", tokenFileDefault = "") {
@@ -570,6 +598,82 @@ export function createManagerExtensionRuntimeController(options = {}) {
     return selectChromeProcessCohort(processes, binding, "");
   }
 
+  async function normalizeManagedWorkerLifecycle(binding) {
+    if (typeof options.normalizeManagedWorkerLifecycle === "function") {
+      await options.normalizeManagedWorkerLifecycle({ binding, extensionId });
+      return;
+    }
+    const manifest = JSON.parse(fs.readFileSync(path.join(canonicalExtensionRoot, "manifest.json"), "utf8"));
+    const nonce = randomUUID().replace(/-/g, "");
+    const callbackPath = `/bootstrap-${nonce}`;
+    const bootstrapRoot = path.join(home, MANAGED_LIFECYCLE_BOOTSTRAP_DIR, binding.profileId, nonce);
+    fs.mkdirSync(bootstrapRoot, { recursive: true });
+    let callbackResolve;
+    let callbackReject;
+    let callbackSettled = false;
+    const callbackPromise = new Promise((resolve, reject) => {
+      callbackResolve = resolve;
+      callbackReject = reject;
+    });
+    const server = createServer((request, response) => {
+      if (request.method === "POST" && request.url === callbackPath) {
+        response.statusCode = 204;
+        response.end();
+        if (!callbackSettled) {
+          callbackSettled = true;
+          callbackResolve();
+        }
+        return;
+      }
+      response.statusCode = 404;
+      response.end();
+    });
+    try {
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string" || !Number.isInteger(address.port)) {
+        throw managerError("EXTENSION_MANAGED_BOOTSTRAP_LISTEN_FAILED", "Could not allocate the managed lifecycle bootstrap callback.");
+      }
+      const callbackUrl = `http://127.0.0.1:${address.port}${callbackPath}`;
+      const files = managedWorkerLifecycleBootstrapFiles({ manifestKey: manifest.key, callbackUrl });
+      fs.writeFileSync(path.join(bootstrapRoot, "manifest.json"), files.manifest);
+      fs.writeFileSync(path.join(bootstrapRoot, "bootstrap.html"), files.html);
+      fs.writeFileSync(path.join(bootstrapRoot, "bootstrap.js"), files.script);
+      const args = chromeActivationArguments(binding, bootstrapRoot)
+        .filter((value) => value !== "--restore-last-session");
+      args.push(`chrome-extension://${extensionId}/bootstrap.html`);
+      const child = spawnChrome(managedTestingBrowser, args);
+      if (!child || child.pid === undefined) {
+        throw managerError("EXTENSION_MANAGED_BOOTSTRAP_START_FAILED", "Managed lifecycle bootstrap Chrome did not return a process handle.");
+      }
+      const timer = setTimeout(() => {
+        if (!callbackSettled) {
+          callbackSettled = true;
+          callbackReject(managerError(
+            "EXTENSION_MANAGED_BOOTSTRAP_TIMEOUT",
+            "Timed out normalizing isolated worker lifecycle state."
+          ));
+        }
+      }, MANAGED_LIFECYCLE_BOOTSTRAP_TIMEOUT_MS);
+      try {
+        await callbackPromise;
+      } finally {
+        clearTimeout(timer);
+      }
+    } finally {
+      await new Promise((resolve) => server.close(() => resolve())).catch(() => {});
+      try {
+        await stopProfile({ profileId: binding.profileId });
+      } catch (error) {
+        if (error?.code !== "EXTENSION_CHROME_PROCESS_MISSING") throw error;
+      }
+      fs.rmSync(bootstrapRoot, { recursive: true, force: true });
+    }
+  }
+
   async function prepareProfile(profileId) {
     const binding = bindingFor(profileId);
     let candidate;
@@ -603,6 +707,7 @@ export function createManagerExtensionRuntimeController(options = {}) {
     managedTestingBrowser = candidate;
     fs.mkdirSync(binding.profileRoot, { recursive: true });
     const seededStorage = seedManagerOwnedExtensionStorage(binding);
+    await normalizeManagedWorkerLifecycle(binding);
     return {
       profileId,
       profileDirectory: binding.profileDirectory,
