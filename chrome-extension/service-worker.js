@@ -3058,19 +3058,19 @@ async function execute(command) {
       let trustedClickBaseline=false;
       try{
         const trustedSubmit=await timedSendPhase('trusted_click_ms',()=>promiseWithTimeout(
-          trustedSubmitChatSendButtonTab(tab.id,attemptId,text,(startedAt)=>{generationAckStartedAfterMs=Number(startedAt)||0;}),
+          trustedSubmitChatSendButtonTab(tab.id,attemptId,text,(startedAt)=>{generationAckStartedAfterMs=Number(startedAt)||0;},Math.min(commandDeadlineAt-500,Date.now()+TRUSTED_INPUT_TIMEOUT_MS-250)),
           TRUSTED_INPUT_TIMEOUT_MS,
           'Chrome không phản hồi khi bấm visible Send button.'
         ));
         generationAckStartedAfterMs=Number(trustedSubmit.click_dispatch_started_at)||Date.now();
         trustedClickBaseline=Boolean(trustedSubmit.generating_before_click);
         submitResult={...submitResult,...trustedSubmit,trusted_click_dispatched:Boolean(trustedSubmit.send_button_actually_clicked)};
-        sendAttemptDiagnostics={...sendAttemptDiagnostics,send_button_selector:String(trustedSubmit.send_button_selector||''),send_button_hit_test:Boolean(trustedSubmit.send_button_hit_test),send_button_verified_point_kind:String(trustedSubmit.send_button_verified_point_kind||''),trusted_click_hit_test_evidence:trustedSubmit.trusted_click_hit_test_evidence||null,trusted_click_ms:Number(trustedSubmit.trusted_click_ms)||Number(sendPhaseTimings.trusted_click_ms)||0,send_button_actually_clicked:Boolean(trustedSubmit.send_button_actually_clicked)};
+        sendAttemptDiagnostics={...sendAttemptDiagnostics,send_button_selector:String(trustedSubmit.send_button_selector||''),send_button_hit_test:Boolean(trustedSubmit.send_button_hit_test),send_button_verified_point_kind:String(trustedSubmit.send_button_verified_point_kind||''),trusted_click_hit_test_evidence:trustedSubmit.trusted_click_hit_test_evidence||null,send_control_wait_ms:Number(trustedSubmit.send_control_wait_ms)||0,send_control_disabled_duration_ms:Number(trustedSubmit.send_control_disabled_duration_ms)||0,form_inert_duration_ms:Number(trustedSubmit.form_inert_duration_ms)||0,first_send_ready_at_ms:Number(trustedSubmit.first_send_ready_at_ms)||0,send_control_readiness_timeline:Array.isArray(trustedSubmit.send_control_readiness_timeline)?trustedSubmit.send_control_readiness_timeline:[],trusted_click_ms:Number(trustedSubmit.trusted_click_ms)||Number(sendPhaseTimings.trusted_click_ms)||0,send_button_actually_clicked:Boolean(trustedSubmit.send_button_actually_clicked)};
         postTrace(command, trustedSubmit.send_button_actually_clicked?'submit_dispatched':'submit_error',{attempt_id:attemptId,tab_id:tab.id,conversation_id:newChat?'':conversationId,stage_outcome:trustedSubmit.send_button_actually_clicked?'trusted_send_button':'click_not_confirmed',error_code:trustedSubmit.send_button_actually_clicked?'':'TRUSTED_CLICK_NOT_CONFIRMED'});
       }catch(error){
         const trustedSubmitError=String(error?.message||error).slice(0,300);
         const trustedClickHitTestEvidence=error?.details?.trusted_click_hit_test_evidence&&typeof error.details.trusted_click_hit_test_evidence==='object'?error.details.trusted_click_hit_test_evidence:null;
-        sendAttemptDiagnostics={...sendAttemptDiagnostics,trusted_click_hit_test_evidence:trustedClickHitTestEvidence,send_button_selector:String(trustedClickHitTestEvidence?.send_button_selector||sendAttemptDiagnostics.send_button_selector||''),send_button_hit_test:false};
+        sendAttemptDiagnostics={...sendAttemptDiagnostics,trusted_click_hit_test_evidence:trustedClickHitTestEvidence,send_button_selector:String(trustedClickHitTestEvidence?.send_button_selector||sendAttemptDiagnostics.send_button_selector||''),send_button_hit_test:false,send_control_wait_ms:Number(error?.details?.send_control_wait_ms)||0,send_control_disabled_duration_ms:Number(error?.details?.send_control_disabled_duration_ms)||0,form_inert_duration_ms:Number(error?.details?.form_inert_duration_ms)||0,first_send_ready_at_ms:Number(error?.details?.first_send_ready_at_ms)||0,send_control_readiness_timeline:Array.isArray(error?.details?.send_control_readiness_timeline)?error.details.send_control_readiness_timeline:[]};
         generationAckStartedAfterMs=Number(error?.details?.click_dispatch_started_at)||generationAckStartedAfterMs||0;
         const evidence=generationAckStartedAfterMs?recentChatPostEvidence(tab.id,generationAckStartedAfterMs):[];
         const definitelyNotDispatched=/TRUSTED_CLICK_NOT_DISPATCHED:.*(?:PRE_DISPATCH|HIT_TEST_FAILED)/.test(trustedSubmitError);
@@ -3112,7 +3112,7 @@ async function execute(command) {
         let retryGeneratingBeforeClick=trustedClickBaseline;
         try{
           retryClick=await timedSendPhase('retry_trusted_click_ms',()=>promiseWithTimeout(
-            trustedActivateChatSendButtonTab(tab.id,attemptId,text),
+            trustedActivateChatSendButtonTab(tab.id,attemptId,text,null,Math.min(commandDeadlineAt-500,Date.now()+TRUSTED_INPUT_TIMEOUT_MS-250)),
             TRUSTED_INPUT_TIMEOUT_MS,
             'Chrome không phản hồi khi retry visible Send button.'
           ));
@@ -4345,8 +4345,10 @@ async function restoreChatTabAfterTrustedSend(activation) {
   return {restored:Boolean(restoredTabId||restoredWindowId),restored_tab_id:restoredTabId,restored_window_id:restoredWindowId};
 }
 
-function trustedSendButtonPointPage(attemptId='',expectedText='',armListener=false,allowScroll=true) {
+function trustedSendButtonPointPage(attemptId='',expectedText='',armListener=false,allowScroll=true,expectedPathname='') {
   const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
+  const pathname=String(globalThis.location?.pathname||'');
+  if(expectedPathname&&pathname!==expectedPathname)return {ok:false,error:'Target conversation changed before trusted click.',conversation_changed:true,pathname,expected_pathname:expectedPathname,retryable:false};
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.opacity!=='0';};
   const controlLabel=control=>String(control?.getAttribute?.('aria-label')||control?.innerText||control?.textContent||'').trim();
   const isStopControl=control=>String(control?.getAttribute?.('data-testid')||'').toLowerCase()==='stop-button'||/^(?:stop(?: answering| generating| streaming)?|dừng(?: trả lời)?)$/i.test(controlLabel(control));
@@ -4357,15 +4359,17 @@ function trustedSendButtonPointPage(attemptId='',expectedText='',armListener=fal
     return {tag:String(node.tagName||''),id:String(node.id||''),classes:String(node.className||'').slice(0,500),aria:String(node.getAttribute?.('aria-label')||'').slice(0,300),pointer_events:String(style?.pointerEvents||''),position:String(style?.position||''),z_index:String(style?.zIndex||''),rect:rectValue(rect),element:String(node.outerHTML||'').slice(0,700)};
   };
   const ancestorEvidence=node=>{const items=[];for(let current=node,depth=0;current&&depth<8;current=current.parentElement,depth+=1){const evidence=nodeEvidence(current);if(evidence)items.push({tag:evidence.tag,id:evidence.id,classes:evidence.classes,aria:evidence.aria,position:evidence.position,z_index:evidence.z_index});}return items;};
-  if(visible(document.querySelector('#modal-subscription-failure')))return {ok:false,blocked:true,error:'Modal thanh toán đang chặn nút Send.'};
+  if(visible(document.querySelector('#modal-subscription-failure')))return {ok:false,blocked:true,error:'Modal thanh toán đang chặn nút Send.',pathname,retryable:false};
   const generatingBeforeClick=Array.from(document.querySelectorAll('button,[role="button"]')).some(control=>visible(control)&&isStopControl(control));
   const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
   const composerText=composer?.isContentEditable?String(composer.innerText||composer.textContent||''):String(composer?.value||'');
   const draftOwned=Boolean(composer&&(composer.dataset.codexproDraftAttempt===attemptId||expectedText&&normalized(composerText)===normalized(expectedText)));
-  if(!draftOwned||expectedText&&normalized(composerText)!==normalized(expectedText))return {ok:false,error:'Composer không còn giữ đúng payload của attempt trước trusted click.',composer_matches_payload:false,retryable:false};
+  if(!draftOwned||expectedText&&normalized(composerText)!==normalized(expectedText))return {ok:false,error:'Composer không còn giữ đúng payload của attempt trước trusted click.',composer_matches_payload:false,pathname,retryable:false};
   const composerRect=rectValue(composer?.getBoundingClientRect?.());
   const viewport={width:Number(globalThis.innerWidth)||0,height:Number(globalThis.innerHeight)||0,scroll_x:Number(globalThis.scrollX)||0,scroll_y:Number(globalThis.scrollY)||0};
-  const scopes=[composer.closest('form'),composer.closest('[data-type="unified-composer"]'),composer.parentElement].filter((scope,index,array)=>scope&&array.indexOf(scope)===index);
+  const form=composer.closest('form');
+  const formInert=Boolean(form&&(form.inert===true||form.hasAttribute?.('inert')));
+  const scopes=[form,composer.closest('[data-type="unified-composer"]'),composer.parentElement].filter((scope,index,array)=>scope&&array.indexOf(scope)===index);
   const selectors=['#composer-submit-button','button[data-testid="send-button"]','button[aria-label*="Send" i]','button[aria-label*="Gửi" i]'];
   let firstFailure=null;
   for(const scope of scopes){
@@ -4374,12 +4378,15 @@ function trustedSendButtonPointPage(attemptId='',expectedText='',armListener=fal
       if(!el||isStopControl(el))continue;
       const probe=()=>{
         const rect=el.getBoundingClientRect(),style=getComputedStyle(el);
-        const enabled=!el.disabled&&el.getAttribute('aria-disabled')!=='true'&&!el.hasAttribute('data-visually-disabled');
+        const ariaDisabled=el.getAttribute('aria-disabled')||'';
+        const buttonDisabled=Boolean(el.disabled||el.hasAttribute('data-visually-disabled'));
+        const enabled=!buttonDisabled&&ariaDisabled!=='true';
         const pointerEvents=style.pointerEvents!=='none';
+        const controlInert=Boolean(el.inert===true||el.hasAttribute?.('inert')||el.closest?.('[inert]'));
         const isVisible=rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden'&&style.opacity!=='0';
         const fractions=[[0.5,0.5,'center'],[0.25,0.5,'left-mid'],[0.75,0.5,'right-mid'],[0.5,0.25,'top-mid'],[0.5,0.75,'bottom-mid'],[0.25,0.25,'top-left'],[0.75,0.25,'top-right'],[0.25,0.75,'bottom-left'],[0.75,0.75,'bottom-right']];
         const candidateHits=[];let verified=null;
-        if(isVisible&&enabled&&pointerEvents){
+        if(isVisible&&enabled&&pointerEvents&&!formInert&&!controlInert){
           for(const [fx,fy,kind] of fractions){
             const x=rect.left+rect.width*fx,y=rect.top+rect.height*fy;
             if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>=viewport.width||y>=viewport.height)continue;
@@ -4393,8 +4400,8 @@ function trustedSendButtonPointPage(attemptId='',expectedText='',armListener=fal
         const centerPoint={x:rect.left+rect.width/2,y:rect.top+rect.height/2};
         const centerNode=isVisible?document.elementFromPoint(centerPoint.x,centerPoint.y):null;
         const centerHit=nodeEvidence(centerNode);
-        const evidence={send_button_selector:selector,button_rect:rectValue(rect),center_xy:centerPoint,center_hit_element:String(centerHit?.element||''),center_hit_tag:String(centerHit?.tag||''),center_hit_id:String(centerHit?.id||''),center_hit_classes:String(centerHit?.classes||''),center_hit_aria:String(centerHit?.aria||''),center_hit_ancestors:ancestorEvidence(centerNode),center_hit_pointer_events:String(centerHit?.pointer_events||''),center_hit_position:String(centerHit?.position||''),center_hit_z_index:String(centerHit?.z_index||''),button_pointer_events:String(style.pointerEvents||''),button_disabled:Boolean(el.disabled),button_aria_disabled:String(el.getAttribute('aria-disabled')||''),viewport,composer_rect:composerRect,covering_element_rect:center&&!center.accepted?centerHit?.rect||null:null,candidate_hits:candidateHits,verified_point:verified};
-        return {ok:Boolean(isVisible&&enabled&&pointerEvents&&verified),selector,visible:isVisible,enabled,aria_disabled:el.getAttribute('aria-disabled')||'',pointer_events:pointerEvents,bounds:{x:rect.left,y:rect.top,width:rect.width,height:rect.height},x:verified?.x,y:verified?.y,hit_test:Boolean(verified),verified_point_kind:String(verified?.kind||''),generating_before_click:generatingBeforeClick,retryable:Boolean(isVisible&&enabled&&pointerEvents&&!verified),hit_test_evidence:evidence};
+        const evidence={send_button_selector:selector,button_rect:rectValue(rect),center_xy:centerPoint,center_hit_element:String(centerHit?.element||''),center_hit_tag:String(centerHit?.tag||''),center_hit_id:String(centerHit?.id||''),center_hit_classes:String(centerHit?.classes||''),center_hit_aria:String(centerHit?.aria||''),center_hit_ancestors:ancestorEvidence(centerNode),center_hit_pointer_events:String(centerHit?.pointer_events||''),center_hit_position:String(centerHit?.position||''),center_hit_z_index:String(centerHit?.z_index||''),button_pointer_events:String(style.pointerEvents||''),button_disabled:buttonDisabled,button_aria_disabled:String(ariaDisabled),form_inert:formInert,control_inert:controlInert,viewport,composer_rect:composerRect,covering_element_rect:center&&!center.accepted?centerHit?.rect||null:null,candidate_hits:candidateHits,verified_point:verified};
+        return {ok:Boolean(isVisible&&enabled&&pointerEvents&&!formInert&&!controlInert&&verified),selector,button_exists:true,visible:isVisible,enabled,button_disabled:buttonDisabled,aria_disabled:ariaDisabled,pointer_events:pointerEvents,form_inert:formInert,control_inert:controlInert,composer_matches_payload:true,pathname,bounds:{x:rect.left,y:rect.top,width:rect.width,height:rect.height},x:verified?.x,y:verified?.y,hit_test:Boolean(verified),verified_point_kind:String(verified?.kind||''),generating_before_click:generatingBeforeClick,retryable:Boolean(isVisible&&enabled&&pointerEvents&&!formInert&&!controlInert&&!verified),hit_test_evidence:evidence};
       };
       let readiness=probe();
       if(!readiness.ok&&readiness.retryable&&allowScroll){el.scrollIntoView({block:'nearest',inline:'nearest'});readiness=probe();readiness.scroll_attempted=true;}
@@ -4409,19 +4416,20 @@ function trustedSendButtonPointPage(attemptId='',expectedText='',armListener=fal
     }
   }
   const failure=firstFailure||{};
-  const reason=failure.visible&&failure.enabled&&failure.pointer_events&&!failure.hit_test?'Send button has no verified exposed hit-test point.':!failure.enabled?'Send button is disabled.':'Không tìm thấy nút Send khả dụng bên trong composer.';
-  return {ok:false,error:reason,...failure,ok:false};
+  const reason=failure.form_inert||failure.control_inert?'Composer form or Send button is inert.':failure.visible&&failure.enabled&&failure.pointer_events&&!failure.hit_test?'Send button has no verified exposed hit-test point.':failure.button_exists&&!failure.enabled?'Send button is disabled.':'Không tìm thấy nút Send khả dụng bên trong composer.';
+  return {button_exists:Boolean(failure.button_exists),composer_matches_payload:true,form_inert:formInert,pathname,generating_before_click:generatingBeforeClick,ok:false,error:reason,...failure,ok:false};
 }
 
-async function trustedActivateChatSendButtonTab(tabId,attemptId,expectedText='',onDispatchStarted=null) {
+async function trustedActivateChatSendButtonTab(tabId,attemptId,expectedText='',onDispatchStarted=null,deadlineAt=0) {
   if(!attemptId)throw new Error('Trusted send attempt không hợp lệ.');
   const trustedClickStartedAt=Date.now();
+  const readinessDeadlineAt=Math.min(Number(deadlineAt)||trustedClickStartedAt+8500,trustedClickStartedAt+8500);
   return await withDebuggerTab(tabId,async target=>{
     const encodedAttempt=JSON.stringify(String(attemptId));
     const encodedText=JSON.stringify(String(expectedText||''));
     const probeSource=trustedSendButtonPointPage.toString();
-    const evaluatePoint=async(armListener=false,allowScroll=true)=>{
-      const expression=`(${probeSource})(${encodedAttempt},${encodedText},${armListener?'true':'false'},${allowScroll?'true':'false'})`;
+    const evaluatePoint=async(armListener=false,allowScroll=true,expectedPathname='')=>{
+      const expression=`(${probeSource})(${encodedAttempt},${encodedText},${armListener?'true':'false'},${allowScroll?'true':'false'},${JSON.stringify(String(expectedPathname||''))})`;
       const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression,returnByValue:true});
       if(evaluated?.exceptionDetails){
         const error=new Error('TRUSTED_CLICK_PRE_DISPATCH: Không kiểm tra được nút Send trong page context.');
@@ -4433,24 +4441,32 @@ async function trustedActivateChatSendButtonTab(tabId,attemptId,expectedText='',
     const failedPointError=(point,prefix='TRUSTED_CLICK_HIT_TEST_FAILED')=>{
       const error=new Error(prefix+': '+String(point?.error||'Không tìm được tọa độ nút gửi ChatGPT.'));
       error.code=prefix;
-      error.details={trusted_click_hit_test_evidence:point?.hit_test_evidence||null};
+      error.details={trusted_click_hit_test_evidence:point?.hit_test_evidence||null,send_control_wait_ms:Number(point?.send_control_wait_ms)||0,send_control_disabled_duration_ms:Number(point?.send_control_disabled_duration_ms)||0,form_inert_duration_ms:Number(point?.form_inert_duration_ms)||0,first_send_ready_at_ms:Number(point?.first_send_ready_at_ms)||0,send_control_readiness_timeline:Array.isArray(point?.send_control_readiness_timeline)?point.send_control_readiness_timeline:[],send_control_deadline_expired:Boolean(point?.deadline_expired),conversation_changed:Boolean(point?.conversation_changed),composer_matches_payload:point?.composer_matches_payload!==false};
       return error;
     };
-    let point=null;
-    for(let probeAttempt=0;probeAttempt<3;probeAttempt+=1){
-      point=await evaluatePoint(false,true);
-      if(point?.blocked)throw failedPointError(point,'TRUSTED_CLICK_PRE_DISPATCH');
-      if(point?.ok===true&&point?.hit_test===true&&Number.isFinite(point?.x)&&Number.isFinite(point?.y))break;
-      if(point?.retryable!==true||probeAttempt===2)break;
-      await new Promise(resolve=>setTimeout(resolve,40));
+    const waitForSendControlReady=async(initialPoint,expectedPathname)=>{
+      if(readinessDeadlineAt<=Date.now())return {...initialPoint,error:'Send control readiness deadline expired before wait.',deadline_expired:true,send_control_wait_ms:0,send_control_disabled_duration_ms:0,form_inert_duration_ms:0,first_send_ready_at_ms:0,send_control_readiness_timeline:[]};
+      const expression=`(()=>{const __codexproTrustedSendReadyWaitV1=true;const probe=${probeSource};const attemptId=${encodedAttempt};const expectedText=${encodedText};const expectedPathname=${JSON.stringify(String(expectedPathname||''))};const startedAt=Date.now();const deadlineAt=${JSON.stringify(readinessDeadlineAt)};return new Promise(resolve=>{let finished=false;let observer=null;let deadlineTimer=0;let lastObservedAt=startedAt;let lastDisabled=false;let lastInert=false;let disabledDurationMs=0;let inertDurationMs=0;let lastSignature='';const timeline=[];const listeners=[];const cleanup=()=>{try{observer?.disconnect();}catch{}if(deadlineTimer)clearTimeout(deadlineTimer);for(const [target,type,listener,options] of listeners){try{target.removeEventListener(type,listener,options);}catch{}}};const record=(point,reason)=>{const now=Date.now();const elapsed=Math.max(0,now-lastObservedAt);if(lastDisabled)disabledDurationMs+=elapsed;if(lastInert)inertDurationMs+=elapsed;const disabled=Boolean(point?.button_disabled||point?.enabled===false||point?.aria_disabled==='true');const inert=Boolean(point?.form_inert||point?.control_inert);lastObservedAt=now;lastDisabled=disabled;lastInert=inert;const item={timestamp:now,delta_ms:Math.max(0,now-startedAt),reason,composer_matches_payload:point?.composer_matches_payload!==false,form_inert:Boolean(point?.form_inert),control_inert:Boolean(point?.control_inert),button_exists:Boolean(point?.button_exists),button_visible:Boolean(point?.visible),disabled,aria_disabled:String(point?.aria_disabled||''),pointer_events:Boolean(point?.pointer_events),hit_test:Boolean(point?.hit_test),send_button_selector:String(point?.selector||''),pathname:String(point?.pathname||''),conversation_unchanged:!point?.conversation_changed,generation_stop_control:Boolean(point?.generating_before_click),blocked:Boolean(point?.blocked)};const signature=JSON.stringify([item.composer_matches_payload,item.form_inert,item.control_inert,item.button_exists,item.button_visible,item.disabled,item.aria_disabled,item.pointer_events,item.hit_test,item.send_button_selector,item.pathname,item.conversation_unchanged,item.generation_stop_control,item.blocked]);if(signature!==lastSignature&&timeline.length<32){timeline.push(item);lastSignature=signature;}return now;};const finish=(point,reason,now)=>{if(finished)return;finished=true;cleanup();resolve({...point,readiness_wait_reason:reason,send_control_wait_ms:Math.max(0,now-startedAt),send_control_disabled_duration_ms:Math.max(0,disabledDurationMs),form_inert_duration_ms:Math.max(0,inertDurationMs),first_send_ready_at_ms:point?.ok===true?Math.max(0,now-startedAt):0,send_control_readiness_timeline:timeline});};const check=reason=>{if(finished)return;let point;try{point=probe(attemptId,expectedText,false,false,expectedPathname);}catch(error){point={ok:false,error:'Send readiness probe failed: '+String(error?.message||error),retryable:false};}const now=record(point,reason);if(point?.ok===true&&point?.hit_test===true&&Number.isFinite(point?.x)&&Number.isFinite(point?.y)){finish(point,'ready',now);return;}if(point?.blocked||point?.conversation_changed||point?.composer_matches_payload===false){finish(point,'fatal',now);return;}if(now>=deadlineAt){finish({...point,error:'Send control readiness deadline expired: '+String(point?.error||'control never became ready'),deadline_expired:true},'deadline',now);}};const wake=()=>check('event');if(typeof MutationObserver==='function'&&document.documentElement){observer=new MutationObserver(()=>check('mutation'));observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['disabled','aria-disabled','inert','style','class','data-visually-disabled']});}for(const [target,type,options] of [[globalThis,'resize',true],[globalThis,'scroll',true],[document,'transitionend',true],[document,'animationend',true]]){if(target?.addEventListener){target.addEventListener(type,wake,options);listeners.push([target,type,wake,options]);}}deadlineTimer=setTimeout(()=>check('deadline'),Math.max(1,deadlineAt-Date.now()));check('initial');});})()`;
+      const evaluated=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});
+      if(evaluated?.exceptionDetails){const error=new Error('TRUSTED_CLICK_PRE_DISPATCH: Không chờ được Send-control readiness trong page context.');error.details={trusted_click_hit_test_evidence:initialPoint?.hit_test_evidence||null};throw error;}
+      return evaluated?.result?.value||initialPoint;
+    };
+    let point=await evaluatePoint(false,true);
+    if(point?.blocked)throw failedPointError(point,'TRUSTED_CLICK_PRE_DISPATCH');
+    if(point?.conversation_changed||point?.composer_matches_payload===false)throw failedPointError(point,'TRUSTED_CLICK_PRE_DISPATCH');
+    const expectedPathname=String(point?.pathname||'');
+    let readinessTelemetry={send_control_wait_ms:0,send_control_disabled_duration_ms:0,form_inert_duration_ms:0,first_send_ready_at_ms:0,send_control_readiness_timeline:[]};
+    if(point?.ok!==true||point?.hit_test!==true||!Number.isFinite(point?.x)||!Number.isFinite(point?.y)){
+      point=await waitForSendControlReady(point,expectedPathname);
+      readinessTelemetry={send_control_wait_ms:Number(point?.send_control_wait_ms)||0,send_control_disabled_duration_ms:Number(point?.send_control_disabled_duration_ms)||0,form_inert_duration_ms:Number(point?.form_inert_duration_ms)||0,first_send_ready_at_ms:Number(point?.first_send_ready_at_ms)||0,send_control_readiness_timeline:Array.isArray(point?.send_control_readiness_timeline)?point.send_control_readiness_timeline:[]};
     }
+    if(point?.blocked)throw failedPointError(point,'TRUSTED_CLICK_PRE_DISPATCH');
+    if(point?.conversation_changed||point?.composer_matches_payload===false)throw failedPointError(point,'TRUSTED_CLICK_PRE_DISPATCH');
     if(point?.ok!==true||point?.hit_test!==true||!Number.isFinite(point?.x)||!Number.isFinite(point?.y))throw failedPointError(point);
-    let finalPoint=await evaluatePoint(true,false);
-    if(finalPoint?.blocked)throw failedPointError(finalPoint,'TRUSTED_CLICK_PRE_DISPATCH');
-    if(finalPoint?.ok!==true||finalPoint?.hit_test!==true||!Number.isFinite(finalPoint?.x)||!Number.isFinite(finalPoint?.y)){
-      if(finalPoint?.retryable===true){await new Promise(resolve=>setTimeout(resolve,32));finalPoint=await evaluatePoint(true,false);}
-    }
-    if(finalPoint?.ok!==true||finalPoint?.hit_test!==true||!Number.isFinite(finalPoint?.x)||!Number.isFinite(finalPoint?.y))throw failedPointError(finalPoint);
+    const finalPoint=await evaluatePoint(true,false,expectedPathname);
+    if(finalPoint?.blocked||finalPoint?.conversation_changed||finalPoint?.composer_matches_payload===false)throw failedPointError({...finalPoint,...readinessTelemetry},'TRUSTED_CLICK_PRE_DISPATCH');
+    if(finalPoint?.ok!==true||finalPoint?.hit_test!==true||!Number.isFinite(finalPoint?.x)||!Number.isFinite(finalPoint?.y))throw failedPointError({...finalPoint,...readinessTelemetry});
+    if(Date.now()>=readinessDeadlineAt)throw failedPointError({...finalPoint,...readinessTelemetry,error:'Send control readiness deadline expired before trusted dispatch.',deadline_expired:true},'TRUSTED_CLICK_PRE_DISPATCH');
     point=finalPoint;
     const clickDispatchStartedAt=Date.now();
     if(typeof onDispatchStarted==='function')onDispatchStarted(clickDispatchStartedAt);
@@ -4463,17 +4479,17 @@ async function trustedActivateChatSendButtonTab(tabId,attemptId,expectedText='',
     try{confirmation=await chrome.debugger.sendCommand(target,'Runtime.evaluate',{expression:`(()=>{const record=globalThis.__codexproTrustedSendClickV1?.[${encodedAttempt}];return record?{clicked:record.clicked===true,is_trusted:record.is_trusted===true}:null;})()`,returnByValue:true});}
     catch(error){confirmationError=String(error?.message||error).slice(0,300);}
     const click=confirmation?.result?.value||{};
-    return {mouse_events_dispatched:true,send_button_actually_clicked:Boolean(click.clicked&&click.is_trusted),send_button_selector:String(point.selector||''),send_button_hit_test:Boolean(point.hit_test),send_button_verified_point_kind:String(point.verified_point_kind||''),trusted_click_hit_test_evidence:point.hit_test_evidence||null,generating_before_click:Boolean(point.generating_before_click),click_dispatch_started_at:clickDispatchStartedAt,trusted_click_confirmation_error:confirmationError,trusted_click_ms:Math.max(0,Date.now()-trustedClickStartedAt)};
+    return {mouse_events_dispatched:true,send_button_actually_clicked:Boolean(click.clicked&&click.is_trusted),send_button_selector:String(point.selector||''),send_button_hit_test:Boolean(point.hit_test),send_button_verified_point_kind:String(point.verified_point_kind||''),trusted_click_hit_test_evidence:point.hit_test_evidence||null,generating_before_click:Boolean(point.generating_before_click),...readinessTelemetry,click_dispatch_started_at:clickDispatchStartedAt,trusted_click_confirmation_error:confirmationError,trusted_click_ms:Math.max(0,Date.now()-trustedClickStartedAt)};
   });
 }
 
-async function trustedSubmitChatSendButtonTab(tabId,attemptId,expectedText='',onDispatchStarted=null) {
+async function trustedSubmitChatSendButtonTab(tabId,attemptId,expectedText='',onDispatchStarted=null,deadlineAt=0) {
   if(!attemptId)throw new Error('Trusted Send-button attempt không hợp lệ.');
   let tracker;
   try{tracker=await startCdpChatNetworkTracker(tabId);}
   catch(error){throw new Error('TRUSTED_CLICK_NOT_DISPATCHED: '+String(error?.message||error));}
   let clicked;
-  try{clicked=await trustedActivateChatSendButtonTab(tabId,attemptId,expectedText,onDispatchStarted);}
+  try{clicked=await trustedActivateChatSendButtonTab(tabId,attemptId,expectedText,onDispatchStarted,deadlineAt);}
   catch(error){await tracker.cleanup();const wrapped=new Error('TRUSTED_CLICK_NOT_DISPATCHED: '+String(error?.message||error));wrapped.details=error?.details&&typeof error.details==='object'?error.details:{};throw wrapped;}
   return {...clicked,dispatched:Boolean(clicked?.send_button_actually_clicked),page_brought_to_front:true,background_submit:false,focus_emulation_used:false,cdp_tracker_armed:true,cdp_network_acknowledged:false,cdp_generation_endpoint:'',cdp_request_id:'',cdp_tracker_timeout:false};
 }

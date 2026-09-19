@@ -469,7 +469,7 @@ const timeoutCatch = sendBlock.indexOf("}catch(error){");
 const cleanup = sendBlock.indexOf("await cleanupAttempt()", timeoutCatch);
 const sendButtonPrimary = sendBlock.indexOf("trustedSubmitChatSendButtonTab(tab.id,attemptId,text,");
 const postClickVerification = sendBlock.indexOf("observeChatSendAfterClick(", sendButtonPrimary);
-const retryClick = sendBlock.indexOf("trustedActivateChatSendButtonTab(tab.id,attemptId,text)", postClickVerification);
+const retryClick = sendBlock.indexOf("trustedActivateChatSendButtonTab(tab.id,attemptId,text,null,", postClickVerification);
 const postRetryVerification = sendBlock.indexOf("post_retry_verification_ms", retryClick);
 
 assert.ok(timeoutCatch >= 0, "DOM send timeout must be handled");
@@ -519,7 +519,10 @@ assert.match(sendBlock, /submitted_by:'prepare-timeout'.*send_uncertain:false.*A
 const trustedSendPointSourceForLatency = extractFunction("trustedSendButtonPointPage");
 const trustedSendButtonSourceForLatency = extractFunction("trustedActivateChatSendButtonTab");
 assert.match(trustedSendPointSourceForLatency, /elementFromPoint\(x,y\)[\s\S]*?hit===el\|\|el\.contains\(hit\)/, "trusted Send must verify every candidate point belongs to the real button or a descendant before dispatch");
-assert.match(trustedSendButtonSourceForLatency, /finalPoint=await evaluatePoint\(true,false\)[\s\S]*?point=finalPoint[\s\S]*?Input\.dispatchMouseEvent/, "trusted Send must re-resolve the button immediately before dispatch and use only final verified coordinates");
+assert.match(trustedSendButtonSourceForLatency, /waitForSendControlReady[\s\S]*?MutationObserver[\s\S]*?attributeFilter:\['disabled','aria-disabled','inert','style','class','data-visually-disabled'\]/, "Send-control readiness must be condition-driven by page state changes rather than a blind sleep");
+assert.doesNotMatch(trustedSendButtonSourceForLatency, /setTimeout\(resolve,(?:32|40)\)/, "trusted Send readiness must not use the old arbitrary retry sleeps");
+assert.match(trustedSendButtonSourceForLatency, /readinessDeadlineAt=Math\.min\(Number\(deadlineAt\)[\s\S]*?trustedClickStartedAt\+8500/, "Send-control readiness must be bounded inside the existing trusted-input deadline");
+assert.match(trustedSendButtonSourceForLatency, /finalPoint=await evaluatePoint\(true,false,expectedPathname\)[\s\S]*?point=finalPoint[\s\S]*?Input\.dispatchMouseEvent/, "trusted Send must re-resolve the button immediately before dispatch and use only final verified coordinates");
 assert.match(trustedSendButtonSourceForLatency, /Input\.dispatchMouseEvent[\s\S]*?mousePressed[\s\S]*?Input\.dispatchMouseEvent[\s\S]*?mouseReleased/, "trusted Send must dispatch a complete CDP mouse click");
 assert.match(trustedSendButtonSourceForLatency, /click\.clicked&&click\.is_trusted/, "CDP command success alone must not claim that the Send button was clicked");
 assert.doesNotMatch(trustedSendButtonSourceForLatency, /dispatchKeyEvent/, "the primary Send-button helper must never dispatch Enter");

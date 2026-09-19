@@ -174,7 +174,7 @@ const trustedClickSource = extractFunction(workerSource, "trustedActivateChatSen
 assert.match(trustedPointSource, /\[0\.5,0\.5,'center'\][\s\S]*?\[0\.25,0\.5,'left-mid'\][\s\S]*?\[0\.75,0\.5,'right-mid'\]/, "trusted Send must probe a bounded set of points inside the actual button rect, starting with center");
 assert.match(trustedPointSource, /document\.elementFromPoint\(x,y\)[\s\S]{0,220}hit===el\|\|el\.contains\(hit\)/, "every candidate point must pass elementFromPoint against the real Send button or a descendant");
 assert.match(trustedPointSource, /readiness\.retryable&&allowScroll[\s\S]{0,180}scrollIntoView[\s\S]{0,180}probe\(\)/, "scroll recovery may run only after no verified point exists, and it must re-probe afterward");
-assert.match(trustedClickSource, /evaluatePoint\(false,true\)[\s\S]*?finalPoint=await evaluatePoint\(true,false\)[\s\S]*?point=finalPoint[\s\S]*?Input\.dispatchMouseEvent/, "trusted Send must re-resolve and re-hit-test immediately before CDP mouse dispatch");
+assert.match(trustedClickSource, /evaluatePoint\(false,true\)[\s\S]*?finalPoint=await evaluatePoint\(true,false,expectedPathname\)[\s\S]*?point=finalPoint[\s\S]*?Input\.dispatchMouseEvent/, "trusted Send must re-resolve and re-hit-test immediately before CDP mouse dispatch");
 const mouseEvents = [];
 let runtimeEvaluations = 0;
 const clickChrome = {
@@ -216,7 +216,7 @@ const blockedClick = Function("chrome", "withDebuggerTab", `${trustedPointSource
 await assert.rejects(() => blockedClick(42, "attempt-covered", "hello"), /covered|hit.?test/i);
 assert.equal(blockedMouseEvents, 0, "a failed elementFromPoint hit-test must stop before any mouse dispatch");
 
-function trustedSendPageFixture({ centerCovered = false, fullyCovered = false, disabled = false, ariaDisabled = false } = {}) {
+function trustedSendPageFixture({ centerCovered = false, fullyCovered = false, disabled = false, ariaDisabled = false, formInert = false, pointerEventsNone = false } = {}) {
   const pageGlobal = { innerWidth: 1000, innerHeight: 800, scrollX: 0, scrollY: 0 };
   const overlay = {
     tagName: "DIV",
@@ -241,12 +241,13 @@ function trustedSendPageFixture({ centerCovered = false, fullyCovered = false, d
       return "";
     },
     hasAttribute() { return false; },
+    closest(selector) { return selector === "[inert]" && formInert ? root : null; },
     getBoundingClientRect() { return { left: 100, top: 60, width: 40, height: 40, right: 140, bottom: 100 }; },
     contains(node) { return node === this; },
     scrollIntoView() {},
     addEventListener() {}
   };
-  const root = { querySelector() { return button; } };
+  const root = { inert: formInert, hasAttribute(name) { return name === "inert" && formInert; }, querySelector() { return button; } };
   const composer = {
     tagName: "DIV",
     id: "prompt-textarea",
@@ -255,7 +256,7 @@ function trustedSendPageFixture({ centerCovered = false, fullyCovered = false, d
     textContent: "hello",
     dataset: { codexproDraftAttempt: "attempt-exposed-point" },
     parentElement: root,
-    closest() { return root; },
+    closest(selector) { return selector === "[inert]" ? (formInert ? root : null) : root; },
     getBoundingClientRect() { return { left: 20, top: 20, width: 400, height: 100, right: 420, bottom: 120 }; }
   };
   const document = {
@@ -275,7 +276,7 @@ function trustedSendPageFixture({ centerCovered = false, fullyCovered = false, d
     display: "block",
     visibility: "visible",
     opacity: "1",
-    pointerEvents: "auto",
+    pointerEvents: element === button && pointerEventsNone ? "none" : "auto",
     position: element === overlay ? "absolute" : "relative",
     zIndex: element === overlay ? "20" : "auto"
   });
@@ -322,8 +323,14 @@ function fixtureTrustedClick(fixture, attemptId = "attempt-fixture") {
     debugger: {
       async sendCommand(_target, method, params) {
         if (method === "Runtime.evaluate") {
-          if (String(params.expression).includes("__codexproTrustedSendClickV1?.[")) return { result: { value: { clicked: true, is_trusted: true } } };
-          const value = Function("document", "getComputedStyle", "globalThis", `return ${params.expression};`)(fixture.document, fixture.getComputedStyle, fixture.pageGlobal);
+          const expression = String(params.expression);
+          if (expression.includes("__codexproTrustedSendClickV1?.[")) return { result: { value: { clicked: true, is_trusted: true } } };
+          if (expression.includes("__codexproTrustedSendReadyWaitV1")) {
+            const probe = Function("document", "getComputedStyle", "globalThis", `${trustedPointSource}; return trustedSendButtonPointPage;`)(fixture.document, fixture.getComputedStyle, fixture.pageGlobal);
+            const current = probe(attemptId, "hello", false, false, "");
+            return { result: { value: { ...current, deadline_expired: true, send_control_wait_ms: 25, send_control_disabled_duration_ms: current.enabled === false ? 25 : 0, form_inert_duration_ms: current.form_inert ? 25 : 0, first_send_ready_at_ms: 0, send_control_readiness_timeline: [] } } };
+          }
+          const value = Function("document", "getComputedStyle", "globalThis", `return ${expression};`)(fixture.document, fixture.getComputedStyle, fixture.pageGlobal);
           return { result: { value } };
         }
         if (method === "Input.dispatchMouseEvent") mouse.push({ type: params.type, x: params.x, y: params.y });
@@ -353,12 +360,83 @@ assert.deepEqual(fullyCoveredError?.details?.trusted_click_hit_test_evidence?.co
 
 for (const [label, fixture] of [
   ["disabled", trustedSendPageFixture({ disabled: true })],
-  ["aria-disabled", trustedSendPageFixture({ ariaDisabled: true })]
+  ["aria-disabled", trustedSendPageFixture({ ariaDisabled: true })],
+  ["inert", trustedSendPageFixture({ formInert: true })],
+  ["pointer-events-none", trustedSendPageFixture({ pointerEventsNone: true })]
 ]) {
   const harness = fixtureTrustedClick(fixture, `attempt-${label}`);
-  await assert.rejects(harness.click, /disabled|hit.?test/i, `${label} Send button must not be clicked`);
+  await assert.rejects(harness.click, /disabled|inert|khả dụng|hit.?test/i, `${label} Send button must not be clicked`);
   assert.equal(harness.mouse.length, 0, `${label} Send button must stop before CDP mouse dispatch`);
 }
+
+let transientReady = false;
+let transientReadinessWaits = 0;
+let transientDispatchBeforeReady = false;
+const transientMouse = [];
+const transientChrome = {
+  debugger: {
+    async sendCommand(_target, method, params) {
+      if (method === "Runtime.evaluate") {
+        const expression = String(params?.expression || "");
+        if (expression.includes("__codexproTrustedSendClickV1?.[")) return { result: { value: { clicked: true, is_trusted: true } } };
+        if (expression.includes("__codexproTrustedSendReadyWaitV1")) {
+          transientReadinessWaits += 1;
+          transientReady = true;
+          return { result: { value: { ok: true, x: 120, y: 80, selector: "#composer-submit-button", hit_test: true, verified_point_kind: "center", visible: true, enabled: true, aria_disabled: "false", pointer_events: true, form_inert: false, control_inert: false, pathname: "/c/historical", send_control_wait_ms: 2400, send_control_disabled_duration_ms: 2400, form_inert_duration_ms: 2400, first_send_ready_at_ms: 2400 } } };
+        }
+        return { result: { value: transientReady
+          ? { ok: true, x: 120, y: 80, selector: "#composer-submit-button", hit_test: true, verified_point_kind: "center", visible: true, enabled: true, aria_disabled: "false", pointer_events: true, form_inert: false, control_inert: false, pathname: "/c/historical" }
+          : { ok: false, error: "Send button is disabled.", selector: "#composer-submit-button", hit_test: false, visible: true, enabled: false, aria_disabled: "true", pointer_events: false, form_inert: true, control_inert: false, pathname: "/c/historical", retryable: false } } };
+      }
+      if (method === "Input.dispatchMouseEvent") {
+        if (!transientReady) transientDispatchBeforeReady = true;
+        transientMouse.push(params.type);
+      }
+      return {};
+    }
+  }
+};
+const transientClick = Function("chrome", "withDebuggerTab", `${trustedPointSource}; ${trustedClickSource}; return trustedActivateChatSendButtonTab;`)(transientChrome, withClickDebugger);
+const transientResult = await transientClick(42, "attempt-transient-disabled", "hello", null, Date.now() + 5000);
+assert.ok(transientReadinessWaits > 0, "a transient disabled/inert Send control must enter the condition-based readiness wait instead of failing immediately");
+assert.equal(transientDispatchBeforeReady, false, "transient Send readiness must never dispatch while the control is disabled/inert");
+assert.deepEqual(transientMouse, ["mouseMoved", "mousePressed", "mouseReleased"], "transient Send readiness must dispatch exactly one trusted click after readiness");
+assert.equal(transientResult.send_button_actually_clicked, true);
+assert.equal(transientResult.send_control_wait_ms, 2400, "readiness telemetry must expose the bounded wait observed before trusted dispatch");
+assert.equal(transientResult.send_control_disabled_duration_ms, 2400);
+assert.equal(transientResult.form_inert_duration_ms, 2400);
+assert.equal(transientResult.first_send_ready_at_ms, 2400);
+
+async function assertTrustedReadinessAbort(label, terminalPoint, expectedError, { initialPoint = null, expectWait = true } = {}) {
+  let readinessWaits = 0;
+  let mouseEvents = 0;
+  const waitingPoint = initialPoint || { ok: false, error: "Send button is disabled.", selector: "#composer-submit-button", button_exists: true, visible: true, enabled: false, button_disabled: true, aria_disabled: "true", pointer_events: false, form_inert: true, control_inert: false, composer_matches_payload: true, pathname: "/c/historical", hit_test: false };
+  const chrome = {
+    debugger: {
+      async sendCommand(_target, method, params) {
+        if (method === "Runtime.evaluate") {
+          const expression = String(params?.expression || "");
+          if (expression.includes("__codexproTrustedSendReadyWaitV1")) {
+            readinessWaits += 1;
+            return { result: { value: { ...terminalPoint, send_control_wait_ms: 125, send_control_disabled_duration_ms: 125, form_inert_duration_ms: 125, first_send_ready_at_ms: 0, send_control_readiness_timeline: [] } } };
+          }
+          return { result: { value: waitingPoint } };
+        }
+        if (method === "Input.dispatchMouseEvent") mouseEvents += 1;
+        return {};
+      }
+    }
+  };
+  const click = Function("chrome", "withDebuggerTab", `${trustedPointSource}; ${trustedClickSource}; return trustedActivateChatSendButtonTab;`)(chrome, withClickDebugger);
+  await assert.rejects(() => click(42, `attempt-${label}`, "hello", null, Date.now() + 5000), expectedError, `${label} must abort before trusted mouse dispatch`);
+  assert.equal(mouseEvents, 0, `${label} must fail closed with zero mouse events`);
+  assert.equal(readinessWaits > 0, expectWait, `${label} readiness wait expectation must be preserved`);
+}
+
+await assertTrustedReadinessAbort("payload-change", { ok: false, error: "Composer no longer matches payload.", composer_matches_payload: false, pathname: "/c/historical" }, /payload|Composer/i);
+await assertTrustedReadinessAbort("conversation-change", { ok: false, error: "Target conversation changed before trusted click.", conversation_changed: true, composer_matches_payload: true, pathname: "/c/other" }, /conversation changed/i);
+await assertTrustedReadinessAbort("deadline-expiry", { ok: false, error: "Send control readiness deadline expired: Send button is disabled.", deadline_expired: true, composer_matches_payload: true, pathname: "/c/historical", button_exists: true, enabled: false, aria_disabled: "true", pointer_events: false, form_inert: true }, /deadline expired/i);
+await assertTrustedReadinessAbort("modal-blocker", null, /PRE_DISPATCH|Modal|chặn/i, { initialPoint: { ok: false, blocked: true, error: "Modal thanh toán đang chặn nút Send.", composer_matches_payload: true, pathname: "/c/historical" }, expectWait: false });
 
 let replacementEval = 0;
 const replacementMouse = [];
@@ -559,7 +637,7 @@ assert.match(sendBlock, /finally\{await restoreActivatedTab\(\);\}/, "temporary 
 assert.match(sendBlock, /ensureChatRendererReadyForSend[\s\S]{0,500}catch\(error\)\{await restoreChatTabAfterTrustedSend\(tabActivationOrigin\);throw error;\}/, "renderer preflight failure must restore the previously active tab/window");
 assert.match(sendBlock, /prepareChatRequestTab\(tab\.id,text,attachments,attemptId,deadlineAt,staleAttachmentOwnership,targetConversationId\)/, "send must use the low-latency text prepare router");
 assert.match(sendBlock, /submit_path:'trusted-send-button'/, "visible Send must be the primary text submission path");
-assert.match(sendBlock, /trustedSubmitChatSendButtonTab\(tab\.id,attemptId,text,\(startedAt\)=>\{generationAckStartedAfterMs=Number\(startedAt\)\|\|0;\}\)/, "the primary submit must retain the exact dispatch cutoff even if post-click confirmation hangs");
+assert.match(sendBlock, /trustedSubmitChatSendButtonTab\(tab\.id,attemptId,text,\(startedAt\)=>\{generationAckStartedAfterMs=Number\(startedAt\)\|\|0;\},Math\.min\(commandDeadlineAt-500,Date\.now\(\)\+TRUSTED_INPUT_TIMEOUT_MS-250\)\)/, "the primary submit must retain the exact dispatch cutoff and bound Send-control readiness by the existing command/input deadlines");
 assert.doesNotMatch(sendBlock, /trustedSubmitChatComposerTab\(tab\.id,attemptId,text\)/, "trusted Enter must not remain the preferred text submission method");
 assert.match(sendBlock, /retry_click_count/, "the send result must expose the exactly-once retry count");
 assert.match(sendBlock, /trustedSubmitError[\s\S]*?waitForNetworkGeneration[\s\S]*?resultForNetwork/, "a post-dispatch click confirmation failure must still honor a strong generation ACK before returning uncertain");
@@ -703,6 +781,19 @@ const hitTestTelemetry = sendDebugEvidence({
 assert.equal(hitTestTelemetry.send_button_verified_point_kind, "left-mid", "Manager evidence must retain the verified alternative hit point kind");
 assert.equal(hitTestTelemetry.trusted_click_hit_test_evidence?.center_hit_id, "composer-overlay", "Manager evidence must retain the exact covering element id");
 assert.deepEqual(hitTestTelemetry.trusted_click_hit_test_evidence?.covering_element_rect, { left: 116, top: 72, right: 132, bottom: 88, width: 16, height: 16 });
+const readinessTelemetry = sendDebugEvidence({
+  send_control_wait_ms: 2400,
+  send_control_disabled_duration_ms: 2100,
+  form_inert_duration_ms: 1800,
+  first_send_ready_at_ms: 2400,
+  send_control_readiness_timeline: [{ delta_ms: 0, disabled: true, form_inert: true }, { delta_ms: 2400, disabled: false, form_inert: false, hit_test: true }]
+});
+assert.equal(readinessTelemetry.send_control_wait_ms, 2400, "Manager evidence must retain Send-control readiness wait duration");
+assert.equal(readinessTelemetry.send_control_disabled_duration_ms, 2100);
+assert.equal(readinessTelemetry.form_inert_duration_ms, 1800);
+assert.equal(readinessTelemetry.first_send_ready_at_ms, 2400);
+assert.equal(readinessTelemetry.send_control_readiness_timeline.length, 2, "Manager evidence must retain bounded Send-control state transitions");
 assert.match(managerSource, /trusted_click_hit_test_evidence/, "Manager diagnostic result details must persist trusted hit-test evidence for production failures");
+assert.match(managerSource, /send_control_wait_ms[\s\S]*?send_control_disabled_duration_ms[\s\S]*?form_inert_duration_ms[\s\S]*?first_send_ready_at_ms[\s\S]*?send_control_readiness_timeline/, "Manager diagnostic result details must persist Send-control readiness timing and timeline evidence");
 
 console.log("chat send pipeline smoke PASS");
