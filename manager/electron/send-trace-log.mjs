@@ -69,6 +69,7 @@ export async function readSendTraceTimeline(home, options = {}) {
   if (!sendTraceId) return { send_trace_id: "", events: [], status: "EMPTY", total_ms: 0, last_successful_stage: "", first_failed_stage: "" };
   const maxEvents = Math.max(1, Math.min(500, Number(options?.limit) || 250));
   const records = [];
+  const parsedRecords = [];
   for (const component of TRACE_READ_COMPONENTS) {
     const current = path.join(home, `send-trace-${component}.jsonl`);
     for (const candidate of [`${current}.1`, current]) {
@@ -76,15 +77,31 @@ export async function readSendTraceTimeline(home, options = {}) {
       try { text = await fs.promises.readFile(candidate, "utf8"); }
       catch (error) { if (error?.code !== "ENOENT") throw error; continue; }
       for (const line of text.split(/\r?\n/)) {
-        if (!line || !line.includes(sendTraceId)) continue;
+        if (!line) continue;
         try {
           const record = JSON.parse(line);
-          if (String(record?.details?.send_trace_id || "") !== sendTraceId) continue;
-          records.push(record);
+          parsedRecords.push(record);
+          if (String(record?.details?.send_trace_id || "") === sendTraceId) records.push(record);
         } catch {}
       }
     }
   }
+  const collectIds = (key) => new Set(records.map((record) => String(record?.details?.[key] || "")).filter(Boolean));
+  const commandIds = collectIds("command_id");
+  const attemptIds = collectIds("attempt_id");
+  const ipcCallIds = collectIds("ipc_call_id");
+  for (const record of parsedRecords) {
+    if (records.includes(record)) continue;
+    if (String(record?.writer_component || "") !== "bridge") continue;
+    const details = record?.details && typeof record.details === "object" ? record.details : {};
+    if (String(details.send_trace_id || "")) continue;
+    const matchesKnownSend =
+      (details.command_id && commandIds.has(String(details.command_id)))
+      || (details.attempt_id && attemptIds.has(String(details.attempt_id)))
+      || (details.ipc_call_id && ipcCallIds.has(String(details.ipc_call_id)));
+    if (matchesKnownSend) records.push(record);
+  }
+  const fallbackIpcCallId = ipcCallIds.size === 1 ? [...ipcCallIds][0] : "";
   records.sort((left, right) => Date.parse(left?.event_at || left?.received_at || 0) - Date.parse(right?.event_at || right?.received_at || 0) || Number(left?.writer_sequence || 0) - Number(right?.writer_sequence || 0));
   const selected = records.slice(-maxEvents);
   const startedMs = selected.length ? Date.parse(selected[0]?.event_at || selected[0]?.received_at || 0) : 0;
@@ -100,7 +117,7 @@ export async function readSendTraceTimeline(home, options = {}) {
       event: String(record?.event || ""),
       status: traceEventStatus(record),
       send_trace_id: sendTraceId,
-      ipc_call_id: String(details.ipc_call_id || ""),
+      ipc_call_id: String(details.ipc_call_id || fallbackIpcCallId || ""),
       attempt_id: String(details.attempt_id || ""),
       command_id: String(details.command_id || ""),
       profile_id: String(details.profile_id || ""),

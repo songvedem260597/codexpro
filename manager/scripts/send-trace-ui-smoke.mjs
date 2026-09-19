@@ -24,12 +24,17 @@ function line({ event, at, component, sequence, traceId, details = {} }) {
 try {
   const failedId = "send_failure_fixture";
   const successId = "send_success_fixture";
+  const historicalGapId = "send_historical_correlation_gap";
   await fs.writeFile(path.join(tempRoot, "send-trace-manager.jsonl"), [
     line({ event: "renderer_send_started", at: "2026-09-18T00:00:00.000Z", component: "manager", sequence: 1, traceId: failedId, details: { profile_id: "e7", conversation_id: "historical" } }),
     line({ event: "ipc_accepted", at: "2026-09-18T00:00:00.010Z", component: "manager", sequence: 2, traceId: failedId, details: { ipc_call_id: "ipc-fail", profile_id: "e7", conversation_id: "historical" } }),
     line({ event: "send_finished", at: "2026-09-18T00:00:01.000Z", component: "manager", sequence: 3, traceId: failedId, details: { ipc_call_id: "ipc-fail", attempt_id: "attempt-fail", command_id: "command-fail", submission_state: "failed", terminal_outcome: "failed", network_acknowledged: false } }),
     line({ event: "renderer_send_started", at: "2026-09-18T00:01:00.000Z", component: "manager", sequence: 4, traceId: successId, details: { profile_id: "e7", conversation_id: "historical" } }),
-    line({ event: "send_finished", at: "2026-09-18T00:01:01.200Z", component: "manager", sequence: 5, traceId: successId, details: { ipc_call_id: "ipc-success", attempt_id: "attempt-success", command_id: "command-success", submission_state: "submitted", terminal_outcome: "success", network_acknowledged: true } })
+    line({ event: "send_finished", at: "2026-09-18T00:01:01.200Z", component: "manager", sequence: 5, traceId: successId, details: { ipc_call_id: "ipc-success", attempt_id: "attempt-success", command_id: "command-success", submission_state: "submitted", terminal_outcome: "success", network_acknowledged: true } }),
+    line({ event: "renderer_send_started", at: "2026-09-18T00:02:00.000Z", component: "manager", sequence: 6, traceId: historicalGapId, details: { profile_id: "e7", conversation_id: "historical-gap" } }),
+    line({ event: "ipc_accepted", at: "2026-09-18T00:02:00.010Z", component: "manager", sequence: 7, traceId: historicalGapId, details: { ipc_call_id: "ipc-gap", profile_id: "e7", conversation_id: "historical-gap" } }),
+    line({ event: "task_gate_completed", at: "2026-09-18T00:02:00.020Z", component: "manager", sequence: 8, traceId: historicalGapId, details: { ipc_call_id: "ipc-gap", profile_id: "e7", conversation_id: "historical-gap" } }),
+    line({ event: "send_finished", at: "2026-09-18T00:02:03.200Z", component: "manager", sequence: 9, traceId: historicalGapId, details: { ipc_call_id: "ipc-gap", attempt_id: "attempt-gap", command_id: "command-gap", profile_id: "e7", conversation_id: "historical-gap", submission_state: "failed", terminal_outcome: "failed", network_acknowledged: false } })
   ].join("\n") + "\n", "utf8");
   await fs.writeFile(path.join(tempRoot, "send-trace-bridge.jsonl"), [
     line({ event: "extension_received", at: "2026-09-18T00:00:00.020Z", component: "bridge", sequence: 1, traceId: failedId, details: { ipc_call_id: "ipc-fail", command_id: "command-fail", conversation_id: "historical" } }),
@@ -37,7 +42,10 @@ try {
     line({ event: "prepare_error", at: "2026-09-18T00:00:00.300Z", component: "bridge", sequence: 3, traceId: failedId, details: { ipc_call_id: "ipc-fail", command_id: "command-fail", attempt_id: "attempt-fail", conversation_id: "historical", tab_id: 42, error_code: "PREPARE_RECOVERABLE", composer_visible: false, composer_wait_ms: 250, remaining_deadline_ms: 3500 } }),
     line({ event: "prepare_error", at: "2026-09-18T00:01:00.150Z", component: "bridge", sequence: 4, traceId: successId, details: { ipc_call_id: "ipc-success", command_id: "command-success", attempt_id: "attempt-success", conversation_id: "historical", tab_id: 43, error_code: "PREPARE_RECOVERABLE" } }),
     line({ event: "draft_verified", at: "2026-09-18T00:01:00.600Z", component: "bridge", sequence: 5, traceId: successId, details: { ipc_call_id: "ipc-success", command_id: "command-success", attempt_id: "attempt-success", conversation_id: "historical", tab_id: 43 } }),
-    line({ event: "network_ack", at: "2026-09-18T00:01:01.000Z", component: "bridge", sequence: 6, traceId: successId, details: { ipc_call_id: "ipc-success", command_id: "command-success", attempt_id: "attempt-success", conversation_id: "historical", tab_id: 43, submission_state: "submitted", ack_source: "generation" } })
+    line({ event: "network_ack", at: "2026-09-18T00:01:01.000Z", component: "bridge", sequence: 6, traceId: successId, details: { ipc_call_id: "ipc-success", command_id: "command-success", attempt_id: "attempt-success", conversation_id: "historical", tab_id: 43, submission_state: "submitted", ack_source: "generation" } }),
+    line({ event: "prepare_started", at: "2026-09-18T00:02:00.500Z", component: "bridge", sequence: 7, details: { command_id: "command-gap", attempt_id: "attempt-gap", profile_id: "e7", conversation_id: "historical-gap", tab_id: 44 } }),
+    line({ event: "draft_verified", at: "2026-09-18T00:02:01.600Z", component: "bridge", sequence: 8, details: { command_id: "command-gap", attempt_id: "attempt-gap", profile_id: "e7", conversation_id: "historical-gap", tab_id: 44, stage_outcome: "verified" } }),
+    line({ event: "submit_error", at: "2026-09-18T00:02:02.000Z", component: "bridge", sequence: 9, details: { command_id: "command-gap", attempt_id: "attempt-gap", profile_id: "e7", conversation_id: "historical-gap", tab_id: 44, stage_outcome: "not_dispatched", error_code: "TRUSTED_CLICK_NOT_DISPATCHED" } })
   ].join("\n") + "\n", "utf8");
 
   const failed = await readSendTraceTimeline(tempRoot, { send_trace_id: failedId });
@@ -55,6 +63,29 @@ try {
   assert.equal(success.last_successful_stage, "send_finished");
   assert.equal(success.total_ms, 1200);
   assert.equal(success.events.find((event) => event.event === "network_ack")?.relevant?.ack_source, "generation");
+
+  const historicalGap = await readSendTraceTimeline(tempRoot, { send_trace_id: historicalGapId });
+  assert.equal(historicalGap.status, "FAILURE");
+  assert.deepEqual(
+    [historicalGap.last_successful_stage, historicalGap.first_failed_stage],
+    ["draft_verified", "submit_error"],
+    "historical bridge/browser stages must correlate back into the Manager send trace by existing command/attempt IDs"
+  );
+  const gapDraft = historicalGap.events.find((event) => event.event === "draft_verified");
+  const gapSubmitError = historicalGap.events.find((event) => event.event === "submit_error");
+  for (const event of [gapDraft, gapSubmitError]) {
+    assert.equal(event?.send_trace_id, historicalGapId);
+    assert.equal(event?.ipc_call_id, "ipc-gap");
+    assert.equal(event?.attempt_id, "attempt-gap");
+    assert.equal(event?.command_id, "command-gap");
+  }
+  assert.equal(gapSubmitError?.relevant?.error_code, "TRUSTED_CLICK_NOT_DISPATCHED");
+
+  const successNetworkAck = success.events.find((event) => event.event === "network_ack");
+  assert.equal(successNetworkAck?.send_trace_id, successId);
+  assert.equal(successNetworkAck?.ipc_call_id, "ipc-success");
+  assert.equal(successNetworkAck?.attempt_id, "attempt-success");
+  assert.equal(successNetworkAck?.command_id, "command-success");
 
   const preload = await fs.readFile(path.join(managerRoot, "electron", "preload.cjs"), "utf8");
   const ipc = await fs.readFile(path.join(managerRoot, "electron", "ipc", "diagnostic-log-ipc.mjs"), "utf8");

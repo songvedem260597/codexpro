@@ -68,6 +68,8 @@ export function registerBrowserControlTool(options: BrowserControlToolOptions): 
         browser: z.enum(["active", "dedicated"]).optional().describe("Use the ACTIVE extension profile when available (default), or force the dedicated port-9223 Chrome."),
         target_id: z.string().optional().describe("Tab id from list_tabs. Omit to use the first page tab."),
         conversation_id: z.string().optional().describe("Exact ChatGPT conversation id for send_chat_request, rename_chat, get_chat_response, recovery, or a long-task audit."),
+        send_trace_id: z.string().max(160).optional().describe("Existing Manager send correlation id propagated unchanged into extension/bridge trace events."),
+        ipc_call_id: z.string().max(160).optional().describe("Existing Manager IPC call correlation id propagated unchanged into extension/bridge trace events."),
         task_id: z.string().regex(/^cpt_[a-f0-9]{24}$/).optional().describe("Exact Manager task id to finalize when a ChatGPT response reaches a terminal state."),
         started_at: z.string().max(80).optional().describe("Stable task start timestamp for a one-shot long-task audit."),
         attempt_key: z.string().max(300).optional().describe("Persistent deduplication key for a one-shot long-task audit."),
@@ -207,6 +209,8 @@ export function registerBrowserControlTool(options: BrowserControlToolOptions): 
         result = await dependencies.runBrowserExtensionCommand(args.action, {
           target_id: args.target_id,
           conversation_id: args.conversation_id,
+          send_trace_id: args.send_trace_id,
+          ipc_call_id: args.ipc_call_id,
           task_id: args.task_id,
           started_at: args.started_at,
           attempt_key: args.attempt_key,

@@ -99,6 +99,8 @@ assert.equal(registeredOptions._meta["openai/toolInvocation/invoked"], "Browser 
 assert.equal(registeredOptions.inputSchema.action.safeParse("browser_control").success, false);
 assert.equal(registeredOptions.inputSchema.action.safeParse("get_chat_response").success, true);
 assert.equal(registeredOptions.inputSchema.task_id.safeParse("cpt_0123456789abcdef01234567").success, true);
+assert.equal(registeredOptions.inputSchema.send_trace_id.safeParse("send-browser-control-smoke").success, true);
+assert.equal(registeredOptions.inputSchema.ipc_call_id.safeParse("ipc-browser-control-smoke").success, true);
 assert.equal(registeredOptions.inputSchema.task_id.safeParse("bad-task").success, false);
 assert.ok(registeredOptions.inputSchema.canonical_only);
 assert.ok(registeredOptions.inputSchema.attachments);
@@ -190,6 +192,8 @@ result = await call({
   profile_id: "profile-a",
   target_id: "tab-x",
   conversation_id: "conv-x",
+  send_trace_id: "send-browser-control-smoke",
+  ipc_call_id: "ipc-browser-control-smoke",
   task_id: "cpt_bbbbbbbbbbbbbbbbbbbbbbbb",
   started_at: "start",
   attempt_key: "attempt",
@@ -229,6 +233,8 @@ result = await call({
 const extCall = extensionCalls.at(-1);
 assert.equal(extCall.action, "send_chat_request");
 assert.equal(extCall.profileId, "profile-a");
+assert.equal(extCall.args.send_trace_id, "send-browser-control-smoke");
+assert.equal(extCall.args.ipc_call_id, "ipc-browser-control-smoke");
 assert.deepEqual(extCall.args.attachments, [attachment]);
 assert.equal(extCall.args.read_dom, false);
 assert.equal(extCall.args.recover_stale_dom, true);
