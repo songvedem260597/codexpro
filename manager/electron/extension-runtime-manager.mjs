@@ -61,12 +61,34 @@ export function managedWorkerLifecycleBootstrapFiles({ manifestKey, callbackUrl 
       permissions: ["storage"],
       host_permissions: ["http://127.0.0.1/*"]
     }, null, 2),
-    html: "<!doctype html><meta charset=\"utf-8\"><script src=\"bootstrap.js\"></script>",
+    html: "<!doctype html><meta charset=\"utf-8\"><title>CODEXPRO_BOOTSTRAP|BOOTSTRAP_EXTENSION_LOADED</title><script src=\"bootstrap.js\"></script>",
     script: [
+      "let codexProBootstrapStage='BOOTSTRAP_PAGE_STARTED';",
+      "let codexProBootstrapSnapshot={workerEnabled:null,workerDisablePending:null,active:null};",
+      "const codexProBootstrapSafeError=(error)=>{",
+      "  const name=String(error?.name||'Error').replace(/[^A-Za-z0-9_.-]/g,'_').slice(0,48)||'Error';",
+      "  const message=String(error?.message||'').toLowerCase();",
+      "  if(message.includes('failed to fetch')) return name+'_FAILED_TO_FETCH';",
+      "  if(message.includes('access to fetch')) return name+'_FETCH_BLOCKED';",
+      "  return name;",
+      "};",
+      "const codexProBootstrapSnapshotText=()=>['we='+String(codexProBootstrapSnapshot.workerEnabled),'wdp='+String(codexProBootstrapSnapshot.workerDisablePending),'a='+String(codexProBootstrapSnapshot.active)].join(';');",
+      "const codexProBootstrapMark=(stage,errorCode='')=>{",
+      "  codexProBootstrapStage=stage;",
+      "  document.documentElement.dataset.codexproBootstrapStage=stage;",
+      "  if(errorCode) document.documentElement.dataset.codexproBootstrapError=errorCode;",
+      "  document.title=['CODEXPRO_BOOTSTRAP',stage,codexProBootstrapSnapshotText(),errorCode].filter(Boolean).join('|');",
+      "};",
       "(async()=>{",
+      "  codexProBootstrapMark('BOOTSTRAP_PAGE_STARTED');",
+      "  codexProBootstrapMark('STORAGE_SET_STARTED');",
       "  await chrome.storage.local.set({workerEnabled:true,workerEnabledUpdatedAt:Date.now(),workerDisablePending:false});",
+      "  codexProBootstrapSnapshot=await chrome.storage.local.get(['workerEnabled','workerDisablePending','active']);",
+      "  codexProBootstrapMark('STORAGE_SET_SUCCEEDED');",
+      "  codexProBootstrapMark('CALLBACK_FETCH_STARTED');",
       `  await fetch(${JSON.stringify(callback)},{method:"POST",cache:"no-store"});`,
-      "})().catch(()=>{});"
+      "  codexProBootstrapMark('CALLBACK_RECEIVED');",
+      "})().catch((error)=>codexProBootstrapMark('BOOTSTRAP_FAILED',codexProBootstrapStage+'__'+codexProBootstrapSafeError(error)));"
     ].join("\n")
   };
 }
@@ -185,6 +207,45 @@ function seedManagerOwnedExtensionStorage(binding) {
     throw managerError("EXTENSION_MANAGED_PROFILE_SEED_FAILED", "Could not seed isolated extension storage.", cause);
   }
   return { destinationRoot, seeded: true };
+}
+
+function normalizeManagerOwnedChromeExitState(binding) {
+  const managedProfilesRoot = path.join(normalizePath(binding?.managerHome), MANAGED_BROWSER_PROFILE_DIR);
+  if (binding?.managerOwned !== true || !binding?.managerHome ||
+      !isInside(managedProfilesRoot, binding?.userDataRoot)) {
+    throw managerError(
+      "EXTENSION_MANAGED_PROFILE_INPUT_INVALID",
+      "Refusing to normalize Chrome exit state outside the Manager-owned browser profile."
+    );
+  }
+  const preferencesPath = path.join(binding.profileRoot, "Preferences");
+  if (!fs.existsSync(preferencesPath)) return { changed: false, before: "", after: "" };
+  let preferences;
+  try {
+    preferences = JSON.parse(fs.readFileSync(preferencesPath, "utf8"));
+  } catch (cause) {
+    throw managerError(
+      "EXTENSION_MANAGED_PREFERENCES_INVALID",
+      "Manager-owned Chrome Preferences could not be read for lifecycle normalization.",
+      cause
+    );
+  }
+  const before = String(preferences?.profile?.exit_type || "");
+  if (before !== "Crashed") return { changed: false, before, after: before };
+  preferences.profile = {
+    ...(preferences.profile || {}),
+    exit_type: "Normal"
+  };
+  try {
+    fs.writeFileSync(preferencesPath, JSON.stringify(preferences));
+  } catch (cause) {
+    throw managerError(
+      "EXTENSION_MANAGED_PREFERENCES_WRITE_FAILED",
+      "Manager-owned Chrome crash state could not be normalized.",
+      cause
+    );
+  }
+  return { changed: true, before, after: "Normal" };
 }
 
 function defaultChromeUserDataRoots() {
@@ -496,12 +557,12 @@ export function createManagerExtensionRuntimeController(options = {}) {
     if (!owners.length || owners.some((value) => value !== owners[0])) {
       throw managerError("EXTENSION_TASK_OWNER_PROVENANCE_MISMATCH", "Task owner provenance is missing or inconsistent.");
     }
-    const worktreeRoots = [coordination.task_worktree_root, repo.worktree_root]
-      .map((value) => String(value || "")).filter(Boolean);
-    const branches = [coordination.task_worktree_branch, repo.worktree_branch]
-      .map((value) => String(value || "")).filter(Boolean);
-    if (worktreeRoots.length !== 2 || !samePath(worktreeRoots[0], worktreeRoots[1]) ||
-        branches.length !== 2 || branches[0] !== branches[1]) {
+    const coordinationWorktreeRoot = String(coordination.task_worktree_root || "");
+    const repoWorktreeRoot = String(repo.worktree_root || job.root || repo.root || "");
+    const coordinationBranch = String(coordination.task_worktree_branch || "");
+    const repoBranch = String(repo.worktree_branch || job.worktree_branch || "");
+    if (!coordinationWorktreeRoot || !repoWorktreeRoot || !samePath(coordinationWorktreeRoot, repoWorktreeRoot) ||
+        !coordinationBranch || (repoBranch && repoBranch !== coordinationBranch)) {
       throw managerError("EXTENSION_TASK_WORKTREE_PROVENANCE_MISMATCH", "Task worktree provenance is missing or inconsistent.");
     }
     const executionState = String(job.execution_state || "").toLowerCase();
@@ -511,8 +572,8 @@ export function createManagerExtensionRuntimeController(options = {}) {
       status: executionState === "blocked" ? "blocked" : String(coordination.task_status || job.status || "").toLowerCase(),
       completionConfirmed: job.completion_confirmed === true || String(coordination.task_status || "").toLowerCase() === "completed",
       repositoryRoot: String(coordination.root || repo.root || ""),
-      worktreeRoot: worktreeRoots[0],
-      worktreeBranch: branches[0],
+      worktreeRoot: coordinationWorktreeRoot,
+      worktreeBranch: coordinationBranch,
       commitShas: [tracking.checkpoint, tracking.commit_sha, repo.tracking?.worktree_head].filter(Boolean)
     };
   }
@@ -606,17 +667,124 @@ export function createManagerExtensionRuntimeController(options = {}) {
     const manifest = JSON.parse(fs.readFileSync(path.join(canonicalExtensionRoot, "manifest.json"), "utf8"));
     const nonce = randomUUID().replace(/-/g, "");
     const callbackPath = `/bootstrap-${nonce}`;
-    const bootstrapRoot = path.join(home, MANAGED_LIFECYCLE_BOOTSTRAP_DIR, binding.profileId, nonce);
+    const bootstrapParentRoot = path.join(home, MANAGED_LIFECYCLE_BOOTSTRAP_DIR, binding.profileId);
+    const bootstrapRoot = path.join(bootstrapParentRoot, nonce);
+    const bootstrapUrl = `chrome-extension://${extensionId}/bootstrap.html`;
+    const diagnosticsPath = path.join(bootstrapParentRoot, "last-diagnostics.json");
+    const devToolsActivePortPath = path.join(binding.userDataRoot, "DevToolsActivePort");
     fs.mkdirSync(bootstrapRoot, { recursive: true });
+    normalizeManagerOwnedChromeExitState(binding);
+    const diagnostics = {
+      version: 1,
+      profile_id: binding.profileId,
+      extension_id: extensionId,
+      extension_root: bootstrapRoot,
+      bootstrap_url: bootstrapUrl,
+      callback_listen_address: "",
+      callback_request_count: 0,
+      bootstrap_browser_pid: 0,
+      bootstrap_browser_command_line: "",
+      chrome_process_alive_at_failure: false,
+      chrome_process_lifetime_ms: 0,
+      devtools_port: 0,
+      devtools_target_url: "",
+      devtools_target_title: "",
+      bootstrap_chrome_started: false,
+      bootstrap_extension_loaded: false,
+      bootstrap_page_started: false,
+      storage_set_started: false,
+      storage_set_succeeded: false,
+      callback_fetch_started: false,
+      callback_received: false,
+      bootstrap_failed: false,
+      first_failed_stage: "",
+      first_failed_error: "",
+      last_successful_stage: "",
+      worker_enabled_after: null,
+      worker_disable_pending_after: null,
+      active_after: null,
+      secure_preferences_extension_path_before: "",
+      secure_preferences_extension_path_after: "",
+      secure_preferences_extension_state_before: null,
+      secure_preferences_extension_state_after: null,
+      secure_preferences_disable_reasons_before: [],
+      secure_preferences_disable_reasons_after: []
+    };
+    const readPreferenceExtensionSetting = () => {
+      try {
+        const preferences = JSON.parse(fs.readFileSync(binding.securePreferencesPath, "utf8"));
+        const setting = preferences?.extensions?.settings?.[extensionId] || {};
+        return {
+          path: String(setting.path || ""),
+          state: Number.isInteger(setting.state) ? setting.state : null,
+          disableReasons: Array.isArray(setting.disable_reasons) ? setting.disable_reasons.map(Number).filter(Number.isFinite) : []
+        };
+      } catch {
+        return { path: "", state: null, disableReasons: [] };
+      }
+    };
+    const readPreferenceExtensionPath = () => readPreferenceExtensionSetting().path;
+    const preferenceBefore = readPreferenceExtensionSetting();
+    diagnostics.secure_preferences_extension_path_before = preferenceBefore.path;
+    diagnostics.secure_preferences_extension_state_before = preferenceBefore.state;
+    diagnostics.secure_preferences_disable_reasons_before = preferenceBefore.disableReasons;
     let callbackResolve;
     let callbackReject;
     let callbackSettled = false;
+    let observerStop = false;
+    let observerPromise = null;
+    let chromeStartedAt = 0;
+    let bootstrapError = null;
+    const stageOrder = [
+      "BOOTSTRAP_PAGE_STARTED",
+      "STORAGE_SET_STARTED",
+      "STORAGE_SET_SUCCEEDED",
+      "CALLBACK_FETCH_STARTED",
+      "CALLBACK_RECEIVED"
+    ];
+    const markObservedStage = (stage) => {
+      const index = stageOrder.indexOf(stage);
+      if (index >= 0) {
+        diagnostics.bootstrap_page_started = true;
+        if (index >= 1) diagnostics.storage_set_started = true;
+        if (index >= 2) diagnostics.storage_set_succeeded = true;
+        if (index >= 3) diagnostics.callback_fetch_started = true;
+        if (index >= 4) diagnostics.callback_received = true;
+      }
+    };
+    const parseSnapshot = (value) => {
+      for (const token of String(value || "").split(";")) {
+        const [key, raw] = token.split("=");
+        const parsed = raw === "true" ? true : raw === "false" ? false : null;
+        if (key === "we") diagnostics.worker_enabled_after = parsed;
+        if (key === "wdp") diagnostics.worker_disable_pending_after = parsed;
+        if (key === "a") diagnostics.active_after = parsed;
+      }
+    };
+    const observeTargetTitle = (title) => {
+      const parts = String(title || "").split("|");
+      if (parts[0] !== "CODEXPRO_BOOTSTRAP") return;
+      const stage = String(parts[1] || "");
+      parseSnapshot(parts[2]);
+      diagnostics.devtools_target_title = String(title || "");
+      if (stage === "BOOTSTRAP_FAILED") {
+        diagnostics.bootstrap_failed = true;
+        const [failedStage, ...errorParts] = String(parts[3] || "").split("__");
+        markObservedStage(failedStage);
+        diagnostics.first_failed_stage = failedStage || "BOOTSTRAP_PAGE_STARTED";
+        diagnostics.first_failed_error = errorParts.join("__") || "BOOTSTRAP_SCRIPT_ERROR";
+        return;
+      }
+      markObservedStage(stage);
+    };
     const callbackPromise = new Promise((resolve, reject) => {
       callbackResolve = resolve;
       callbackReject = reject;
     });
     const server = createServer((request, response) => {
+      diagnostics.callback_request_count += 1;
       if (request.method === "POST" && request.url === callbackPath) {
+        diagnostics.callback_received = true;
         response.statusCode = 204;
         response.end();
         if (!callbackSettled) {
@@ -637,6 +805,7 @@ export function createManagerExtensionRuntimeController(options = {}) {
       if (!address || typeof address === "string" || !Number.isInteger(address.port)) {
         throw managerError("EXTENSION_MANAGED_BOOTSTRAP_LISTEN_FAILED", "Could not allocate the managed lifecycle bootstrap callback.");
       }
+      diagnostics.callback_listen_address = `127.0.0.1:${address.port}`;
       const callbackUrl = `http://127.0.0.1:${address.port}${callbackPath}`;
       const files = managedWorkerLifecycleBootstrapFiles({ manifestKey: manifest.key, callbackUrl });
       fs.writeFileSync(path.join(bootstrapRoot, "manifest.json"), files.manifest);
@@ -644,11 +813,55 @@ export function createManagerExtensionRuntimeController(options = {}) {
       fs.writeFileSync(path.join(bootstrapRoot, "bootstrap.js"), files.script);
       const args = chromeActivationArguments(binding, bootstrapRoot)
         .filter((value) => value !== "--restore-last-session");
-      args.push(`chrome-extension://${extensionId}/bootstrap.html`);
+      args.push("--remote-debugging-port=0");
+      args.push(bootstrapUrl);
       const child = spawnChrome(managedTestingBrowser, args);
       if (!child || child.pid === undefined) {
         throw managerError("EXTENSION_MANAGED_BOOTSTRAP_START_FAILED", "Managed lifecycle bootstrap Chrome did not return a process handle.");
       }
+      chromeStartedAt = Date.now();
+      diagnostics.bootstrap_browser_pid = Number(child.pid) || 0;
+      diagnostics.bootstrap_chrome_started = true;
+      observerPromise = (async () => {
+        while (!observerStop) {
+          try {
+            const processes = await (options.listChromeProcesses ? options.listChromeProcesses() : listChromeProcesses(runPowerShell));
+            const rows = (Array.isArray(processes) ? processes : []).map((item) => ({
+              processId: Number(item.processId ?? item.ProcessId),
+              commandLine: String(item.commandLine ?? item.CommandLine ?? "")
+            }));
+            const browserProcess = rows.find((item) =>
+              item.processId === diagnostics.bootstrap_browser_pid ||
+              (item.commandLine && !/(?:^|\s)--type=/i.test(item.commandLine) &&
+                samePath(commandLineUserDataRoot(item.commandLine) || binding.userDataRoot, binding.userDataRoot))
+            );
+            if (browserProcess?.commandLine) diagnostics.bootstrap_browser_command_line = browserProcess.commandLine;
+            diagnostics.chrome_process_alive_at_failure = Boolean(browserProcess);
+          } catch {}
+          try {
+            if (fs.existsSync(devToolsActivePortPath)) {
+              const [portText] = fs.readFileSync(devToolsActivePortPath, "utf8").split(/\r?\n/);
+              const port = Number(portText);
+              if (Number.isInteger(port) && port > 0 && port <= 65535) {
+                diagnostics.devtools_port = port;
+                const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+                  signal: AbortSignal.timeout(750)
+                });
+                if (response.ok) {
+                  const targets = await response.json();
+                  const target = (Array.isArray(targets) ? targets : []).find((item) => String(item?.url || "") === bootstrapUrl);
+                  if (target) {
+                    diagnostics.bootstrap_extension_loaded = true;
+                    diagnostics.devtools_target_url = String(target.url || "");
+                    observeTargetTitle(target.title);
+                  }
+                }
+              }
+            }
+          } catch {}
+          await sleep(100);
+        }
+      })();
       const timer = setTimeout(() => {
         if (!callbackSettled) {
           callbackSettled = true;
@@ -663,12 +876,54 @@ export function createManagerExtensionRuntimeController(options = {}) {
       } finally {
         clearTimeout(timer);
       }
+    } catch (error) {
+      bootstrapError = error;
+      throw error;
     } finally {
+      observerStop = true;
+      if (observerPromise) await observerPromise.catch(() => {});
+      if (bootstrapError?.code === "EXTENSION_MANAGED_BOOTSTRAP_TIMEOUT" && !diagnostics.first_failed_stage) {
+        diagnostics.bootstrap_failed = true;
+        if (!diagnostics.bootstrap_extension_loaded) {
+          diagnostics.first_failed_stage = "BOOTSTRAP_EXTENSION_LOADED";
+          diagnostics.first_failed_error = "BOOTSTRAP_TARGET_NOT_OBSERVED";
+        } else if (!diagnostics.bootstrap_page_started) {
+          diagnostics.first_failed_stage = "BOOTSTRAP_PAGE_STARTED";
+          diagnostics.first_failed_error = "BOOTSTRAP_SCRIPT_NOT_OBSERVED";
+        } else if (diagnostics.callback_fetch_started && !diagnostics.callback_received) {
+          diagnostics.first_failed_stage = "CALLBACK_FETCH_STARTED";
+          diagnostics.first_failed_error = "CALLBACK_REQUEST_NOT_RECEIVED";
+        } else {
+          diagnostics.first_failed_stage = "BOOTSTRAP_CALLBACK";
+          diagnostics.first_failed_error = "CALLBACK_PROMISE_TIMEOUT";
+        }
+      }
+      const successfulStages = [];
+      if (diagnostics.bootstrap_chrome_started) successfulStages.push("BOOTSTRAP_CHROME_STARTED");
+      if (diagnostics.bootstrap_extension_loaded) successfulStages.push("BOOTSTRAP_EXTENSION_LOADED");
+      if (diagnostics.bootstrap_page_started) successfulStages.push("BOOTSTRAP_PAGE_STARTED");
+      if (diagnostics.storage_set_started && diagnostics.first_failed_stage !== "STORAGE_SET_STARTED") successfulStages.push("STORAGE_SET_STARTED");
+      if (diagnostics.storage_set_succeeded) successfulStages.push("STORAGE_SET_SUCCEEDED");
+      if (diagnostics.callback_fetch_started && diagnostics.first_failed_stage !== "CALLBACK_FETCH_STARTED") successfulStages.push("CALLBACK_FETCH_STARTED");
+      if (diagnostics.callback_received) successfulStages.push("CALLBACK_RECEIVED");
+      diagnostics.last_successful_stage = successfulStages.at(-1) || "";
+      const preferenceAfter = readPreferenceExtensionSetting();
+      diagnostics.secure_preferences_extension_path_after = preferenceAfter.path;
+      diagnostics.secure_preferences_extension_state_after = preferenceAfter.state;
+      diagnostics.secure_preferences_disable_reasons_after = preferenceAfter.disableReasons;
       await new Promise((resolve) => server.close(() => resolve())).catch(() => {});
       try {
         await stopProfile({ profileId: binding.profileId });
       } catch (error) {
         if (error?.code !== "EXTENSION_CHROME_PROCESS_MISSING") throw error;
+      } finally {
+        normalizeManagerOwnedChromeExitState(binding);
+        if (chromeStartedAt) diagnostics.chrome_process_lifetime_ms = Math.max(0, Date.now() - chromeStartedAt);
+        fs.mkdirSync(bootstrapParentRoot, { recursive: true });
+        try {
+          fs.writeFileSync(diagnosticsPath, JSON.stringify(diagnostics, null, 2));
+        } catch {}
+        if (bootstrapError) bootstrapError.bootstrapDiagnostics = diagnostics;
       }
       fs.rmSync(bootstrapRoot, { recursive: true, force: true });
     }

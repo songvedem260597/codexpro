@@ -101,7 +101,8 @@ main().catch((error) => {
     ok: false,
     code: String(error?.code || "EXTENSION_ACTIVATION_FAILED"),
     message: error?.message || String(error),
-    rollback: error?.rollback || null
+    rollback: error?.rollback || null,
+    bootstrap_diagnostics: error?.bootstrapDiagnostics || null
   }, null, 2));
   process.exitCode = 1;
 });

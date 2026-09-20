@@ -172,9 +172,7 @@ try {
   const mcp = async (toolName) => {
     if (toolName === "repo_task_status") {
       return {
-        root: repositoryRoot,
-        worktree_root: worktreeRoot,
-        worktree_branch: "codexpro/task/621",
+        root: worktreeRoot,
         tracking: {
           task_id: TASK_ID,
           owner_profile: OWNER_ID,
@@ -420,7 +418,8 @@ try {
   assert.match(bootstrapFiles.script, /workerEnabled:true/);
   assert.match(bootstrapFiles.script, /workerEnabledUpdatedAt:Date\.now\(\)/);
   assert.match(bootstrapFiles.script, /workerDisablePending:false/);
-  assert.doesNotMatch(bootstrapFiles.script, /\bactive\s*:/, "isolated bootstrap must not override active routing state");
+  const lifecycleWrite = bootstrapFiles.script.match(/chrome\.storage\.local\.set\((\{[^;]+\})\)/)?.[1] || "";
+  assert.doesNotMatch(lifecycleWrite, /\bactive\s*:/, "isolated bootstrap must not override active routing state");
 
   const disabledController = createManagerExtensionRuntimeController({
     home: path.join(sandbox, "disabled-managed-home"),
