@@ -87,6 +87,7 @@ function makeFixture({ profileId = "profile-a", requireRepoTask = true, workspac
   let recoveryBarrier;
   let recoveryFailure;
   let recoveryResolution;
+  let expectedVerifyRoot;
   const operationOrder = [];
 
   const workspaces = {
@@ -217,6 +218,12 @@ function makeFixture({ profileId = "profile-a", requireRepoTask = true, workspac
     resolveWorkspaceTaskRootByTaskId: () => recoveryResolution ?? { root: repoRoot, task: { status: "running", worktreeRoot: repoRoot, worktreeBranch: "codexpro/task/recovery" } },
     verifyWorkspaceTaskResume: async ({ taskId, root }) => {
       counters.verifyWorkspace += 1;
+      if (expectedVerifyRoot && path.resolve(root) !== path.resolve(expectedVerifyRoot)) {
+        throw new CodexProError(`WORKSPACE_TASK_NOT_ACTIVE: ${taskId} has no running workspace coordination record.`, {
+          code: "WORKSPACE_TASK_NOT_ACTIVE",
+          details: { task_id: taskId, workspace_root: root, status: "missing" }
+        });
+      }
       return { taskId, status: "running", worktreeRoot, worktreeBranch: `codexpro/task/${taskId}`, root };
     },
     withVerifiedWorkspaceTaskResume: async (_context, _verified, fn) => await fn()
@@ -259,6 +266,7 @@ function makeFixture({ profileId = "profile-a", requireRepoTask = true, workspac
     setRecoveryBarrier(barrier) { recoveryBarrier = barrier; },
     setRecoveryFailure(error) { recoveryFailure = error; },
     setRecoveryResolution(value) { recoveryResolution = value; },
+    setExpectedVerifyRoot(value) { expectedVerifyRoot = value; },
     selectedBrowserProfile: () => selectedBrowserProfile
   };
 }
@@ -525,6 +533,33 @@ try {
   assert.equal(durableResume.counters.graph, 1);
   assert.equal(durableResume.runtime.activeRepoTaskForProfile("profile-resume")?.taskId, resumeId);
   assert.equal(durableResume.events.some((entry) => entry.type === "repo_task_resumed"), true);
+
+  // Durable resume keeps the execution worktree separate from the authoritative coordination root.
+  const splitRootResume = makeFixture({ profileId: "profile-split-root", requireRepoTask: true, workspaceId: "ws-worktree" });
+  const splitRootId = "cpt_787878787878787878787878";
+  const coordinationRoot = path.join(tempRoot, "split-coordination-root");
+  splitRootResume.jobs.set(splitRootId, makeJob({
+    jobId: splitRootId,
+    workerId: "profile-split-root",
+    root: worktreeRoot,
+    workspaceId: "ws-worktree"
+  }));
+  splitRootResume.setRecoveryResolution({
+    root: coordinationRoot,
+    task: {
+      taskId: splitRootId,
+      workerId: "profile-split-root",
+      status: "running",
+      worktreeRoot,
+      worktreeBranch: `codexpro/task/${splitRootId}`,
+      integrationStatus: "idle"
+    }
+  });
+  splitRootResume.setExpectedVerifyRoot(coordinationRoot);
+  const splitRootRecovered = await splitRootResume.registered.get("resume_repo_task").handler({ task_id: splitRootId });
+  assert.equal(splitRootRecovered.structuredContent.root, path.resolve(worktreeRoot));
+  assert.equal(splitRootRecovered.structuredContent.coordination_root, coordinationRoot);
+  assert.equal(splitRootResume.runtime.activeRepoTaskForProfile("profile-split-root")?.coordinationRoot, coordinationRoot);
 
   // Concurrent resume calls share one in-flight recovery and mark the follower deduplicated.
   const concurrent = makeFixture({ profileId: "profile-concurrent", requireRepoTask: true });

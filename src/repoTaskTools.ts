@@ -80,6 +80,7 @@ const repoTaskRuntimeResumeKey = `runtime-${process.pid}-${randomBytes(8).toStri
 type ResumeResult = {
   taskId: string;
   profileId: string;
+  coordinationRoot: string;
   root: string;
   workspaceId: string;
   scope: "workspace" | "all_allowed";
@@ -974,13 +975,20 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
         && existingExpected.scope === durableScope
         && sameResolvedRoot(existingActive.root, durableBefore.root)
         && existingActive.globalRulesSha256 === latestRules.sha256) {
-        const context = { taskId, root: durableBefore.root, workerId: profileId };
+        const resolvedCoordination = resolveWorkspaceTaskRootByTaskId({
+          taskId,
+          rootHint: existingActive.coordinationRoot || durableBefore.root,
+          workerId: profileId,
+          requireUniqueMatch: true
+        });
+        const context = { taskId, root: resolvedCoordination.root, workerId: profileId };
         const verified = await verifyWorkspaceTaskResume(context);
         await withVerifiedWorkspaceTaskResume(context, verified, async () => assertResumeStillCurrent());
         const worktree = repoTaskWorktree(existingActive);
         assertResumeStillCurrent();
+        existingActive.coordinationRoot = resolvedCoordination.root;
         setActiveRepoTaskForServer(server, existingActive);
-        await syncAuthoritativeTaskTracking({ taskId, rootHint: durableBefore.root, ownerProfile: profileId }).catch(() => undefined);
+        await syncAuthoritativeTaskTracking({ taskId, rootHint: resolvedCoordination.root, ownerProfile: profileId }).catch(() => undefined);
         return textResult(`# Repo Task Gate Ready\n\nTask: ${taskId}\nProfile: ${profileId}\n\nThe existing task gate is already valid; no task action was replayed.`, {
           resumed: true,
           gate_active: true,
@@ -990,6 +998,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
           task_kind: durableBefore.kind,
           task_size: durableBefore.taskSize,
           profile_id: profileId,
+          coordination_root: resolvedCoordination.root,
           root: durableBefore.root,
           workspace_id: durableBefore.workspaceId,
           worktree_root: worktree.root,
@@ -1033,11 +1042,17 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
               details: { task_id: taskId, saved_workspace_id: durableJob.workspaceId, current_workspace_id: workspace.id, root: workspace.root }
             });
           }
+          const resolvedCoordination = resolveWorkspaceTaskRootByTaskId({
+            taskId,
+            rootHint: workspace.root,
+            workerId: profileId,
+            requireUniqueMatch: true
+          });
           const coordinationTask = await verifyWorkspaceTaskResume({
             taskId,
             workerId: profileId,
             title: durableJob.title,
-            root: workspace.root
+            root: resolvedCoordination.root
           });
           const globalRules = await readGlobalRulesSnapshot();
           const codexGraph = await requireCodexGraphForWorkspace(config, guard, workspace);
@@ -1048,7 +1063,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
             includeDiff: false
           });
           const agentsSha256 = createHash("sha256").update(codexContext.text).digest("hex");
-          const resumedJob = await withVerifiedWorkspaceTaskResume({ taskId, root: workspace.root, workerId: profileId }, coordinationTask, () => resumeWorkerJob({
+          const resumedJob = await withVerifiedWorkspaceTaskResume({ taskId, root: resolvedCoordination.root, workerId: profileId }, coordinationTask, () => resumeWorkerJob({
             jobId: taskId,
             workerId: profileId,
             root: workspace.root,
@@ -1085,6 +1100,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
           rememberRepoTaskProof(proof);
           rememberExpectedRepoTask(profileId, { taskId, root: workspace.root, scope });
           const activeTask: ActiveRepoTask = {
+            coordinationRoot: resolvedCoordination.root,
             taskId,
             taskTitle: durableJob.title,
             root: workspace.root,
@@ -1101,6 +1117,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
             recordBrowserProfileTaskEvent("repo_task_resumed", {
               profile_id: profileId,
               task_id: taskId,
+              coordination_root: resolvedCoordination.root,
               root: workspace.root,
               workspace_id: workspace.id,
               worktree_root: coordinationTask.worktreeRoot,
@@ -1112,6 +1129,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
           return {
             taskId,
             profileId,
+            coordinationRoot: resolvedCoordination.root,
             root: workspace.root,
             workspaceId: workspace.id,
             scope,
@@ -1140,6 +1158,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
         });
       }
       const activeTask: ActiveRepoTask = {
+        coordinationRoot: recovered.coordinationRoot,
         taskId: recovered.taskId,
         taskTitle: recovered.taskTitle,
         root: recovered.root,
@@ -1152,7 +1171,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
       assertResumeStillCurrent();
       setActiveRepoTaskForProfile(profileId, activeTask);
       setActiveRepoTaskForServer(server, activeTask);
-      await syncAuthoritativeTaskTracking({ taskId, rootHint: recovered.root, ownerProfile: profileId }).catch(() => undefined);
+      await syncAuthoritativeTaskTracking({ taskId, rootHint: recovered.coordinationRoot, ownerProfile: profileId }).catch(() => undefined);
       return textResult(`# Repo Task Resumed\n\nTask: ${taskId}\nProfile: ${profileId}\nWorktree: ${recovered.worktreeRoot}\n\nThe existing task gate was restored without replaying prior task actions.`, {
         resumed: true,
         gate_active: true,
@@ -1162,6 +1181,7 @@ export function registerRepoTaskTools(options: RepoTaskToolsOptions): void {
         task_size: recovered.workerJob.taskSize,
         profile_id: profileId,
         session_profile_id: sessionProfileId,
+        coordination_root: recovered.coordinationRoot,
         root: recovered.root,
         workspace_id: recovered.workspaceId,
         worktree_root: recovered.worktreeRoot,
