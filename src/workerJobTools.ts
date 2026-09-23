@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { CodexProError } from "./guard.js";
-import { getBrowserExtensionProfileTaskBinding, setBrowserExtensionProfileTask } from "./browserExtensionBridge.js";
+import {
+  getBrowserExtensionProfileTaskBinding,
+  setBrowserExtensionProfileTask,
+  setBrowserExtensionProfileWorkspace,
+  setBrowserExtensionProfileWorkspaceBinding
+} from "./browserExtensionBridge.js";
 import { listWorkerContextCheckpoints } from "./workerContext.js";
 import {
   finalizeWorkerJob,
@@ -284,9 +289,13 @@ export function createWorkerJobToolDefinitions(deps: WorkerJobToolDependencies):
             }, coordinationStatus);
             await syncTrackingBestEffort({ taskId: record.jobId, rootHint: record.root, ownerProfile: gateProfileId });
           }
-          if (record.status === "completed") {
-            const binding = getBrowserExtensionProfileTaskBinding(gateProfileId);
-            if (binding?.taskId === record.jobId) setBrowserExtensionProfileTask(gateProfileId, "", "");
+          const binding = getBrowserExtensionProfileTaskBinding(gateProfileId);
+          if (binding?.taskId === record.jobId && (record.status === "completed" || record.status === "cancelled")) {
+            setBrowserExtensionProfileTask(gateProfileId, "", "");
+            if (record.status === "cancelled") {
+              setBrowserExtensionProfileWorkspaceBinding(gateProfileId, "");
+              setBrowserExtensionProfileWorkspace(gateProfileId, "");
+            }
           }
           return textResult(`# Worker Job Finalized\n\n${record.jobId}: ${record.status}`, {
             finalized: true,

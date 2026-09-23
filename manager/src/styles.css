@@ -775,6 +775,8 @@ h4.response-heading, h5.response-heading, h6.response-heading { font-size: 13px;
 .profile-task-reason p { margin: 0; color: #d8c3c8; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 .profile-task-item-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #252e3b; }
 .profile-task-item-foot > span:first-child { min-width: 0; overflow: hidden; color: #77859a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.profile-task-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.profile-task-abandon { min-height: 34px; padding: 7px 12px; white-space: nowrap; }
 .profile-task-resume { min-width: 126px; min-height: 34px; padding: 7px 12px; }
 .profile-task-done { color: #78dba0; font-size: 11px; font-weight: var(--weight-semibold); white-space: nowrap; }
 .attachment-lightbox-backdrop { z-index: 36; padding: 24px; background: #020409e8; backdrop-filter: blur(9px); }

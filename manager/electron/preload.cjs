@@ -93,6 +93,7 @@ contextBridge.exposeInMainWorld("codexpro", {
     return invokeResult("codexpro:send-profile-request", { ...payload, ipc_call_id: ipcCallId });
   },
   resumeProfileTask: (payload) => invokeResult("codexpro:resume-profile-task", payload),
+  abandonProfileTask: (payload) => invokeResult("codexpro:abandon-profile-task", payload),
   renameProfileChat: (payload) => invoke("codexpro:rename-profile-chat", payload),
   getProfileResponse: (payload) => invoke("codexpro:get-profile-response", payload),
   getChatResponseCache: (payload) => invoke("codexpro:get-chat-response-cache", payload),

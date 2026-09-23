@@ -1,4 +1,4 @@
-const RESUMABLE_TASK_STATUSES = new Set(["prepared", "running", "failed", "cancelled", "blocked"]);
+const RESUMABLE_TASK_STATUSES = new Set(["prepared", "running", "failed", "blocked"]);
 
 function normalizedStatus(job) {
   return String(job?.status || "").trim().toLowerCase();
@@ -31,7 +31,7 @@ export function profileTaskStatusLabel(job) {
   if (execution === "error") return "Có lỗi";
   if (status === "blocked" || execution === "blocked") return "Bị chặn";
   if (status === "failed") return "Thất bại";
-  if (status === "cancelled") return "Chưa hoàn thành";
+  if (status === "cancelled") return "Đã hủy";
   if (status === "prepared") return "Chưa bắt đầu";
   if (status === "running") return "Chưa hoàn thành";
   return status || "Không rõ";

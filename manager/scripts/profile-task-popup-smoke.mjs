@@ -39,7 +39,8 @@ const jobs = [
   { job_id: "cpt_000000000000000000000009", worker_id: "profile-a", status: "prepared", progress_percent: 0, fifo_queued_at: "2026-09-04T05:30:00Z", events: [{ type: "prepared" }] },
   { job_id: "cpt_000000000000000000000004", worker_id: "profile-b", status: "failed", progress_percent: 20, updated_at: "2026-09-04T04:00:00Z" },
   { job_id: "cpt_000000000000000000000007", worker_id: "profile-a", status: "running", completion_confirmed: true, progress_percent: 100, updated_at: "2026-09-04T06:00:00Z" },
-  { job_id: "cpt_000000000000000000000008", worker_id: "profile-a", status: "blocked", progress_percent: 55, updated_at: "2026-09-04T07:00:00Z" }
+  { job_id: "cpt_000000000000000000000008", worker_id: "profile-a", status: "blocked", progress_percent: 55, updated_at: "2026-09-04T07:00:00Z" },
+  { job_id: "cpt_000000000000000000000010", worker_id: "profile-a", status: "cancelled", progress_percent: 0, updated_at: "2026-09-04T08:00:00Z" }
 ];
 const sorted = profileTaskJobsForWorker(jobs, "profile-a", "cpt_000000000000000000000002");
 assert.deepEqual(sorted.map((job) => job.job_id), [
@@ -57,8 +58,11 @@ assert.equal(profileTaskCanResume(placeholderPreparedJob, true), false, "uniniti
 assert.equal(profileTaskCanResume(jobs[1], true), true, "failed task should resume while idle");
 assert.equal(profileTaskCanResume(jobs[1], false), false, "failed task should not resume while worker is busy");
 assert.equal(profileTaskCanResume(jobs[0], true), false, "completed task must never resume");
+const cancelledJob = jobs.find((job) => job.status === "cancelled");
+assert.equal(sorted.includes(cancelledJob), false, "cancelled terminal tasks must not remain in the resumable popup");
+assert.equal(profileTaskCanResume(cancelledJob, true), false, "cancelled terminal tasks must never resume");
 assert.equal(profileTaskProgress({ completed_parts: ["a", "b"], remaining_parts: ["c", "d"] }), 50);
-assert.equal(profileTaskStatusLabel({ status: "cancelled" }), "Chưa hoàn thành");
+assert.equal(profileTaskStatusLabel({ status: "cancelled" }), "Đã hủy");
 
 const taskButtonIndex = profilesSource.indexOf('className="button secondary profile-task-button"');
 const normalButtonsIndex = profilesSource.indexOf('className="profile-action-buttons"', taskButtonIndex);
@@ -71,8 +75,16 @@ assert.match(modalSource, /Không có task thất bại hoặc chưa hoàn thàn
 assert.match(electronSource, /const WORKER_JOB_HISTORY_LIMIT = 200;[\s\S]*?"worker_job_history"[\s\S]*?limit: WORKER_JOB_HISTORY_LIMIT/, "profile task popup must retain the full worker history window supported by the runtime so completed tasks do not disappear behind other profiles");
 assert.match(profileActionsSource, /api\.resumeProfileTask\(\{ profileId: profile\.profile_id, taskId \}\)/, "popup must call the dedicated resume IPC");
 assert.match(preloadSource, /resumeProfileTask: \(payload\) => invokeResult\("codexpro:resume-profile-task", payload\)/, "preload must expose resumeProfileTask");
-assert.match(electronSource, /WORKER_NOT_IDLE: Chỉ có thể tiếp tục task khi worker đang ở trạng thái ĐANG RẢNH/, "backend must re-check worker idle state");
-assert.match(electronSource, /RESUMABLE_BROWSER_TASK_STATUSES = new Set\(\["prepared", "running", "failed", "cancelled", "blocked"\]\)/, "backend must limit resumable task statuses");
+assert.match(mainSource, /onAbandon=\{abandonProfileTask\}/, "App must wire the explicit task-abandon action into the popup");
+assert.match(modalSource, /profile-task-abandon[\s\S]*?onClick=\{\(\) => void onAbandon\(job\)\}/, "popup must expose a dedicated abandon button for unfinished tasks");
+assert.match(profileActionsSource, /window\.confirm\([\s\S]*?Source và worktree sẽ không bị xóa/, "abandon must require explicit confirmation and state that source/worktree are retained");
+assert.match(profileActionsSource, /api\.abandonProfileTask\(\{ profileId: profile\.profile_id, taskId \}\)/, "popup must call the dedicated abandon IPC with exact profile/task identity");
+assert.match(preloadSource, /abandonProfileTask: \(payload\) => invokeResult\("codexpro:abandon-profile-task", payload\)/, "preload must expose abandonProfileTask");
+assert.match(electronSource, /WORKER_NOT_IDLE: Chỉ có thể tiếp tục task khi worker đang ở trạng thái ĐANG RẢNH/, "backend must re-check worker idle state for resume");
+assert.match(electronSource, /WORKER_NOT_IDLE: Chỉ có thể bỏ task khi worker đang ở trạng thái ĐANG RẢNH/, "backend must re-check worker idle state for abandon");
+assert.match(electronSource, /jobWorkerId !== profileId[\s\S]*?Task này không thuộc worker đang chọn/, "abandon must reject a task owned by another profile");
+assert.match(electronSource, /"finalize_worker_job"[\s\S]*?task_id: taskId[\s\S]*?outcome: "cancelled"/, "abandon must use the sanctioned cancelled terminal transition");
+assert.match(electronSource, /RESUMABLE_BROWSER_TASK_STATUSES = new Set\(\["prepared", "running", "failed", "blocked"\]\)/, "backend must not treat terminal cancellation as resumable");
 assert.match(electronSource, /previousStatus === "failed" && codeTask[\s\S]*?"recover_repo_task"[\s\S]*?profile_id: profileId[\s\S]*?task_id: taskId/, "failed code tasks must use official Manager terminal recovery with the same Task ID and owner");
 assert.match(electronSource, /preparedFailedLifecycle = previousStatus === "prepared" && codeTask && lastFailedFinalization > lastTerminalRecovery/, "Manager must recover the failed authoritative lifecycle even when an earlier all_allowed re-prepare already left WorkerJob prepared and unbound");
 assert.match(electronSource, /\(previousStatus === "failed" && codeTask\) \|\| preparedFailedLifecycle/, "both terminal and prepared split-state failures must use the same official recovery primitive");
@@ -81,7 +93,7 @@ assert.match(electronSource, /projectRoot: recoveryRoot/, "terminal all_allowed 
 assert.match(electronSource, /recoveryAccepted && initialWorkspaceRoot[\s\S]*?Không chọn repo\/root khác, không tạo task ID mới, không tạo worktree mới/, "recovery prompt must bind begin_repo_task to the authoritative worktree and forbid replacement state");
 assert.match(electronSource, /existingWorkerJobStatus === "prepared"[\s\S]*begin_repo_task đúng Task ID/, "re-prepared task must call begin_repo_task before workspace tools");
 assert.match(electronSource, /previousTaskId: taskId[\s\S]*taskMode: "recovery"|taskMode: "recovery"[\s\S]*previousTaskId: taskId/, "resume must reuse the original Task ID via recovery mode");
-for (const className of ["profile-task-button", "profile-task-modal", "profile-task-list", "profile-task-resume"]) {
+for (const className of ["profile-task-button", "profile-task-modal", "profile-task-list", "profile-task-actions", "profile-task-abandon", "profile-task-resume"]) {
   assert.ok(styles.includes(`.${className}`), `missing ${className} styles`);
 }
 

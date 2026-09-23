@@ -2893,7 +2893,7 @@ async function reloadChromeProfiles() {
 }
 
 const profileSendOperations = new Map();
-const RESUMABLE_BROWSER_TASK_STATUSES = new Set(["prepared", "running", "failed", "cancelled", "blocked"]);
+const RESUMABLE_BROWSER_TASK_STATUSES = new Set(["prepared", "running", "failed", "blocked"]);
 
 function browserProfileIdleForTaskResume(profile) {
   if (!profile?.connected || String(profile.activity || "") !== "idle") return false;
@@ -3428,6 +3428,42 @@ async function resumeProfileTask(payload) {
     requireIdleProfile: !hangRecovery
   });
   return { ...result, resumed_task_id: taskId, resumed_from_status: previousStatus, resumed_checkpoint_count: workerContexts.length, hang_recovery: hangRecovery };
+}
+
+async function abandonProfileTask(payload) {
+  const profileId = String(payload?.profileId || "").trim();
+  const taskId = String(payload?.taskId || "").trim();
+  if (!profileId || profileId.length > 160 || !/^[A-Za-z0-9._-]+$/.test(profileId)) throw new Error("Chrome profile id không hợp lệ.");
+  if (!/^cpt_[a-f0-9]{24}$/.test(taskId)) throw new Error("CodexPro task id không hợp lệ.");
+  if (profileSendOperations.has(profileId)) throw new Error("Profile này đang gửi một yêu cầu khác. Chỉ có thể bỏ task khi worker đang rảnh.");
+
+  const base = await readyRuntimeBaseStatus();
+  if (!base.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
+  const profiles = await listBrowserProfilesThroughMcp(base.config, base.token);
+  const profile = (Array.isArray(profiles) ? profiles : []).find((item) => String(item?.profile_id || "") === profileId);
+  if (!profile) throw new Error("Profile Chrome này không còn được CodexPro nhận diện.");
+  if (!browserProfileIdleForTaskResume(profile)) throw new Error("WORKER_NOT_IDLE: Chỉ có thể bỏ task khi worker đang ở trạng thái ĐANG RẢNH.");
+
+  const workerJobResult = await localMcpTool(base.config, base.token, "worker_job_status", { task_id: taskId }, 15000);
+  const job = workerJobResult?.job;
+  if (!job) throw new Error("Không tìm thấy task đã chọn trong lịch sử CodexPro.");
+  const jobWorkerId = String(workerJobField(job, "worker_id", "workerId") || "");
+  if (jobWorkerId !== profileId) throw new Error("Task này không thuộc worker đang chọn.");
+  const status = String(job?.status || "").trim().toLowerCase();
+  if (status === "completed" || workerJobField(job, "completion_confirmed", "completionConfirmed") === true) throw new Error("Task đã hoàn thành nên không thể bỏ.");
+  if (status === "cancelled") return { abandoned: true, already_abandoned: true, task_id: taskId, profile_id: profileId, status };
+  if (!RESUMABLE_BROWSER_TASK_STATUSES.has(status)) throw new Error(`Task ở trạng thái ${status || "không xác định"} nên không thể bỏ an toàn.`);
+
+  const finalized = await localMcpTool(base.config, base.token, "finalize_worker_job", {
+    task_id: taskId,
+    outcome: "cancelled",
+    summary: "User abandoned task from CodexPro Manager task popup."
+  }, 30000);
+  const finalizedJob = finalized?.job;
+  if (finalized?.finalized !== true || String(workerJobField(finalizedJob, "job_id", "jobId") || "") !== taskId || String(finalizedJob?.status || "").toLowerCase() !== "cancelled") {
+    throw new Error("CodexPro chưa xác nhận task đã được hủy.");
+  }
+  return { abandoned: true, task_id: taskId, profile_id: profileId, status: "cancelled" };
 }
 
 async function getRepoTaskStatus(payload) {
@@ -4243,6 +4279,18 @@ diagnosticIpcHandle("codexpro:resume-profile-task", {
     return { profile_id: String(value?.profile_id || ""), task_id: String(value?.resumed_task_id || value?.repo_task_id || ""), resumed_from_status: String(value?.resumed_from_status || ""), conversation_id: String(value?.conversation_id || "") };
   }
 }, (_event, payload) => ipcResult(() => resumeProfileTask(payload)));
+diagnosticIpcHandle("codexpro:abandon-profile-task", {
+  category: "task",
+  action: "abandon-profile-task",
+  logSuccess: true,
+  successMessage: "Đã bỏ task",
+  failureMessage: "Bỏ task thất bại",
+  details: (payload) => ({ profile_id: String(payload?.profileId || ""), task_id: String(payload?.taskId || "") }),
+  resultDetails: (result) => {
+    const value = result?.ok ? result.value : result;
+    return { profile_id: String(value?.profile_id || ""), task_id: String(value?.task_id || ""), status: String(value?.status || "") };
+  }
+}, (_event, payload) => ipcResult(() => abandonProfileTask(payload)));
 diagnosticIpcHandle("codexpro:rename-profile-chat", {
   category: "chat",
   action: "rename-profile-chat",

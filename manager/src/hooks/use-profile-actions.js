@@ -158,6 +158,32 @@ export function useProfileActions({
     }
   }, [api, notify, refresh, resumeBusyTaskId, setError, setProfileTaskLabels, setResumeBusyTaskId, setTaskProfileId, status?.browserProfiles, taskProfileId]);
 
+  const abandonProfileTask = useCallback(async (job) => {
+    const taskId = String(job?.job_id || job?.jobId || "").trim();
+    const profile = (status?.browserProfiles || []).find((item) => item.profile_id === taskProfileId);
+    if (!profile || !taskId || resumeBusyTaskId) return;
+    if (!profileWorkerIsIdleForTaskResume(profile)) {
+      setError("Worker đang bận. Chỉ có thể bỏ task khi worker trở về trạng thái ĐANG RẢNH.");
+      return;
+    }
+    const title = String(job?.title || taskId);
+    if (!window.confirm(`Bỏ task “${title}”?\n\nTask sẽ được đánh dấu đã hủy và gỡ khỏi profile. Source và worktree sẽ không bị xóa.`)) return;
+    setResumeBusyTaskId(taskId);
+    setError("");
+    try {
+      const result = await api.abandonProfileTask({ profileId: profile.profile_id, taskId });
+      if (result?.abandoned !== true) throw new Error("CodexPro chưa xác nhận task đã được hủy.");
+      setTaskProfileId("");
+      notify(`Đã bỏ ${title}`);
+      await refresh(false);
+    } catch (abandonError) {
+      setError(abandonError?.message || String(abandonError));
+      await refresh(false).catch(() => undefined);
+    } finally {
+      setResumeBusyTaskId("");
+    }
+  }, [api, notify, refresh, resumeBusyTaskId, setError, setResumeBusyTaskId, setTaskProfileId, status?.browserProfiles, taskProfileId]);
+
   const stopControlTask = useCallback(async (task) => {
     const profile = task?.profile;
     const tab = task?.tab;
@@ -209,6 +235,7 @@ export function useProfileActions({
     setupProfile,
     openProfile,
     resumeProfileTask,
+    abandonProfileTask,
     stopControlTask,
     reloadProfiles
   };

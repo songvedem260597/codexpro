@@ -17,7 +17,7 @@ function formatTaskTime(job) {
     : value.toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
 }
 
-export function ProfileTaskModal({ profile, jobs, resumeBusyTaskId, onClose, onResume }) {
+export function ProfileTaskModal({ profile, jobs, resumeBusyTaskId, onClose, onResume, onAbandon }) {
   useEffect(() => {
     const handleEscape = (event) => {
       if (event.key !== "Escape") return;
@@ -63,6 +63,7 @@ export function ProfileTaskModal({ profile, jobs, resumeBusyTaskId, onClose, onR
               const remaining = Array.isArray(job?.remaining_parts) ? job.remaining_parts : [];
               const reason = profileTaskLastReason(job);
               const canResume = profileTaskCanResume(job, workerIdle) && !resumeBusyTaskId;
+              const canAbandon = workerIdle && !resumeBusyTaskId;
               const isResuming = resumeBusyTaskId === taskId;
               return (
                 <article className={`profile-task-item is-${status || "unknown"} ${current ? "is-current" : ""}`} key={taskId || `${job?.title}:${job?.updated_at}`}>
@@ -84,7 +85,10 @@ export function ProfileTaskModal({ profile, jobs, resumeBusyTaskId, onClose, onR
                   <div className="profile-task-item-foot">
                     <span>{job?.root ? String(job.root).split(/[\\/]/).at(-1) : "Tất cả vùng được cấp quyền"}</span>
                     {status === "completed" || job?.completion_confirmed === true ? <span className="profile-task-done">✓ Đã hoàn thành</span> : (
-                      <button className="button primary profile-task-resume" type="button" disabled={!canResume} title={!workerIdle ? "Chỉ có thể tiếp tục khi worker đang rảnh" : "Tiếp tục task từ checkpoint gần nhất"} onClick={() => void onResume(job)}>{isResuming ? "Đang tiếp tục…" : "Tiếp tục task"}</button>
+                      <div className="profile-task-actions">
+                        <button className="button danger-quiet profile-task-abandon" type="button" disabled={!canAbandon} title={!workerIdle ? "Chỉ có thể bỏ task khi worker đang rảnh" : "Đánh dấu task đã hủy và gỡ binding; không xóa source/worktree"} onClick={() => void onAbandon(job)}>{isResuming ? "Đang xử lý…" : "Bỏ task"}</button>
+                        <button className="button primary profile-task-resume" type="button" disabled={!canResume} title={!workerIdle ? "Chỉ có thể tiếp tục khi worker đang rảnh" : "Tiếp tục task từ checkpoint gần nhất"} onClick={() => void onResume(job)}>{isResuming ? "Đang tiếp tục…" : "Tiếp tục task"}</button>
+                      </div>
                     )}
                   </div>
                 </article>

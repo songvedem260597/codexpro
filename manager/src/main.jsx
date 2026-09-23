@@ -500,6 +500,7 @@ function App() {
     setupProfile,
     openProfile,
     resumeProfileTask,
+    abandonProfileTask,
     stopControlTask,
     reloadProfiles
   } = useProfileActions({
@@ -899,6 +900,7 @@ function App() {
           resumeBusyTaskId={resumeBusyTaskId}
           onClose={() => setTaskProfileId("")}
           onResume={resumeProfileTask}
+          onAbandon={abandonProfileTask}
         />
       )}
 
