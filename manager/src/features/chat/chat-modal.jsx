@@ -143,7 +143,11 @@ export function ChatModal({ profile, settings, projects, busy, state, refs, acti
   const working = profile.connected && ((profile.activity === "working" && !selectedResponseClearsProfileBusy) || selectedBusy || selectedSettling || rolloverCreating);
   const workerState = !profile.connected ? "hung" : working ? "working" : "idle";
   const showRolloverNotice = Boolean(responseCurrent && !responseCleared && response?.rolloverNotice);
-  const showRepoTaskNotice = Boolean(responseCurrent && !responseCleared && response?.repoTaskId && (response.repoTaskStatus === "verified" || response.repoTaskStatus === "failed"));
+  const showRepoTaskNotice = Boolean(responseCurrent && !responseCleared && response?.repoTaskId && (response.repoTaskStatus === "verified" || response.repoTaskStatus === "activation-failed"));
+  const repoTaskFailureHeading = response?.repoTaskFailureKind === "control-plane-error" ? "CodexPro: lỗi control-plane"
+    : response?.repoTaskFailureKind === "title-missing" ? "CodexPro: thiếu task title"
+      : response?.repoTaskFailureKind === "proof-missing" ? "CodexPro: thiếu proof kích hoạt task"
+        : "CodexPro: task chưa được kích hoạt";
   const showNetworkNotice = Boolean(responseCurrent && !responseCleared && !isNewChat && !responseVerifiedComplete && (selectedNetworkFailed || selectedRecoveringNetworkAbort));
   const hasResponseNotice = showRolloverNotice || showRepoTaskNotice || showNetworkNotice;
   const responseHeadline = responseCleared
@@ -210,7 +214,7 @@ export function ChatModal({ profile, settings, projects, busy, state, refs, acti
             {hasResponseNotice && (
               <div className="chat-response-notices" aria-live="polite">
                 {showRolloverNotice && <div className={`conversation-rollover-notice is-${response.rolloverStatus || "done"}`}><strong>{response.rolloverStatus === "creating" ? "Chat đã đầy · đang chuyển sang chat mới" : response.rolloverStatus === "failed" ? "Chat đã đầy · chuyển chat tự động thất bại" : "Đã chuyển sang chat mới"}</strong><span>{response.rolloverNotice}</span></div>}
-                {showRepoTaskNotice && <div className={`network-response-notice is-${response.repoTaskStatus === "verified" ? "completed" : response.repoTaskStatus === "failed" ? "failed" : "generating"}`}><strong>{response.repoTaskStatus === "verified" ? (response.repoTaskProof?.task_kind === "code" ? "CodexPro: Rules + CodexGraph đã xác minh" : "CodexPro: đã ghi nhận task title") : response.repoTaskStatus === "retrying" ? "CodexPro: ChatGPT thiếu title · đang gửi lại" : response.repoTaskStatus === "failed" ? "CodexPro: phản hồi bị chặn" : "CodexPro: đang chờ task title"}</strong><span>{response.repoTaskStatus === "verified" ? repoTaskEvidenceSummary(response.repoTaskProof) : response.repoTaskStatus === "failed" ? "ChatGPT không trả task title qua CodexPro nên Manager không công nhận phản hồi này." : "Mọi task phải có title; chỉ task CODE mới tải Rules và CodexGraph."}</span></div>}
+                {showRepoTaskNotice && <div className={`network-response-notice is-${response.repoTaskStatus === "verified" ? "completed" : "failed"}`}><strong>{response.repoTaskStatus === "verified" ? (response.repoTaskProof?.task_kind === "code" ? "CodexPro: Rules + CodexGraph đã xác minh" : "CodexPro: đã ghi nhận task title") : repoTaskFailureHeading}</strong><span>{response.repoTaskStatus === "verified" ? repoTaskEvidenceSummary(response.repoTaskProof) : `${response.repoTaskFailureReason || "Không xác minh được trạng thái task."} Tin nhắn đã gửi vẫn được giữ nguyên; CodexPro không tự gửi lại.`}</span></div>}
                 {showNetworkNotice && <div className={`network-response-notice is-${selectedNetworkState}`}><strong>{selectedRecoveringNetworkAbort ? "Network: transport cũ bị hủy · đang xác minh" : selectedBusy ? "Network: AI đang xử lý" : "Network: request thất bại"}</strong><span>{selectedRecoveringNetworkAbort ? "Chrome đã hủy transport cũ nhưng ChatGPT có thể vẫn tiếp tục ở backend. CodexPro đang kiểm tra transcript canonical trước khi kết luận lỗi." : selectedNetworkFailed ? (response?.networkError || selectedTab?.network_error || `HTTP ${response?.networkStatusCode || selectedTab?.network_status_code || "error"}`) : "Theo dõi trực tiếp vòng đời request của ChatGPT."}</span></div>}
               </div>
             )}

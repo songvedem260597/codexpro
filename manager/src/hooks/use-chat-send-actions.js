@@ -552,119 +552,22 @@ export function useChatSendActions({
         });
         return;
       }
-      const retryCount = Number(response?.repoTaskRetryCount) || 0;
-      const rolloverCount = Number(response?.repoTaskRolloverCount) || 0;
-      const original = response?.repoTaskRequest;
-      const originalScope = original?.scope === "all_allowed" || original?.projectRoot === ALL_ALLOWED_WORKSPACES ? "all_allowed" : "workspace";
-      if (retryCount >= 1 || !original?.projectRoot) {
-        if (retryCount >= 1 && rolloverCount < 1 && original?.projectRoot) {
-          setRequestResponses((current) => {
-            const previous = current[profile.profile_id] || {};
-            return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "rolling-over", loading: true } } : current;
-          });
-          notify("Chat cũ thiếu task title 2 lần · đang tạo chat mới");
-          const created = await api.sendProfileRequest({
-            profileId: profile.profile_id,
-            conversationId: "",
-            newChat: true,
-            scope: originalScope,
-            projectRoot: originalScope === "all_allowed" ? "" : original.projectRoot,
-            workspaceCandidates: originalScope === "all_allowed" ? projects.map((project) => project.root) : [],
-            text: original.text,
-            attachments: Array.isArray(original.attachments) ? original.attachments : [],
-            toolRetry: false,
-            toolRolloverCount: rolloverCount + 1,
-            previousTaskId: taskId
-          });
-          if (String(created?.submission_state || "") === "uncertain") throw new Error("Chat mới có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
-          if (String(created?.repo_task_id || "") !== taskId) throw new Error("Manager đã đổi Task ID khi tạo chat mới; đã dừng để tránh REPO_TASK_MISMATCH.");
-          const newConversationId = String(created?.conversation_id || "").trim();
-          if (!/^[A-Za-z0-9-]{8,160}$/.test(newConversationId)) throw new Error("ChatGPT chưa trả conversation id cho chat mới bắt buộc dùng CodexPro.");
-          requestTargetsRef.current = { ...requestTargetsRef.current, [profile.profile_id]: newConversationId };
-          setRequestTargets((current) => ({ ...current, [profile.profile_id]: newConversationId }));
-          setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
-          setRequestResponses((current) => ({
-            ...current,
-            [profile.profile_id]: {
-              visible: true,
-              loading: true,
-              error: "",
-              conversationId: newConversationId,
-              messages: [],
-              submissionState: "submitted",
-              sendUncertain: false,
-              networkState: String(created?.generation_state || created?.network_state || "generating"),
-              repoTaskId: String(created?.repo_task_id || ""),
-              repoTaskDispatchedAt: String(created?.repo_task_dispatched_at || ""),
-              repoTaskScope: String(created?.repo_task_scope || originalScope),
-              logicalTaskStatus: String(created?.worker_job_status || "prepared"),
-              repoTaskRetryCount: 0,
-              repoTaskRolloverCount: rolloverCount + 1,
-              repoTaskStatus: "waiting",
-              repoTaskVerified: false,
-              repoTaskRequest: original
-            }
-          }));
-          repoTaskVerificationReads.current.set(verificationKey, "done");
-          logRendererDiagnostic(api, "warn", "tool", "ChatGPT thiếu task title; Manager đã tạo chat mới và giữ nguyên Task ID", { action: "repo-task-title-rollover", profile_id: profile.profile_id, previous_conversation_id: conversationId, conversation_id: newConversationId, previous_task_id: taskId, rollover_task_id: String(created?.repo_task_id || ""), task_id_reused: created?.repo_task_id_reused === true, repo_task_dispatched_at: String(created?.repo_task_dispatched_at || "") });
-          notify("Đã tạo chat mới · @CodexPro được gọi lại đúng một lần");
-          window.setTimeout(() => void refresh(false), 500);
-          return;
-        }
-        const message = "ChatGPT đã trả lời nhưng không trả task title qua CodexPro sau 2 lần. Phản hồi này không được công nhận.";
-        logRendererDiagnostic(api, "error", "tool", message, { action: "repo-task-title-missing", profile_id: profile.profile_id, conversation_id: conversationId, task_id: taskId, retry_count: retryCount, rollover_count: rolloverCount, proof });
-        setRequestResponses((current) => {
-          const previous = current[profile.profile_id] || {};
-          return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "failed", repoTaskVerified: false } } : current;
-        });
-        repoTaskVerificationReads.current.set(verificationKey, "done");
-        setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: message }));
-        notify("ChatGPT thiếu task title · đã chặn phản hồi");
-        return;
-      }
-      setRequestResponses((current) => {
-        const previous = current[profile.profile_id] || {};
-        return previous.repoTaskId === taskId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "retrying", loading: true } } : current;
-      });
-      const retried = await api.sendProfileRequest({
-        profileId: profile.profile_id,
-        conversationId,
-        newChat: false,
-        scope: originalScope,
-        projectRoot: originalScope === "all_allowed" ? "" : original.projectRoot,
-        workspaceCandidates: originalScope === "all_allowed" ? projects.map((project) => project.root) : [],
-        text: original.text,
-        attachments: Array.isArray(original.attachments) ? original.attachments : [],
-        toolRetry: true,
-        toolRolloverCount: rolloverCount,
-        previousTaskId: taskId
-      });
-      if (String(retried?.submission_state || "") === "uncertain") throw new Error("Lần bắt buộc gọi CodexPro có trạng thái gửi không chắc chắn; không tự gửi thêm để tránh duplicate.");
-      if (String(retried?.repo_task_id || "") !== taskId) throw new Error("Manager đã đổi Task ID khi gửi lại; đã dừng để tránh REPO_TASK_MISMATCH.");
+      const workerStatus = String(proof?.worker_job?.status || "");
+      const taskTitle = String(proof?.task_title || proof?.worker_job?.title || "").trim();
+      const failureKind = !proof?.worker_job ? "proof-missing"
+        : proof?.gate_active !== true || workerStatus !== "running" ? "activation-missing"
+          : !taskTitle ? "title-missing" : "proof-unverified";
+      const reason = failureKind === "proof-missing" ? "Chưa có proof từ begin_repo_task cho task này."
+        : failureKind === "activation-missing" ? `Task chưa được kích hoạt (worker=${workerStatus || "unknown"}, gate=${proof?.gate_active === true ? "active" : "inactive"}).`
+          : failureKind === "title-missing" ? "Task đã chạy nhưng chưa có task title được xác minh."
+            : "Proof của task chưa được CodexPro xác minh.";
       repoTaskVerificationReads.current.set(verificationKey, "done");
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: "" }));
+      logRendererDiagnostic(api, "error", "tool", reason, { action: "repo-task-activation-failed", profile_id: profile.profile_id, conversation_id: conversationId, task_id: taskId, failure_kind: failureKind, worker_status: workerStatus, gate_active: proof?.gate_active === true, task_title_present: Boolean(taskTitle), proof });
       setRequestResponses((current) => {
         const previous = current[profile.profile_id] || {};
-        return previous.repoTaskId === taskId ? {
-          ...current,
-          [profile.profile_id]: {
-            ...previous,
-            repoTaskId: String(retried?.repo_task_id || ""),
-            repoTaskDispatchedAt: String(retried?.repo_task_dispatched_at || ""),
-            repoTaskScope: String(retried?.repo_task_scope || originalScope),
-            logicalTaskStatus: String(retried?.worker_job_status || "prepared"),
-            repoTaskRetryCount: 1,
-            repoTaskRolloverCount: rolloverCount,
-            repoTaskStatus: "waiting",
-            repoTaskVerified: false,
-            loading: true,
-            networkState: String(retried?.generation_state || retried?.network_state || "generating")
-          }
-        } : current;
+        return previous.repoTaskId === taskId && previous.conversationId === conversationId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "activation-failed", repoTaskVerified: false, repoTaskProof: proof, repoTaskFailureKind: failureKind, repoTaskFailureReason: reason } } : current;
       });
-      notify("ChatGPT chưa trả task title · đang tự gửi lại bắt buộc");
-      logRendererDiagnostic(api, "warn", "tool", "ChatGPT thiếu task title; Manager đã gửi lại một lần và giữ nguyên Task ID", { action: "repo-task-title-retry", profile_id: profile.profile_id, conversation_id: conversationId, previous_task_id: taskId, retry_task_id: String(retried?.repo_task_id || ""), task_id_reused: retried?.repo_task_id_reused === true, repo_task_dispatched_at: String(retried?.repo_task_dispatched_at || "") });
-      window.setTimeout(() => void refresh(false), 500);
+      notify("Tin nhắn đã gửi · CodexPro chưa kích hoạt task");
     } catch (err) {
       const message = err?.message || String(err);
       if (isRetryableChatTurnBusyError(err)) {
@@ -679,7 +582,11 @@ export function useChatSendActions({
       }
       repoTaskVerificationReads.current.set(verificationKey, "done");
       logRendererDiagnostic(api, "error", "tool", `Không xác minh được tool call CodexPro: ${message}`, { action: "repo-task-verification", profile_id: profile.profile_id, conversation_id: conversationId, task_id: taskId, error: err });
-      setRequestSendErrors((current) => ({ ...current, [profile.profile_id]: `Không xác minh được tool call CodexPro: ${message}` }));
+      setRequestResponses((current) => {
+        const previous = current[profile.profile_id] || {};
+        return previous.repoTaskId === taskId && previous.conversationId === conversationId ? { ...current, [profile.profile_id]: { ...previous, repoTaskStatus: "activation-failed", repoTaskVerified: false, repoTaskFailureKind: "control-plane-error", repoTaskFailureReason: `Lỗi control-plane khi xác minh task: ${message}` } } : current;
+      });
+      notify("Tin nhắn đã gửi · lỗi xác minh task CodexPro");
     }
   }
 
