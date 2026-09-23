@@ -1,5 +1,5 @@
 (() => {
-  const INSTALLER_REVISION = '2026-08-31-27';
+  const INSTALLER_REVISION = '2026-09-23-1';
   if (globalThis.__codexProConnectorInstaller === INSTALLER_REVISION) return;
   globalThis.__codexProConnectorInstaller = INSTALLER_REVISION;
 
@@ -163,7 +163,18 @@
   }
 
   function installedConnectorAction() {
-    return candidates().find(element => connectorActionLabelMatches(
+    const root = document.querySelector('#plugin-search')?.closest('main') || document.querySelector('main') || document;
+    const card = [...root.querySelectorAll('article')].filter(visible).find(article => {
+      const name = [...article.querySelectorAll('span,a')].filter(visible)
+        .some(element => text(element) === 'codexpro' && !element.querySelector('span,a'));
+      const hasPluginLink = Boolean(article.querySelector('a[href*="/plugins/plugin_"]'));
+      const hasAction = [...article.querySelectorAll('button')].some(button => connectorActionLabelMatches(
+        normalize(button.getAttribute('aria-label') || ''), text(button), true
+      ));
+      return name && (hasPluginLink || hasAction);
+    });
+    if (card) return card;
+    return candidates(root).find(element => element.closest('article') && connectorActionLabelMatches(
       normalize(element.getAttribute?.('aria-label') || ''),
       text(element),
       element.matches('button,[role="button"],[role="menuitem"],[role="option"]')
@@ -172,6 +183,18 @@
 
   function connectorAlreadyListed() {
     return Boolean(installedConnectorAction());
+  }
+
+  function connectorDefinitionState() {
+    if (connectorAlreadyListed()) return 'installed';
+    const search = document.querySelector('#plugin-search');
+    const root = search?.closest('main') || document.querySelector('main') || document;
+    const emptyMessage = [...root.querySelectorAll('section div')].filter(visible).some(element => {
+      const value = text(element);
+      return value === 'no plugins match that search right now.' || value === 'no plugins found' ||
+        value === 'no results found' || value === 'khong tim thay plugin';
+    });
+    return search && normalize(search.value) === 'codexpro' && emptyMessage ? 'absent' : 'inconclusive';
   }
 
   function connectorCheckEvidence(match = installedConnectorAction()) {
@@ -215,7 +238,7 @@
       setNativeValue(input, 'CodexPro');
       await sleep(1200);
     }
-    await waitFor(() => connectorAlreadyListed() || document.querySelector('button[aria-label="Create app"]'), 10000);
+    await waitFor(() => connectorDefinitionState() !== 'inconclusive', 10000);
     return input;
   }
 
@@ -273,6 +296,7 @@
     const labels = ['Create', 'New plugin', 'Add plugin', 'Create app', 'Add custom connector', 'Tạo', 'Thêm plugin', 'Tạo ứng dụng'];
     const button = findAction(labels) || findAction(['create', 'new plugin', 'add plugin', 'custom connector', 'thêm plugin'], document, false);
     if (!button) return null;
+    if (connectorDefinitionState() !== 'absent') throw new Error('Chưa xác minh được CodexPro vắng mặt trước khi mở New Plugin.');
     button.click();
     return await waitFor(creationDialog, 12000);
   }
@@ -371,7 +395,7 @@
       const current = creationDialog();
       if (!current) return true;
       const error = formError(current);
-      if (error) throw new Error(error);
+      if (error) throw new Error(/(?:connector|plugin) name already exists/i.test(error) ? `CODEXPRO_CONNECTOR_DUPLICATE_NAME: ${error}` : error);
       if (Date.now() - lastFollowUpAt > 1200 && followUpClicks < 3) {
         const followUp = [...current.querySelectorAll('button,[role="button"]')]
           .filter(visible)
@@ -563,11 +587,14 @@
       throw new Error('Profile Chrome này chưa đăng nhập ChatGPT.');
     }
     await preparePluginSearch();
-    if (connectorAlreadyListed()) {
+    const initialState = connectorDefinitionState();
+    if (initialState === 'installed') {
       return {ok: true, alreadyInstalled: true, migrationRequired: true, connectorId: installedConnectorId()};
     }
+    if (initialState !== 'absent') throw new Error('Chưa xác minh được CodexPro vắng mặt; dừng trước khi tạo connector mới.');
 
     await enableDeveloperMode();
+    if (connectorDefinitionState() !== 'absent') throw new Error('Trạng thái CodexPro thay đổi trước New Plugin; dừng để tránh tạo trùng.');
     const dialog = await openCreationDialog();
     if (!dialog) {
       throw new Error('Không mở được form New Plugin. Tài khoản có thể chưa được cấp quyền Developer mode.');
@@ -586,12 +613,9 @@
       throw new Error('Profile Chrome này chưa đăng nhập ChatGPT.');
     }
     await preparePluginSearch();
-    const connectorAction = installedConnectorAction();
-    if (connectorAction) return {ok: true, installed: true, diagnostic: connectorCheckEvidence(connectorAction)};
-    const createLabels = ['Create', 'New plugin', 'Add plugin', 'Create app', 'Add custom connector', 'Tạo', 'Thêm plugin', 'Tạo ứng dụng'];
-    const settingsReady = Boolean(document.querySelector('button[aria-label="Create app"]') || findAction(createLabels));
-    if (!settingsReady) throw new Error('ChatGPT chưa tải xong danh sách Plugins hoặc profile không có quyền tạo app.');
-    return {ok: true, installed: false, diagnostic: connectorCheckEvidence()};
+    const state = connectorDefinitionState();
+    const connectorAction = state === 'installed' ? installedConnectorAction() : null;
+    return {ok: true, installed: state === 'installed', definition_state: state, diagnostic: connectorCheckEvidence(connectorAction)};
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

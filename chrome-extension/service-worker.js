@@ -3728,6 +3728,7 @@ async function installConnector() {
     if(stored.connectorServerFingerprint===fingerprint){
       const checked=await sendPageMessage(tab.id,{type:'codexpro-check-connector'},30000).catch(()=>null);
       if(checked?.ok&&checked.installed)result={ok:true,alreadyInstalled:true,migrationRequired:false};
+      else if(!checked?.ok||checked.definition_state!=='absent')throw new Error('CODEXPRO_CONNECTOR_VERIFICATION_INCONCLUSIVE: refusing to create a duplicate connector.');
     }
     if(!result)result=await sendInstallerMessage(tab.id,connector);
     if(!result?.ok)throw new Error(result?.error || 'ChatGPT không hoàn tất thêm CodexPro.');
@@ -3736,7 +3737,7 @@ async function installConnector() {
       const previousConnectorId=String(result.connectorId||'');
       await navigateInstallerTab(tab.id,settingsPluginsUrl);
       const deleted=await sendPageMessage(tab.id,{type:'codexpro-delete-connector-definition'},45000);
-      if(!deleted?.ok)throw new Error(deleted?.error || 'Không xóa được definition CodexPro cũ.');
+      if(!deleted?.ok||!deleted.deleted)throw new Error(deleted?.error || 'Chưa xác nhận đã xóa definition CodexPro cũ; không tạo lại để tránh trùng.');
       await navigateInstallerTab(tab.id,settingsUrl);
       let recreateError=null;
       try{result=await sendInstallerMessage(tab.id,connector);}
@@ -3793,6 +3794,7 @@ async function checkConnectorInstalled() {
     await waitForTab(tab.id);
     const result=await sendPageMessage(tab.id,{type:'codexpro-check-connector'},30000);
     if(!result?.ok)throw new Error(result?.error || 'Không kiểm tra được Apps trong ChatGPT.');
+    if(!result.installed&&result.definition_state!=='absent')throw new Error('CodexPro verification inconclusive; trạng thái connector chưa xác minh được.');
     const saved={
       ok:Boolean(result.installed),
       message:result.installed?'CodexPro READY':'Profile này chưa thêm CodexPro.',

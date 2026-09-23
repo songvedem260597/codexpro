@@ -1000,7 +1000,8 @@ assert.match(worker, /current\.active\|\|current\.pinned\|\|current\.audible[\s\
 assert.match(worker, /value==='codexpro'\|\|value\.startsWith\('codexpro '\)/, "worker must open a Settings plugin row whose accessible name includes the permission summary");
 assert.match(connectorInstaller, /value === 'codexpro' \|\| value\.startsWith\('codexpro '\)/, "connector installer must recognize ChatGPT's CodexPro Allow all row");
 assert.match(connectorInstaller, /function connectorCheckEvidence[\s\S]*?codexpro_candidate_count[\s\S]*?match_text[\s\S]*?match_aria/, "connector checks must return bounded selector evidence for false-positive and false-negative investigations");
-assert.match(connectorInstaller, /installed: true, diagnostic: connectorCheckEvidence\(connectorAction\)[\s\S]*?installed: false, diagnostic: connectorCheckEvidence\(\)/, "connector checks must preserve selector evidence for both installed and missing results");
+assert.match(connectorInstaller, /definition_state: state, diagnostic: connectorCheckEvidence\(connectorAction\)/, "connector checks must preserve selector evidence and distinguish installed, absent, and inconclusive results");
+assert.match(connectorInstaller, /function connectorDefinitionState\(\)[\s\S]*?return 'installed'[\s\S]*?return search && normalize\(search.value\) === 'codexpro' && emptyMessage \? 'absent' : 'inconclusive'/, "connector absence must require an explicit empty result, not only a search input or Create app button");
 assert.match(worker, /value\.includes\('settings'\)\|\|value\.includes\('cai dat'\)/, "worker setup must recognize localized Settings dialogs");
 assert.match(worker, /value\.includes\('connection'\)\|\|value\.includes\('ket noi'\)/, "worker setup must recognize localized Connection details");
 assert.match(worker, /CODEXPRO_SETUP_EVIDENCE/, "worker setup failures must preserve bounded selector evidence for Manager diagnostics");
