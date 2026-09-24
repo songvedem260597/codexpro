@@ -634,7 +634,7 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     env,
     stdio: ['ignore', 'pipe', 'pipe']
   });
-  const createClient = async (name, boundProfileId = '') => {
+  const createClient = async (name, boundProfileId = '', onSession = () => {}) => {
     const client = new Client({ name, version: '0.0.0' });
     const url = new URL(`http://127.0.0.1:${port}/mcp`);
     if (boundProfileId) url.searchParams.set('codexpro_profile', boundProfileId);
@@ -642,11 +642,13 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
       requestInit: { headers: { Authorization: `Bearer ${token}` } }
     });
     await client.connect(transport);
+    onSession(transport.sessionId);
     return client;
   };
 
   let child = startServer();
   let client;
+  let oldSessionClient;
   try {
     await waitForListening(child);
     client = await createClient('prepared-task-manager');
@@ -659,6 +661,15 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     await client.close();
     client = undefined;
 
+    let oldSessionId = '';
+    oldSessionClient = await createClient('prepared-task-old-session', profileId, (value) => { oldSessionId = value || ''; });
+    if (!oldSessionId) throw new Error('old runtime did not establish a profile-bound MCP session');
+    const oldSessionHash = createHash('sha256').update(oldSessionId).digest('hex').slice(0, 12);
+    const oldTaskEvents = (await fs.readFile(path.join(codexProHome, 'profile-task-events.jsonl'), 'utf8'))
+      .trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    const oldInitialized = oldTaskEvents.find((event) => event.event === 'MCP_SESSION_INITIALIZED' && event.session_id_hash === oldSessionHash);
+    if (!oldInitialized || oldInitialized.profile_id !== profileId) throw new Error('old session did not log its profile binding');
+
     const persistedBeforeRestart = JSON.parse(await fs.readFile(path.join(codexProHome, 'browser-profile-tasks.json'), 'utf8'));
     const pendingBeforeRestart = persistedBeforeRestart?.profiles?.[profileId];
     if (pendingBeforeRestart?.pending_task_id !== taskId || pendingBeforeRestart?.pending_scope !== 'all_allowed' || pendingBeforeRestart?.pending_root) {
@@ -670,7 +681,94 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     child = startServer();
     await waitForListening(child);
 
-    client = await createClient('prepared-task-worker', profileId);
+    const restartedBaseUrl = `http://127.0.0.1:${port}`;
+    const privateMessageMarker = 'private-user-message-must-not-be-logged';
+    let sameClientSucceeded = false;
+    try {
+      await oldSessionClient.callTool({ name: 'server_config', arguments: { diagnostic_marker: privateMessageMarker } }, undefined, { timeout: 5_000 });
+      sameClientSucceeded = true;
+    } catch {
+      // The exact client error is not needed; the new runtime's sanitized request log is authoritative.
+    }
+    const firstRequestEvents = (await fs.readFile(path.join(codexProHome, 'profile-task-events.jsonl'), 'utf8'))
+      .trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+      .filter((event) => event.event === 'MCP_REQUEST' && event.runtime_pid === child.pid);
+    const firstRequest = firstRequestEvents[0];
+    if (sameClientSucceeded || !firstRequest || firstRequest.http_method !== 'POST' || firstRequest.is_initialize_request !== false
+      || firstRequest.method !== 'tools/call' || firstRequest.tool_name !== 'server_config'
+      || firstRequest.session_id_present !== true || firstRequest.session_id_hash !== oldSessionHash
+      || firstRequest.session_lookup_result !== 'missing' || firstRequest.http_status !== 404
+      || firstRequest.mcp_error_code !== -32001 || firstRequestEvents.some((event) => event.is_initialize_request === true)) {
+      throw new Error(`same MCP client did not reproduce stale-session failure: ${JSON.stringify(firstRequest)}`);
+    }
+    console.log(`mcp session restart repro: ${JSON.stringify({
+      old_session_hash: oldSessionHash,
+      new_runtime_pid: child.pid,
+      same_client_read_succeeded: sameClientSucceeded,
+      first_request_reached_server: Boolean(firstRequest),
+      first_request_method: firstRequest?.http_method || '',
+      first_request_initialize: firstRequest?.is_initialize_request ?? null,
+      first_request_session_hash: firstRequest?.session_id_hash || '',
+      first_request_session_lookup: firstRequest?.session_lookup_result || '',
+      first_request_http_status: firstRequest?.http_status ?? null,
+      first_request_mcp_error_code: firstRequest?.mcp_error_code ?? null,
+      same_client_reinitialized: firstRequestEvents.some((event) => event.is_initialize_request === true)
+    })}`);
+    await expectSessionNotFound(await postToolsListWithSession(restartedBaseUrl, token, oldSessionId), 'pre-restart POST session');
+    const noSessionResponse = await fetch(`${restartedBaseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 405, method: 'tools/list', params: {} })
+    });
+    const noSessionBody = await noSessionResponse.json();
+    if (noSessionResponse.status !== 400 || noSessionBody.error?.code !== -32000) throw new Error('missing MCP session header did not fail closed');
+    const malformedSessionId = 'not-a-valid-session-id';
+    const malformedResponse = await postToolsListWithSession(restartedBaseUrl, token, malformedSessionId);
+    const malformedBody = await malformedResponse.json();
+    if (malformedResponse.status !== 400 || malformedBody.error?.code !== -32000) throw new Error('malformed MCP session header did not fail closed');
+    const taskEventPath = path.join(codexProHome, 'profile-task-events.jsonl');
+    const taskEventText = await fs.readFile(taskEventPath, 'utf8');
+    if (taskEventText.includes(oldSessionId) || taskEventText.includes(malformedSessionId)
+      || taskEventText.includes(token) || taskEventText.includes(privateMessageMarker)) {
+      throw new Error('MCP session diagnostic leaked a raw session id, auth token, or request content');
+    }
+    const sessionEvents = taskEventText.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    const staleEvent = sessionEvents.find((event) => event.event === 'MCP_SESSION_NOT_FOUND' && event.session_id_hash === oldSessionHash);
+    if (!staleEvent || staleEvent.http_status !== 404 || staleEvent.mcp_error_code !== -32001 || staleEvent.session_lookup_result !== 'missing'
+      || staleEvent.http_method !== 'POST' || staleEvent.method !== 'tools/call' || staleEvent.tool_name !== 'server_config'
+      || !Number.isSafeInteger(staleEvent.request_id)
+      || staleEvent.session_id_present !== true || !staleEvent.runtime_started_at || !staleEvent.runtime_build_id || !staleEvent.runtime_pid) {
+      throw new Error(`missing sanitized stale-session diagnostic after restart: ${JSON.stringify(staleEvent)}`);
+    }
+    if (!sessionEvents.some((event) => event.event === 'MCP_SESSION_MISSING_HEADER' && event.http_status === 400 && event.mcp_error_code === -32000 && event.session_lookup_result === 'none')) {
+      throw new Error('missing-header MCP diagnostic was not recorded');
+    }
+    if (!sessionEvents.some((event) => event.event === 'MCP_SESSION_MALFORMED' && event.http_status === 400 && event.mcp_error_code === -32000 && event.session_lookup_result === 'malformed')) {
+      throw new Error('malformed-header MCP diagnostic was not recorded');
+    }
+
+    let newSessionId = '';
+    client = await createClient('prepared-task-worker', profileId, (value) => { newSessionId = value || ''; });
+    if (!newSessionId || newSessionId === oldSessionId) throw new Error('new runtime did not create a fresh MCP session');
+    const newSessionHash = createHash('sha256').update(newSessionId).digest('hex').slice(0, 12);
+    const refreshedEventText = await fs.readFile(taskEventPath, 'utf8');
+    if (refreshedEventText.includes(oldSessionId) || refreshedEventText.includes(newSessionId)) {
+      throw new Error('MCP session diagnostic leaked a raw session id');
+    }
+    const refreshedEvents = refreshedEventText.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    const initializedEvent = refreshedEvents.find((event) => event.event === 'MCP_SESSION_INITIALIZED' && event.session_id_hash === newSessionHash);
+    if (!initializedEvent || initializedEvent.profile_id !== profileId || initializedEvent.session_lookup_result !== 'found'
+      || initializedEvent.http_status !== 200 || initializedEvent.client_name !== 'prepared-task-worker'
+      || initializedEvent.runtime_pid === oldInitialized.runtime_pid || initializedEvent.runtime_started_at === oldInitialized.runtime_started_at) {
+      throw new Error(`missing sanitized profile-bound session initialization diagnostic: ${JSON.stringify(initializedEvent)}`);
+    }
+    console.log(`mcp session restart identities: ${JSON.stringify({
+      old_runtime_id: `${oldInitialized.runtime_started_at}:${oldInitialized.runtime_pid}`,
+      old_session_hash: oldSessionHash,
+      new_runtime_id: `${initializedEvent.runtime_started_at}:${initializedEvent.runtime_pid}`,
+      new_session_hash: newSessionHash,
+      profile_bound_after_restart: initializedEvent.profile_id === profileId
+    })}`);
     const preparedOnlyStatus = await callTool(client, 'repo_task_status', { task_id: taskId });
     if (preparedOnlyStatus.structuredContent.verified !== false) {
       throw new Error(`prepared-only worker job was accepted as begin_repo_task proof: ${JSON.stringify(preparedOnlyStatus.structuredContent)}`);
@@ -731,6 +829,7 @@ async function expectPreparedTaskSurvivesRuntimeRestart() {
     await expectToolErrorCode(client, 'read', { path: 'gate.txt' }, 'BEGIN_REPO_TASK_REQUIRED');
   } finally {
     if (client) await client.close().catch(() => {});
+    if (oldSessionClient) await oldSessionClient.close().catch(() => {});
     if (child && child.exitCode == null && child.signalCode == null) child.kill('SIGTERM');
     if (child && child.exitCode == null && child.signalCode == null) await waitForExit(child).catch(() => {});
   }

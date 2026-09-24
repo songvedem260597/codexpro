@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -1502,6 +1502,20 @@ async function main(): Promise<void> {
 
   const app = express();
   const logRequests = process.env.CODEXPRO_LOG_REQUESTS === "1";
+  type McpRequestDiagnostic = {
+    isInitializeRequest: boolean;
+    sessionIdPresent: boolean;
+    sessionIdHash: string;
+    sessionLookupResult: "found" | "missing" | "malformed" | "none";
+    mcpErrorCode: number | "";
+    clientName: string;
+    profileId: string;
+    requestId: string | number | "";
+    method: string;
+    toolName: string;
+    initializedSessionHash: string;
+  };
+  const mcpRequestDiagnostics = new WeakMap<Request, McpRequestDiagnostic>();
   const authFailureWindow = new Map<string, { count: number; resetAt: number }>();
   const authFailureLimit = 10;
   const runtimeEventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
@@ -1525,6 +1539,41 @@ async function main(): Promise<void> {
     };
     res.once("finish", release);
     res.once("close", release);
+    next();
+  });
+
+  app.use("/mcp", (req, res, next) => {
+    const sessionId = requestSessionId(req);
+    const profileId = safeMcpLabel(req.query.codexpro_profile, WORKER_PROFILE_ID_PATTERN, 160, [config.authToken, sessionId]);
+    mcpRequestDiagnostics.set(req, {
+      isInitializeRequest: false,
+      sessionIdPresent: Boolean(sessionId),
+      sessionIdHash: sessionId ? createHash("sha256").update(sessionId).digest("hex").slice(0, 12) : "",
+      sessionLookupResult: sessionId ? !sessionIdPattern.test(sessionId) ? "malformed" : transports.has(sessionId) ? "found" : "missing" : "none",
+      mcpErrorCode: "",
+      clientName: "",
+      profileId,
+      requestId: "",
+      method: "",
+      toolName: "",
+      initializedSessionHash: ""
+    });
+    recordMcpBoundaryEvent("MCP_REQUEST_RECEIVED", req, res);
+    let logged = false;
+    const logRequest = (finished: boolean) => {
+      if (logged) return;
+      logged = true;
+      recordMcpBoundaryEvent("MCP_REQUEST", req, res, { http_status: res.headersSent ? res.statusCode : 0 });
+      const initializedSessionHash = mcpRequestDiagnostics.get(req)?.initializedSessionHash;
+      if (finished && initializedSessionHash) {
+        recordMcpBoundaryEvent("MCP_SESSION_INITIALIZED", req, res, {
+          session_id_hash: initializedSessionHash,
+          session_lookup_result: "found"
+        });
+      }
+    };
+    res.once("finish", () => logRequest(true));
+    res.once("close", () => logRequest(false));
     next();
   });
 
@@ -1635,14 +1684,53 @@ async function main(): Promise<void> {
   const transports = new Map<string, TransportRecord>();
   const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+  function safeMcpLabel(value: unknown, pattern: RegExp, maxLength: number, forbidden: Array<string | undefined> = []): string {
+    if (typeof value !== "string" || value.length > maxLength || !pattern.test(value)) return "";
+    if (forbidden.some((secret) => secret && value.includes(secret))) return "";
+    return value;
+  }
+
+  function recordMcpBoundaryEvent(event: string, req: Request, res: Response, overrides: Record<string, string | number | boolean> = {}): void {
+    const diagnostic = mcpRequestDiagnostics.get(req);
+    if (!diagnostic) return;
+    recordBrowserProfileTaskEvent(event, {
+      timestamp: new Date().toISOString(),
+      runtime_started_at: RUNTIME_STARTED_AT,
+      runtime_build_id: RUNTIME_BUILD_ID,
+      runtime_pid: process.pid,
+      http_method: req.method,
+      is_initialize_request: diagnostic.isInitializeRequest,
+      session_id_present: diagnostic.sessionIdPresent,
+      session_id_hash: diagnostic.sessionIdHash,
+      session_lookup_result: diagnostic.sessionLookupResult,
+      http_status: res.headersSent ? res.statusCode : 0,
+      mcp_error_code: diagnostic.mcpErrorCode,
+      client_name: diagnostic.clientName,
+      profile_id: diagnostic.profileId,
+      request_id: diagnostic.requestId,
+      method: diagnostic.method,
+      tool_name: diagnostic.toolName,
+      ...overrides
+    });
+  }
+
   function requestSessionId(req: Request): string | undefined {
     const value = req.headers["mcp-session-id"];
     return Array.isArray(value) ? value[0] : value;
   }
 
-  function sendSessionError(res: Response, sessionId: string | undefined): void {
+  function sendSessionError(req: Request, res: Response, sessionId: string | undefined): void {
     const missing = !sessionId;
     const malformed = Boolean(sessionId && !sessionIdPattern.test(sessionId));
+    const diagnostic = mcpRequestDiagnostics.get(req);
+    if (diagnostic) {
+      diagnostic.sessionLookupResult = missing ? "none" : malformed ? "malformed" : "missing";
+      diagnostic.mcpErrorCode = missing || malformed ? -32000 : -32001;
+    }
+    recordMcpBoundaryEvent(missing ? "MCP_SESSION_MISSING_HEADER" : malformed ? "MCP_SESSION_MALFORMED" : "MCP_SESSION_NOT_FOUND", req, res, {
+      http_status: missing || malformed ? 400 : 404,
+      mcp_error_code: missing || malformed ? -32000 : -32001
+    });
     res.status(missing || malformed ? 400 : 404).json({
       jsonrpc: "2.0",
       error: missing
@@ -1848,10 +1936,27 @@ async function main(): Promise<void> {
   app.post("/mcp", express.json({ limit: "20mb" }), async (req, res) => {
     try {
       const sessionId = requestSessionId(req);
+      const diagnostic = mcpRequestDiagnostics.get(req);
+      if (diagnostic) {
+        diagnostic.isInitializeRequest = isInitializeRequest(req.body);
+        diagnostic.requestId = typeof req.body?.id === "number" && Number.isSafeInteger(req.body.id)
+          ? req.body.id
+          : safeMcpLabel(req.body?.id, /^[A-Za-z0-9._:-]+$/, 80, [config.authToken, sessionId]);
+        diagnostic.method = safeMcpLabel(req.body?.method, /^[A-Za-z0-9/_-]+$/, 80, [config.authToken, sessionId]);
+        diagnostic.toolName = diagnostic.method === "tools/call"
+          ? safeMcpLabel(req.body?.params?.name, /^[A-Za-z0-9_:-]+$/, 100, [config.authToken, sessionId])
+          : "";
+        diagnostic.clientName = diagnostic.isInitializeRequest
+          ? safeMcpLabel(req.body?.params?.clientInfo?.name, /^[\p{L}\p{N} ._():-]+$/u, 80, [config.authToken, sessionId])
+          : "";
+      }
       let transport: StreamableHTTPServerTransport;
       let acquiredSessionId: string | undefined;
 
       const existingTransport = getTransport(sessionId);
+      if (diagnostic && sessionId && sessionIdPattern.test(sessionId)) {
+        diagnostic.sessionLookupResult = existingTransport ? "found" : "missing";
+      }
       if (existingTransport) {
         transport = existingTransport;
         acquiredSessionId = sessionId;
@@ -1868,6 +1973,7 @@ async function main(): Promise<void> {
             });
             acquiredSessionId = newSessionId;
             pruneTransports(newSessionId);
+            if (diagnostic) diagnostic.initializedSessionHash = createHash("sha256").update(newSessionId).digest("hex").slice(0, 12);
           }
         } as any);
 
@@ -1883,7 +1989,7 @@ async function main(): Promise<void> {
         recordBrowserProfileTaskEvent("mcp_session_initialized", {
           profile_id: browserProfileId,
           profile_bound: Boolean(browserProfileId),
-          client_name: String(req.body?.params?.clientInfo?.name || ""),
+          client_name: diagnostic?.clientName || "",
           pending_task_id: pendingTask?.task_id,
           pending_task_scope: pendingTask?.scope,
           pending_task_age_ms: pendingTask?.age_ms
@@ -1891,7 +1997,7 @@ async function main(): Promise<void> {
         const server = createCodexProServer(config, { browserProfileId });
         await server.connect(transport);
       } else {
-        sendSessionError(res, sessionId);
+        sendSessionError(req, res, sessionId);
         return;
       }
 
@@ -1903,6 +2009,8 @@ async function main(): Promise<void> {
     } catch (error) {
       console.error(error instanceof Error ? error.stack ?? error.message : String(error));
       if (!res.headersSent) {
+        const diagnostic = mcpRequestDiagnostics.get(req);
+        if (diagnostic) diagnostic.mcpErrorCode = -32603;
         res.status(500).json({
           jsonrpc: "2.0",
           error: { code: -32603, message: "Internal CodexPro MCP error. Check the local terminal for details." },
@@ -1915,8 +2023,12 @@ async function main(): Promise<void> {
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = requestSessionId(req);
     const transport = getTransport(sessionId);
+    const diagnostic = mcpRequestDiagnostics.get(req);
+    if (diagnostic && sessionId && sessionIdPattern.test(sessionId)) {
+      diagnostic.sessionLookupResult = transport ? "found" : "missing";
+    }
     if (!transport) {
-      sendSessionError(res, sessionId);
+      sendSessionError(req, res, sessionId);
       return;
     }
     try {
@@ -1941,6 +2053,8 @@ async function main(): Promise<void> {
     }
     const status = type === "entity.too.large" ? 413 : 400;
     if (req.path === "/mcp") {
+      const diagnostic = mcpRequestDiagnostics.get(req);
+      if (diagnostic) diagnostic.mcpErrorCode = type === "entity.too.large" ? -32000 : -32700;
       res.status(status).json({
         jsonrpc: "2.0",
         error: {
