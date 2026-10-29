@@ -1895,11 +1895,29 @@ async function readChatResponsePage() {
     return !best||fullLength>bestLength+24?assistantMessage:best;
   };
   if(!location.pathname.startsWith('/c/'))return {ok:false,error:'Tab đã chọn không phải đoạn chat ChatGPT.'};
-  const turnNodes=Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]')).filter(turn=>{
+  const legacyTurnNodes=Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]')).filter(turn=>{
     const style=getComputedStyle(turn);
     return style.display!=='none'&&style.visibility!=='hidden'&&turn.getClientRects().length>0;
   }).slice(-12);
+  const modernTurnNodes=legacyTurnNodes.length?[]:Array.from(document.querySelectorAll('[data-turn-key]')).filter(turn=>{
+    const style=getComputedStyle(turn);
+    return style.display!=='none'&&style.visibility!=='hidden'&&turn.getClientRects().length>0;
+  }).slice(-12);
+  const turnNodes=legacyTurnNodes.length?legacyTurnNodes:modernTurnNodes;
   const messages=(await Promise.all(turnNodes.map(async(turn,index)=>{
+    if(!legacyTurnNodes.length){
+      const userHeading=turn.querySelector('h4[data-conversation-role="user"]');
+      const assistantHeading=turn.querySelector('h4[data-conversation-role="assistant"]');
+      const userRoot=userHeading?.parentElement;
+      const userRaw=userRoot?nodeText(userRoot).slice(nodeText(userHeading).length).trim():'';
+      const assistantRoot=assistantHeading?.closest('[data-content-search-unit-key]');
+      const assistantContent=assistantRoot?.querySelector('[data-chatgpt-selection-message-id]');
+      const assistantRaw=assistantContent?structuredText(assistantContent):'';
+      return [
+        ...(userRaw?[{id:`user-${index}`,role:'user',text:userRaw.slice(0,40000),truncated:userRaw.length>40000}]:[]),
+        ...(assistantRaw?[{id:`assistant-${index}`,role:'assistant',text:assistantRaw.slice(0,40000),truncated:assistantRaw.length>40000}]:[])
+      ];
+    }
     const userMessage=turn.querySelector('[data-message-author-role="user"]');
     const assistantMessage=turn.querySelector('[data-message-author-role="assistant"]');
     if(userMessage){
@@ -1915,7 +1933,7 @@ async function readChatResponsePage() {
     const links=content?linksFor(content):[];
     const text=raw.slice(0,40000);
     return raw||images.length?{id:`assistant-${index}`,role:'assistant',text,truncated:raw.length>text.length,...(links.length?{links}:{}),...(images.length?{images}:{})}:null;
-  }))).filter(Boolean);
+  }))).flat().filter(Boolean);
   const latestUserIndex=messages.findLastIndex(message=>message.role==='user');
   const assistantAfterLatestUser=latestUserIndex>=0?messages.slice(latestUserIndex+1).findLast(message=>message.role==='assistant'):[...messages].reverse().find(message=>message.role==='assistant');
   const stopControl=Array.from(document.querySelectorAll('button,[role="button"]')).find(control=>{
@@ -1923,7 +1941,8 @@ async function readChatResponsePage() {
     return /^(?:stop(?: answering| generating| streaming)?|dừng(?: trả lời)?)$/i.test(label);
   });
   const thinkingPlaceholder=/^(?:thinking|đang suy nghĩ)(?:\s*[.…]{1,3})?$/i.test(assistantAfterLatestUser?.text||'');
-  const latestTurn=Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]')).at(-1);
+  const latestTurn=turnNodes.at(-1);
+  const turnComplete=Boolean(modernTurnNodes.length&&(latestTurn?.getAttribute('data-talvt-turn-state')==='complete'||latestTurn?.querySelector('[data-talvt-turn-state="complete"]')));
   const imageGenerationLoading=Boolean(latestTurn?.querySelector?.('[data-testid="image-gen-loading-state"],[data-testid="image-gen-loading-state-frame"],[aria-label^="Generating image" i]'));
   const generatedImage=Array.from(latestTurn?.querySelectorAll?.('img')||[]).find(image=>{
     const alt=String(image.getAttribute?.('alt')||'').trim();
@@ -1949,7 +1968,7 @@ async function readChatResponsePage() {
   const finalizedMessages=messages.map((message,index)=>message.role==='assistant'?{...message,end_turn:index<latestUserIndex||responseReady}:message);
   const text=assistantAfterLatestUser?.text||'';
   const links=Array.isArray(assistantAfterLatestUser?.links)?assistantAfterLatestUser.links:[];
-  return {ok:true,title:document.title,url:location.href,text,text_length:text.length,links,truncated:Boolean(assistantAfterLatestUser?.truncated),incomplete:busy,incomplete_reason:imageGenerationLoading?'image_generation_in_progress':messageStreamError?'message_stream_error':messageDeliveryTimedOut?'message_delivery_timeout':connectionInterrupted?'connection_interrupted':busy?(thinkingPlaceholder?'thinking_placeholder':'generation_in_progress'):'',image_generation_in_progress:imageGenerationLoading,image_response_ready:imageResponseReady,response_kind:imageResponseReady||imageGenerationLoading?'image':'text',connection_interrupted:legacyInterrupted,message_delivery_timed_out:messageDeliveryTimedOut,message_stream_error:messageStreamError,conversation_limit_reached:false,conversation_limit_message:'',conversation_limit_button_label:'',message_count:finalizedMessages.filter(message=>message.role==='assistant').length,total_message_count:finalizedMessages.length,messages:finalizedMessages,busy,response_ready:responseReady,response_source:'chatgpt_dom',updated_at:new Date().toISOString()};
+  return {ok:true,title:document.title,url:location.href,text,text_length:text.length,links,truncated:Boolean(assistantAfterLatestUser?.truncated),incomplete:busy,incomplete_reason:imageGenerationLoading?'image_generation_in_progress':messageStreamError?'message_stream_error':messageDeliveryTimedOut?'message_delivery_timeout':connectionInterrupted?'connection_interrupted':busy?(thinkingPlaceholder?'thinking_placeholder':'generation_in_progress'):'',image_generation_in_progress:imageGenerationLoading,image_response_ready:imageResponseReady,response_kind:imageResponseReady||imageGenerationLoading?'image':'text',connection_interrupted:legacyInterrupted,message_delivery_timed_out:messageDeliveryTimedOut,message_stream_error:messageStreamError,conversation_limit_reached:false,conversation_limit_message:'',conversation_limit_button_label:'',message_count:finalizedMessages.filter(message=>message.role==='assistant').length,total_message_count:finalizedMessages.length,messages:finalizedMessages,busy,response_ready:responseReady,turn_complete:turnComplete,response_source:'chatgpt_dom',updated_at:new Date().toISOString()};
 }
 
 function inspectChatSendAttemptPage(attemptId='',expectedText='',baselineMatchingUserMessages=0,generatingBeforeClick=false) {
@@ -3327,14 +3346,14 @@ if(action==='rename_chat'){
       let observedDomResult=injected.result;
       let domResult=injected.result;
       const initialDomText=String(domResult.text||'').trim();
-      const unverifiedShortDom=Boolean(domResult.response_ready&&initialDomText.length>0&&initialDomText.length<=2&&!currentCanonical.response_ready);
+      const unverifiedShortDom=Boolean(domResult.response_ready&&initialDomText.length>0&&initialDomText.length<=2&&!currentCanonical.response_ready&&domResult.turn_complete!==true);
       if(unverifiedShortDom)domResult={...domResult,busy:true,response_ready:false,incomplete:true,incomplete_reason:'short_dom_response_unverified'};
       const initialDomResponseReady=Boolean(domResult.response_ready&&!domResult.busy&&!unverifiedShortDom);
       if(initialDomResponseReady){
         const previousCanonicalActivity=chatCanonicalActivityByTab.get(tab.id)||emptyCanonicalActivity();
         chatCanonicalActivityByTab.set(tab.id,{...previousCanonicalActivity,conversation_id:conversationId,busy:false,response_ready:true,busy_since:0,last_checked_at:Date.now()});
         canonicalActivityPayload={canonical_busy:false,canonical_response_ready:true,canonical_observed:Boolean(canonical.ok)};
-        if(networkState.busy){
+        if(networkState.busy||networkState.network_state==='failed'){
           await reconcileChatNetworkCompletion(tab.id,conversationId,domResult.image_response_ready?'dom_image':'dom_response');
           networkState=await chatRequestState(tab.id,conversationId);
           networkPayload=networkPayloadOf(networkState);

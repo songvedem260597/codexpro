@@ -244,7 +244,7 @@ assert.equal(extCall.args.trace, true);
 assert.equal(extCall.args.trace_ms, 987);
 assert.equal(extCall.args.test_id, "composer");
 assert.deepEqual(extCall.args.steps, [{ action: "click", test_id: "step-test", timeout_ms: 700, delta_x: 1, delta_y: 2, max_chars: 777, full_page: true, delta: true }]);
-assert.equal(Object.hasOwn(extCall.args, "canonical_only"), false);
+assert.equal(extCall.args.canonical_only, true, "canonical_only must reach the extension");
 assert.equal(result.structuredContent.browser_backend, "extension");
 assert.equal(result.structuredContent.profile_id, "profile-a");
 

@@ -974,8 +974,8 @@ assert.match(managerMain, /let keepChromeFocused = payload\?\.newChat === true[\
 assert.doesNotMatch(managerMain, /owner\.minimize\(\)/, "recovery must never minimize the Manager window");
 assert.match(managerMain, /if \(!keepChromeFocused && restoreManagerFocus[\s\S]*?if \(owner\.isMinimized\(\)\) owner\.restore\(\);[\s\S]*?owner\.focus\(\);/, "renderer wake fallback may return focus to Manager only when Chrome continuation focus is not required");
 assert.match(responseReaderSource, /const networkStreamLive=Boolean\(effectiveNetworkBusy&&networkStream\.available\)/, "closed network streams must be hidden after the request becomes terminal");
-assert.match(worker, /response_ready:responseReady,response_source:'chatgpt_dom'/, "DOM fallback must explicitly mark only settled latest-assistant content as ready");
-assert.match(worker, /const turnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
+assert.match(worker, /response_ready:responseReady(?:,turn_complete:turnComplete)?,response_source:'chatgpt_dom'/, "DOM fallback must explicitly mark only settled latest-assistant content as ready");
+assert.match(worker, /const legacyTurnNodes=Array\.from\(document\.querySelectorAll\('\[data-testid\^="conversation-turn-"\]'\)\)/, "DOM transcript reads must include image-only ChatGPT conversation turns without an assistant role node");
 assert.match(worker, /const images=await generatedImagesFor\(turn\)/, "image-only turns must collect generated image previews into assistant transcript messages");
 assert.match(worker, /data_url:dataUrl/, "generated image previews must be returned to Manager as renderable image data");
 assert.match(worker, /if\(domActivity\.busy&&!allowBusyFollowup\)\{[\s\S]*?probeCanonicalActivity\(tab\.id,targetConversationId,true\)[\s\S]*?canonicalCompleted[\s\S]*?send_preflight_canonical/, "automated send preflight must clear a stale DOM busy guard when canonical proves the previous turn completed while manual follow-ups bypass that guard");
@@ -1035,7 +1035,11 @@ assert.match(managerMain, /function profileDiagnosticSnapshot[\s\S]*?connector_i
 assert.match(managerMain, /CodexPro connector bị hạ xuống chưa xác minh[\s\S]*?CodexPro connector đã được xác minh[\s\S]*?CodexPro connector không còn khớp profile/, "Manager must log connector verification and binding transitions");
 assert.match(managerMain, /codexpro:check-profile[\s\S]*?result\?\.installed \?\? result\?\.connector_installed[\s\S]*?connector_check_diagnostic/, "automatic connector checks must log the actual installed result and selector evidence");
 assert.match(managerUi, /connectorUpdateRequired \? "Cập nhật CodexPro" : "Thêm CodexPro"/, "old profile connectors must offer an update action instead of pretending CodexPro is missing");
-assert.doesNotMatch(managerUi, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");
+const profileActionsSource = await readFile(join(root, "manager/src/hooks/use-profile-actions.js"), "utf8");
+const workerUpdateStart = profileActionsSource.indexOf("const reloadProfiles = useCallback");
+assert.ok(workerUpdateStart >= 0, "worker update handler must exist");
+const workerUpdateHandler = profileActionsSource.slice(workerUpdateStart, profileActionsSource.indexOf("\n  return {", workerUpdateStart));
+assert.doesNotMatch(workerUpdateHandler, /window\.confirm\(/, "worker update must use the CodexPro confirmation dialog instead of the native Windows prompt");
 assert.match(managerWorkerUpdateDialog, /className="worker-update-dialog"[\s\S]*?Cập nhật CodexPro Worker[\s\S]*?Cập nhật worker/, "Manager must render the custom worker update confirmation dialog");
 assert.match(managerUi, /Đã update thành công.*result\.version/, "Manager must only announce update success after the backend confirms the target version");
 assert.ok(manifest.permissions.includes("debugger"));

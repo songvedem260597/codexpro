@@ -215,6 +215,7 @@ export function registerBrowserControlTool(options: BrowserControlToolOptions): 
           started_at: args.started_at,
           attempt_key: args.attempt_key,
           read_dom: args.read_dom,
+          canonical_only: args.canonical_only,
           recover_stale_dom: args.recover_stale_dom,
           new_chat: args.new_chat,
           visual_watchdog: args.visual_watchdog,
