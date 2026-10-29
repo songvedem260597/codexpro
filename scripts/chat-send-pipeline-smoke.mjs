@@ -265,7 +265,7 @@ function trustedSendPageFixture({ centerCovered = false, fullyCovered = false, d
       if (selector.includes("prompt-textarea") || selector.includes("contenteditable") || selector.includes("textarea")) return composer;
       return null;
     },
-    querySelectorAll() { return []; },
+    querySelectorAll(selector) { return /prompt-textarea|contenteditable|textarea/.test(selector) ? [composer] : []; },
     elementFromPoint(x, y) {
       if (fullyCovered) return overlay;
       if (centerCovered && Math.abs(x - 120) < 0.01 && Math.abs(y - 80) < 0.01) return overlay;
@@ -517,6 +517,7 @@ const inspectDocument = {
   querySelectorAll(selector) {
     if (selector.includes("data-message-author-role=\"user\"")) return [userMessage];
     if (selector === "button,[role=\"button\"]") return [stopButton];
+    if (/prompt-textarea|contenteditable|textarea/.test(selector)) return [composer];
     return [];
   },
   elementFromPoint() { return sendButton; }
@@ -688,7 +689,7 @@ const fastComposer = {
 const fastDocument = {
   title: "ChatGPT",
   querySelector(selector) { return /prompt-textarea|contenteditable|textarea/.test(selector) ? fastComposer : null; },
-  querySelectorAll(selector) { return selector.includes('data-message-author-role="user"') ? [] : []; },
+  querySelectorAll(selector) { return /prompt-textarea|contenteditable|textarea/.test(selector) ? [fastComposer] : []; },
   createRange: () => ({ selectNodeContents() {}, collapse() {} }),
   execCommand(command, _ui, value) {
     if (command === "insertText") { fastComposer.innerText = value; fastComposer.textContent = value; return true; }

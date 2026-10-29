@@ -82,7 +82,7 @@ assert.equal(composerLookups,0,'conversation limit must stop the consolidated pr
 
 const cleanupSource=source.slice(source.indexOf('async function cleanupChatRequestDraftPage('),source.indexOf('async function readChatResponsePage('));
 const editedComposer={isContentEditable:true,innerText:'user edited draft',dataset:{codexproDraftAttempt:'old',codexproDraftText:'original'},closest:()=>null,getBoundingClientRect:()=>({width:100,height:20}),focus(){throw new Error('must not focus user draft');}};
-const cleanupContext=vm.createContext({Date,setTimeout,location:{pathname:'/c/expected'},CSS:{escape:x=>x},document:{querySelector:()=>editedComposer},getComputedStyle:()=>({display:'block',visibility:'visible'})});
+const cleanupContext=vm.createContext({Date,setTimeout,location:{pathname:'/c/expected'},CSS:{escape:x=>x},document:{querySelector:()=>editedComposer,querySelectorAll:()=>[editedComposer]},getComputedStyle:()=>({display:'block',visibility:'visible'})});
 vm.runInContext(cleanupSource,cleanupContext);
 const cleanup=await cleanupContext.cleanupChatRequestDraftPage('old','expected',Date.now()+1000);
 assert.equal(cleanup.draft_changed,true);

@@ -7,7 +7,7 @@ const CONVERSATION_ID = "6aa6c3ac-11a0-83ec-ac95-6ef7ea109e42";
 const OTHER_CONVERSATION_ID = "6aa70cf7-1b48-83ec-b8b1-ff7d92df7b92";
 const MESSAGE = "REAL_SEND_READINESS_REGRESSION";
 
-function createFastPrepareHarness({ composerVisible = false, draft = "", attachmentCount = 0 } = {}) {
+function createFastPrepareHarness({ composerVisible = false, draft = "", attachmentCount = 0, modernComposer = false, hiddenFirst = false } = {}) {
   let listener = null;
   let visibleNow = Boolean(composerVisible);
   let currentPath = `/c/${CONVERSATION_ID}`;
@@ -24,7 +24,7 @@ function createFastPrepareHarness({ composerVisible = false, draft = "", attachm
     querySelectorAll() { return Array.from({ length: currentAttachmentCount }, () => attachmentButton); }
   };
   const composer = {
-    id: "prompt-textarea",
+    id: modernComposer ? "" : "prompt-textarea",
     dataset: {},
     isContentEditable: true,
     innerText: String(draft),
@@ -36,6 +36,8 @@ function createFastPrepareHarness({ composerVisible = false, draft = "", attachm
     dispatchEvent() {},
     getBoundingClientRect() { return { width: 640, height: 48 }; }
   };
+  const hiddenComposer = { ...composer, dataset: {}, getBoundingClientRect() { return { width: 0, height: 0 }; } };
+  const activeSelector = modernComposer ? '[contenteditable="true"][data-composer-markdown]' : '#prompt-textarea';
   const selection = { removeAllRanges() {}, addRange() {} };
   const location = {
     origin: "https://chatgpt.com",
@@ -46,11 +48,12 @@ function createFastPrepareHarness({ composerVisible = false, draft = "", attachm
     title: "Historical conversation",
     querySelector(selector) {
       if (!visibleNow) return null;
-      return selector === "#prompt-textarea" ? composer : null;
+      return selector === activeSelector ? (hiddenFirst ? hiddenComposer : composer) : null;
     },
     querySelectorAll(selector) {
       if (selector === "button,a,[role=\"button\"]") return [];
       if (selector === "[data-message-author-role=\"user\"]") return [];
+      if (selector === activeSelector && visibleNow) return hiddenFirst ? [hiddenComposer, composer] : [composer];
       return [];
     },
     createRange() { return { selectNodeContents() {}, collapse() {} }; },
@@ -156,6 +159,22 @@ const immediate = await immediateHarness.prepare(immediateStartedAt + 2_000);
 assert.equal(immediate?.ok, true, "already-visible composer must prepare immediately");
 assert.ok(Date.now() - immediateStartedAt < 500, "already-visible composer must not incur readiness sleep");
 assert.equal(immediate?.requires_trusted_submit, true);
+
+const hiddenFirstHarness = createFastPrepareHarness({ composerVisible: true, modernComposer: true, hiddenFirst: true });
+const hiddenFirst = await hiddenFirstHarness.prepare(Date.now() + 350);
+assert.equal(hiddenFirst?.ok, true, `hidden first ProseMirror must not shadow visible input: ${JSON.stringify(hiddenFirst)}`);
+assert.equal(hiddenFirstHarness.composer.textContent, MESSAGE);
+assert.equal(hiddenFirstHarness.composer.dataset.codexproDraftAttempt, "attempt-readiness-regression");
+
+const legacyHiddenHarness = createFastPrepareHarness({ composerVisible: true, hiddenFirst: true });
+const legacyHidden = await legacyHiddenHarness.prepare(Date.now() + 350);
+assert.equal(legacyHidden?.ok, true, "hidden legacy composer must not shadow a visible legacy textarea");
+assert.equal(legacyHiddenHarness.composer.textContent, MESSAGE);
+
+const hiddenDraftHarness = createFastPrepareHarness({ composerVisible: true, modernComposer: true, hiddenFirst: true, draft: "DO NOT ERASE" });
+const hiddenDraft = await hiddenDraftHarness.prepare(Date.now() + 350);
+assertPrepareFailure(hiddenDraft, "visible draft when hidden twin appears first");
+assert.equal(hiddenDraftHarness.composer.textContent, "DO NOT ERASE", "must preserve the visible user's draft");
 
 const delayed = await runHistoricalReopenReadinessRace();
 assert.equal(

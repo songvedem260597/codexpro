@@ -371,7 +371,7 @@ const inspectChatSendAttemptPage = Function(
   "getComputedStyle",
   `${inspectAttemptSource}; return inspectChatSendAttemptPage;`
 )(
-  { querySelector: () => replacedComposer },
+  { querySelector: () => replacedComposer, querySelectorAll: () => [replacedComposer] },
   () => ({ display: "block", visibility: "visible" })
 );
 const recoveredReplacedComposer = inspectChatSendAttemptPage("attempt-react-replaced", replacedComposerPayload);
@@ -661,7 +661,7 @@ const blockingModal={innerText:'Plus plan failed to renew',textContent:'Plus pla
 const guardedDocument={
   activeElement:null,
   querySelector(selector){if(selector==='#modal-subscription-failure')return blockingModal;if(selector.startsWith('[data-codexpro-submit-attempt='))return guardedComposer;if(selector==='#prompt-textarea')return guardedComposer;return null;},
-  querySelectorAll:()=>[],
+  querySelectorAll:(selector)=>/prompt-textarea|contenteditable|textarea/.test(selector)?[guardedComposer]:[],
   createRange:()=>({selectNodeContents(){},collapse(){}})
 };
 const emptySelection={anchorNode:null,removeAllRanges(){},addRange(){}};

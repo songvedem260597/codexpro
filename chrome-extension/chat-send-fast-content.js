@@ -20,9 +20,10 @@
   const findComposer = () => [
     '#prompt-textarea',
     '[contenteditable="true"][data-lexical-editor="true"]',
+    '[contenteditable="true"][data-composer-markdown]',
     'textarea[data-id="root"]',
     'textarea[placeholder]'
-  ].map((selector) => document.querySelector(selector)).find(visible);
+  ].flatMap((selector) => Array.from(document.querySelectorAll(selector))).find(visible);
   const rootFor = (composer) => composer?.closest('form')
     || composer?.closest('[data-type="unified-composer"]')
     || composer?.parentElement;

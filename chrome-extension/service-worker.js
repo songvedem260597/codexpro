@@ -1449,8 +1449,8 @@ async function sendChatRequestPage(text,attachments=[],attemptId='',deadlineAt=0
   if(location.origin!=='https://chatgpt.com'||(!location.pathname.startsWith('/c/')&&location.pathname!=='/'))return {ok:false,error:'Tab đã chọn không phải ChatGPT.'};
   const initialConversationLimit=conversationLimit();
   if(initialConversationLimit.reached)return {ok:false,error:'CONVERSATION_LIMIT_REACHED: '+initialConversationLimit.message,conversation_limit_reached:true,conversation_limit_message:initialConversationLimit.message,cleanup_skipped:true};
-  const composerSelectors=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'];
-  const findComposer=()=>composerSelectors.map(selector=>document.querySelector(selector)).find(element=>visible(element));
+  const composerSelectors=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','[contenteditable="true"][data-composer-markdown]','textarea[data-id="root"]','textarea[placeholder]'];
+  const findComposer=()=>composerSelectors.flatMap(selector=>Array.from(document.querySelectorAll(selector))).find(element=>visible(element));
   const composerRootFor=element=>element?.closest('form')||element?.closest('[data-type="unified-composer"]')||element?.parentElement;
   const attachmentButtons=root=>Array.from((root||document).querySelectorAll('button[aria-label*="Remove file" i],button[aria-label*="Remove attachment" i],button[aria-label*="Xóa tệp" i],button[aria-label*="Xóa file" i]')).filter(visible);
   const attachmentLabel=button=>String(button?.getAttribute?.('aria-label')||button?.innerText||button?.textContent||'').trim();
@@ -1712,8 +1712,8 @@ async function cleanupChatRequestDraftPage(attemptId='',expectedConversationId=n
   if(!valid())return {ok:false,cleanup_skipped:true};
   const normalize=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\s+/g,' ').trim();
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
-  const composerSelectors=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'];
-  const composer=composerSelectors.map(selector=>document.querySelector(selector)).find(element=>visible(element));
+  const composerSelectors=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','[contenteditable="true"][data-composer-markdown]','textarea[data-id="root"]','textarea[placeholder]'];
+  const composer=composerSelectors.flatMap(selector=>Array.from(document.querySelectorAll(selector))).find(element=>visible(element));
   const markedRoot=attemptId?document.querySelector(`[data-codexpro-attachment-attempt="${CSS.escape(attemptId)}"]`):null;
   const root=composer?.closest('form')||composer?.closest('[data-type="unified-composer"]')||markedRoot||composer?.parentElement;
   let textCleared=false,attachmentsRemoved=0;
@@ -1957,7 +1957,7 @@ function inspectChatSendAttemptPage(attemptId='',expectedText='',baselineMatchin
   const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
   const controlLabel=control=>String(control?.getAttribute?.('aria-label')||control?.innerText||control?.textContent||'').trim();
   const isStopControl=control=>String(control?.getAttribute?.('data-testid')||'').toLowerCase()==='stop-button'||/^(?:stop(?: answering| generating| streaming)?|dừng(?: trả lời)?)$/i.test(controlLabel(control));
-  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','[contenteditable="true"][data-composer-markdown]','textarea[data-id="root"]','textarea[placeholder]'].flatMap(selector=>Array.from(document.querySelectorAll(selector))).find(visible);
   const text=String(composer?.isContentEditable?(composer.innerText||composer.textContent||''):(composer?.value||'')).replace(/[\u200B-\u200D\uFEFF]/g,'').trim();
   const payloadMatches=Boolean(composer&&expectedText&&normalized(text)===normalized(expectedText));
   const marked=Boolean(composer&&composer.dataset.codexproDraftAttempt===attemptId);
@@ -2042,7 +2042,7 @@ async function focusChatComposerForSubmitPage(attemptId='',expectedText='') {
   const composerText=element=>element?.isContentEditable?String(element.innerText||element.textContent||''):String(element?.value||'');
   let blockingModalDismissed=false;
   for(let guardAttempt=0;guardAttempt<6;guardAttempt+=1){
-    const current=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+    const current=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','[contenteditable="true"][data-composer-markdown]','textarea[data-id="root"]','textarea[placeholder]'].flatMap(selector=>Array.from(document.querySelectorAll(selector))).find(visible);
     const draftOwned=Boolean(current&&(current.dataset.codexproDraftAttempt===attemptId||expectedText&&normalized(composerText(current))===normalized(expectedText)));
     if(!draftOwned)return {ok:false,error:'Composer của attempt không còn giữ đúng draft trước trusted Enter.'};
     const dialogs=[document.querySelector('#modal-subscription-failure'),...document.querySelectorAll('[role="dialog"]')].filter((element,index,array)=>element&&array.indexOf(element)===index&&visible(element));
@@ -2059,7 +2059,7 @@ async function focusChatComposerForSubmitPage(attemptId='',expectedText='') {
     if(guardAttempt===5)return {ok:false,error:'Modal thanh toán liên tục xuất hiện lại; dừng trước khi phát Enter để tránh trạng thái gửi không chắc chắn.'};
   }
   const marked=document.querySelector(`[data-codexpro-submit-attempt="${CSS.escape(attemptId)}"]`);
-  const current=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+  const current=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','[contenteditable="true"][data-composer-markdown]','textarea[data-id="root"]','textarea[placeholder]'].flatMap(selector=>Array.from(document.querySelectorAll(selector))).find(visible);
   const recovered=Boolean(!marked&&current&&normalized(composerText(current))===normalized(expectedText));
   const composer=marked||recovered&&current;
   if(!composer)return {ok:false,error:'Composer của attempt đã bị React thay thế và draft hiện tại không còn khớp payload.'};
@@ -2081,7 +2081,7 @@ async function focusChatComposerForSubmitPage(attemptId='',expectedText='') {
 function dismissKnownBlockingChatModalPage(attemptId='',expectedText='') {
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
   const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
-  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','[contenteditable="true"][data-composer-markdown]','textarea[data-id="root"]','textarea[placeholder]'].flatMap(selector=>Array.from(document.querySelectorAll(selector))).find(visible);
   const composerText=composer?.isContentEditable?String(composer.innerText||composer.textContent||''):String(composer?.value||'');
   const draftOwned=Boolean(composer&&(composer.dataset.codexproDraftAttempt===attemptId||expectedText&&normalized(composerText)===normalized(expectedText)));
   if(!draftOwned)return {ok:true,dismissed:false,reason:'draft-not-owned'};
@@ -2100,7 +2100,7 @@ function dismissKnownBlockingChatModalPage(attemptId='',expectedText='') {
 
 function prepareTrustedClickFallbackPage(attemptId='',expectedText='') {
   const visible=element=>{if(!element)return false;const rect=element.getBoundingClientRect(),style=getComputedStyle(element);return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility!=='hidden';};
-  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','[contenteditable="true"][data-composer-markdown]','textarea[data-id="root"]','textarea[placeholder]'].flatMap(selector=>Array.from(document.querySelectorAll(selector))).find(visible);
   const normalized=value=>String(value||'').replace(/[\u200B-\u200D\uFEFF]/g,'').replace(/\u00a0/g,' ').replace(/\s+/g,' ').replace(/^@\s*(?=CodexPro\b)/i,'').trim();
   const composerText=composer?.isContentEditable?String(composer.innerText||composer.textContent||''):String(composer?.value||'');
   const blockingModal=document.querySelector('#modal-subscription-failure');
@@ -4363,7 +4363,7 @@ function trustedSendButtonPointPage(attemptId='',expectedText='',armListener=fal
   const ancestorEvidence=node=>{const items=[];for(let current=node,depth=0;current&&depth<8;current=current.parentElement,depth+=1){const evidence=nodeEvidence(current);if(evidence)items.push({tag:evidence.tag,id:evidence.id,classes:evidence.classes,aria:evidence.aria,position:evidence.position,z_index:evidence.z_index});}return items;};
   if(visible(document.querySelector('#modal-subscription-failure')))return {ok:false,blocked:true,error:'Modal thanh toán đang chặn nút Send.',pathname,retryable:false};
   const generatingBeforeClick=Array.from(document.querySelectorAll('button,[role="button"]')).some(control=>visible(control)&&isStopControl(control));
-  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','textarea[data-id="root"]','textarea[placeholder]'].map(selector=>document.querySelector(selector)).find(visible);
+  const composer=['#prompt-textarea','[contenteditable="true"][data-lexical-editor="true"]','[contenteditable="true"][data-composer-markdown]','textarea[data-id="root"]','textarea[placeholder]'].flatMap(selector=>Array.from(document.querySelectorAll(selector))).find(visible);
   const composerText=composer?.isContentEditable?String(composer.innerText||composer.textContent||''):String(composer?.value||'');
   const draftOwned=Boolean(composer&&(composer.dataset.codexproDraftAttempt===attemptId||expectedText&&normalized(composerText)===normalized(expectedText)));
   if(!draftOwned||expectedText&&normalized(composerText)!==normalized(expectedText))return {ok:false,error:'Composer không còn giữ đúng payload của attempt trước trusted click.',composer_matches_payload:false,pathname,retryable:false};
