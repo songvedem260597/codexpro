@@ -156,8 +156,26 @@ try {
   git(["remote", "add", "origin", remoteRoot]);
   git(["push", "-u", "origin", "main"]);
 
+  // ZIP-imported workspaces have no Git metadata or task worktree: resume in place.
+  const zipRoot = path.join(scratchRoot, "imported-zip");
+  fs.mkdirSync(zipRoot, { recursive: true });
+  fs.writeFileSync(path.join(zipRoot, "app.txt"), "imported source remains intact\n");
+  const zipTask = { taskId: "cpt_123412341234123412341234", workerId: "worker:zip", title: "ZIP workspace resume", root: zipRoot };
+  const zipRecord = await registerWorkspaceTask(zipTask);
+  assert.equal(zipRecord.baseHead, "");
+  assert.equal(zipRecord.worktreeRoot, undefined);
+  assert.equal(await resumeWorkspaceTask(zipTask), true, "a ZIP-imported source task must resume without a Git worktree");
+  assert.equal(fs.readFileSync(path.join(zipRoot, "app.txt"), "utf8"), "imported source remains intact\n");
+  await assert.rejects(verifyWorkspaceTaskResume({ ...zipTask, workerId: "worker:other" }), /WORKSPACE_TASK_OWNER_MISMATCH/);
+
   const registeredA = await registerWorkspaceTask(TASK_A);
   const registeredB = await registerWorkspaceTask(TASK_B);
+  // A Git-backed task with a lost worktree must still fail closed.
+  mutateCoordinationState(repoRoot, (state) => { delete state.tasks[TASK_A.taskId].worktreeRoot; });
+  await assert.rejects(verifyWorkspaceTaskResume(TASK_A), /WORKSPACE_TASK_WORKTREE_MISSING/);
+  mutateCoordinationState(repoRoot, (state) => { state.tasks[TASK_A.taskId].worktreeRoot = registeredA.worktreeRoot; });
+  assert.equal(await resumeWorkspaceTask(TASK_A), true, "restored Git worktree should resume normally");
+
   assert.equal(registeredA.baseHead, registeredB.baseHead, "parallel tasks should snapshot the same base HEAD");
   assert.equal(registeredA.baseHead, initialHead);
   assert.ok(registeredA.worktreeRoot && fs.existsSync(registeredA.worktreeRoot), "task A should receive a real worktree");

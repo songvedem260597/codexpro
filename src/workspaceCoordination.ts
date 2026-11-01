@@ -560,6 +560,13 @@ export async function verifyWorkspaceTaskResume(context: WorkspaceTaskContext): 
     });
   }
   const recordedWorktree = String(task.worktreeRoot || "").trim();
+  // Imported ZIP projects have no Git HEAD and never had a task worktree.
+  // Only allow in-place resume when this was originally a non-Git task.
+  if (!recordedWorktree && !task.baseHead && !task.baseBranch && !task.worktreeBranch && !task.commitShas.length
+    && fs.existsSync(root) && fs.statSync(root).isDirectory()
+    && !(await gitText(root, ["rev-parse", "--show-toplevel"]))) {
+    return task;
+  }
   if (!recordedWorktree || !fs.existsSync(recordedWorktree)) {
     throw new CodexProError(`WORKSPACE_TASK_WORKTREE_MISSING: recorded worktree is missing for ${context.taskId}.`, {
       code: "WORKSPACE_TASK_WORKTREE_MISSING",
@@ -791,7 +798,7 @@ export async function withVerifiedWorkspaceTaskResume<T>(
     const state = readState(root);
     const current = state.tasks[context.taskId];
     if (!current || current.status !== "running" || current.finishedAt
-      || JSON.stringify({ ...current, worktreeRoot: canonicalRoot(current.worktreeRoot || root) }) !== JSON.stringify(verified)) {
+      || JSON.stringify({ ...current, ...(current.worktreeRoot ? { worktreeRoot: canonicalRoot(current.worktreeRoot) } : {}) }) !== JSON.stringify(verified)) {
       throw new CodexProError("WORKSPACE_TASK_RESUME_CHANGED: task changed during resume verification; retry after checking its owner.", { code: "WORKSPACE_TASK_RESUME_CHANGED" });
     }
     const normalizeOwner = (value: string) => value.replace(/^browser:/, "");
@@ -803,7 +810,7 @@ export async function withVerifiedWorkspaceTaskResume<T>(
       if (other.taskId === current.taskId || other.status !== "running") continue;
       const otherRoot = other.worktreeRoot || root;
       if (normalizeOwner(other.workerId) === normalizeOwner(current.workerId)
-        || overlap(current.worktreeRoot!, otherRoot) || overlap(otherRoot, current.worktreeRoot!)) {
+        || overlap(current.worktreeRoot || root, otherRoot) || overlap(otherRoot, current.worktreeRoot || root)) {
         throw new CodexProError("WORKSPACE_TASK_RESUME_WRITER_CONFLICT: another active task may write this worktree or owns this worker.", { code: "WORKSPACE_TASK_RESUME_WRITER_CONFLICT", details: { other_task_id: other.taskId } });
       }
     }
