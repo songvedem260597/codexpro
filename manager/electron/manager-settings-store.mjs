@@ -1,4 +1,8 @@
-import { dialog } from "electron";
+import { createRequire } from "node:module";
+const _require = createRequire(import.meta.url);
+let _electron = null;
+try { const mod = _require("electron"); if (mod && typeof mod === "object") _electron = mod; } catch {}
+const dialog = _electron?.dialog;
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -411,8 +415,63 @@ export function createManagerSettingsStore({ home, mimeTypeForFile }) {
     return managerSettingsPayload();
   }
 
+  function applyWorkerImageFile(packId, state, sourcePath) {
+    const normalizedState = String(state || "");
+    if (!WORKER_IMAGE_STATES.has(normalizedState)) throw new Error("Tr?ng th?i worker kh?ng h?p l?.");
+    const settings = readManagerSettings();
+    const pack = findWorkerPack(settings, packId);
+    const source = path.resolve(String(sourcePath || ""));
+    const stat = fs.statSync(source);
+    if (!stat.isFile()) throw new Error("?nh worker kh?ng h?p l?.");
+    if (stat.size > MAX_WORKER_IMAGE_BYTES) throw new Error("?nh worker ???c t?i ?a 10 MB.");
+    const extension = path.extname(source).toLowerCase();
+    if (!WORKER_IMAGE_EXTENSIONS.has(extension)) throw new Error("Ch? h? tr? PNG, JPG, GIF ho?c WEBP.");
+    fs.mkdirSync(managerAssetsDir, { recursive: true });
+    const previousPath = pack.images[normalizedState];
+    const destination = path.join(managerAssetsDir, `worker-${pack.id}-${normalizedState}${extension}`);
+    if (path.resolve(source) !== path.resolve(destination)) {
+      for (const candidate of fs.readdirSync(managerAssetsDir, { withFileTypes: true })) {
+        if (candidate.isFile() && candidate.name.startsWith(`worker-${pack.id}-${normalizedState}.`)) {
+          fs.rmSync(path.join(managerAssetsDir, candidate.name), { force: true });
+        }
+      }
+      fs.copyFileSync(source, destination);
+    }
+    if (previousPath && path.resolve(previousPath) !== path.resolve(destination)) removeManagedWorkerImage(previousPath);
+    pack.images[normalizedState] = destination;
+    settings.selectedWorkerPackId = pack.id;
+    settings.workerImages = { ...pack.images };
+    writeManagerSettings(settings);
+    return managerSettingsPayload();
+  }
+
+  function applyAppBackgroundFile(sourcePath) {
+    const source = path.resolve(String(sourcePath || ""));
+    const stat = fs.statSync(source);
+    if (!stat.isFile()) throw new Error("H?nh n?n kh?ng h?p l?.");
+    if (stat.size > MAX_APP_BACKGROUND_BYTES) throw new Error("H?nh n?n ???c t?i ?a 25 MB.");
+    const extension = path.extname(source).toLowerCase();
+    if (!WORKER_IMAGE_EXTENSIONS.has(extension)) throw new Error("Ch? h? tr? PNG, JPG, GIF ho?c WEBP.");
+    fs.mkdirSync(managerAssetsDir, { recursive: true });
+    const settings = readManagerSettings();
+    const previousPath = settings.appBackground;
+    const destination = path.join(managerAssetsDir, `app-background${extension}`);
+    if (path.resolve(source) !== path.resolve(destination)) {
+      for (const candidate of fs.readdirSync(managerAssetsDir, { withFileTypes: true })) {
+        if (candidate.isFile() && candidate.name.startsWith("app-background.")) fs.rmSync(path.join(managerAssetsDir, candidate.name), { force: true });
+      }
+      fs.copyFileSync(source, destination);
+    }
+    if (previousPath && path.resolve(previousPath) !== path.resolve(destination)) removeManagedWorkerImage(previousPath);
+    settings.appBackground = destination;
+    writeManagerSettings(settings);
+    return managerSettingsPayload();
+  }
+
   return {
     readManagerSettings,
+    applyWorkerImageFile,
+    applyAppBackgroundFile,
     managerSettingsPayload,
     saveManagerSettingsPatch,
     createWorkerImagePack,

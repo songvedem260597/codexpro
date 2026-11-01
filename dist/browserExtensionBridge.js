@@ -1,0 +1,1522 @@
+import http from "node:http";
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { CodexProError } from "./guard.js";
+import { createBridgeSendTraceLogger } from "./sendTraceLog.js";
+import { readWorkerJob, reconcileWorkerJobWorkspaceStatus } from "./workerPolicy.js";
+import { createRuntimeTraceContext, currentRuntimeTraceContext, recordRuntimeTraceSpan, runWithRuntimeTraceContext } from "./analysis/runtimeTrace.js";
+import { browserProfilePersistenceSnapshot, browserProfileRetentionState, mergeBrowserExtensionStreamBatch, normalizeRecentConversations, PROFILE_REGISTRY_VERSION, PROFILE_RETENTION_MS, PROFILE_TTL_MS } from "./browserExtensionProfileState.js";
+export { browserProfilePersistenceSnapshot, browserProfileRetentionState, mergeBrowserExtensionStreamBatch };
+const BRIDGE_HOST = "127.0.0.1";
+const CODEXPRO_EXTENSION_ORIGIN = "chrome-extension://gndipignbnipohooclcbhjliikamjlpl";
+const configuredBridgePort = Number(process.env.CODEXPRO_BROWSER_EXTENSION_BRIDGE_PORT);
+export const BROWSER_EXTENSION_BRIDGE_PORT = Number.isInteger(configuredBridgePort) && configuredBridgePort > 0 && configuredBridgePort <= 65_535
+    ? configuredBridgePort
+    : 9224;
+const PROFILE_RECONNECT_WAIT_MS = 45_000;
+const COMMAND_TIMEOUT_MS = 25_000;
+const CHECK_COMMAND_TIMEOUT_MS = 60_000;
+const SETUP_COMMAND_TIMEOUT_MS = 300_000;
+const SEND_COMMAND_TIMEOUT_MS = 180_000;
+const TEST_COMMAND_TIMEOUT_MS = Math.max(0, Number(process.env.CODEXPRO_SEND_TRACE_TEST_TIMEOUT_MS) || 0);
+const LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS = 125_000;
+const COMMAND_EXPIRY_HEADROOM_MS = 5_000;
+const COMMAND_HEARTBEAT_TIMEOUT_MS = 35_000;
+const COMMAND_HEARTBEAT_CHECK_MS = 2_500;
+const READ_RESPONSE_TIMEOUT_MS = 75_000;
+const MAX_BODY_BYTES = 32 * 1024 * 1024;
+const PROFILE_TASK_STATE_VERSION = 1;
+const MAX_PERSISTED_PROFILE_TASKS = 200;
+const PROFILE_TASK_EVENT_LOG_MAX_BYTES = 2 * 1024 * 1024;
+const PROFILE_TASK_EVENT_THROTTLE_MS = 30_000;
+const FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES = 8 * 1024 * 1024;
+const MAX_PROFILE_FLIGHT_RECORDER_INCIDENTS = 60;
+const RATE_LIMIT_INCIDENT_DEDUPE_MS = 5_000;
+const RATE_LIMIT_INCIDENT_DEDUPE_MAX = 256;
+const PROFILE_REGISTRY_WRITE_INTERVAL_MS = 30_000;
+const BRIDGE_RUN_ID = `bridge_${Date.now().toString(36)}_${randomUUID().replace(/-/g, "").slice(0, 10)}`;
+const bridgeSendTraceLogger = createBridgeSendTraceLogger(BRIDGE_RUN_ID);
+const bridgeTrace = (event, details = {}, options = {}) => {
+    try {
+        bridgeSendTraceLogger.emit(event, details, options);
+    }
+    catch { }
+};
+void (async () => {
+    try {
+        const artifact = fileURLToPath(import.meta.url);
+        const stat = await fs.promises.stat(artifact);
+        const hash = createHash("sha256");
+        await new Promise((resolve, reject) => {
+            const stream = fs.createReadStream(artifact);
+            stream.on("data", (chunk) => hash.update(chunk));
+            stream.on("error", reject);
+            stream.on("end", resolve);
+        });
+        bridgeTrace("runtime_identity", { component: "bridge", identity_ref: BRIDGE_RUN_ID, artifact_name: path.basename(artifact), artifact_size: stat.size, artifact_mtime_ms: Math.round(stat.mtimeMs), artifact_sha256: hash.digest("hex") }, { priority: "critical" });
+    }
+    catch (error) {
+        bridgeTrace("runtime_identity", { component: "bridge", identity_ref: BRIDGE_RUN_ID, identity_error: String(error?.message || error).slice(0, 500) }, { priority: "critical" });
+    }
+})();
+const profileWorkspaceRoots = new Map();
+const profileWorkspaceBindings = new Map();
+const profileTaskIds = new Map();
+const profileTaskTitles = new Map();
+const profileTaskConversationIds = new Map();
+const profileTaskUpdatedAt = new Map();
+const profilePendingTasks = new Map();
+const profileTaskEventSignatures = new Map();
+const rateLimitIncidentDedupeAt = new Map();
+let singleton;
+function browserProfileTaskStatePath() {
+    const configuredHome = String(process.env.CODEXPRO_HOME || "").trim();
+    const home = configuredHome ? path.resolve(configuredHome) : path.join(os.homedir(), ".codexpro");
+    return path.join(home, "browser-profile-tasks.json");
+}
+function browserProfileRegistryPath() {
+    return path.join(path.dirname(browserProfileTaskStatePath()), "browser-profiles.json");
+}
+function persistBrowserProfileRegistry(state, now = Date.now()) {
+    try {
+        const registryPath = browserProfileRegistryPath();
+        const temporaryPath = `${registryPath}.${process.pid}.tmp`;
+        fs.mkdirSync(path.dirname(registryPath), { recursive: true });
+        fs.writeFileSync(temporaryPath, `${JSON.stringify(browserProfilePersistenceSnapshot(state.profiles.values(), now), null, 2)}\n`, "utf8");
+        fs.renameSync(temporaryPath, registryPath);
+        state.profileRegistryLastWrittenAt = now;
+    }
+    catch {
+        // Profile retention is best-effort and must never make the bridge unavailable.
+    }
+}
+function scheduleBrowserProfileRegistryPersistence(state) {
+    if (state.profileRegistryTimer)
+        return;
+    const now = Date.now();
+    const delay = state.profileRegistryLastWrittenAt
+        ? Math.max(250, PROFILE_REGISTRY_WRITE_INTERVAL_MS - (now - state.profileRegistryLastWrittenAt))
+        : 250;
+    state.profileRegistryTimer = setTimeout(() => {
+        state.profileRegistryTimer = undefined;
+        persistBrowserProfileRegistry(state);
+    }, delay);
+    state.profileRegistryTimer.unref?.();
+}
+function loadBrowserProfileRegistry(state, now = Date.now()) {
+    try {
+        const parsed = JSON.parse(fs.readFileSync(browserProfileRegistryPath(), "utf8"));
+        if (Number(parsed?.version) !== PROFILE_REGISTRY_VERSION || !Array.isArray(parsed?.profiles))
+            return;
+        for (const saved of browserProfilePersistenceSnapshot(parsed.profiles, now).profiles) {
+            const profile = {
+                ...saved,
+                restored: true,
+                tabs: [],
+                recentConversations: [],
+                flightRecorderIncidents: [],
+                queued: []
+            };
+            state.profiles.set(profile.id, profile);
+            if (profile.workspaceRoot)
+                profileWorkspaceRoots.set(profile.id, profile.workspaceRoot);
+        }
+    }
+    catch {
+        // A missing or corrupt snapshot behaves like a clean first run.
+    }
+}
+function browserProfileTaskEventLogPath() {
+    return path.join(path.dirname(browserProfileTaskStatePath()), "profile-task-events.jsonl");
+}
+function rotateDiagnosticLogIfNeeded(logPath, maxBytes) {
+    const cutoff = Date.now() - PROFILE_RETENTION_MS;
+    const previousPath = `${logPath}.1`;
+    for (const file of [previousPath, logPath]) {
+        try {
+            if (fs.statSync(file).mtimeMs < cutoff)
+                fs.rmSync(file, { force: true });
+        }
+        catch (error) {
+            if (error?.code !== "ENOENT")
+                throw error;
+        }
+    }
+    if (!fs.existsSync(logPath) || fs.statSync(logPath).size < maxBytes)
+        return;
+    if (fs.existsSync(previousPath))
+        fs.rmSync(previousPath, { force: true });
+    fs.renameSync(logPath, previousPath);
+}
+export function recordBrowserProfileTaskEvent(event, details = {}) {
+    try {
+        const logPath = browserProfileTaskEventLogPath();
+        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        rotateDiagnosticLogIfNeeded(logPath, PROFILE_TASK_EVENT_LOG_MAX_BYTES);
+        const safeDetails = Object.fromEntries(Object.entries(details).slice(0, 40).map(([key, value]) => [
+            String(key).slice(0, 100),
+            typeof value === "string" ? value.slice(0, 500) : typeof value === "number" || typeof value === "boolean" || value == null ? value : String(value).slice(0, 500)
+        ]));
+        fs.appendFileSync(logPath, `${JSON.stringify({ at: new Date().toISOString(), event: String(event).slice(0, 120), ...safeDetails })}\n`, "utf8");
+    }
+    catch {
+        // Diagnostics must never break the profile bridge or MCP runtime.
+    }
+}
+function browserFlightRecorderLogPath() {
+    return path.join(path.dirname(browserProfileTaskStatePath()), "browser-flight-recorder.jsonl");
+}
+function browserRateLimitLogPath() {
+    return path.join(path.dirname(browserProfileTaskStatePath()), "chatgpt-rate-limit.jsonl");
+}
+function sanitizeFlightRecorderEvent(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return {};
+    return Object.fromEntries(Object.entries(value).slice(0, 40).map(([key, item]) => [
+        String(key).slice(0, 100),
+        typeof item === "string" ? item.slice(0, 2000) : typeof item === "number" || typeof item === "boolean" || item == null ? item : String(item).slice(0, 2000)
+    ]));
+}
+function sanitizeFlightRecorderIncident(value, fallbackProfileId = "") {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return null;
+    const source = value;
+    const tabId = Number(source.tab_id);
+    if (!Number.isInteger(tabId) || tabId < 0)
+        return null;
+    const atMs = Math.max(0, Number(source.at_ms) || Date.parse(String(source.at || "")) || Date.now());
+    return {
+        id: String(source.id || randomUUID()).slice(0, 160), at: String(source.at || new Date(atMs).toISOString()).slice(0, 64), at_ms: atMs,
+        reason: String(source.reason || "cdp").slice(0, 80), kind: String(source.kind || "unknown").slice(0, 120), message: String(source.message || "").slice(0, 2000),
+        profile_id: String(source.profile_id || fallbackProfileId).slice(0, 160), tab_id: tabId, window_id: Math.max(0, Number(source.window_id) || 0), conversation_id: String(source.conversation_id || "").slice(0, 180),
+        task_id: String(source.task_id || "").slice(0, 160), task_title: String(source.task_title || "").slice(0, 300), command_id: String(source.command_id || "").slice(0, 160), action: String(source.action || "").slice(0, 160), url: String(source.url || "").slice(0, 1000),
+        event: sanitizeFlightRecorderEvent(source.event), events: (Array.isArray(source.events) ? source.events : []).slice(-120).map(sanitizeFlightRecorderEvent)
+    };
+}
+function recordBrowserFlightRecorderIncident(incident) {
+    try {
+        const logPath = browserFlightRecorderLogPath();
+        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        rotateDiagnosticLogIfNeeded(logPath, FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES);
+        fs.appendFileSync(logPath, `${JSON.stringify(incident)}\n`, "utf8");
+    }
+    catch {
+        // Flight-recorder persistence is diagnostic-only and must not break commands.
+    }
+}
+function browserFlightRecorderIncidentIsRateLimit(incident) {
+    if (String(incident.reason || "") === "rate_limit" || Number(incident.event?.status) === 429)
+        return true;
+    const kind = String(incident.kind || incident.event?.event || "");
+    if (!["Runtime.consoleAPICalled", "Log.entryAdded"].includes(kind))
+        return false;
+    const text = `${String(incident.message || "")} ${String(incident.event?.text || "")}`;
+    return /\btoo many requests\b/i.test(text)
+        || /\b(?:http|status(?:\s+code)?(?:\s+of)?)\s*[:=]?\s*429\b/i.test(text)
+        || /\bserver responded with a status of 429\b/i.test(text);
+}
+function normalizeBrowserRateLimitIncident(incident) {
+    if (!browserFlightRecorderIncidentIsRateLimit(incident))
+        return incident;
+    const event = { ...(incident.event || {}), status: 429 };
+    const rawUrl = String(event.url || "");
+    if (!String(event.endpoint || "") && rawUrl) {
+        try {
+            event.endpoint = new URL(rawUrl).pathname.slice(0, 1000);
+        }
+        catch { }
+    }
+    if (!String(event.rate_limit_fallback_source || ""))
+        event.rate_limit_fallback_source = String(incident.kind || event.event || "").slice(0, 120);
+    const endpoint = String(event.endpoint || "").trim();
+    return {
+        ...incident,
+        reason: "rate_limit",
+        message: `ChatGPT HTTP 429 Too Many Requests${endpoint ? `: ${endpoint}` : ""}`.slice(0, 2000),
+        event
+    };
+}
+function duplicateBrowserRateLimitIncident(profileId, incident, now = Date.now()) {
+    if (!browserFlightRecorderIncidentIsRateLimit(incident))
+        return false;
+    const key = `${String(profileId || incident.profile_id || "")}:${Math.max(0, Number(incident.tab_id) || 0)}:${String(incident.conversation_id || "")}`;
+    const previous = Number(rateLimitIncidentDedupeAt.get(key) || 0);
+    if (previous && now - previous < RATE_LIMIT_INCIDENT_DEDUPE_MS)
+        return true;
+    rateLimitIncidentDedupeAt.set(key, now);
+    const cutoff = now - RATE_LIMIT_INCIDENT_DEDUPE_MS;
+    for (const [entryKey, at] of rateLimitIncidentDedupeAt) {
+        if (at < cutoff)
+            rateLimitIncidentDedupeAt.delete(entryKey);
+    }
+    while (rateLimitIncidentDedupeAt.size > RATE_LIMIT_INCIDENT_DEDUPE_MAX) {
+        const oldestKey = rateLimitIncidentDedupeAt.keys().next().value;
+        if (!oldestKey)
+            break;
+        rateLimitIncidentDedupeAt.delete(oldestKey);
+    }
+    return false;
+}
+function recordBrowserRateLimitIncident(incident) {
+    if (String(incident.reason || "") !== "rate_limit" && Number(incident.event?.status) !== 429)
+        return;
+    try {
+        const logPath = browserRateLimitLogPath();
+        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        rotateDiagnosticLogIfNeeded(logPath, FLIGHT_RECORDER_EVENT_LOG_MAX_BYTES);
+        fs.appendFileSync(logPath, `${JSON.stringify(incident)}\n`, "utf8");
+    }
+    catch {
+        // Dedicated rate-limit diagnostics must never break the browser bridge.
+    }
+}
+function connectorFingerprint(serverUrl) {
+    return createHash("sha256").update(String(serverUrl || ""), "utf8").digest("hex");
+}
+function expectedConnectorFingerprint(state, profileId) {
+    try {
+        return state.connectorInfo ? connectorFingerprint(state.connectorInfo(profileId).server_url) : "";
+    }
+    catch {
+        return "";
+    }
+}
+function validPersistedProfileId(value) {
+    return /^[A-Za-z0-9_-]{2,160}$/.test(value);
+}
+function conversationIdFromUrl(value) {
+    try {
+        return new URL(String(value || "")).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1] || "";
+    }
+    catch {
+        return "";
+    }
+}
+function inferProfileTaskConversationId(profileId) {
+    const profile = singleton?.profiles.get(profileId);
+    const tabs = Array.isArray(profile?.tabs)
+        ? profile.tabs.filter((value) => Boolean(value) && typeof value === "object" && !Array.isArray(value))
+        : [];
+    const candidates = tabs
+        .map((tab) => ({
+        id: conversationIdFromUrl(tab.url),
+        codexActivity: /^CodexPro đang\b/i.test(String(tab.activity_text || "").trim()),
+        working: tab.busy === true || tab.settling === true || tab.network_state === "generating" || tab.network_stream_in_progress === true,
+        active: tab.active === true,
+        startedAt: Date.parse(String(tab.network_last_started_at || "")) || 0
+    }))
+        .filter((tab) => Boolean(tab.id))
+        .sort((left, right) => Number(right.codexActivity && right.working) - Number(left.codexActivity && left.working)
+        || Number(right.working) - Number(left.working)
+        || Number(right.active) - Number(left.active)
+        || right.startedAt - left.startedAt);
+    return candidates[0]?.id || "";
+}
+function profileTaskConversationCandidateLog(profileId) {
+    const profile = singleton?.profiles.get(profileId);
+    const tabs = Array.isArray(profile?.tabs)
+        ? profile.tabs.filter((value) => Boolean(value) && typeof value === "object" && !Array.isArray(value))
+        : [];
+    return JSON.stringify(tabs.slice(0, 8).map((tab) => ({
+        id: conversationIdFromUrl(tab.url),
+        title: String(tab.title || "").slice(0, 120),
+        active: tab.active === true,
+        busy: tab.busy === true,
+        settling: tab.settling === true,
+        network_state: String(tab.network_state || ""),
+        network_stream_in_progress: tab.network_stream_in_progress === true,
+        activity_text: String(tab.activity_text || "").slice(0, 120)
+    }))).slice(0, 500);
+}
+function loadBrowserProfileTasks() {
+    let discardedInactiveTask = false;
+    try {
+        const parsed = JSON.parse(fs.readFileSync(browserProfileTaskStatePath(), "utf8"));
+        for (const [profileId, value] of Object.entries(parsed.profiles || {}).slice(-MAX_PERSISTED_PROFILE_TASKS)) {
+            if (!validPersistedProfileId(profileId))
+                continue;
+            const taskId = String(value?.task_id || "").trim();
+            const taskTitle = String(value?.task_title || "").trim();
+            const taskConversationId = String(value?.task_conversation_id || "").trim();
+            const updatedAt = String(value?.updated_at || "").trim();
+            if (/^cpt_[a-f0-9]{24}$/.test(taskId) && taskTitle.length >= 4 && taskTitle.length <= 56) {
+                const wordCount = taskTitle.split(/\s+/).filter(Boolean).length;
+                const workerJob = readWorkerJob(taskId);
+                const workerOwner = String(workerJob?.workerId || "").replace(/^browser:/, "");
+                if (wordCount >= 2 && wordCount <= 6 && workerJob && ["prepared", "running"].includes(workerJob.status) && workerOwner === profileId) {
+                    profileTaskIds.set(profileId, taskId);
+                    profileTaskTitles.set(profileId, taskTitle);
+                    if (/^[A-Za-z0-9-]{8,160}$/.test(taskConversationId))
+                        profileTaskConversationIds.set(profileId, taskConversationId);
+                    profileTaskUpdatedAt.set(profileId, updatedAt || new Date(0).toISOString());
+                }
+                else if (wordCount >= 2 && wordCount <= 6) {
+                    discardedInactiveTask = true;
+                    void reconcileWorkerJobWorkspaceStatus(taskId).catch(() => undefined);
+                }
+            }
+            const pendingTaskId = String(value?.pending_task_id || "").trim();
+            const pendingRoot = String(value?.pending_root || "").trim();
+            const pendingScope = value?.pending_scope === "all_allowed" ? "all_allowed" : value?.pending_scope === "workspace" ? "workspace" : "";
+            const pendingPreparedAt = Date.parse(String(value?.pending_prepared_at || ""));
+            if (/^cpt_[a-f0-9]{24}$/.test(pendingTaskId) && pendingScope && Number.isFinite(pendingPreparedAt)) {
+                profilePendingTasks.set(profileId, {
+                    taskId: pendingTaskId,
+                    root: pendingRoot,
+                    scope: pendingScope,
+                    preparedAt: pendingPreparedAt
+                });
+            }
+        }
+        if (discardedInactiveTask)
+            persistBrowserProfileTasks();
+    }
+    catch {
+        // Missing or malformed state must not prevent the local bridge from starting.
+    }
+}
+function discardInactiveBrowserProfileTasks() {
+    let changed = false;
+    for (const [profileId, taskId] of profileTaskIds) {
+        const workerJob = readWorkerJob(taskId);
+        if (!workerJob)
+            continue;
+        const workerOwner = String(workerJob.workerId || "").replace(/^browser:/, "");
+        if (["prepared", "running"].includes(workerJob.status) && workerOwner === profileId)
+            continue;
+        profileTaskIds.delete(profileId);
+        profileTaskTitles.delete(profileId);
+        profileTaskConversationIds.delete(profileId);
+        profileTaskUpdatedAt.delete(profileId);
+        changed = true;
+        void reconcileWorkerJobWorkspaceStatus(taskId).catch(() => undefined);
+        recordBrowserProfileTaskEvent("profile_task_binding_cleared", {
+            profile_id: profileId,
+            task_id: taskId,
+            worker_job_status: workerJob?.status || "missing",
+            reason: "task_not_active"
+        });
+    }
+    if (changed)
+        persistBrowserProfileTasks();
+}
+function persistBrowserProfileTasks() {
+    try {
+        const profileIds = [...new Set([...profileTaskTitles.keys(), ...profileTaskConversationIds.keys(), ...profilePendingTasks.keys()])];
+        const profiles = profileIds
+            .map((profileId) => {
+            const pendingTask = profilePendingTasks.get(profileId);
+            return {
+                profileId,
+                taskId: profileTaskIds.get(profileId) || "",
+                taskTitle: profileTaskTitles.get(profileId) || "",
+                taskConversationId: profileTaskConversationIds.get(profileId) || "",
+                updatedAt: profileTaskUpdatedAt.get(profileId) || new Date(0).toISOString(),
+                pendingTaskId: pendingTask?.taskId || "",
+                pendingRoot: pendingTask?.root || "",
+                pendingScope: pendingTask?.scope || "",
+                pendingPreparedAt: pendingTask ? new Date(pendingTask.preparedAt).toISOString() : ""
+            };
+        })
+            .filter((entry) => validPersistedProfileId(entry.profileId) && ((/^cpt_[a-f0-9]{24}$/.test(entry.taskId) && Boolean(entry.taskTitle))
+            || (/^cpt_[a-f0-9]{24}$/.test(entry.pendingTaskId) && Boolean(entry.pendingScope))))
+            .sort((left, right) => Math.max(Date.parse(left.updatedAt) || 0, Date.parse(left.pendingPreparedAt) || 0) - Math.max(Date.parse(right.updatedAt) || 0, Date.parse(right.pendingPreparedAt) || 0))
+            .slice(-MAX_PERSISTED_PROFILE_TASKS);
+        const stateFile = browserProfileTaskStatePath();
+        fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+        fs.writeFileSync(stateFile, `${JSON.stringify({
+            version: PROFILE_TASK_STATE_VERSION,
+            profiles: Object.fromEntries(profiles.map((entry) => [entry.profileId, {
+                    ...(entry.taskId && entry.taskTitle ? {
+                        task_id: entry.taskId,
+                        task_title: entry.taskTitle,
+                        task_conversation_id: entry.taskConversationId,
+                        updated_at: entry.updatedAt
+                    } : {}),
+                    ...(entry.pendingTaskId && entry.pendingScope ? {
+                        pending_task_id: entry.pendingTaskId,
+                        pending_root: entry.pendingRoot,
+                        pending_scope: entry.pendingScope,
+                        pending_prepared_at: entry.pendingPreparedAt
+                    } : {})
+                }]))
+        }, null, 2)}\n`, "utf8");
+    }
+    catch {
+        // The in-memory title/pending gate remains usable if persistence is temporarily unavailable.
+    }
+}
+loadBrowserProfileTasks();
+export function browserProfileNotificationSignature(profiles) {
+    return JSON.stringify((Array.isArray(profiles) ? profiles : []).map(({ last_seen: _lastSeen, ...profile }) => profile));
+}
+function scheduleProfileNotification(state) {
+    if (state.profileNotifyTimer)
+        return;
+    state.profileNotifyTimer = setTimeout(() => {
+        state.profileNotifyTimer = undefined;
+        const profiles = listBrowserExtensionProfiles();
+        const signature = browserProfileNotificationSignature(profiles);
+        if (signature === state.profileNotifySignature)
+            return;
+        state.profileNotifySignature = signature;
+        for (const listener of state.profileListeners) {
+            try {
+                listener(profiles);
+            }
+            catch { }
+        }
+    }, 25);
+    state.profileNotifyTimer.unref?.();
+}
+function scheduleProfileExpiryNotification(state) {
+    if (state.profileExpiryTimer)
+        clearTimeout(state.profileExpiryTimer);
+    state.profileExpiryTimer = undefined;
+    const now = Date.now();
+    const nextExpiry = [...state.profiles.values()]
+        .map((profile) => browserProfileRetentionState(profile, now).nextTransitionAt)
+        .filter((expiresAt) => expiresAt != null)
+        .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > now)
+        .sort((left, right) => left - right)[0];
+    if (!Number.isFinite(nextExpiry))
+        return;
+    state.profileExpiryTimer = setTimeout(() => {
+        state.profileExpiryTimer = undefined;
+        scheduleProfileNotification(state);
+        scheduleProfileExpiryNotification(state);
+    }, Math.max(1, nextExpiry - Date.now() + 25));
+    state.profileExpiryTimer.unref?.();
+}
+function isLoopbackAddress(value) {
+    return value === "127.0.0.1" || value === "::1" || value === "::ffff:127.0.0.1";
+}
+function extensionOrigin(req) {
+    const origin = String(req.headers.origin ?? "");
+    return origin.startsWith("chrome-extension://") ? origin : undefined;
+}
+function trustedConnectorRequest(req) {
+    return extensionOrigin(req) === CODEXPRO_EXTENSION_ORIGIN;
+}
+function setCors(req, res) {
+    const origin = extensionOrigin(req);
+    if (origin)
+        res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-CodexPro-Extension");
+    res.setHeader("Access-Control-Allow-Private-Network", "true");
+    res.setHeader("Cache-Control", "no-store");
+}
+function allowedRequest(req) {
+    if (!isLoopbackAddress(req.socket.remoteAddress))
+        return false;
+    const host = String(req.headers.host ?? "").toLowerCase();
+    if (host !== `${BRIDGE_HOST}:${BROWSER_EXTENSION_BRIDGE_PORT}` && host !== `localhost:${BROWSER_EXTENSION_BRIDGE_PORT}`)
+        return false;
+    return Boolean(extensionOrigin(req)) && req.headers["x-codexpro-extension"] === "profile-bridge-v1";
+}
+function sendJson(req, res, status, value) {
+    setCors(req, res);
+    res.statusCode = status;
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.end(JSON.stringify(value));
+}
+async function readJson(req) {
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of req) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += buffer.length;
+        if (size > MAX_BODY_BYTES)
+            throw new CodexProError("Browser extension bridge request is too large.");
+        chunks.push(buffer);
+    }
+    if (!chunks.length)
+        return {};
+    try {
+        const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    }
+    catch {
+        throw new CodexProError("Browser extension bridge received invalid JSON.");
+    }
+}
+function boundedBridgeValue(value, maxChars = 2_000) {
+    return String(value ?? "").slice(0, maxChars);
+}
+function bridgeErrorEnvelope(value) {
+    const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const message = boundedBridgeValue(source.message ?? value ?? "Chrome extension action failed.");
+    const detailsSource = source.details && typeof source.details === "object" && !Array.isArray(source.details)
+        ? source.details
+        : {};
+    const details = Object.fromEntries(Object.entries(detailsSource).slice(0, 40).map(([key, item]) => [
+        boundedBridgeValue(key, 100),
+        typeof item === "string" ? boundedBridgeValue(item, 4_000) : item
+    ]));
+    return {
+        name: boundedBridgeValue(source.name || "CodexProExtensionError", 120),
+        message,
+        code: boundedBridgeValue(source.code, 160) || undefined,
+        stage: boundedBridgeValue(source.stage, 160) || undefined,
+        action: boundedBridgeValue(source.action, 160) || undefined,
+        details
+    };
+}
+function profileFromBody(state, body) {
+    const source = body.profile && typeof body.profile === "object" ? body.profile : body;
+    const id = String(source.id ?? "").trim().slice(0, 160);
+    if (!id)
+        throw new CodexProError("Browser extension profile id is required.");
+    const existing = state.profiles.get(id);
+    const profile = existing ?? {
+        id,
+        enabled: true,
+        enabledUpdatedAt: 0,
+        email: "",
+        label: "",
+        extensionVersion: "",
+        runtimeBuildId: "",
+        connectorInstalled: false,
+        connectorMessage: "",
+        connectorCheckedAt: "",
+        connectorServerFingerprint: "",
+        workspaceRoot: profileWorkspaceRoots.get(id) || "",
+        lastSeen: 0,
+        tabs: [],
+        recentConversations: [],
+        flightRecorderIncidents: [],
+        queued: []
+    };
+    const incomingEnabledUpdatedAt = Math.max(0, Number(source.worker_enabled_updated_at) || 0);
+    if (!profile.enabledUpdatedAt || incomingEnabledUpdatedAt >= profile.enabledUpdatedAt) {
+        profile.enabled = source.enabled !== false;
+        profile.enabledUpdatedAt = incomingEnabledUpdatedAt;
+    }
+    if (!profile.enabled && state.activeProfileId === id)
+        state.activeProfileId = undefined;
+    profile.email = String(source.email ?? profile.email ?? "").trim().slice(0, 320);
+    profile.label = String(source.label ?? profile.label ?? profile.email ?? `Chrome ${id.slice(0, 8)}`).trim().slice(0, 320);
+    profile.extensionVersion = String(source.version ?? profile.extensionVersion ?? "").trim().slice(0, 32);
+    profile.runtimeBuildId = String(source.runtime_build_id ?? "").trim().slice(0, 120);
+    profile.connectorServerFingerprint = String(source.connector_server_fingerprint ?? profile.connectorServerFingerprint ?? "").trim().slice(0, 128);
+    if (source.connector_install && typeof source.connector_install === "object") {
+        const incomingInstalled = source.connector_install.ok === true;
+        const incomingCheckedAt = String(source.connector_install.at ?? "").trim().slice(0, 64);
+        const incomingCheckedAtMs = Date.parse(incomingCheckedAt);
+        const currentCheckedAtMs = Date.parse(profile.connectorCheckedAt);
+        const mayDowngrade = !profile.connectorInstalled
+            || (Number.isFinite(incomingCheckedAtMs) && (!Number.isFinite(currentCheckedAtMs) || incomingCheckedAtMs >= currentCheckedAtMs));
+        if (incomingInstalled || mayDowngrade) {
+            profile.connectorInstalled = incomingInstalled;
+            profile.connectorMessage = String(source.connector_install.message ?? "").trim().slice(0, 500);
+            profile.connectorCheckedAt = incomingCheckedAt;
+        }
+    }
+    profile.lastSeen = Date.now();
+    profile.restored = false;
+    if (Array.isArray(body.tabs))
+        profile.tabs = body.tabs.slice(0, 500);
+    else if (Array.isArray(body.tab_inventory)) {
+        const existingTabsById = new Map(profile.tabs.filter((tab) => Number.isInteger(Number(tab?.id))).map((tab) => [Number(tab.id), tab]));
+        profile.tabs = body.tab_inventory
+            .slice(0, 500)
+            .filter((tab) => tab && typeof tab === "object" && Number.isInteger(Number(tab.id)))
+            .map((tab) => ({ ...(existingTabsById.get(Number(tab.id)) || {}), ...tab }));
+    }
+    if (Array.isArray(body.recent_conversations))
+        profile.recentConversations = normalizeRecentConversations(body.recent_conversations);
+    const observedCodexProToolActivity = profile.tabs.some((tab) => Boolean(tab?.busy || tab?.settling) && /^CodexPro đang\b/i.test(String(tab?.activity_text ?? "").trim()));
+    if (observedCodexProToolActivity && !profileTaskTitles.get(id)) {
+        const activeTab = profile.tabs.find((tab) => tab?.active) || profile.tabs.find((tab) => tab?.busy || tab?.settling);
+        const signature = [activeTab?.url, activeTab?.activity_text, activeTab?.network_state].map((value) => String(value || "").slice(0, 240)).join("|");
+        const previous = profileTaskEventSignatures.get(id);
+        if (!previous || previous.signature !== signature || profile.lastSeen - previous.at >= PROFILE_TASK_EVENT_THROTTLE_MS) {
+            profileTaskEventSignatures.set(id, { signature, at: profile.lastSeen });
+            const pendingTask = profilePendingTasks.get(id);
+            recordBrowserProfileTaskEvent("profile_activity_without_task", {
+                profile_id: id,
+                conversation_url: String(activeTab?.url || ""),
+                activity_text: String(activeTab?.activity_text || ""),
+                network_state: String(activeTab?.network_state || ""),
+                pending_task_id: pendingTask?.taskId,
+                pending_task_root: pendingTask?.root,
+                pending_task_scope: pendingTask?.scope,
+                pending_task_age_ms: pendingTask ? Math.max(0, profile.lastSeen - pendingTask.preparedAt) : undefined,
+                connector_fingerprint_present: Boolean(profile.connectorServerFingerprint),
+                connector_fingerprint_expected: Boolean(expectedConnectorFingerprint(state, id))
+            });
+        }
+    }
+    state.profiles.set(id, profile);
+    scheduleBrowserProfileRegistryPersistence(state);
+    scheduleProfileNotification(state);
+    scheduleProfileExpiryNotification(state);
+    return profile;
+}
+function clearWaiter(profile) {
+    if (profile.waiterTimer)
+        clearTimeout(profile.waiterTimer);
+    profile.waiterTimer = undefined;
+    profile.waiter = undefined;
+}
+function clearPendingCommandTimers(pending) {
+    if (pending.timer)
+        clearTimeout(pending.timer);
+    if (pending.heartbeatTimer)
+        clearInterval(pending.heartbeatTimer);
+    pending.timer = undefined;
+    pending.heartbeatTimer = undefined;
+}
+function armPendingCommandHeartbeat(state, profile, command, pending) {
+    if (pending.heartbeatTimer)
+        clearInterval(pending.heartbeatTimer);
+    pending.heartbeatTimer = undefined;
+    if (pending.waitingForReconnect || !pending.dispatchedAtMs)
+        return;
+    pending.heartbeatTimer = setInterval(() => {
+        if (!state.pending.has(command.id)) {
+            clearPendingCommandTimers(pending);
+            return;
+        }
+        const heartbeatAgeMs = Math.max(0, Date.now() - profile.lastSeen);
+        if (heartbeatAgeMs <= COMMAND_HEARTBEAT_TIMEOUT_MS)
+            return;
+        state.pending.delete(command.id);
+        profile.queued = profile.queued.filter((queued) => queued.id !== command.id);
+        clearPendingCommandTimers(pending);
+        state.timedOut.set(command.id, { commandId: command.id, sendTraceId: pending.sendTraceId, ipcCallId: pending.ipcCallId, profileId: pending.profileId, taskId: pending.taskId, conversationId: pending.conversationId, action: pending.action, timedOutAt: Date.now() });
+        while (state.timedOut.size > 500)
+            state.timedOut.delete(state.timedOut.keys().next().value);
+        bridgeTrace("bridge_timeout", { send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: command.id, profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId, action: pending.action, timeout_kind: "extension_heartbeat_lost", heartbeat_age_ms: heartbeatAgeMs }, { priority: "critical" });
+        pending.reject(new CodexProError(`Extension của profile ${profile.label} đã ngừng phản hồi khi đang chạy ${pending.action}. Hãy kiểm tra Chrome trước khi gửi lại để tránh trùng tin.`, {
+            code: "EXTENSION_HEARTBEAT_LOST",
+            details: {
+                send_trace_id: pending.sendTraceId,
+                ipc_call_id: pending.ipcCallId,
+                command_id: command.id,
+                profile_id: profile.id,
+                task_id: pending.taskId,
+                conversation_id: pending.conversationId,
+                action: pending.action,
+                heartbeat_age_ms: heartbeatAgeMs,
+                submission_state: pending.action === "send_chat_request" && pending.dispatchedAtMs ? "uncertain" : "failed"
+            }
+        }));
+    }, COMMAND_HEARTBEAT_CHECK_MS);
+    pending.heartbeatTimer.unref?.();
+}
+function armPendingCommandTimeout(state, profile, command, timeoutMs, message) {
+    const pending = state.pending.get(command.id);
+    if (!pending)
+        return;
+    clearPendingCommandTimers(pending);
+    pending.timer = setTimeout(() => {
+        state.pending.delete(command.id);
+        profile.queued = profile.queued.filter((queued) => queued.id !== command.id);
+        clearPendingCommandTimers(pending);
+        const timedOut = { commandId: command.id, sendTraceId: pending.sendTraceId, ipcCallId: pending.ipcCallId, profileId: pending.profileId, taskId: pending.taskId, conversationId: pending.conversationId, action: pending.action, timedOutAt: Date.now() };
+        state.timedOut.set(command.id, timedOut);
+        while (state.timedOut.size > 500)
+            state.timedOut.delete(state.timedOut.keys().next().value);
+        bridgeTrace("bridge_timeout", { send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: command.id, profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId, action: pending.action, timeout_ms: timeoutMs }, { priority: "critical" });
+        pending.reject(new CodexProError(message, { code: "BRIDGE_TIMEOUT", details: { send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: command.id, profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId, action: pending.action, submission_state: pending.action === "send_chat_request" && pending.dispatchedAtMs ? "uncertain" : "failed" } }));
+    }, timeoutMs);
+    pending.timer.unref?.();
+    armPendingCommandHeartbeat(state, profile, command, pending);
+}
+function markCommandDispatched(state, profile, command) {
+    const pending = state.pending.get(command.id);
+    if (!pending)
+        return;
+    if (!pending.dispatchedAtMs) {
+        pending.dispatchedAtMs = Date.now();
+        bridgeTrace("bridge_dispatched", { send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: command.id, profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId, action: pending.action });
+    }
+    if (!pending.waitingForReconnect) {
+        armPendingCommandHeartbeat(state, profile, command, pending);
+        return;
+    }
+    pending.waitingForReconnect = false;
+    armPendingCommandTimeout(state, profile, command, pending.timeoutMs, `Timed out waiting for Chrome profile ${profile.label}.`);
+}
+function pruneExpiredProfiles(state, now = Date.now()) {
+    let removed = false;
+    for (const [id, profile] of state.profiles) {
+        if (browserProfileRetentionState(profile, now).visible || profile.waiter || profile.queued.length)
+            continue;
+        state.profiles.delete(id);
+        removed = true;
+        profileWorkspaceRoots.delete(id);
+        profileWorkspaceBindings.delete(id);
+        if (state.activeProfileId === id)
+            state.activeProfileId = undefined;
+    }
+    if (removed)
+        scheduleBrowserProfileRegistryPersistence(state);
+}
+function deliver(state, profile, command) {
+    if (!profile.waiter)
+        return false;
+    if (command)
+        markCommandDispatched(state, profile, command);
+    const response = profile.waiter;
+    clearWaiter(profile);
+    response.statusCode = 200;
+    response.setHeader("Content-Type", "application/json; charset=utf-8");
+    response.setHeader("Cache-Control", "no-store");
+    response.end(JSON.stringify({ command, active_profile_id: state.activeProfileId ?? null }));
+    return true;
+}
+function nextLiveCommand(state, profile) {
+    if (!profile.enabled)
+        return null;
+    while (profile.queued.length) {
+        const command = profile.queued.shift();
+        if (command.expires_at_ms <= Date.now() || !state.pending.has(command.id))
+            continue;
+        markCommandDispatched(state, profile, command);
+        return command;
+    }
+    return null;
+}
+function syncWaiters(state) {
+    for (const profile of state.profiles.values())
+        deliver(state, profile, null);
+}
+async function handleRequest(state, req, res) {
+    setCors(req, res);
+    if (req.method === "OPTIONS") {
+        if (!extensionOrigin(req)) {
+            res.statusCode = 403;
+            res.end();
+            return;
+        }
+        res.statusCode = 204;
+        res.end();
+        return;
+    }
+    if (req.method !== "POST" || !allowedRequest(req)) {
+        sendJson(req, res, 403, { error: "Browser extension bridge request denied." });
+        return;
+    }
+    const body = await readJson(req);
+    if (req.url === "/activate") {
+        const profile = profileFromBody(state, body);
+        state.activeProfileId = profile.id;
+        scheduleProfileNotification(state);
+        syncWaiters(state);
+        sendJson(req, res, 200, { ok: true, active_profile_id: profile.id });
+        return;
+    }
+    if (req.url === "/stream") {
+        const profileId = String(body.profile_id ?? "").trim().slice(0, 160);
+        const profile = profileId ? state.profiles.get(profileId) : undefined;
+        if (!profile) {
+            sendJson(req, res, 202, { ok: true, ignored: true, reason: "profile_not_registered" });
+            return;
+        }
+        const { changed, updates } = mergeBrowserExtensionStreamBatch(profile.id, profile.tabs, body.streams);
+        profile.lastSeen = Date.now();
+        profile.restored = false;
+        scheduleBrowserProfileRegistryPersistence(state);
+        if (updates.length) {
+            for (const listener of state.streamListeners) {
+                try {
+                    listener(updates);
+                }
+                catch { }
+            }
+        }
+        scheduleProfileExpiryNotification(state);
+        sendJson(req, res, 200, { ok: true, profile_id: profile.id, changed });
+        return;
+    }
+    if (req.url === "/flight-recorder") {
+        const profile = profileFromBody(state, body);
+        const sanitizedIncident = sanitizeFlightRecorderIncident(body.incident, profile.id);
+        const incident = sanitizedIncident ? normalizeBrowserRateLimitIncident(sanitizedIncident) : null;
+        if (!incident) {
+            sendJson(req, res, 400, { error: "Invalid flight recorder incident." });
+            return;
+        }
+        if (!incident.task_id)
+            incident.task_id = String(profileTaskIds.get(profile.id) || "").slice(0, 160);
+        if (!incident.task_title)
+            incident.task_title = String(profileTaskTitles.get(profile.id) || "").slice(0, 300);
+        if (!incident.conversation_id)
+            incident.conversation_id = String(profileTaskConversationIds.get(profile.id) || "").slice(0, 180);
+        if (duplicateBrowserRateLimitIncident(profile.id, incident)) {
+            sendJson(req, res, 200, { ok: true, profile_id: profile.id, incident_id: incident.id, deduplicated: true });
+            return;
+        }
+        profile.flightRecorderIncidents.push(incident);
+        profile.flightRecorderIncidents = profile.flightRecorderIncidents.slice(-MAX_PROFILE_FLIGHT_RECORDER_INCIDENTS);
+        recordBrowserFlightRecorderIncident(incident);
+        recordBrowserRateLimitIncident(incident);
+        scheduleProfileNotification(state);
+        sendJson(req, res, 200, { ok: true, profile_id: profile.id, incident_id: incident.id });
+        return;
+    }
+    if (req.url === "/register") {
+        const profile = profileFromBody(state, body);
+        sendJson(req, res, 200, { ok: true, active_profile_id: state.activeProfileId ?? null, profile_id: profile.id });
+        return;
+    }
+    if (req.url === "/connector") {
+        if (!trustedConnectorRequest(req)) {
+            sendJson(req, res, 403, { error: "Install the signed CodexPro extension before requesting the private MCP URL." });
+            return;
+        }
+        const profile = profileFromBody(state, body);
+        if (!state.connectorInfo) {
+            sendJson(req, res, 503, { error: "CodexPro does not have a public MCP URL ready for browser setup." });
+            return;
+        }
+        const connector = state.connectorInfo(profile.id);
+        sendJson(req, res, 200, {
+            ok: true,
+            profile_id: profile.id,
+            connector
+        });
+        return;
+    }
+    if (req.url === "/poll") {
+        const profile = profileFromBody(state, body);
+        if (body.active === true && !state.activeProfileId)
+            state.activeProfileId = profile.id;
+        const queuedCommand = nextLiveCommand(state, profile);
+        if (queuedCommand) {
+            sendJson(req, res, 200, { command: queuedCommand, active_profile_id: state.activeProfileId ?? null });
+            return;
+        }
+        if (profile.waiter) {
+            profile.waiter.statusCode = 409;
+            profile.waiter.end(JSON.stringify({ error: "Replaced by a newer extension poll." }));
+            clearWaiter(profile);
+        }
+        profile.waiter = res;
+        profile.waiterTimer = setTimeout(() => deliver(state, profile, null), 20_000);
+        res.on("close", () => {
+            if (profile.waiter === res && !res.writableEnded)
+                clearWaiter(profile);
+        });
+        return;
+    }
+    if (req.url === "/trace") {
+        const event = String(body.event || "").slice(0, 120);
+        const sendTraceId = String(body.send_trace_id || "").slice(0, 160);
+        if (event)
+            bridgeTrace(event, { send_trace_id: sendTraceId, ipc_call_id: String(body.ipc_call_id || "").slice(0, 160), command_id: String(body.command_id || "").slice(0, 160), attempt_id: String(body.attempt_id || "").slice(0, 160), profile_id: String(body.profile_id || "").slice(0, 160), tab_id: Number.isInteger(Number(body.tab_id)) ? Number(body.tab_id) : undefined, conversation_id: String(body.conversation_id || "").slice(0, 180), task_id: String(body.task_id || "").slice(0, 160), source_component: String(body.source_component || "extension").slice(0, 80), source_run_id: String(body.source_run_id || "").slice(0, 160), source_sequence: Number(body.source_sequence) || 0, source_elapsed_ms: Number(body.source_elapsed_ms) || 0, stage_outcome: String(body.stage_outcome || "").slice(0, 80), ack_source: String(body.ack_source || "").slice(0, 120), submission_state: String(body.submission_state || "").slice(0, 80), error_code: String(body.error_code || "").slice(0, 160), handled: body.handled === true, artifact_name: String(body.artifact_name || "").slice(0, 200), artifact_sha256: String(body.artifact_sha256 || "").slice(0, 128), artifact_size: Number(body.artifact_size) || 0, extension_version_label: String(body.extension_version_label || "").slice(0, 80) }, { eventAt: String(body.event_at || new Date().toISOString()), priority: event === "network_ack" || event === "runtime_identity" ? "critical" : "normal" });
+        sendJson(req, res, 200, { ok: true });
+        return;
+    }
+    if (req.url === "/result") {
+        profileFromBody(state, body);
+        const commandId = String(body.command_id ?? "");
+        const pending = state.pending.get(commandId);
+        if (pending) {
+            clearPendingCommandTimers(pending);
+            state.pending.delete(commandId);
+            state.timedOut.delete(commandId);
+            bridgeTrace("result_received", { send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: commandId, attempt_id: String(body?.result?.attempt_id || body?.error?.details?.attempt_id || "").slice(0, 160), profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId, action: pending.action, handled: true, result_kind: body.error ? "error" : "success" }, { priority: "critical" });
+            if (body.error) {
+                const envelope = bridgeErrorEnvelope(body.error);
+                pending.reject(new CodexProError(`Chrome extension action failed: ${String(envelope.message)}`, {
+                    code: String(envelope.code || "EXTENSION_ACTION_FAILED"),
+                    details: { ...envelope, send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: commandId, profile_id: pending.profileId, task_id: pending.taskId, conversation_id: pending.conversationId }
+                }));
+            }
+            else
+                pending.resolve({ ...(body.result && typeof body.result === "object" ? body.result : { value: body.result }), send_trace_id: pending.sendTraceId, ipc_call_id: pending.ipcCallId, command_id: commandId });
+        }
+        else {
+            const timedOut = state.timedOut.get(commandId);
+            if (timedOut) {
+                bridgeTrace("late_result", { send_trace_id: timedOut.sendTraceId, ipc_call_id: timedOut.ipcCallId, command_id: commandId, attempt_id: String(body?.result?.attempt_id || body?.error?.details?.attempt_id || "").slice(0, 160), profile_id: timedOut.profileId, task_id: timedOut.taskId, conversation_id: timedOut.conversationId, action: timedOut.action, handled: false, ignored: true, result_kind: body.error ? "error" : "success", late_by_ms: Math.max(0, Date.now() - timedOut.timedOutAt) }, { priority: "critical" });
+                state.timedOut.delete(commandId);
+            }
+        }
+        sendJson(req, res, 200, { ok: true });
+        return;
+    }
+    sendJson(req, res, 404, { error: "Unknown browser extension bridge endpoint." });
+}
+export function ensureBrowserExtensionBridge(options = {}) {
+    if (singleton) {
+        if (options.connectorInfo)
+            singleton.connectorInfo = options.connectorInfo;
+        return singleton;
+    }
+    const state = {};
+    state.profiles = new Map();
+    state.pending = new Map();
+    state.timedOut = new Map();
+    state.profileListeners = new Set();
+    state.streamListeners = new Set();
+    state.connectorInfo = options.connectorInfo;
+    loadBrowserProfileRegistry(state);
+    scheduleProfileExpiryNotification(state);
+    state.server = http.createServer((req, res) => {
+        handleRequest(state, req, res).catch((error) => {
+            if (!res.headersSent)
+                sendJson(req, res, 400, { error: error instanceof Error ? error.message : String(error) });
+            else if (!res.writableEnded)
+                res.end();
+        });
+    });
+    state.server.on("error", (error) => {
+        console.error(`[CodexProBrowserBridge] ${error instanceof Error ? error.message : String(error)}`);
+    });
+    state.server.listen(BROWSER_EXTENSION_BRIDGE_PORT, BRIDGE_HOST);
+    singleton = state;
+    return state;
+}
+export function listBrowserExtensionProfiles() {
+    const state = ensureBrowserExtensionBridge();
+    discardInactiveBrowserProfileTasks();
+    const now = Date.now();
+    pruneExpiredProfiles(state, now);
+    const visibleProfiles = [...state.profiles.values()]
+        .filter((profile) => profile.enabled && browserProfileRetentionState(profile, now).visible);
+    if (state.activeProfileId && !visibleProfiles.some((profile) => profile.id === state.activeProfileId && browserProfileRetentionState(profile, now).connected)) {
+        state.activeProfileId = undefined;
+    }
+    return visibleProfiles
+        .map((profile) => {
+        const tabs = profile.tabs
+            .filter((value) => Boolean(value) && typeof value === "object" && !Array.isArray(value));
+        const chatgptTabs = tabs.filter((tab) => String(tab.url ?? "").startsWith("https://chatgpt.com/"));
+        const conversationTabs = chatgptTabs.filter((tab) => {
+            try {
+                return new URL(String(tab.url ?? "")).pathname.startsWith("/c/");
+            }
+            catch {
+                return false;
+            }
+        });
+        const activeConversation = conversationTabs.find((tab) => tab.active === true);
+        const busyTabs = chatgptTabs.filter((tab) => tab.busy === true);
+        const settlingTabs = chatgptTabs.filter((tab) => tab.settling === true);
+        const busyRequestCount = busyTabs.reduce((total, tab) => total + Math.max(1, Number(tab.busy_request_count) || 0), 0);
+        const busySince = busyTabs
+            .map((tab) => String(tab.busy_since ?? ""))
+            .filter(Boolean)
+            .sort()[0] ?? "";
+        const activity = busyRequestCount > 0 ? "working" : settlingTabs.length ? "settling" : chatgptTabs.length ? "idle" : "no_chatgpt";
+        const titleConversation = activeConversation ?? conversationTabs[0];
+        let activeConversationId = "";
+        try {
+            activeConversationId = new URL(String(titleConversation?.url ?? "")).pathname.match(/^\/c\/([A-Za-z0-9-]{8,160})/)?.[1] ?? "";
+        }
+        catch { }
+        const chatgptTabSummaries = chatgptTabs
+            .map((tab) => ({
+            id: Number(tab.id),
+            title: String(tab.title ?? "ChatGPT").trim().slice(0, 300),
+            url: String(tab.url ?? "").trim().slice(0, 2000),
+            active: tab.active === true
+        }))
+            .filter((tab) => Number.isInteger(tab.id) && tab.id >= 0);
+        const conversationSummaries = conversationTabs
+            .map((tab) => ({
+            id: Number(tab.id),
+            title: String(tab.title ?? "Đoạn chat chưa có tiêu đề").trim().slice(0, 300),
+            url: String(tab.url ?? "").trim().slice(0, 2000),
+            active: tab.active === true,
+            busy: tab.busy === true,
+            settling: tab.settling === true,
+            activity_text: String(tab.activity_text ?? "").trim().slice(0, 220),
+            network_state: tab.network_state === "generating" ? "generating" : tab.network_state === "completed" ? "completed" : tab.network_state === "failed" ? "failed" : "idle",
+            network_source: String(tab.network_source ?? "").trim().slice(0, 32),
+            network_generation_endpoint: String(tab.network_generation_endpoint ?? "").trim().slice(0, 500),
+            network_last_started_at: String(tab.network_last_started_at ?? "").trim().slice(0, 64),
+            network_last_completed_at: String(tab.network_last_completed_at ?? "").trim().slice(0, 64),
+            network_status_code: Number(tab.network_status_code) || 0,
+            network_error: String(tab.network_error ?? "").trim().slice(0, 500),
+            network_duration_ms: Math.max(0, Number(tab.network_duration_ms) || 0),
+            network_stream_text: String(tab.network_stream_text ?? '').slice(0, 200_000),
+            network_stream_revision: Math.max(0, Number(tab.network_stream_revision) || 0),
+            network_stream_record_id: Math.max(0, Number(tab.network_stream_record_id) || 0),
+            network_stream_event_count: Math.max(0, Number(tab.network_stream_event_count) || 0),
+            network_stream_updated_at: String(tab.network_stream_updated_at ?? '').trim().slice(0, 64),
+            network_stream_in_progress: tab.network_stream_in_progress === true,
+            network_stream_error: String(tab.network_stream_error ?? '').trim().slice(0, 500),
+            network_stream_activity_text: String(tab.network_stream_activity_text ?? '').trim().slice(0, 220),
+            connection_interrupted: tab.connection_interrupted === true,
+            message_delivery_timed_out: tab.message_delivery_timed_out === true,
+            message_stream_error: tab.message_stream_error === true,
+            conversation_limit_reached: tab.conversation_limit_reached === true,
+            conversation_limit_message: String(tab.conversation_limit_message ?? "").trim().slice(0, 500),
+            renderer_unresponsive: tab.renderer_unresponsive === true,
+            renderer_error: String(tab.renderer_error ?? "").trim().slice(0, 300),
+            flight_recorder_incident_count: Math.max(0, Number(tab.flight_recorder_incident_count) || 0),
+            flight_recorder_latest_at: String(tab.flight_recorder_latest_at ?? "").trim().slice(0, 64),
+            flight_recorder_latest_kind: String(tab.flight_recorder_latest_kind ?? "").trim().slice(0, 120),
+            flight_recorder_latest_message: String(tab.flight_recorder_latest_message ?? "").trim().slice(0, 500),
+            flight_recorder_latest_task_id: String(tab.flight_recorder_latest_task_id ?? "").trim().slice(0, 160),
+            rate_limit_incident_count: Math.max(0, Number(tab.rate_limit_incident_count) || 0),
+            rate_limit_latest_at: String(tab.rate_limit_latest_at ?? "").trim().slice(0, 64),
+            rate_limit_latest_message: String(tab.rate_limit_latest_message ?? "").trim().slice(0, 500),
+            rate_limit_latest_status_code: Number(tab.rate_limit_latest_status_code) || 0,
+            rate_limit_latest_url: String(tab.rate_limit_latest_url ?? "").trim().slice(0, 2000),
+            rate_limit_latest_endpoint: String(tab.rate_limit_latest_endpoint ?? "").trim().slice(0, 1000),
+            rate_limit_latest_request_id: String(tab.rate_limit_latest_request_id ?? "").trim().slice(0, 160),
+            rate_limit_latest_response_request_id: String(tab.rate_limit_latest_response_request_id ?? "").trim().slice(0, 160),
+            rate_limit_latest_retry_after: String(tab.rate_limit_latest_retry_after ?? "").trim().slice(0, 300),
+            rate_limit_latest_task_id: String(tab.rate_limit_latest_task_id ?? "").trim().slice(0, 160),
+            rate_limit_latest_conversation_id: String(tab.rate_limit_latest_conversation_id ?? "").trim().slice(0, 180),
+            rate_limit_latest_tab_id: tab.rate_limit_latest_at ? Number(tab.id) || 0 : 0,
+            long_task_watchdog_hung: tab.long_task_watchdog_hung === true,
+            long_task_watchdog_attempt_key: String(tab.long_task_watchdog_attempt_key ?? "").trim().slice(0, 300),
+            network_recent_posts: Array.isArray(tab.network_recent_posts) ? tab.network_recent_posts.slice(-12) : []
+        }))
+            .filter((tab) => Number.isInteger(tab.id) && tab.id >= 0);
+        const recentConversations = profile.recentConversations
+            .filter((value) => Boolean(value) && typeof value === "object" && !Array.isArray(value))
+            .map((conversation) => {
+            const id = String(conversation.id ?? "").trim();
+            const openTab = conversationTabs.find((tab) => {
+                try {
+                    return new URL(String(tab.url ?? "")).pathname === `/c/${id}`;
+                }
+                catch {
+                    return false;
+                }
+            });
+            return {
+                id,
+                title: String(conversation.title ?? "Đoạn chat chưa có tiêu đề").trim().slice(0, 300),
+                url: `https://chatgpt.com/c/${id}`,
+                updated_at: Number(conversation.updated_at) || 0,
+                open: Boolean(openTab),
+                active: openTab?.active === true,
+                long_task_watchdog_hung: openTab?.long_task_watchdog_hung === true || conversation.long_task_watchdog_hung === true,
+                long_task_watchdog_attempt_key: String(openTab?.long_task_watchdog_attempt_key ?? conversation.long_task_watchdog_attempt_key ?? "").trim().slice(0, 300)
+            };
+        })
+            .filter((conversation) => /^[A-Za-z0-9-]{8,160}$/.test(conversation.id))
+            .slice(0, 3);
+        const activeChatTitle = String(recentConversations.find((conversation) => conversation.id === activeConversationId)?.title ?? titleConversation?.title ?? "").trim().slice(0, 300);
+        const observedCodexProToolActivity = conversationSummaries.some((tab) => (tab.busy || tab.settling) && /^CodexPro đang\b/i.test(tab.activity_text));
+        const expectedFingerprint = expectedConnectorFingerprint(state, profile.id);
+        const connectorProfileBound = expectedFingerprint
+            ? Boolean(profile.connectorServerFingerprint && profile.connectorServerFingerprint === expectedFingerprint)
+            : profile.connectorInstalled;
+        const connectorUpdateRequired = Boolean(expectedFingerprint && ((profile.connectorInstalled && profile.connectorServerFingerprint !== expectedFingerprint) ||
+            (!profile.connectorInstalled && profile.connectorServerFingerprint)));
+        const connectorInstalled = profile.connectorInstalled && connectorProfileBound;
+        const latestFlightRecorderIncident = profile.flightRecorderIncidents.at(-1);
+        const rateLimitIncidents = profile.flightRecorderIncidents.filter((incident) => String(incident.reason || "") === "rate_limit" || Number(incident.event?.status) === 429);
+        const latestRateLimitIncident = rateLimitIncidents.at(-1);
+        const latestRateLimitEvent = latestRateLimitIncident?.event || {};
+        const connectorMessage = connectorUpdateRequired
+            ? observedCodexProToolActivity
+                ? "CodexPro đang gọi tool qua connector cũ chưa gắn đúng profile. Cần cập nhật connector."
+                : "CodexPro hiện có đang dùng URL cũ, chưa gắn đúng profile Chrome."
+            : profile.connectorMessage;
+        return {
+            profile_id: profile.id,
+            email: profile.email,
+            label: profile.label,
+            extension_version: profile.extensionVersion,
+            extension_build_id: profile.runtimeBuildId,
+            connector_installed: connectorInstalled,
+            connector_message: connectorMessage,
+            connector_checked_at: profile.connectorCheckedAt,
+            connector_profile_bound: connectorProfileBound,
+            connector_update_required: connectorUpdateRequired,
+            active: browserProfileRetentionState(profile, now).connected && state.activeProfileId === profile.id,
+            connected: browserProfileRetentionState(profile, now).connected,
+            last_seen: new Date(profile.lastSeen).toISOString(),
+            tab_count: profile.tabs.length,
+            chatgpt_tab_count: chatgptTabs.length,
+            busy_request_count: busyRequestCount,
+            busy_since: busySince,
+            activity,
+            active_chat_title: activeChatTitle,
+            current_workspace_root: profile.workspaceRoot,
+            current_task_id: profileTaskIds.get(profile.id) || "",
+            current_task_title: profileTaskTitles.get(profile.id) || "",
+            current_task_conversation_id: profileTaskConversationIds.get(profile.id) || "",
+            flight_recorder_incident_count: profile.flightRecorderIncidents.length,
+            flight_recorder_latest_at: String(latestFlightRecorderIncident?.at || ""),
+            flight_recorder_latest_kind: String(latestFlightRecorderIncident?.kind || ""),
+            flight_recorder_latest_message: String(latestFlightRecorderIncident?.message || "").slice(0, 500),
+            rate_limit_incident_count: rateLimitIncidents.length,
+            rate_limit_latest_at: String(latestRateLimitIncident?.at || "").slice(0, 64),
+            rate_limit_latest_message: String(latestRateLimitIncident?.message || "").slice(0, 500),
+            rate_limit_latest_status_code: Number(latestRateLimitEvent.status) || 0,
+            rate_limit_latest_url: String(latestRateLimitEvent.url || "").slice(0, 2000),
+            rate_limit_latest_endpoint: String(latestRateLimitEvent.endpoint || "").slice(0, 1000),
+            rate_limit_latest_request_id: String(latestRateLimitEvent.request_id || "").slice(0, 160),
+            rate_limit_latest_response_request_id: String(latestRateLimitEvent.response_request_id || "").slice(0, 160),
+            rate_limit_latest_retry_after: String(latestRateLimitEvent.retry_after || "").slice(0, 300),
+            rate_limit_latest_task_id: String(latestRateLimitIncident?.task_id || "").slice(0, 160),
+            rate_limit_latest_conversation_id: String(latestRateLimitIncident?.conversation_id || "").slice(0, 180),
+            rate_limit_latest_tab_id: Math.max(0, Number(latestRateLimitIncident?.tab_id) || 0),
+            chatgpt_tabs: chatgptTabSummaries,
+            conversation_tabs: conversationSummaries,
+            recent_conversations: recentConversations
+        };
+    })
+        .sort((a, b) => Number(b.active) - Number(a.active) || b.last_seen.localeCompare(a.last_seen));
+}
+export function listDisabledBrowserExtensionProfileIds() {
+    const state = ensureBrowserExtensionBridge();
+    const now = Date.now();
+    pruneExpiredProfiles(state, now);
+    return [...state.profiles.values()]
+        .filter((profile) => !profile.enabled && browserProfileRetentionState(profile, now).visible)
+        .map((profile) => profile.id)
+        .sort((left, right) => left.localeCompare(right));
+}
+export function forgetBrowserExtensionProfile(profileId) {
+    const id = String(profileId || "").trim().slice(0, 160);
+    if (!id)
+        return false;
+    const state = ensureBrowserExtensionBridge();
+    const profile = state.profiles.get(id);
+    if (!profile)
+        return false;
+    if (profile.waiter) {
+        profile.waiter.statusCode = 410;
+        profile.waiter.end(JSON.stringify({ error: "Chrome profile was forgotten by CodexPro Manager." }));
+        clearWaiter(profile);
+    }
+    for (const command of profile.queued) {
+        const pending = state.pending.get(command.id);
+        if (!pending)
+            continue;
+        clearPendingCommandTimers(pending);
+        state.pending.delete(command.id);
+        pending.reject(new CodexProError(`Chrome profile ${profile.label || id} was forgotten by CodexPro Manager.`));
+    }
+    state.profiles.delete(id);
+    profileWorkspaceRoots.delete(id);
+    profileWorkspaceBindings.delete(id);
+    profileTaskIds.delete(id);
+    profileTaskTitles.delete(id);
+    profileTaskConversationIds.delete(id);
+    profileTaskUpdatedAt.delete(id);
+    profilePendingTasks.delete(id);
+    profileTaskEventSignatures.delete(id);
+    if (state.activeProfileId === id)
+        state.activeProfileId = undefined;
+    persistBrowserProfileRegistry(state);
+    persistBrowserProfileTasks();
+    scheduleProfileNotification(state);
+    scheduleProfileExpiryNotification(state);
+    return true;
+}
+export function subscribeBrowserExtensionProfiles(listener) {
+    const state = ensureBrowserExtensionBridge();
+    state.profileListeners.add(listener);
+    return () => state.profileListeners.delete(listener);
+}
+export function subscribeBrowserExtensionStreams(listener) {
+    const state = ensureBrowserExtensionBridge();
+    state.streamListeners.add(listener);
+    return () => state.streamListeners.delete(listener);
+}
+export function setBrowserExtensionProfileWorkspace(profileId, root) {
+    const id = String(profileId || "").trim();
+    const workspaceRoot = String(root || "").trim();
+    if (!id)
+        return;
+    if (workspaceRoot)
+        profileWorkspaceRoots.set(id, workspaceRoot);
+    else
+        profileWorkspaceRoots.delete(id);
+    const profile = singleton?.profiles.get(id);
+    if (profile)
+        profile.workspaceRoot = workspaceRoot;
+    if (singleton)
+        scheduleBrowserProfileRegistryPersistence(singleton);
+    if (singleton)
+        scheduleProfileNotification(singleton);
+}
+export function setBrowserExtensionProfileTask(profileId, taskId, title) {
+    const id = String(profileId || "").trim();
+    const normalizedTaskId = String(taskId || "").trim();
+    const taskTitle = String(title || "").trim();
+    if (!id)
+        return;
+    if (normalizedTaskId) {
+        const durableJob = readWorkerJob(normalizedTaskId);
+        if (durableJob?.status === "completed" || durableJob?.completionConfirmed === true) {
+            if (profilePendingTasks.get(id)?.taskId === normalizedTaskId)
+                profilePendingTasks.delete(id);
+            if (profileTaskIds.get(id) === normalizedTaskId) {
+                setBrowserExtensionProfileTask(id, "", "");
+            }
+            return;
+        }
+    }
+    const pendingTask = profilePendingTasks.get(id);
+    const pendingCleared = Boolean(pendingTask && (!normalizedTaskId || pendingTask.taskId === normalizedTaskId));
+    if (pendingCleared)
+        profilePendingTasks.delete(id);
+    const previousTaskId = profileTaskIds.get(id) || "";
+    const inferredConversationId = normalizedTaskId ? inferProfileTaskConversationId(id) : "";
+    const nextConversationId = normalizedTaskId === previousTaskId
+        ? inferredConversationId || profileTaskConversationIds.get(id) || ""
+        : inferredConversationId;
+    const changed = previousTaskId !== normalizedTaskId
+        || profileTaskTitles.get(id) !== taskTitle
+        || profileTaskConversationIds.get(id) !== nextConversationId;
+    if (!changed) {
+        if (pendingCleared)
+            persistBrowserProfileTasks();
+        if (singleton)
+            scheduleProfileNotification(singleton);
+        return;
+    }
+    if (normalizedTaskId)
+        profileTaskIds.set(id, normalizedTaskId);
+    else
+        profileTaskIds.delete(id);
+    if (nextConversationId)
+        profileTaskConversationIds.set(id, nextConversationId);
+    else
+        profileTaskConversationIds.delete(id);
+    if (taskTitle) {
+        profileTaskTitles.set(id, taskTitle);
+        profileTaskUpdatedAt.set(id, new Date().toISOString());
+    }
+    else {
+        profileTaskTitles.delete(id);
+        profileTaskUpdatedAt.delete(id);
+    }
+    persistBrowserProfileTasks();
+    recordBrowserProfileTaskEvent("profile_task_persisted", {
+        profile_id: id,
+        task_id: normalizedTaskId,
+        task_title: taskTitle,
+        task_conversation_id: nextConversationId,
+        task_conversation_binding_source: normalizedTaskId ? (inferredConversationId ? "live_tab_inference" : nextConversationId ? "persisted_existing" : "unbound") : "cleared",
+        task_conversation_candidates: profileTaskConversationCandidateLog(id),
+        task_title_source: "ai"
+    });
+    if (singleton)
+        scheduleProfileNotification(singleton);
+}
+export function rebindBrowserExtensionProfileTaskConversation(profileId, taskId, conversationId) {
+    const id = String(profileId || "").trim();
+    const normalizedTaskId = String(taskId || "").trim();
+    const normalizedConversationId = String(conversationId || "").trim();
+    if (!validPersistedProfileId(id) || !/^cpt_[a-f0-9]{24}$/.test(normalizedTaskId) || !/^[A-Za-z0-9-]{8,160}$/.test(normalizedConversationId))
+        return false;
+    if (profileTaskIds.get(id) !== normalizedTaskId)
+        return false;
+    if (profileTaskConversationIds.get(id) === normalizedConversationId)
+        return true;
+    const previousConversationId = profileTaskConversationIds.get(id) || "";
+    profileTaskConversationIds.set(id, normalizedConversationId);
+    profileTaskUpdatedAt.set(id, new Date().toISOString());
+    persistBrowserProfileTasks();
+    recordBrowserProfileTaskEvent("profile_task_conversation_rebound", {
+        profile_id: id,
+        task_id: normalizedTaskId,
+        previous_conversation_id: previousConversationId,
+        task_conversation_id: normalizedConversationId,
+        reason: "recovery_rollover"
+    });
+    if (singleton)
+        scheduleProfileNotification(singleton);
+    return true;
+}
+export function getBrowserExtensionProfileTaskBinding(profileId) {
+    const id = String(profileId || "").trim();
+    const taskId = profileTaskIds.get(id) || "";
+    if (!id || !taskId)
+        return undefined;
+    return {
+        taskId,
+        conversationId: profileTaskConversationIds.get(id) || ""
+    };
+}
+export function getBrowserExtensionTaskOwners(taskId) {
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!/^cpt_[a-f0-9]{24}$/.test(normalizedTaskId))
+        return [];
+    const owners = [];
+    for (const [profileId, boundTaskId] of profileTaskIds) {
+        if (boundTaskId !== normalizedTaskId)
+            continue;
+        owners.push({
+            profile_id: profileId,
+            task_id: boundTaskId,
+            task_title: profileTaskTitles.get(profileId) || "",
+            conversation_id: profileTaskConversationIds.get(profileId) || "",
+            updated_at: profileTaskUpdatedAt.get(profileId) || new Date(0).toISOString()
+        });
+    }
+    return owners.sort((left, right) => left.profile_id.localeCompare(right.profile_id));
+}
+export function setBrowserExtensionProfilePendingTask(profileId, taskId, root, scope, preparedAt = Date.now()) {
+    const id = String(profileId || "").trim();
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!id || !normalizedTaskId)
+        return;
+    profilePendingTasks.set(id, {
+        taskId: normalizedTaskId,
+        root: String(root || "").trim(),
+        scope,
+        preparedAt
+    });
+    persistBrowserProfileTasks();
+}
+export function getBrowserExtensionProfilePendingTask(profileId) {
+    const pendingTask = profilePendingTasks.get(String(profileId || "").trim());
+    if (!pendingTask)
+        return undefined;
+    return {
+        task_id: pendingTask.taskId,
+        root: pendingTask.root,
+        scope: pendingTask.scope,
+        prepared_at: new Date(pendingTask.preparedAt).toISOString(),
+        age_ms: Math.max(0, Date.now() - pendingTask.preparedAt)
+    };
+}
+export function getBrowserExtensionPendingTaskOwner(taskId) {
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!/^cpt_[a-f0-9]{24}$/.test(normalizedTaskId))
+        return undefined;
+    let owner;
+    for (const [profileId, pendingTask] of profilePendingTasks) {
+        if (pendingTask.taskId !== normalizedTaskId)
+            continue;
+        if (owner)
+            return undefined;
+        owner = {
+            profile_id: profileId,
+            task_id: pendingTask.taskId,
+            root: pendingTask.root,
+            scope: pendingTask.scope,
+            prepared_at: new Date(pendingTask.preparedAt).toISOString(),
+            age_ms: Math.max(0, Date.now() - pendingTask.preparedAt)
+        };
+    }
+    return owner;
+}
+export function setBrowserExtensionProfileWorkspaceBinding(profileId, root) {
+    const id = String(profileId || "").trim();
+    const workspaceRoot = String(root || "").trim();
+    if (!id)
+        return;
+    if (workspaceRoot)
+        profileWorkspaceBindings.set(id, workspaceRoot);
+    else
+        profileWorkspaceBindings.delete(id);
+}
+export function getBrowserExtensionProfileWorkspaceBinding(profileId) {
+    return profileWorkspaceBindings.get(String(profileId || "").trim()) || "";
+}
+async function runBrowserExtensionCommandCore(action, args, profileId) {
+    const state = ensureBrowserExtensionBridge();
+    const selectedId = profileId || state.activeProfileId;
+    if (!selectedId)
+        throw new CodexProError("No Chrome profile is ACTIVE. Open the CodexPro Profile Bridge extension in the desired profile and press ACTIVE.");
+    const profile = state.profiles.get(selectedId);
+    if (!profile) {
+        throw new CodexProError("The selected Chrome profile bridge is offline. Open that profile and verify the CodexPro extension is enabled.");
+    }
+    const waitingForReconnect = Date.now() - profile.lastSeen > PROFILE_TTL_MS;
+    const timeoutMs = TEST_COMMAND_TIMEOUT_MS > 0 ? TEST_COMMAND_TIMEOUT_MS : action === "setup_chatgpt"
+        ? SETUP_COMMAND_TIMEOUT_MS
+        : action === "check_chatgpt"
+            ? CHECK_COMMAND_TIMEOUT_MS
+            : action === "send_chat_request"
+                ? SEND_COMMAND_TIMEOUT_MS
+                : action === "audit_long_running_chat"
+                    ? LONG_TASK_AUDIT_COMMAND_TIMEOUT_MS
+                    : action === "get_chat_response"
+                        ? READ_RESPONSE_TIMEOUT_MS
+                        : COMMAND_TIMEOUT_MS;
+    const createdAtMs = Date.now();
+    const commandArgs = {
+        ...args,
+        profile_id: String(args.profile_id || selectedId).slice(0, 160),
+        task_id: String(args.task_id || profileTaskIds.get(selectedId) || "").slice(0, 160),
+        task_title: String(args.task_title || profileTaskTitles.get(selectedId) || "").slice(0, 300),
+        conversation_id: String(args.conversation_id || profileTaskConversationIds.get(selectedId) || "").slice(0, 180)
+    };
+    const command = {
+        id: randomUUID(),
+        action,
+        args: commandArgs,
+        created_at_ms: createdAtMs,
+        expires_at_ms: createdAtMs
+            + (waitingForReconnect ? PROFILE_RECONNECT_WAIT_MS : 0)
+            + Math.max(1_000, timeoutMs - COMMAND_EXPIRY_HEADROOM_MS)
+    };
+    let pendingRecord;
+    const result = new Promise((resolve, reject) => {
+        pendingRecord = { resolve, reject, timeoutMs, waitingForReconnect, dispatchedAtMs: 0, profileId: profile.id, action, sendTraceId: String(commandArgs.send_trace_id || "").slice(0, 160), ipcCallId: String(commandArgs.ipc_call_id || "").slice(0, 160), taskId: String(commandArgs.task_id || "").slice(0, 160), conversationId: String(commandArgs.conversation_id || "").slice(0, 180) };
+        state.pending.set(command.id, pendingRecord);
+        armPendingCommandTimeout(state, profile, command, waitingForReconnect ? PROFILE_RECONNECT_WAIT_MS : timeoutMs, waitingForReconnect
+            ? `Chrome profile ${profile.label} did not reconnect to CodexPro in time.`
+            : `Timed out waiting for Chrome profile ${profile.label}.`);
+    });
+    const deliveredImmediately = deliver(state, profile, command);
+    if (!deliveredImmediately)
+        profile.queued.push(command);
+    bridgeTrace("bridge_queued", { send_trace_id: pendingRecord.sendTraceId, ipc_call_id: pendingRecord.ipcCallId, command_id: command.id, profile_id: profile.id, task_id: pendingRecord.taskId, conversation_id: pendingRecord.conversationId, action, delivered_immediately: deliveredImmediately }, { priority: "critical" });
+    const resolved = await result;
+    const completedAtMs = Date.now();
+    const dispatchedAtMs = pendingRecord.dispatchedAtMs || completedAtMs;
+    return {
+        ...resolved,
+        bridge_phase_timings: {
+            queue_wait_ms: Math.max(0, dispatchedAtMs - createdAtMs),
+            extension_roundtrip_ms: Math.max(0, completedAtMs - dispatchedAtMs),
+            bridge_total_ms: Math.max(0, completedAtMs - createdAtMs)
+        }
+    };
+}
+export async function runBrowserExtensionCommand(action, args, profileId) {
+    const parent = currentRuntimeTraceContext();
+    if (!parent)
+        return runBrowserExtensionCommandCore(action, args, profileId);
+    const workspace = { id: parent.workspaceId };
+    const context = createRuntimeTraceContext(workspace, parent);
+    const startedAtMs = Date.now();
+    try {
+        const result = await runWithRuntimeTraceContext(context, () => runBrowserExtensionCommandCore(action, args, profileId));
+        const endedAtMs = Date.now();
+        await recordRuntimeTraceSpan(workspace, {
+            traceId: context.traceId,
+            spanId: context.spanId,
+            parentSpanId: context.parentSpanId,
+            kind: "browser-extension",
+            name: "extension-command",
+            action: String(action || "").slice(0, 160),
+            source: "browser-extension-bridge",
+            status: "ok",
+            startedAtMs,
+            endedAtMs
+        }).catch(() => undefined);
+        return result;
+    }
+    catch (error) {
+        const endedAtMs = Date.now();
+        await recordRuntimeTraceSpan(workspace, {
+            traceId: context.traceId,
+            spanId: context.spanId,
+            parentSpanId: context.parentSpanId,
+            kind: "browser-extension",
+            name: "extension-command",
+            action: String(action || "").slice(0, 160),
+            source: "browser-extension-bridge",
+            status: "error",
+            startedAtMs,
+            endedAtMs
+        }).catch(() => undefined);
+        throw error;
+    }
+}
+//# sourceMappingURL=browserExtensionBridge.js.map

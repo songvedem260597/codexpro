@@ -1,0 +1,2012 @@
+#!/usr/bin/env node
+import { createHash, randomUUID } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { monitorEventLoopDelay } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
+import express from "express";
+import cors from "cors";
+import { z } from "zod";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { expandHome, loadConfig } from "./config.js";
+import { profilePathForRoot, readRuntimeConnection, readWorkspaceProfile, sanitizeWorkspaceProfile, saveWorkspaceProfile } from "./profileStore.js";
+import { redactSensitiveText, redactStructured } from "./redact.js";
+import { createCodexProServer } from "./server.js";
+import { ensureBrowserExtensionBridge, getBrowserExtensionProfilePendingTask, listBrowserExtensionProfiles, listDisabledBrowserExtensionProfileIds, recordBrowserProfileTaskEvent, subscribeBrowserExtensionProfiles, subscribeBrowserExtensionStreams } from "./browserExtensionBridge.js";
+const CHATGPT_CONNECTOR_SETTINGS_URL = "https://chatgpt.com/plugins?q=CodexPro";
+const RUNTIME_STARTED_AT = new Date().toISOString();
+const RUNTIME_ENTRY_STAT = fs.statSync(fileURLToPath(import.meta.url));
+const RUNTIME_BUILD_ID = `${Math.floor(RUNTIME_ENTRY_STAT.mtimeMs)}:${RUNTIME_ENTRY_STAT.size}`;
+const WORKER_PROFILE_ID_PATTERN = /^(?:[A-Za-z0-9][A-Za-z0-9._-]{0,159}|[a-z0-9][a-z0-9._-]{0,63}:[A-Za-z0-9][A-Za-z0-9._-]{0,94})$/;
+function browserExtensionConnectorInfo(config, profileId = "") {
+    const runtime = readRuntimeConnection(config.defaultRoot);
+    const profile = readWorkspaceProfile(config.defaultRoot);
+    const hostname = profile.hostname ??
+        process.env.CODEXPRO_PUBLIC_HOSTNAME ??
+        process.env.CODEXPRO_HOSTNAME ??
+        process.env.NGROK_DOMAIN ??
+        "";
+    const endpoint = typeof runtime.endpoint === "string" && runtime.endpoint
+        ? runtime.endpoint
+        : hostname
+            ? `https://${normalizePublicHostname(hostname)}/mcp`
+            : "";
+    if (!endpoint)
+        throw new Error("CodexPro public MCP URL is not ready. Start the public tunnel first.");
+    const serverUrl = new URL(endpoint);
+    if (serverUrl.protocol !== "https:") {
+        throw new Error("ChatGPT requires the public HTTPS CodexPro MCP URL; the current runtime is local-only.");
+    }
+    if (serverUrl.pathname === "/" || !serverUrl.pathname)
+        serverUrl.pathname = "/mcp";
+    if (serverUrl.pathname !== "/mcp")
+        throw new Error("CodexPro public endpoint must use the /mcp path.");
+    if (config.authToken)
+        serverUrl.searchParams.set("codexpro_token", config.authToken);
+    const normalizedProfileId = String(profileId || "").trim();
+    if (WORKER_PROFILE_ID_PATTERN.test(normalizedProfileId))
+        serverUrl.searchParams.set("codexpro_profile", normalizedProfileId);
+    return {
+        name: "CodexPro",
+        server_url: serverUrl.toString(),
+        settings_url: CHATGPT_CONNECTOR_SETTINGS_URL,
+        authentication: "none"
+    };
+}
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+}
+function shellQuote(value) {
+    return `'${value.replaceAll("'", "'\\''")}'`;
+}
+function copyCommand(title, description, command, displayCommand = command, copyKind = "") {
+    const copyAttrs = copyKind
+        ? `data-copy-kind="${escapeHtml(copyKind)}" data-copy-base="${escapeHtml(command)}"`
+        : `data-copy="${escapeHtml(command)}"`;
+    return `<div class="control">
+    <div>
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(description)}</p>
+      <code>${escapeHtml(displayCommand)}</code>
+    </div>
+    <button type="button" class="copy-mini" ${copyAttrs}>Copy</button>
+  </div>`;
+}
+const TUNNELS = ["cloudflare", "ngrok", "cloudflare-named", "tailscale", "none"];
+const MODES = ["agent", "handoff", "pro"];
+const BASH_MODES = ["safe", "off", "full"];
+const BASH_TRANSCRIPTS = ["compact", "full"];
+const CODEX_SESSIONS = ["off", "metadata", "read"];
+const WRITE_MODES = ["workspace", "handoff", "off"];
+const TOOL_MODES = ["standard", "minimal", "full"];
+const textField = (max) => z.preprocess((value) => (typeof value === "string" ? value.trim() : value), z.string().max(max).optional());
+const AdminProfilePatch = z.object({
+    tunnel: z.enum(TUNNELS).optional(),
+    hostname: textField(253),
+    port: z.coerce.number().int().min(1).max(65535).optional(),
+    mode: z.enum(MODES).optional(),
+    bash: z.enum(BASH_MODES).optional(),
+    bashTranscript: z.enum(BASH_TRANSCRIPTS).optional(),
+    codexSessions: z.enum(CODEX_SESSIONS).optional(),
+    codexDir: textField(4096),
+    bashSession: textField(64).refine((value) => !value || /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value), "bashSession must be 1-64 characters using letters, numbers, dot, underscore, or dash, and must start with a letter or number."),
+    requireBashSession: z.boolean().optional(),
+    write: z.enum(WRITE_MODES).optional(),
+    toolMode: z.enum(TOOL_MODES).optional(),
+    toolCards: z.boolean().optional(),
+    widgetDomain: textField(2048),
+    tunnelName: textField(128),
+    ngrokConfig: textField(4096),
+    cloudflareConfig: textField(4096),
+    cloudflareTokenFile: textField(4096),
+    noInstallCloudflared: z.boolean().optional()
+}).strict();
+function oneOf(value, values, fallback) {
+    return typeof value === "string" && values.includes(value) ? value : fallback;
+}
+function runtimeTunnelFallback() {
+    if (process.env.CODEXPRO_TUNNEL && TUNNELS.includes(process.env.CODEXPRO_TUNNEL)) {
+        return process.env.CODEXPRO_TUNNEL;
+    }
+    return process.env.CODEXPRO_TUNNEL_MODE === "0" ? "none" : "cloudflare";
+}
+function normalizePublicHostname(value) {
+    const raw = value?.trim().replace(/\/+$/, "") ?? "";
+    if (!raw)
+        return "";
+    const url = new URL(raw.includes("://") ? raw : `https://${raw}`);
+    if (url.protocol !== "https:")
+        throw new Error("hostname must use https when a scheme is provided.");
+    if (url.search || url.hash)
+        throw new Error("hostname must not include query strings or fragments.");
+    if (url.pathname !== "/" && url.pathname !== "/mcp")
+        throw new Error("hostname must be a host, URL root, or /mcp URL.");
+    return url.host;
+}
+function normalizeWidgetDomain(value) {
+    const raw = value?.trim() ?? "";
+    if (!raw)
+        return "";
+    const url = new URL(raw);
+    if (url.protocol !== "https:")
+        throw new Error("widgetDomain must use https.");
+    if (url.pathname !== "/" || url.search || url.hash) {
+        throw new Error("widgetDomain must be an origin only, for example https://widgets.example.com.");
+    }
+    return url.origin;
+}
+function effectiveWriteMode(mode, write) {
+    if (mode === "agent")
+        return write;
+    return write === "off" ? "off" : "handoff";
+}
+function normalizeProfilePath(root, value) {
+    const raw = value?.trim() ?? "";
+    if (!raw)
+        return "";
+    const expanded = expandHome(raw);
+    return path.isAbsolute(expanded) || path.win32.isAbsolute(expanded)
+        ? path.resolve(expanded)
+        : path.resolve(root, expanded);
+}
+function profileValues(config, profile = readWorkspaceProfile(config.defaultRoot)) {
+    const hostname = profile.hostname ??
+        process.env.CODEXPRO_PUBLIC_HOSTNAME ??
+        process.env.CODEXPRO_HOSTNAME ??
+        process.env.NGROK_DOMAIN ??
+        "";
+    const mode = oneOf(profile.mode ?? process.env.CODEXPRO_MODE, MODES, "agent");
+    const write = effectiveWriteMode(mode, oneOf(profile.write ?? config.writeMode, WRITE_MODES, config.writeMode));
+    return {
+        port: String(profile.port ?? config.port),
+        mode,
+        tunnel: oneOf(profile.tunnel, TUNNELS, runtimeTunnelFallback()),
+        hostname: String(hostname),
+        tunnelName: String(profile.tunnelName ?? ""),
+        ngrokConfig: String(profile.ngrokConfig ?? ""),
+        cloudflareConfig: String(profile.cloudflareConfig ?? ""),
+        cloudflareTokenFile: String(profile.cloudflareTokenFile ?? ""),
+        bash: oneOf(profile.bash ?? config.bashMode, BASH_MODES, config.bashMode),
+        bashTranscript: oneOf(profile.bashTranscript ?? config.bashTranscript, BASH_TRANSCRIPTS, config.bashTranscript),
+        codexSessions: oneOf(profile.codexSessions ?? config.codexSessions, CODEX_SESSIONS, config.codexSessions),
+        codexDir: String(profile.codexDir ?? config.codexDir),
+        bashSession: String(profile.bashSession ?? config.bashSessionId ?? ""),
+        requireBashSession: Boolean(profile.requireBashSession ?? config.requireBashSession),
+        write,
+        toolMode: oneOf(profile.toolMode ?? config.toolMode, TOOL_MODES, config.toolMode),
+        toolCards: Boolean(profile.toolCards ?? config.toolCards),
+        widgetDomain: String(profile.widgetDomain ?? config.widgetDomain),
+        noInstallCloudflared: Boolean(profile.noInstallCloudflared)
+    };
+}
+const OPTION_LABELS = {
+    cloudflare: "Cloudflare quick tunnel",
+    ngrok: "ngrok stable URL",
+    "cloudflare-named": "Cloudflare named tunnel",
+    tailscale: "Tailscale Funnel",
+    none: "Local only",
+    agent: "Agent",
+    handoff: "Handoff",
+    pro: "Pro bundle",
+    safe: "Safe",
+    off: "Off",
+    full: "Full",
+    compact: "Compact",
+    metadata: "Metadata",
+    read: "Read",
+    workspace: "Workspace",
+    minimal: "Minimal",
+    standard: "Standard"
+};
+function optionLabel(value) {
+    return OPTION_LABELS[value] ?? value;
+}
+function selectOptions(values, current) {
+    return values
+        .map((value) => `<option value="${escapeHtml(value)}"${value === current ? " selected" : ""}>${escapeHtml(optionLabel(value))}</option>`)
+        .join("");
+}
+function serverUrlDisplay(endpoint, authEnabled) {
+    if (!endpoint)
+        return "";
+    const safeEndpoint = redactSensitiveText(endpoint);
+    if (!authEnabled)
+        return safeEndpoint;
+    const glue = safeEndpoint.includes("?") ? "&" : "?";
+    return `${safeEndpoint}${glue}codexpro_token=<redacted>`;
+}
+function currentTunnelMessage(tunnel, endpoint) {
+    if (endpoint) {
+        if (tunnel === "cloudflare")
+            return "Cloudflare generated this URL for the current run. Quick tunnel URLs change after restart.";
+        if (tunnel === "ngrok")
+            return "ngrok is using the saved public hostname for this run.";
+        if (tunnel === "cloudflare-named")
+            return "Cloudflare named tunnel is using the saved public hostname for this run.";
+        if (tunnel === "tailscale")
+            return "Tailscale Funnel is using the saved ts.net hostname for this run.";
+        return "Local-only endpoint for clients that can reach this machine.";
+    }
+    if (tunnel === "cloudflare")
+        return "Cloudflare quick tunnels print a generated URL after the tunnel opens.";
+    if (tunnel === "ngrok")
+        return "Enter your reserved ngrok domain, or set NGROK_DOMAIN before starting CodexPro.";
+    if (tunnel === "cloudflare-named")
+        return "Enter the Cloudflare hostname routed to your named tunnel.";
+    if (tunnel === "tailscale")
+        return "Enter the Tailscale Funnel hostname for this device, for example machine.tailnet.ts.net.";
+    return "No public tunnel is saved; local MCP clients can use the local URL.";
+}
+function profileForm(config) {
+    const profile = readWorkspaceProfile(config.defaultRoot);
+    const values = profileValues(config, profile);
+    const runtime = readRuntimeConnection(config.defaultRoot);
+    const profilePath = profile.profilePath ?? profilePathForRoot(config.defaultRoot);
+    const savedLabel = profile.profilePath ? "saved" : "not saved yet";
+    const runtimeEndpoint = typeof runtime.endpoint === "string" ? runtime.endpoint : "";
+    const runtimeTunnel = oneOf(runtime.tunnel ?? values.tunnel, TUNNELS, values.tunnel);
+    const runtimeUrl = serverUrlDisplay(runtimeEndpoint, Boolean(config.authToken));
+    const savedEndpoint = values.hostname ? `https://${values.hostname}/mcp` : "";
+    const savedUrl = serverUrlDisplay(savedEndpoint, Boolean(config.authToken));
+    const ngrokHostname = process.env.NGROK_DOMAIN ?? (values.tunnel === "ngrok" ? values.hostname : "");
+    const cloudflareHostname = process.env.CODEXPRO_PUBLIC_HOSTNAME ??
+        process.env.CODEXPRO_HOSTNAME ??
+        (values.tunnel === "cloudflare-named" ? values.hostname : "");
+    const currentUrlBlock = runtimeUrl
+        ? `<div class="current-url">
+        <div>
+          <span>Current Server URL</span>
+          <code>${escapeHtml(runtimeUrl)}</code>
+          <p>${escapeHtml(currentTunnelMessage(runtimeTunnel, runtimeEndpoint))}</p>
+        </div>
+        <button type="button" class="copy-mini" data-copy-kind="server-url" data-copy-base="${escapeHtml(redactSensitiveText(runtimeEndpoint))}">Copy</button>
+      </div>`
+        : `<div class="current-url idle">
+        <div>
+          <span>${savedUrl ? "Saved Server URL preview" : "Current Server URL"}</span>
+          <code>${savedUrl ? escapeHtml(savedUrl) : "No public URL detected for this run"}</code>
+          <p>${escapeHtml(savedUrl ? "This is based on the saved hostname. It becomes current after the launcher starts that tunnel." : currentTunnelMessage(values.tunnel, ""))}</p>
+        </div>
+        ${savedEndpoint ? `<button type="button" class="copy-mini" data-copy-kind="server-url" data-copy-base="${escapeHtml(redactSensitiveText(savedEndpoint))}">Copy</button>` : ""}
+      </div>`;
+    return `<section class="panel profile-panel" id="profile">
+      <div class="section-head">
+        <div>
+          <h2>Connection profile</h2>
+          <p>Use this for the next start. Current tunnel URLs appear here when the launcher knows them.</p>
+        </div>
+        <span class="pill ${profile.profilePath ? "" : "warn"}">${escapeHtml(savedLabel)}</span>
+      </div>
+      <form class="profile-form" data-profile-form>
+        ${currentUrlBlock}
+        <fieldset class="profile-group">
+          <legend>Connection</legend>
+          <p>Choose how ChatGPT reaches this local MCP server. Stable providers use the saved hostname; quick Cloudflare generates the URL at launch.</p>
+          <div class="form-grid">
+            <label><span>Tunnel</span><select name="tunnel" data-tunnel-select data-ngrok-hostname="${escapeHtml(ngrokHostname)}" data-cloudflare-hostname="${escapeHtml(cloudflareHostname)}">${selectOptions(TUNNELS, values.tunnel)}</select></label>
+            <label><span>Public hostname</span><input name="hostname" value="${escapeHtml(values.hostname)}" data-hostname-input data-autofilled="0"></label>
+            <label><span>Port</span><input name="port" type="number" min="1" max="65535" value="${escapeHtml(values.port)}"></label>
+            <label><span>Mode</span><select name="mode">${selectOptions(MODES, values.mode)}</select></label>
+            <label><span>Cloudflare tunnel name</span><input name="tunnelName" value="${escapeHtml(values.tunnelName)}"></label>
+            <label><span>ngrok config file</span><input name="ngrokConfig" value="${escapeHtml(values.ngrokConfig)}"></label>
+            <label><span>Cloudflare config file</span><input name="cloudflareConfig" value="${escapeHtml(values.cloudflareConfig)}"></label>
+            <label><span>Cloudflare token file</span><input name="cloudflareTokenFile" value="${escapeHtml(values.cloudflareTokenFile)}"></label>
+          </div>
+          <p class="field-help" data-hostname-help>${escapeHtml(currentTunnelMessage(values.tunnel, runtimeEndpoint))}</p>
+          <label class="check-row"><input name="noInstallCloudflared" type="checkbox" value="true"${values.noInstallCloudflared ? " checked" : ""}><span>Do not auto-install cloudflared</span></label>
+        </fieldset>
+        <fieldset class="profile-group">
+          <legend>Runtime policy</legend>
+          <p>Save the default access level for the next launch. These settings do not mutate the process that is already running.</p>
+          <div class="form-grid">
+            <label><span>Bash</span><select name="bash">${selectOptions(BASH_MODES, values.bash)}</select></label>
+            <label><span>Write mode</span><select name="write">${selectOptions(WRITE_MODES, values.write)}</select></label>
+            <label><span>Tool mode</span><select name="toolMode">${selectOptions(TOOL_MODES, values.toolMode)}</select></label>
+            <label><span>Codex sessions</span><select name="codexSessions">${selectOptions(CODEX_SESSIONS, values.codexSessions)}</select></label>
+            <label><span>Codex directory</span><input name="codexDir" value="${escapeHtml(values.codexDir)}"></label>
+            <label><span>Bash session</span><input name="bashSession" value="${escapeHtml(values.bashSession)}"></label>
+          </div>
+          <label class="check-row"><input name="toolCards" type="checkbox" value="true"${values.toolCards ? " checked" : ""}><span>Enable ChatGPT tool cards</span></label>
+          <label class="check-row"><input name="requireBashSession" type="checkbox" value="true"${values.requireBashSession ? " checked" : ""}><span>Require matching bash session id</span></label>
+        </fieldset>
+        <fieldset class="profile-group readonly-group">
+          <legend>Read-only this run</legend>
+          <div class="readonly-grid">
+            <div><span>Bash transcript</span><code>${escapeHtml(values.bashTranscript)}</code></div>
+            <div><span>Widget origin</span><code>${escapeHtml(values.widgetDomain)}</code></div>
+          </div>
+        </fieldset>
+        <div class="actions">
+          <button type="submit" class="primary">Save profile</button>
+          <span class="mono">${escapeHtml(profilePath)}</span>
+        </div>
+        <p class="note" data-profile-status>Tokens stay hidden. Restart CodexPro for saved profile changes to apply.</p>
+      </form>
+    </section>`;
+}
+function buildProfilePayload(config, existing, input) {
+    const current = profileValues(config, existing);
+    const next = {
+        ...current,
+        ...input,
+        port: input.port ? String(input.port) : current.port,
+        requireBashSession: input.requireBashSession ?? current.requireBashSession,
+        noInstallCloudflared: input.noInstallCloudflared ?? current.noInstallCloudflared
+    };
+    next.hostname = normalizePublicHostname(next.hostname);
+    if (next.tunnel !== "ngrok" && next.tunnel !== "cloudflare-named" && next.tunnel !== "tailscale")
+        next.hostname = "";
+    next.widgetDomain = normalizeWidgetDomain(next.widgetDomain);
+    if ((next.tunnel === "ngrok" || next.tunnel === "cloudflare-named" || next.tunnel === "tailscale") && !next.hostname) {
+        throw new Error("hostname is required for ngrok, cloudflare-named, and tailscale profiles.");
+    }
+    if (next.requireBashSession && !next.bashSession) {
+        throw new Error("requireBashSession requires a bashSession value.");
+    }
+    const token = typeof existing.token === "string" && existing.token ? existing.token : config.authToken ?? "";
+    const cloudflareToken = next.tunnel === "cloudflare-named" && typeof existing.cloudflareToken === "string" && existing.cloudflareToken ? existing.cloudflareToken : "";
+    const write = effectiveWriteMode(next.mode, next.write);
+    const tunnelName = next.tunnel === "cloudflare-named" ? next.tunnelName : "";
+    const ngrokConfig = next.tunnel === "ngrok" ? normalizeProfilePath(config.defaultRoot, next.ngrokConfig) : "";
+    const cloudflareConfig = next.tunnel === "cloudflare-named" ? normalizeProfilePath(config.defaultRoot, next.cloudflareConfig) : "";
+    const cloudflareTokenFile = next.tunnel === "cloudflare-named" ? normalizeProfilePath(config.defaultRoot, next.cloudflareTokenFile) : "";
+    return {
+        port: next.port,
+        mode: next.mode,
+        tunnel: next.tunnel,
+        ...(next.hostname ? { hostname: next.hostname } : {}),
+        ...(tunnelName ? { tunnelName } : {}),
+        ...(ngrokConfig ? { ngrokConfig } : {}),
+        ...(cloudflareConfig ? { cloudflareConfig } : {}),
+        ...(cloudflareTokenFile ? { cloudflareTokenFile } : {}),
+        ...(token ? { token } : {}),
+        ...(cloudflareToken ? { cloudflareToken } : {}),
+        bash: next.bash,
+        ...(next.bashTranscript !== "compact" ? { bashTranscript: next.bashTranscript } : {}),
+        ...(next.codexSessions !== "off" ? { codexSessions: next.codexSessions } : {}),
+        ...(next.codexDir ? { codexDir: next.codexDir } : {}),
+        ...(next.bashSession ? { bashSession: next.bashSession } : {}),
+        ...(next.requireBashSession ? { requireBashSession: true } : {}),
+        write,
+        toolMode: next.toolMode,
+        toolCards: next.toolCards,
+        ...(next.widgetDomain ? { widgetDomain: next.widgetDomain } : {}),
+        ...(existing.allowedRoots?.length ? { allowedRoots: existing.allowedRoots } : {}),
+        ...(next.noInstallCloudflared ? { noInstallCloudflared: true } : {})
+    };
+}
+function profileResponse(config) {
+    const profile = readWorkspaceProfile(config.defaultRoot);
+    const runtime = readRuntimeConnection(config.defaultRoot);
+    return redactStructured({
+        ok: true,
+        profile_path: profile.profilePath ?? profilePathForRoot(config.defaultRoot),
+        exists: Boolean(profile.profilePath),
+        profile: sanitizeWorkspaceProfile(profile),
+        effective: profileValues(config, profile),
+        runtime_connection: runtime,
+        runtime: {
+            defaultRoot: config.defaultRoot,
+            port: config.port,
+            bashMode: config.bashMode,
+            bashTranscript: config.bashTranscript,
+            codexSessions: config.codexSessions,
+            writeMode: config.writeMode,
+            toolMode: config.toolMode,
+            toolCards: config.toolCards,
+            widgetDomain: config.widgetDomain,
+            authEnabled: Boolean(config.authToken)
+        }
+    });
+}
+function jsonError(res, status, code, message, issues) {
+    res.status(status).json({
+        ok: false,
+        error: { code, message, ...(issues ? { issues } : {}) }
+    });
+}
+const LOCAL_FAVICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="16" fill="#2563eb"/>
+  <rect x="8" y="8" width="48" height="48" rx="12" fill="#ffffff" fill-opacity=".12" stroke="#ffffff" stroke-opacity=".38"/>
+  <path d="M38.4 40.3c-1.8 1.1-3.9 1.7-6.3 1.7-6.1 0-10.3-4.2-10.3-10s4.2-10 10.4-10c2.4 0 4.5.6 6.2 1.7l-2.1 4.1c-1.1-.7-2.3-1-3.8-1-2.9 0-4.9 2.1-4.9 5.2s2 5.2 4.9 5.2c1.5 0 2.8-.4 3.9-1.1l2 4.2Z" fill="#ffffff"/>
+</svg>`;
+const CODEXPRO_VERSION = "0.29.12";
+function printHelp() {
+    console.log(`CodexPro MCP HTTP server
+
+Usage:
+  codexpro-mcp-http --root /path/to/repo --port 8787
+  codexpro-mcp-http --version
+  codexpro-mcp-http --help
+
+Set CODEXPRO_HTTP_TOKEN for public/tunnel use.
+For trusted local-only testing, set CODEXPRO_ALLOW_NO_HTTP_TOKEN=1.
+Most users should run: codexpro start`);
+}
+function onboardingPage(config) {
+    const localMcp = `http://${config.host}:${config.port}/mcp`;
+    const localMcpDisplay = config.authToken ? `${localMcp}?codexpro_token=<redacted>` : localMcp;
+    const allowedRoots = config.allowedRoots.map((root) => `<li>${escapeHtml(root)}</li>`).join("");
+    const authLabel = config.authToken ? "Token protected" : "Disabled";
+    const writeTone = config.writeMode === "workspace" ? "agent" : config.writeMode;
+    const rootArg = shellQuote(config.defaultRoot);
+    const sessionArg = shellQuote(config.bashSessionId || "main");
+    const githubUrl = "https://github.com/rebel0789/codexpro";
+    const npmUrl = "https://www.npmjs.com/package/codexpro";
+    const docsUrl = "https://rebel0789.github.io/codexpro/";
+    const chatgptUrl = "https://chatgpt.com/#settings/Connectors";
+    const controls = [
+        copyCommand("Re-run setup wizard", "Use the CLI for broader profile edits that are intentionally not exposed here.", "codexpro setup"),
+        copyCommand("Copy local MCP URL", "Useful for a local MCP client. ChatGPT usually needs the public tunnel URL copied by the terminal.", localMcp, localMcpDisplay, "local-mcp"),
+        copyCommand("Start without bash", "Restart with file tools but no ChatGPT-triggered bash tool.", `codexpro start --root ${rootArg} --no-bash`),
+        copyCommand("Require explicit bash target", "Restart so bash calls must include this matching session_id.", `codexpro start --root ${rootArg} --bash-session ${sessionArg} --require-bash-session`),
+        copyCommand("Show Codex session list", "Restart with read-only local Codex session metadata in full tool mode.", `codexpro start --root ${rootArg} --tool-mode full --codex-sessions metadata`),
+        copyCommand("Read Codex transcripts", "Restart with bounded local transcript reads from Codex JSONL history.", `codexpro start --root ${rootArg} --tool-mode full --codex-sessions read`),
+        copyCommand("Use full bash transcript", "Restart with the raw stdout/stderr transcript instead of compact tool cards.", `codexpro start --root ${rootArg} --bash-transcript full`)
+    ].join("");
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="/favicon.ico">
+  <title>CodexPro Local Control - ChatGPT Workspace Agent</title>
+  <style>
+    /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 */
+    /* Hallmark · macrostructure: Workbench · genre: modern-minimal · theme: CC Switch-inspired light manager · tone: technical admin · nav: section switcher · footer: Ft2 · contrast: pass (40-41) · mobile: pass (34, 49, 50-57) */
+    :root {
+      color-scheme: light;
+      --font-display: "Geist", "Aptos", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-body: "Geist", "Aptos", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: "Fira Code", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --color-paper: oklch(98.5% 0.004 250);
+      --color-surface: oklch(100% 0 0);
+      --color-panel: oklch(100% 0 0);
+      --color-panel-2: oklch(96.5% 0.008 252);
+      --color-row: oklch(99.2% 0.004 250);
+      --color-rule: oklch(88% 0.012 250);
+      --color-rule-strong: oklch(78% 0.018 250);
+      --color-ink: oklch(23% 0.026 255);
+      --color-soft: oklch(39% 0.026 255);
+      --color-muted: oklch(53% 0.022 255);
+      --color-subtle: oklch(64% 0.018 255);
+      --color-accent: oklch(58% 0.19 256);
+      --color-accent-strong: oklch(50% 0.22 256);
+      --color-accent-ink: oklch(99% 0.004 250);
+      --color-action: var(--color-accent);
+      --color-action-strong: var(--color-accent-strong);
+      --color-good: oklch(56% 0.14 154);
+      --color-warn: oklch(54% 0.17 256);
+      --color-focus: oklch(61% 0.2 256);
+      --surface-accent: oklch(95% 0.036 256);
+      --surface-good: oklch(94.5% 0.035 154);
+      --surface-warn: oklch(95% 0.036 256);
+      --surface-hover: oklch(93.5% 0.025 256);
+      --shadow-panel: 0 18px 50px oklch(24% 0.03 255 / 0.10);
+      --shadow-row: 0 8px 18px oklch(24% 0.03 255 / 0.06);
+      --space-1: 0.25rem;
+      --space-2: 0.5rem;
+      --space-3: 0.75rem;
+      --space-4: 1rem;
+      --space-5: 1.25rem;
+      --space-6: 1.5rem;
+      --space-7: 2rem;
+      --space-8: 2.5rem;
+      --space-9: 3rem;
+      --radius-1: 6px;
+      --radius-2: 8px;
+      --dur-micro: 120ms;
+      --dur-short: 180ms;
+      --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+      --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+    }
+    * { box-sizing: border-box; }
+    html,
+    body {
+      overflow-x: clip;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--color-paper);
+      color: var(--color-ink);
+      font: 14px/1.55 var(--font-body);
+      letter-spacing: 0;
+    }
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+    main {
+      width: min(1240px, calc(100% - (var(--space-4) * 2)));
+      margin: 0 auto;
+      padding: var(--space-5) 0 var(--space-8);
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-4);
+      margin-bottom: var(--space-3);
+      padding: var(--space-2) 0 var(--space-3);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      min-width: 0;
+    }
+    .logo {
+      display: inline-grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      flex: 0 0 auto;
+      border: 1px solid var(--color-accent);
+      border-radius: 12px;
+      background: var(--color-accent);
+      color: var(--color-accent-ink);
+      box-shadow: var(--shadow-row);
+      font: 900 15px/1 var(--font-mono);
+    }
+    .logo img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      border-radius: inherit;
+    }
+    .brand-kicker {
+      display: block;
+      color: var(--color-muted);
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.1;
+      text-transform: uppercase;
+    }
+    .brand-title {
+      display: block;
+      overflow-wrap: anywhere;
+      color: var(--color-accent);
+      font: 900 28px/1 var(--font-display);
+    }
+    .quick-links {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+    }
+    .resource-link,
+    .action-link,
+    .copy-mini,
+    .primary {
+      min-height: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: var(--radius-2);
+      white-space: nowrap;
+      transition: background-color var(--dur-short) var(--ease-out),
+        border-color var(--dur-short) var(--ease-out),
+        color var(--dur-short) var(--ease-out),
+        transform var(--dur-micro) var(--ease-out);
+    }
+    .resource-link,
+    .action-link {
+      border: 1px solid var(--color-rule);
+      background: var(--color-surface);
+      color: var(--color-soft);
+      font-size: 12px;
+      font-weight: 800;
+      padding: 0 var(--space-3);
+      box-shadow: var(--shadow-row);
+    }
+    .action-link.primary-link {
+      border-color: var(--color-action);
+      background: var(--color-action);
+      color: var(--color-accent-ink);
+    }
+    .section-tabs {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-1);
+      flex-wrap: wrap;
+      margin: 0 0 var(--space-5);
+      padding: var(--space-1);
+      border: 1px solid var(--color-rule);
+      border-radius: 16px;
+      background: var(--color-surface);
+      box-shadow: var(--shadow-panel);
+    }
+    .section-tabs a {
+      min-height: 40px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 12px;
+      color: var(--color-muted);
+      font-size: 13px;
+      font-weight: 900;
+      white-space: nowrap;
+      padding: 0 var(--space-4);
+    }
+    .section-tabs a[aria-current="page"] {
+      background: var(--color-accent);
+      color: var(--color-accent-ink);
+      box-shadow: var(--shadow-row);
+    }
+    .overview {
+      display: grid;
+      grid-template-columns: minmax(0, 1.08fr) minmax(330px, 0.52fr);
+      gap: var(--space-5);
+      align-items: start;
+      margin-bottom: var(--space-5);
+    }
+    .intro-stack {
+      display: grid;
+      gap: var(--space-5);
+      min-width: 0;
+    }
+    .intro {
+      min-width: 0;
+      padding: var(--space-6);
+      border: 1px solid var(--color-rule);
+      border-radius: 18px;
+      background: var(--color-surface);
+      box-shadow: var(--shadow-panel);
+    }
+    h1 {
+      margin: 0;
+      max-width: 18ch;
+      font: 900 2rem/1.05 var(--font-display);
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+    }
+    .lead {
+      max-width: 64ch;
+      margin: var(--space-4) 0 0;
+      color: var(--color-soft);
+      font-size: 15px;
+    }
+    .scope-note {
+      margin-top: var(--space-5);
+      padding-top: var(--space-4);
+      border-top: 1px solid var(--color-rule);
+      color: var(--color-muted);
+      font-size: 13px;
+    }
+    .run-card,
+    .panel {
+      min-width: 0;
+      border: 1px solid var(--color-rule);
+      border-radius: 18px;
+      background: var(--color-panel);
+      box-shadow: var(--shadow-panel);
+    }
+    .run-card,
+    .panel {
+      padding: var(--space-5);
+    }
+    .run-card h2,
+    .panel h2 {
+      margin: 0;
+      color: var(--color-ink);
+      font: 700 16px/1.25 var(--font-display);
+      letter-spacing: 0;
+    }
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.08fr) minmax(310px, 0.58fr);
+      gap: var(--space-5);
+      align-items: start;
+    }
+    .side-stack {
+      display: grid;
+      gap: var(--space-5);
+    }
+    .section-head {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: var(--space-4);
+      margin-bottom: var(--space-4);
+    }
+    .section-head p,
+    .panel > p {
+      margin: var(--space-1) 0 0;
+      color: var(--color-muted);
+      font-size: 13px;
+    }
+    .status {
+      display: grid;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 132px minmax(0, 1fr);
+      gap: var(--space-3);
+      padding: var(--space-3) 0;
+      border-bottom: 1px solid var(--color-rule);
+    }
+    .row:last-child { border-bottom: 0; }
+    .label {
+      color: var(--color-subtle);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    code,
+    .mono {
+      font-family: var(--font-mono);
+      color: var(--color-soft);
+      overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums;
+    }
+    .pill {
+      display: inline-flex;
+      width: fit-content;
+      align-items: center;
+      min-height: 26px;
+      padding: 0 var(--space-2);
+      border: 1px solid var(--color-good);
+      border-radius: 999px;
+      background: var(--surface-good);
+      color: var(--color-good);
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap;
+    }
+    .warn {
+      border-color: var(--color-warn);
+      background: var(--surface-warn);
+      color: var(--color-warn);
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-3);
+    }
+    .control {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--space-3);
+      align-items: center;
+      min-width: 0;
+      min-height: 112px;
+      padding: var(--space-4);
+      border: 1px solid var(--color-rule);
+      border-radius: 18px;
+      background: var(--color-row);
+      box-shadow: var(--shadow-row);
+    }
+    .control strong {
+      display: block;
+      margin-bottom: var(--space-1);
+      color: var(--color-ink);
+      font-size: 13px;
+    }
+    .control p {
+      margin: 0 0 var(--space-2);
+      color: var(--color-muted);
+      font-size: 12px;
+    }
+    .control code {
+      display: block;
+      padding: var(--space-2);
+      border: 1px solid var(--color-rule);
+      border-radius: 10px;
+      background: var(--color-panel-2);
+      line-height: 1.45;
+    }
+    .steps {
+      display: grid;
+      gap: var(--space-3);
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .guide-list {
+      display: grid;
+      gap: var(--space-3);
+    }
+    .guide-item {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr);
+      gap: var(--space-3);
+      padding: var(--space-3);
+      border: 1px solid var(--color-rule);
+      border-radius: 14px;
+      background: var(--color-row);
+    }
+    .guide-item strong {
+      display: block;
+      color: var(--color-ink);
+      font-size: 13px;
+    }
+    .guide-item p {
+      margin: var(--space-1) 0 0;
+      color: var(--color-muted);
+      font-size: 12px;
+    }
+    .steps li {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr);
+      gap: var(--space-3);
+      align-items: start;
+      color: var(--color-soft);
+    }
+    .num {
+      display: inline-grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border: 1px solid var(--color-accent);
+      border-radius: 999px;
+      background: var(--color-accent);
+      color: var(--color-accent-ink);
+      font: 800 11px/1 var(--font-mono);
+    }
+    .roots {
+      margin: var(--space-3) 0 0;
+      padding-left: var(--space-5);
+      color: var(--color-muted);
+    }
+    .profile-form {
+      display: grid;
+      gap: var(--space-4);
+    }
+    .current-url {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: var(--space-3);
+      align-items: center;
+      min-width: 0;
+      padding: var(--space-4);
+      border: 1px solid var(--color-accent);
+      border-radius: 18px;
+      background: var(--surface-accent);
+    }
+    .current-url.idle {
+      border-color: var(--color-rule);
+      background: var(--color-row);
+    }
+    .current-url span,
+    .readonly-grid span {
+      display: block;
+      margin-bottom: var(--space-1);
+      color: var(--color-muted);
+      font-size: 11px;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    .current-url code {
+      display: block;
+      color: var(--color-ink);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .current-url p {
+      margin: var(--space-2) 0 0;
+      color: var(--color-soft);
+      font-size: 12px;
+    }
+    .profile-group {
+      min-width: 0;
+      margin: 0;
+      padding: var(--space-4);
+      border: 1px solid var(--color-rule);
+      border-radius: 18px;
+      background: var(--color-row);
+      box-shadow: var(--shadow-row);
+    }
+    .profile-group legend {
+      padding: 0 var(--space-2);
+      color: var(--color-ink);
+      font: 900 13px/1 var(--font-display);
+    }
+    .profile-group p {
+      margin: 0 0 var(--space-3);
+      color: var(--color-muted);
+      font-size: 12px;
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-3);
+    }
+    .profile-form label {
+      display: grid;
+      gap: var(--space-2);
+      color: var(--color-soft);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .profile-form label span {
+      color: var(--color-muted);
+      text-transform: uppercase;
+    }
+    .profile-form input,
+    .profile-form select {
+      width: 100%;
+      min-height: 44px;
+      border: 1px solid var(--color-rule);
+      border-radius: 12px;
+      outline: 2px solid transparent;
+      outline-offset: 1px;
+      background: var(--color-surface);
+      color: var(--color-ink);
+      font: 13px/1.25 var(--font-body);
+      padding: 0 var(--space-3);
+    }
+    .field-help {
+      min-height: 1lh;
+      margin: var(--space-3) 0 0 !important;
+      color: var(--color-soft) !important;
+      font-size: 12px !important;
+    }
+    .check-row {
+      width: fit-content;
+      display: inline-flex !important;
+      grid-template-columns: none !important;
+      align-items: center;
+      gap: var(--space-2) !important;
+      margin-top: var(--space-3);
+      padding: var(--space-2) var(--space-3);
+      border: 1px solid var(--color-rule);
+      border-radius: 999px;
+      background: var(--color-surface);
+      color: var(--color-soft);
+    }
+    .check-row input {
+      width: 18px;
+      min-height: 18px;
+      height: 18px;
+      padding: 0;
+      accent-color: var(--color-accent);
+    }
+    .check-row span {
+      color: var(--color-soft) !important;
+      text-transform: none !important;
+    }
+    .readonly-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-3);
+    }
+    .readonly-grid > div {
+      min-width: 0;
+      padding: var(--space-3);
+      border: 1px solid var(--color-rule);
+      border-radius: 14px;
+      background: var(--color-surface);
+    }
+    .readonly-grid code {
+      display: block;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      min-width: 0;
+      flex-wrap: wrap;
+    }
+    .primary {
+      border: 1px solid var(--color-accent);
+      background: var(--color-accent);
+      color: var(--color-accent-ink);
+      cursor: pointer;
+      font: 800 13px/1 var(--font-body);
+      padding: 0 var(--space-4);
+      box-shadow: var(--shadow-row);
+    }
+    .copy-mini {
+      border: 1px solid var(--color-action);
+      background: var(--color-action);
+      color: var(--color-accent-ink);
+      cursor: pointer;
+      font: 800 12px/1 var(--font-body);
+      padding: 0 var(--space-3);
+    }
+    .note {
+      min-height: 1lh;
+      margin: var(--space-1) 0 0;
+      color: var(--color-subtle);
+      font-size: 12px;
+    }
+    .scope-list {
+      display: grid;
+      gap: var(--space-2);
+      margin: var(--space-3) 0 0;
+      padding: 0;
+      list-style: none;
+    }
+    .scope-list li {
+      display: grid;
+      grid-template-columns: 112px minmax(0, 1fr);
+      gap: var(--space-3);
+      padding-block: var(--space-2);
+      border-bottom: 1px solid var(--color-rule);
+      color: var(--color-muted);
+    }
+    .scope-list li:last-child {
+      border-bottom: 0;
+    }
+    .scope-list strong {
+      color: var(--color-soft);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    .details-panel {
+      margin-top: var(--space-5);
+    }
+    details summary {
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-3);
+      cursor: pointer;
+      color: var(--color-ink);
+      font: 800 14px/1 var(--font-body);
+      list-style: none;
+    }
+    details summary::-webkit-details-marker {
+      display: none;
+    }
+    details summary::after {
+      content: "+";
+      color: var(--color-accent);
+      font: 800 18px/1 var(--font-mono);
+    }
+    details[open] summary {
+      margin-bottom: var(--space-4);
+    }
+    details[open] summary::after {
+      content: "-";
+    }
+    .foot {
+      margin-top: var(--space-6);
+      padding-top: var(--space-4);
+      border-top: 1px solid var(--color-rule);
+      color: var(--color-subtle);
+      font-size: 12px;
+    }
+    :focus {
+      outline: none;
+    }
+    :focus-visible {
+      outline: 2px solid var(--color-focus);
+      outline-offset: 2px;
+    }
+    .profile-form input:focus-visible,
+    .profile-form select:focus-visible {
+      outline: 2px solid var(--color-focus);
+      outline-offset: 1px;
+    }
+    .resource-link:active,
+    .action-link:active,
+    .copy-mini:active,
+    .primary:active {
+      transform: translateY(1px);
+    }
+    .resource-link[aria-disabled="true"],
+    .action-link[aria-disabled="true"],
+    .copy-mini:disabled,
+    .primary:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      .resource-link:hover,
+      .action-link:hover,
+      .copy-mini:hover,
+      .primary:hover {
+        border-color: var(--color-accent);
+        background: var(--surface-hover);
+        color: var(--color-accent-strong);
+        transform: translateY(-1px);
+      }
+      .action-link.primary-link:hover,
+      .copy-mini:hover,
+      .primary:hover {
+        border-color: var(--color-action-strong);
+        background: var(--color-action-strong);
+        color: var(--color-accent-ink);
+      }
+      .section-tabs a:hover {
+        background: var(--surface-hover);
+        color: var(--color-accent-strong);
+      }
+      .profile-form input:hover,
+      .profile-form select:hover {
+        border-color: var(--color-rule-strong);
+        background: var(--color-panel-2);
+      }
+    }
+    @media (min-width: 52rem) {
+      h1 {
+        font-size: 2.45rem;
+      }
+    }
+    @media (max-width: 58rem) {
+      .overview,
+      .workspace-grid {
+        grid-template-columns: 1fr;
+      }
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .quick-links {
+        justify-content: flex-start;
+      }
+      .section-tabs {
+        justify-content: flex-start;
+      }
+    }
+    @media (max-width: 42rem) {
+      main {
+        width: min(100% - (var(--space-3) * 2), 1180px);
+        padding-block: var(--space-4) var(--space-7);
+      }
+      .intro,
+      .run-card,
+      .panel {
+        padding: var(--space-4);
+      }
+      .section-head {
+        align-items: start;
+        flex-direction: column;
+      }
+      h1 {
+        font-size: 1.85rem;
+      }
+      .row,
+      .scope-list li {
+        grid-template-columns: 1fr;
+        gap: var(--space-1);
+      }
+      .controls,
+      .form-grid {
+        grid-template-columns: 1fr;
+      }
+      .control {
+        grid-template-columns: 1fr;
+      }
+      .current-url,
+      .readonly-grid {
+        grid-template-columns: 1fr;
+      }
+      .actions {
+        align-items: stretch;
+        flex-direction: column;
+      }
+      .primary {
+        width: 100%;
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation-duration: 150ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 150ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"><img src="/favicon.ico" alt=""></span>
+        <span>
+          <span class="brand-kicker">Workspace control</span>
+          <span class="brand-title">CodexPro</span>
+        </span>
+      </div>
+      <nav class="quick-links" aria-label="CodexPro resources">
+        <a class="action-link primary-link" href="${chatgptUrl}" target="_blank" rel="noreferrer">Open ChatGPT settings</a>
+        <a class="resource-link" href="${githubUrl}" target="_blank" rel="noreferrer">Open GitHub</a>
+        <a class="resource-link" href="${npmUrl}" target="_blank" rel="noreferrer">NPM</a>
+        <a class="resource-link" href="${docsUrl}" target="_blank" rel="noreferrer">Docs</a>
+      </nav>
+    </header>
+    <nav class="section-tabs" aria-label="Admin sections">
+      <a href="#profile" aria-current="page">Profile</a>
+      <a href="#status">Status</a>
+      <a href="#connect">ChatGPT</a>
+      <a href="#access">Access</a>
+      <a href="#cli">CLI</a>
+    </nav>
+    <section class="overview">
+      ${profileForm(config)}
+      <aside class="side-stack">
+        <section class="panel guide-panel" id="guide">
+          <div class="section-head">
+            <div>
+              <h2>Quick path</h2>
+              <p>Use ChatGPT like a coding agent for this workspace without widening the local trust boundary.</p>
+            </div>
+          </div>
+          <div class="guide-list">
+            <div class="guide-item"><span class="num">1</span><span><strong>Review the profile</strong><p>Choose the tunnel, port, mode, bash, write, tool, Codex session, and workspace defaults for the next launch.</p></span></div>
+            <div class="guide-item"><span class="num">2</span><span><strong>Copy the Server URL</strong><p>Use the current public URL shown in the profile when available, or the one printed by the terminal after launch.</p></span></div>
+            <div class="guide-item"><span class="num">3</span><span><strong>Create a personal ChatGPT app</strong><p>Choose Server URL, paste the copied URL, and use no extra authentication. This private URL is for one user's connector, not a shared deployment.</p></span></div>
+            <div class="guide-item"><span class="num">4</span><span><strong>Restart for policy changes</strong><p>Saved profile changes apply when CodexPro starts again. The live server does not mutate under an active ChatGPT session.</p></span></div>
+          </div>
+        </section>
+        <article class="run-card" id="status" aria-label="Current runtime">
+          <h2>Runtime guardrails</h2>
+          <div class="status">
+            <div class="row"><span class="label">Workspace</span><span class="mono">${escapeHtml(config.defaultRoot)}</span></div>
+            <div class="row"><span class="label">Local MCP</span><span class="mono">${escapeHtml(localMcp)}</span></div>
+            <div class="row"><span class="label">Write mode</span><span class="pill ${config.writeMode === "workspace" ? "" : "warn"}">${escapeHtml(writeTone)}</span></div>
+            <div class="row"><span class="label">Tool mode</span><span class="pill ${config.toolMode === "standard" ? "" : "warn"}">${escapeHtml(config.toolMode)}</span></div>
+            <div class="row"><span class="label">Bash mode</span><span class="pill ${config.bashMode === "safe" ? "" : "warn"}">${escapeHtml(config.bashMode)}</span></div>
+            <div class="row"><span class="label">Transcript</span><span class="pill ${config.bashTranscript === "compact" ? "" : "warn"}">${escapeHtml(config.bashTranscript)}</span></div>
+            <div class="row"><span class="label">Bash session</span><span class="pill ${config.requireBashSession ? "warn" : ""}">${escapeHtml(config.bashSessionId ? `${config.bashSessionId}${config.requireBashSession ? " required" : ""}` : "not set")}</span></div>
+            <div class="row"><span class="label">Codex sessions</span><span class="pill ${config.codexSessions === "off" ? "" : "warn"}">${escapeHtml(config.codexSessions)}</span></div>
+            <div class="row"><span class="label">Widget domain</span><span class="mono">${escapeHtml(config.widgetDomain)}</span></div>
+            <div class="row"><span class="label">Auth</span><span class="pill">${escapeHtml(authLabel)}</span></div>
+          </div>
+        </article>
+      </aside>
+    </section>
+    <section class="workspace-grid">
+      <section class="panel" id="connect">
+        <div class="section-head">
+          <div>
+          <h2>Connect ChatGPT</h2>
+            <p>Create an app connection that points at the public Server URL copied by the terminal.</p>
+          </div>
+        </div>
+        <ol class="steps">
+          <li><span class="num">1</span><span>Open ChatGPT settings and create an app connection.</span></li>
+          <li><span class="num">2</span><span>Set Connection to <code>Server URL</code>.</span></li>
+          <li><span class="num">3</span><span>Paste the public CodexPro URL from the terminal.</span></li>
+          <li><span class="num">4</span><span>For a personal connector, use <code>No Authentication / None</code>; the private token is already in the copied URL. Shared production access requires OAuth or an Authorization header.</span></li>
+        </ol>
+        <p class="note"><a class="action-link" href="${chatgptUrl}" target="_blank" rel="noreferrer">Open ChatGPT settings</a></p>
+      </section>
+      <aside class="side-stack">
+        <section class="panel" id="access">
+          <h2>Admin boundary</h2>
+          <ul class="scope-list">
+            <li><strong>/setup</strong><span>this setup and settings page</span></li>
+            <li><strong>/admin/profile</strong><span>saved workspace profile API</span></li>
+            <li><strong>/healthz</strong><span>authenticated status check</span></li>
+            <li><strong>/mcp</strong><span>MCP endpoint for ChatGPT and local clients</span></li>
+          </ul>
+        </section>
+      </aside>
+    </section>
+    <section class="panel cli-panel details-panel" id="cli">
+      <div class="section-head">
+        <div>
+          <h2>CLI controls</h2>
+          <p>Copy these when you need to restart with a different runtime policy. They do not mutate the running process from the browser.</p>
+        </div>
+      </div>
+      <div class="controls">${controls}</div>
+    </section>
+    <details class="panel details-panel">
+      <summary>Allowed roots</summary>
+      <ul class="roots">${allowedRoots}</ul>
+      <p class="note">CodexPro rejects workspace access outside these roots.</p>
+    </details>
+    <footer class="foot">Token-protected local control surface for this workspace. Public sharing still happens only through your chosen tunnel.</footer>
+  </main>
+  <script>
+    const initialUrl = new URL(window.location.href);
+    const connectorToken = initialUrl.searchParams.get("codexpro_token") || initialUrl.searchParams.get("token") || "";
+    if (connectorToken) {
+      initialUrl.searchParams.delete("codexpro_token");
+      initialUrl.searchParams.delete("token");
+      const cleanSearch = initialUrl.searchParams.toString();
+      history.replaceState(null, "", initialUrl.pathname + (cleanSearch ? "?" + cleanSearch : "") + initialUrl.hash);
+    }
+    document.querySelectorAll("[data-copy], [data-copy-kind]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        let value = button.getAttribute("data-copy") || "";
+        if (button.getAttribute("data-copy-kind") === "local-mcp") {
+          const base = button.getAttribute("data-copy-base") || value;
+          value = connectorToken ? base + "?codexpro_token=" + encodeURIComponent(connectorToken) : base;
+        } else if (button.getAttribute("data-copy-kind") === "server-url") {
+          const base = button.getAttribute("data-copy-base") || value;
+          value = connectorToken ? base + "?codexpro_token=" + encodeURIComponent(connectorToken) : base;
+        }
+        try {
+          await navigator.clipboard.writeText(value);
+          button.textContent = "Copied";
+          setTimeout(() => { button.textContent = "Copy"; }, 1400);
+        } catch {
+          button.textContent = "Select";
+        }
+      });
+    });
+    const profileForm = document.querySelector("[data-profile-form]");
+    const tunnelSelect = document.querySelector("[data-tunnel-select]");
+    const hostnameInput = document.querySelector("[data-hostname-input]");
+    const hostnameHelp = document.querySelector("[data-hostname-help]");
+    const tokenEnabled = ${config.authToken ? "true" : "false"};
+    function serverPreviewFor(hostname) {
+      const clean = String(hostname || "").trim().replace(/^https?:\\/\\//, "").replace(/\\/mcp\\/?$/, "").replace(/\\/+$/, "");
+      if (!clean) return "";
+      return "https://" + clean + "/mcp" + (tokenEnabled ? "?codexpro_token=<redacted>" : "");
+    }
+    function updateTunnelHelp() {
+      if (!tunnelSelect || !hostnameInput || !hostnameHelp) return;
+      const tunnel = tunnelSelect.value;
+      const ngrokHost = tunnelSelect.getAttribute("data-ngrok-hostname") || "";
+      const cloudflareHost = tunnelSelect.getAttribute("data-cloudflare-hostname") || "";
+      if (tunnel === "ngrok" && !hostnameInput.value && ngrokHost) {
+        hostnameInput.value = ngrokHost;
+        hostnameInput.setAttribute("data-autofilled", "1");
+      }
+      if (tunnel === "cloudflare-named" && !hostnameInput.value && cloudflareHost) {
+        hostnameInput.value = cloudflareHost;
+        hostnameInput.setAttribute("data-autofilled", "1");
+      }
+      if ((tunnel === "cloudflare" || tunnel === "none") && hostnameInput.getAttribute("data-autofilled") === "1") {
+        hostnameInput.value = "";
+        hostnameInput.setAttribute("data-autofilled", "0");
+      }
+      const preview = serverPreviewFor(hostnameInput.value);
+      if (tunnel === "cloudflare") {
+        hostnameHelp.textContent = "Cloudflare quick tunnel generates the public URL at launch and this page shows it when the launcher reports it.";
+      } else if (tunnel === "ngrok") {
+        hostnameHelp.textContent = preview ? "Next Server URL preview: " + preview : "Enter the reserved ngrok domain from your local ngrok setup.";
+      } else if (tunnel === "cloudflare-named") {
+        hostnameHelp.textContent = preview ? "Next Server URL preview: " + preview : "Enter the hostname routed to your Cloudflare named tunnel.";
+      } else if (tunnel === "tailscale") {
+        hostnameHelp.textContent = preview ? "Next Server URL preview: " + preview : "Enter the Tailscale Funnel hostname for this device.";
+      } else {
+        hostnameHelp.textContent = "Local-only mode does not expose a public ChatGPT Server URL.";
+      }
+    }
+    tunnelSelect?.addEventListener("change", updateTunnelHelp);
+    hostnameInput?.addEventListener("input", () => {
+      hostnameInput.setAttribute("data-autofilled", "0");
+      updateTunnelHelp();
+    });
+    updateTunnelHelp();
+    if (profileForm) {
+      profileForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const status = document.querySelector("[data-profile-status]");
+        const data = Object.fromEntries(new FormData(form).entries());
+        const payload = {
+          tunnel: data.tunnel,
+          hostname: data.hostname,
+          tunnelName: data.tunnelName,
+          ngrokConfig: data.ngrokConfig,
+          cloudflareConfig: data.cloudflareConfig,
+          cloudflareTokenFile: data.cloudflareTokenFile,
+          port: Number(data.port),
+          mode: data.mode,
+          bash: data.bash,
+          write: data.write,
+          toolMode: data.toolMode,
+          toolCards: Boolean(form.elements.toolCards?.checked),
+          codexSessions: data.codexSessions,
+          codexDir: data.codexDir,
+          bashSession: data.bashSession,
+          requireBashSession: Boolean(form.elements.requireBashSession?.checked),
+          noInstallCloudflared: Boolean(form.elements.noInstallCloudflared?.checked)
+        };
+        if (status) status.textContent = "Saving...";
+        try {
+          const response = await fetch("/admin/profile" + window.location.search, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(result.error?.message || "Save failed");
+          if (status) status.textContent = "Saved. Restart CodexPro for these profile settings to apply.";
+        } catch (error) {
+          if (status) status.textContent = error instanceof Error ? error.message : "Save failed";
+        }
+      });
+    }
+  </script>
+</body>
+</html>`;
+}
+async function main() {
+    const argv = process.argv.slice(2);
+    if (argv.includes("--version") || argv.includes("-v") || argv[0] === "version") {
+        console.log(CODEXPRO_VERSION);
+        return;
+    }
+    if (argv.includes("--help") || argv[0] === "help") {
+        printHelp();
+        return;
+    }
+    const config = loadConfig();
+    if (config.browserControl) {
+        ensureBrowserExtensionBridge({ connectorInfo: (profileId) => browserExtensionConnectorInfo(config, profileId) });
+    }
+    if (config.requireHttpToken && !config.authToken) {
+        throw new Error("CODEXPRO_HTTP_TOKEN is required for this HTTP binding. " +
+            "Set CODEXPRO_HTTP_TOKEN, use `codexpro start` to generate one, " +
+            "or set CODEXPRO_ALLOW_NO_HTTP_TOKEN=1 only for a trusted local-only setup.");
+    }
+    const app = express();
+    const logRequests = process.env.CODEXPRO_LOG_REQUESTS === "1";
+    const mcpRequestDiagnostics = new WeakMap();
+    const authFailureWindow = new Map();
+    const authFailureLimit = 10;
+    const runtimeEventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+    runtimeEventLoopDelay.enable();
+    let runtimeEventLoopPeakMs = 0;
+    let runtimeEventLoopMeanMs = 0;
+    const runtimeEventLoopSampleTimer = setInterval(() => {
+        runtimeEventLoopPeakMs = Number((Math.max(0, Number(runtimeEventLoopDelay.max) || 0) / 1_000_000).toFixed(2));
+        runtimeEventLoopMeanMs = Number((Math.max(0, Number(runtimeEventLoopDelay.mean) || 0) / 1_000_000).toFixed(2));
+        runtimeEventLoopDelay.reset();
+    }, 2_000);
+    runtimeEventLoopSampleTimer.unref();
+    let activeRequestCount = 0;
+    app.use((_req, res, next) => {
+        activeRequestCount += 1;
+        let released = false;
+        const release = () => {
+            if (released)
+                return;
+            released = true;
+            activeRequestCount = Math.max(0, activeRequestCount - 1);
+        };
+        res.once("finish", release);
+        res.once("close", release);
+        next();
+    });
+    app.use("/mcp", (req, res, next) => {
+        const sessionId = requestSessionId(req);
+        const profileId = safeMcpLabel(req.query.codexpro_profile, WORKER_PROFILE_ID_PATTERN, 160, [config.authToken, sessionId]);
+        mcpRequestDiagnostics.set(req, {
+            isInitializeRequest: false,
+            sessionIdPresent: Boolean(sessionId),
+            sessionIdHash: sessionId ? createHash("sha256").update(sessionId).digest("hex").slice(0, 12) : "",
+            sessionLookupResult: sessionId ? !sessionIdPattern.test(sessionId) ? "malformed" : transports.has(sessionId) ? "found" : "missing" : "none",
+            mcpErrorCode: "",
+            clientName: "",
+            profileId,
+            requestId: "",
+            method: "",
+            toolName: "",
+            initializedSessionHash: ""
+        });
+        recordMcpBoundaryEvent("MCP_REQUEST_RECEIVED", req, res);
+        let logged = false;
+        const logRequest = (finished) => {
+            if (logged)
+                return;
+            logged = true;
+            recordMcpBoundaryEvent("MCP_REQUEST", req, res, { http_status: res.headersSent ? res.statusCode : 0 });
+            const initializedSessionHash = mcpRequestDiagnostics.get(req)?.initializedSessionHash;
+            if (finished && initializedSessionHash) {
+                recordMcpBoundaryEvent("MCP_SESSION_INITIALIZED", req, res, {
+                    session_id_hash: initializedSessionHash,
+                    session_lookup_result: "found"
+                });
+            }
+        };
+        res.once("finish", () => logRequest(true));
+        res.once("close", () => logRequest(false));
+        next();
+    });
+    function tokenMatches(value) {
+        if (!config.authToken || typeof value !== "string")
+            return false;
+        const expected = Buffer.from(config.authToken);
+        const actual = Buffer.from(value);
+        return expected.length === actual.length && timingSafeEqual(expected, actual);
+    }
+    const adminRateWindow = new Map();
+    function adminRateLimit(req, res, next) {
+        const now = Date.now();
+        const key = req.ip || req.socket.remoteAddress || "local";
+        const current = adminRateWindow.get(key);
+        if (!current || current.resetAt <= now) {
+            adminRateWindow.set(key, { count: 1, resetAt: now + 60_000 });
+            next();
+            return;
+        }
+        current.count += 1;
+        if (current.count > 30) {
+            jsonError(res, 429, "rate_limited", "Too many profile save attempts. Try again in a minute.");
+            return;
+        }
+        next();
+    }
+    function adminBodyLimit(req, res, next) {
+        const length = Number(req.headers["content-length"] ?? 0);
+        if (Number.isFinite(length) && length > 32_768) {
+            jsonError(res, 413, "payload_too_large", "Profile request body is too large.");
+            return;
+        }
+        next();
+    }
+    app.use((req, res, next) => {
+        if (!logRequests) {
+            next();
+            return;
+        }
+        const started = Date.now();
+        console.error(`[CodexPro] ${req.method} ${req.path} received`);
+        res.on("finish", () => {
+            console.error(`[CodexPro] ${req.method} ${req.path} -> ${res.statusCode} ${Date.now() - started}ms`);
+        });
+        next();
+    });
+    app.use(cors({ exposedHeaders: ["Mcp-Session-Id"] }));
+    app.get("/favicon.ico", (_req, res) => {
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        res.type("image/svg+xml").send(LOCAL_FAVICON);
+    });
+    app.use((_req, res, next) => {
+        res.setHeader("Cache-Control", "no-store");
+        res.setHeader("Pragma", "no-cache");
+        res.setHeader("Referrer-Policy", "no-referrer");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        next();
+    });
+    app.use((req, res, next) => {
+        if (!config.authToken) {
+            next();
+            return;
+        }
+        const bearer = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+        const queryToken = typeof req.query.codexpro_token === "string"
+            ? req.query.codexpro_token
+            : typeof req.query.token === "string"
+                ? req.query.token
+                : undefined;
+        if (tokenMatches(bearer) || tokenMatches(queryToken)) {
+            next();
+            return;
+        }
+        const now = Date.now();
+        const key = req.ip || req.socket.remoteAddress || "local";
+        const current = authFailureWindow.get(key);
+        if (!current || current.resetAt <= now) {
+            authFailureWindow.set(key, { count: 1, resetAt: now + 60_000 });
+            res.status(401).send("Unauthorized");
+            return;
+        }
+        current.count += 1;
+        if (authFailureWindow.size > 4096) {
+            for (const [candidate, record] of authFailureWindow) {
+                if (record.resetAt <= now)
+                    authFailureWindow.delete(candidate);
+            }
+        }
+        if (current.count > authFailureLimit) {
+            res.setHeader("Retry-After", String(Math.max(1, Math.ceil((current.resetAt - now) / 1000))));
+            res.status(429).send("Too Many Authentication Attempts");
+            return;
+        }
+        res.status(401).send("Unauthorized");
+    });
+    const transports = new Map();
+    const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    function safeMcpLabel(value, pattern, maxLength, forbidden = []) {
+        if (typeof value !== "string" || value.length > maxLength || !pattern.test(value))
+            return "";
+        if (forbidden.some((secret) => secret && value.includes(secret)))
+            return "";
+        return value;
+    }
+    function recordMcpBoundaryEvent(event, req, res, overrides = {}) {
+        const diagnostic = mcpRequestDiagnostics.get(req);
+        if (!diagnostic)
+            return;
+        recordBrowserProfileTaskEvent(event, {
+            timestamp: new Date().toISOString(),
+            runtime_started_at: RUNTIME_STARTED_AT,
+            runtime_build_id: RUNTIME_BUILD_ID,
+            runtime_pid: process.pid,
+            http_method: req.method,
+            is_initialize_request: diagnostic.isInitializeRequest,
+            session_id_present: diagnostic.sessionIdPresent,
+            session_id_hash: diagnostic.sessionIdHash,
+            session_lookup_result: diagnostic.sessionLookupResult,
+            http_status: res.headersSent ? res.statusCode : 0,
+            mcp_error_code: diagnostic.mcpErrorCode,
+            client_name: diagnostic.clientName,
+            profile_id: diagnostic.profileId,
+            request_id: diagnostic.requestId,
+            method: diagnostic.method,
+            tool_name: diagnostic.toolName,
+            ...overrides
+        });
+    }
+    function requestSessionId(req) {
+        const value = req.headers["mcp-session-id"];
+        return Array.isArray(value) ? value[0] : value;
+    }
+    function sendSessionError(req, res, sessionId) {
+        const missing = !sessionId;
+        const malformed = Boolean(sessionId && !sessionIdPattern.test(sessionId));
+        const diagnostic = mcpRequestDiagnostics.get(req);
+        if (diagnostic) {
+            diagnostic.sessionLookupResult = missing ? "none" : malformed ? "malformed" : "missing";
+            diagnostic.mcpErrorCode = missing || malformed ? -32000 : -32001;
+        }
+        recordMcpBoundaryEvent(missing ? "MCP_SESSION_MISSING_HEADER" : malformed ? "MCP_SESSION_MALFORMED" : "MCP_SESSION_NOT_FOUND", req, res, {
+            http_status: missing || malformed ? 400 : 404,
+            mcp_error_code: missing || malformed ? -32000 : -32001
+        });
+        res.status(missing || malformed ? 400 : 404).json({
+            jsonrpc: "2.0",
+            error: missing
+                ? { code: -32000, message: "Bad Request: Mcp-Session-Id header is required" }
+                : malformed
+                    ? { code: -32000, message: "Bad Request: invalid MCP session id" }
+                    : { code: -32001, message: "Session not found" },
+            id: null
+        });
+    }
+    function closeTransport(record) {
+        void record.transport.close?.();
+    }
+    function pruneTransports(preserveSessionId) {
+        const now = Date.now();
+        for (const [sessionId, record] of transports) {
+            if (sessionId !== preserveSessionId && record.activeRequests === 0 && now - record.lastSeenAt > config.httpSessionTtlMs) {
+                transports.delete(sessionId);
+                closeTransport(record);
+            }
+        }
+        while (transports.size > config.maxHttpSessions) {
+            const oldest = [...transports.entries()]
+                .filter(([sessionId, record]) => sessionId !== preserveSessionId && record.activeRequests === 0)
+                .sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt)[0];
+            if (!oldest)
+                break;
+            transports.delete(oldest[0]);
+            closeTransport(oldest[1]);
+        }
+    }
+    function getTransport(sessionId) {
+        if (!sessionId || !sessionIdPattern.test(sessionId))
+            return undefined;
+        pruneTransports(sessionId);
+        const record = transports.get(sessionId);
+        if (!record)
+            return undefined;
+        record.lastSeenAt = Date.now();
+        record.activeRequests += 1;
+        return record.transport;
+    }
+    function releaseTransport(sessionId) {
+        if (!sessionId)
+            return;
+        const record = transports.get(sessionId);
+        if (!record)
+            return;
+        record.activeRequests = Math.max(0, record.activeRequests - 1);
+        record.lastSeenAt = Date.now();
+        pruneTransports(sessionId);
+    }
+    function runtimeSelfMetrics() {
+        const memory = process.memoryUsage();
+        const cpu = process.cpuUsage();
+        let activeResourceCount = 0;
+        try {
+            activeResourceCount = process.getActiveResourcesInfo?.().length || 0;
+        }
+        catch { }
+        return {
+            pid: process.pid,
+            rss_bytes: Math.max(0, Number(memory.rss) || 0),
+            heap_used_bytes: Math.max(0, Number(memory.heapUsed) || 0),
+            heap_total_bytes: Math.max(0, Number(memory.heapTotal) || 0),
+            external_bytes: Math.max(0, Number(memory.external) || 0),
+            array_buffers_bytes: Math.max(0, Number(memory.arrayBuffers) || 0),
+            cpu_user_micros: Math.max(0, Number(cpu.user) || 0),
+            cpu_system_micros: Math.max(0, Number(cpu.system) || 0),
+            event_loop_delay_peak_ms: runtimeEventLoopPeakMs,
+            event_loop_delay_mean_ms: runtimeEventLoopMeanMs,
+            active_request_count: Math.max(0, activeRequestCount),
+            active_mcp_session_count: transports.size,
+            active_resource_count: Math.max(0, activeResourceCount)
+        };
+    }
+    const pruneTimer = setInterval(pruneTransports, Math.min(config.httpSessionTtlMs, 60_000));
+    pruneTimer.unref();
+    app.get("/", (_req, res) => {
+        res.type("html").send(onboardingPage(config));
+    });
+    app.get("/setup", (_req, res) => {
+        res.type("html").send(onboardingPage(config));
+    });
+    app.get("/healthz", (_req, res) => {
+        res.json({
+            ok: true,
+            name: "CodexPro",
+            runtimeStartedAt: RUNTIME_STARTED_AT,
+            runtimeBuildId: RUNTIME_BUILD_ID,
+            pid: process.pid,
+            runtimeMetrics: runtimeSelfMetrics(),
+            defaultRoot: config.defaultRoot,
+            allowedRoots: config.allowedRoots,
+            bashMode: config.bashMode,
+            bashTranscript: config.bashTranscript,
+            bashSessionId: config.bashSessionId ?? null,
+            requireBashSession: config.requireBashSession,
+            codexSessions: config.codexSessions,
+            writeMode: config.writeMode,
+            toolMode: config.toolMode,
+            widgetDomain: config.widgetDomain,
+            contextDir: config.contextDir,
+            authEnabled: Boolean(config.authToken),
+            authRequired: Boolean(config.authToken)
+        });
+    });
+    app.get("/browser-events", (req, res) => {
+        if (!config.browserControl) {
+            res.status(404).json({ error: "Browser control is disabled." });
+            return;
+        }
+        res.status(200);
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.flushHeaders?.();
+        const pendingStreamUpdates = new Map();
+        let streamFlushTimer;
+        let streamBackpressured = false;
+        let streamClosed = false;
+        const flushStreamUpdates = () => {
+            streamFlushTimer = undefined;
+            if (streamClosed || res.writableEnded || streamBackpressured || !pendingStreamUpdates.size)
+                return;
+            const updates = [...pendingStreamUpdates.values()];
+            pendingStreamUpdates.clear();
+            streamBackpressured = !res.write(`event: browser-stream\ndata: ${JSON.stringify({ type: "browser-stream", updates })}\n\n`);
+        };
+        const onStreamDrain = () => {
+            streamBackpressured = false;
+            flushStreamUpdates();
+        };
+        res.on("drain", onStreamDrain);
+        const queueStreamUpdates = (updates) => {
+            for (const update of updates) {
+                const key = `${String(update?.profile_id || "")}:${String(update?.tab_id || "")}`;
+                pendingStreamUpdates.set(key, update);
+            }
+            if (streamBackpressured || streamFlushTimer || !pendingStreamUpdates.size)
+                return;
+            streamFlushTimer = setTimeout(flushStreamUpdates, 50);
+            streamFlushTimer.unref?.();
+        };
+        const send = (profiles = listBrowserExtensionProfiles()) => {
+            if (res.writableEnded)
+                return;
+            const disabled_profile_ids = listDisabledBrowserExtensionProfileIds();
+            res.write(`event: browser-profiles\ndata: ${JSON.stringify({ checked_at: new Date().toISOString(), profiles, disabled_profile_ids })}\n\n`);
+        };
+        send();
+        const unsubscribe = subscribeBrowserExtensionProfiles(send);
+        const unsubscribeStreams = subscribeBrowserExtensionStreams((updates) => {
+            if (res.writableEnded || !updates.length)
+                return;
+            queueStreamUpdates(updates);
+        });
+        const heartbeat = setInterval(() => {
+            if (!res.writableEnded)
+                res.write(`: heartbeat ${Date.now()}\n\n`);
+        }, 15_000);
+        heartbeat.unref();
+        req.on("close", () => {
+            streamClosed = true;
+            if (streamFlushTimer)
+                clearTimeout(streamFlushTimer);
+            streamFlushTimer = undefined;
+            pendingStreamUpdates.clear();
+            res.off("drain", onStreamDrain);
+            clearInterval(heartbeat);
+            unsubscribe();
+            unsubscribeStreams();
+        });
+    });
+    app.get("/admin/profile", (_req, res) => {
+        res.json(profileResponse(config));
+    });
+    app.post("/admin/profile", adminRateLimit, adminBodyLimit, express.json({ limit: "32kb" }), (req, res) => {
+        const parsed = AdminProfilePatch.safeParse(req.body ?? {});
+        if (!parsed.success) {
+            jsonError(res, 400, "invalid_profile", "Invalid profile settings.", parsed.error.flatten());
+            return;
+        }
+        try {
+            const existing = readWorkspaceProfile(config.defaultRoot);
+            const payload = buildProfilePayload(config, existing, parsed.data);
+            const profilePath = saveWorkspaceProfile(config.defaultRoot, payload);
+            res.json({
+                ...profileResponse(config),
+                saved: true,
+                profile_path: profilePath,
+                message: "Saved. Restart CodexPro for these profile settings to apply."
+            });
+        }
+        catch (error) {
+            jsonError(res, 400, "invalid_profile", error instanceof Error ? error.message : String(error));
+        }
+    });
+    app.all("/admin/profile", (_req, res) => {
+        jsonError(res, 405, "method_not_allowed", "Use GET or POST for /admin/profile.");
+    });
+    app.post("/mcp", express.json({ limit: "20mb" }), async (req, res) => {
+        try {
+            const sessionId = requestSessionId(req);
+            const diagnostic = mcpRequestDiagnostics.get(req);
+            if (diagnostic) {
+                diagnostic.isInitializeRequest = isInitializeRequest(req.body);
+                diagnostic.requestId = typeof req.body?.id === "number" && Number.isSafeInteger(req.body.id)
+                    ? req.body.id
+                    : safeMcpLabel(req.body?.id, /^[A-Za-z0-9._:-]+$/, 80, [config.authToken, sessionId]);
+                diagnostic.method = safeMcpLabel(req.body?.method, /^[A-Za-z0-9/_-]+$/, 80, [config.authToken, sessionId]);
+                diagnostic.toolName = diagnostic.method === "tools/call"
+                    ? safeMcpLabel(req.body?.params?.name, /^[A-Za-z0-9_:-]+$/, 100, [config.authToken, sessionId])
+                    : "";
+                diagnostic.clientName = diagnostic.isInitializeRequest
+                    ? safeMcpLabel(req.body?.params?.clientInfo?.name, /^[\p{L}\p{N} ._():-]+$/u, 80, [config.authToken, sessionId])
+                    : "";
+            }
+            let transport;
+            let acquiredSessionId;
+            const existingTransport = getTransport(sessionId);
+            if (diagnostic && sessionId && sessionIdPattern.test(sessionId)) {
+                diagnostic.sessionLookupResult = existingTransport ? "found" : "missing";
+            }
+            if (existingTransport) {
+                transport = existingTransport;
+                acquiredSessionId = sessionId;
+            }
+            else if (!sessionId && isInitializeRequest(req.body)) {
+                transport = new StreamableHTTPServerTransport({
+                    sessionIdGenerator: () => randomUUID(),
+                    onsessioninitialized: (newSessionId) => {
+                        pruneTransports(newSessionId);
+                        transports.set(newSessionId, {
+                            transport,
+                            createdAt: Date.now(),
+                            lastSeenAt: Date.now(),
+                            activeRequests: 1
+                        });
+                        acquiredSessionId = newSessionId;
+                        pruneTransports(newSessionId);
+                        if (diagnostic)
+                            diagnostic.initializedSessionHash = createHash("sha256").update(newSessionId).digest("hex").slice(0, 12);
+                    }
+                });
+                transport.onclose = () => {
+                    const closedSessionId = transport.sessionId;
+                    if (closedSessionId)
+                        transports.delete(closedSessionId);
+                };
+                const browserProfileId = typeof req.query.codexpro_profile === "string" && WORKER_PROFILE_ID_PATTERN.test(req.query.codexpro_profile)
+                    ? req.query.codexpro_profile
+                    : "";
+                const pendingTask = browserProfileId ? getBrowserExtensionProfilePendingTask(browserProfileId) : undefined;
+                recordBrowserProfileTaskEvent("mcp_session_initialized", {
+                    profile_id: browserProfileId,
+                    profile_bound: Boolean(browserProfileId),
+                    client_name: diagnostic?.clientName || "",
+                    pending_task_id: pendingTask?.task_id,
+                    pending_task_scope: pendingTask?.scope,
+                    pending_task_age_ms: pendingTask?.age_ms
+                });
+                const server = createCodexProServer(config, { browserProfileId });
+                await server.connect(transport);
+            }
+            else {
+                sendSessionError(req, res, sessionId);
+                return;
+            }
+            try {
+                await transport.handleRequest(req, res, req.body);
+            }
+            finally {
+                releaseTransport(acquiredSessionId);
+            }
+        }
+        catch (error) {
+            console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+            if (!res.headersSent) {
+                const diagnostic = mcpRequestDiagnostics.get(req);
+                if (diagnostic)
+                    diagnostic.mcpErrorCode = -32603;
+                res.status(500).json({
+                    jsonrpc: "2.0",
+                    error: { code: -32603, message: "Internal CodexPro MCP error. Check the local terminal for details." },
+                    id: null
+                });
+            }
+        }
+    });
+    const handleSessionRequest = async (req, res) => {
+        const sessionId = requestSessionId(req);
+        const transport = getTransport(sessionId);
+        const diagnostic = mcpRequestDiagnostics.get(req);
+        if (diagnostic && sessionId && sessionIdPattern.test(sessionId)) {
+            diagnostic.sessionLookupResult = transport ? "found" : "missing";
+        }
+        if (!transport) {
+            sendSessionError(req, res, sessionId);
+            return;
+        }
+        try {
+            await transport.handleRequest(req, res);
+        }
+        finally {
+            releaseTransport(sessionId);
+        }
+    };
+    app.get("/mcp", handleSessionRequest);
+    app.delete("/mcp", handleSessionRequest);
+    app.use((error, req, res, next) => {
+        if (!error || typeof error !== "object" || !("type" in error)) {
+            next(error);
+            return;
+        }
+        const type = String(error.type ?? "");
+        if (type !== "entity.parse.failed" && type !== "entity.too.large") {
+            next(error);
+            return;
+        }
+        const status = type === "entity.too.large" ? 413 : 400;
+        if (req.path === "/mcp") {
+            const diagnostic = mcpRequestDiagnostics.get(req);
+            if (diagnostic)
+                diagnostic.mcpErrorCode = type === "entity.too.large" ? -32000 : -32700;
+            res.status(status).json({
+                jsonrpc: "2.0",
+                error: {
+                    code: type === "entity.too.large" ? -32000 : -32700,
+                    message: type === "entity.too.large" ? "Payload too large." : "Parse error."
+                },
+                id: null
+            });
+            return;
+        }
+        if (req.path === "/admin/profile") {
+            jsonError(res, status, type === "entity.too.large" ? "payload_too_large" : "invalid_json", type === "entity.too.large" ? "Request body is too large." : "Request body must be valid JSON.");
+            return;
+        }
+        next(error);
+    });
+    app.listen(config.port, config.host, () => {
+        console.error(`[CodexPro] HTTP MCP listening on http://${config.host}:${config.port}/mcp`);
+        console.error(`[CodexPro] defaultRoot=${config.defaultRoot}`);
+        console.error(`[CodexPro] allowedRoots=${config.allowedRoots.join(", ")}`);
+        console.error(`[CodexPro] bashMode=${config.bashMode}`);
+        console.error(`[CodexPro] writeMode=${config.writeMode}`);
+        console.error(`[CodexPro] widgetDomain=${config.widgetDomain}`);
+    });
+}
+main().catch((error) => {
+    console.error(error instanceof Error ? error.stack ?? error.message : String(error));
+    process.exit(1);
+});
+//# sourceMappingURL=http.js.map

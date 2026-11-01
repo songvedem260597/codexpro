@@ -1,4 +1,12 @@
-import { app, clipboard, dialog, nativeImage } from "electron";
+import { createRequire } from "node:module";
+import os from "node:os";
+const _require = createRequire(import.meta.url);
+let _electron = null;
+try { const mod = _require("electron"); if (mod && typeof mod === "object") _electron = mod; } catch {}
+const app = _electron?.app || { getPath: () => os.tmpdir() };
+const clipboard = _electron?.clipboard || {};
+const dialog = _electron?.dialog;
+const nativeImage = _electron?.nativeImage;
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -30,7 +38,10 @@ export function requestFileSummary(filePath) {
   let previewDataUrl = "";
   if (mimeType.startsWith("image/")) {
     try {
-      const image = nativeImage.createFromPath(resolved);
+      if (!nativeImage?.createFromPath && stat.size <= 512 * 1024) {
+        previewDataUrl = `data:${mimeType};base64,${fs.readFileSync(resolved).toString("base64")}`;
+      }
+      const image = nativeImage?.createFromPath ? nativeImage.createFromPath(resolved) : { isEmpty: () => true };
       if (!image.isEmpty()) {
         const { width, height } = image.getSize();
         const longest = Math.max(width, height, 1);

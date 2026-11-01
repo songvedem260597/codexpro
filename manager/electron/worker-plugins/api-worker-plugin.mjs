@@ -1,5 +1,6 @@
 import { runMcpAgentJob } from "../worker-core/mcp-agent-loop.mjs";
 import { resolveTaskWorkflow } from "../task-workflow-registry.mjs";
+import { CLOUD_CHAT_WORKER_ID, CLOUD_CHAT_MESSAGE_LIMIT } from "../worker-core/api-worker-chat-history.mjs";
 
 function clean(value, maxLength = 1000) {
   return String(value ?? "").trim().slice(0, maxLength);
@@ -38,7 +39,8 @@ function publicRun(state) {
     workflow_id: state.workflow?.id || "",
     workflow_version: state.workflow?.version || "",
     workflow_evidence: state.workflowEvidence,
-    events: state.events.slice(-50)
+    events: state.events.slice(-50),
+    ...(state.cloudChat ? { chat_history: state.history.slice(-CLOUD_CHAT_MESSAGE_LIMIT) } : {})
   };
 }
 
@@ -88,6 +90,10 @@ export function createApiWorkerPlugin(options = {}) {
       return configs.filter((config) => config?.enabled !== false).map((config) => {
         const id = localWorkerId(config?.id);
         const run = runs.get(id);
+        const saved = id === CLOUD_CHAT_WORKER_ID ? options.chatHistoryStore?.read(id) : null;
+        const messages = run?.cloudChat ? run.history : saved?.messages || [];
+        const latestUser = [...messages].reverse().find((entry) => entry.role === "user")?.content || "";
+        const latestAssistant = messages.at(-1)?.role === "assistant" ? messages.at(-1).content : "";
         return {
           local_worker_id: id,
           label: clean(config?.label || id, 160),
@@ -101,7 +107,8 @@ export function createApiWorkerPlugin(options = {}) {
           current_workspace_root: run?.activity === "working" ? run.root : "",
           run_id: run?.jobId || "",
           last_task_id: run?.jobId || "",
-          last_result: run?.result?.text || "",
+          last_result: run?.result?.text || latestAssistant,
+          ...(id === CLOUD_CHAT_WORKER_ID ? { chat_history: messages.slice(-CLOUD_CHAT_MESSAGE_LIMIT), last_request: run?.request || latestUser } : {}),
           stream_text: run?.streamText || "",
           stream_revision: run?.streamRevision || 0,
           stream_phase: run?.streamPhase || "idle",
@@ -128,7 +135,11 @@ export function createApiWorkerPlugin(options = {}) {
       const scope = payload.scope === "all_allowed" ? "all_allowed" : "workspace";
       const root = clean(payload.root, 2048);
       const sameWorkspace = Boolean(existing?.scope === scope && (scope === "all_allowed" || (existing?.root && root && existing.root.toLowerCase() === root.toLowerCase())));
-      const history = sameWorkspace && Array.isArray(existing?.history) ? existing.history.slice(-12) : [];
+      const cloudChat = workerConfigId === CLOUD_CHAT_WORKER_ID;
+      const stored = cloudChat ? options.chatHistoryStore?.read(workerConfigId, scope, root)?.messages || [] : [];
+      const history = sameWorkspace && Array.isArray(existing?.history)
+        ? existing.history.slice(cloudChat ? -CLOUD_CHAT_MESSAGE_LIMIT : -12)
+        : stored;
       const attachmentNames = Array.isArray(payload.attachment_names) ? payload.attachment_names.map((name) => clean(name, 260)).filter(Boolean) : [];
       const request = clean(payload.text || payload.request, 20_000) || `Đã gửi ${attachmentNames.length} file: ${attachmentNames.join(", ")}`;
       const workflow = resolveTaskWorkflow(payload.workflow, request);
@@ -138,7 +149,8 @@ export function createApiWorkerPlugin(options = {}) {
         scope,
         root,
         request,
-        history,
+        history: cloudChat ? [...history, { role: "user", content: request }].slice(-CLOUD_CHAT_MESSAGE_LIMIT) : history,
+        cloudChat,
         activity: "working",
         startedAt: new Date().toISOString(),
         finishedAt: "",
@@ -155,6 +167,10 @@ export function createApiWorkerPlugin(options = {}) {
         controller
       };
       runs.set(workerConfigId, state);
+      if (cloudChat) {
+        try { options.chatHistoryStore?.save(workerConfigId, scope, root, state.history); }
+        catch { /* History storage must not prevent task execution. */ }
+      }
       publish(workerConfigId, state);
       const workerId = `api:${workerConfigId}`;
       let clients;
@@ -187,7 +203,7 @@ export function createApiWorkerPlugin(options = {}) {
           workspaceCandidates: payload.workspaceCandidates || payload.workspace_candidates
         },
         request: payload.text || payload.request,
-        messages: [...history, ...(Array.isArray(payload.messages) ? payload.messages : [])],
+        messages: [...history, ...(Array.isArray(payload.messages) && payload.messages.length ? payload.messages : [{ role: "user", content: request }])],
         limits: payload.limits,
         signal: controller.signal,
         onPhase: (phase, details = {}) => updateStream(workerConfigId, state, {

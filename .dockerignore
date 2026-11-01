@@ -1,0 +1,14 @@
+.git
+.gitignore
+node_modules
+manager/node_modules
+manager/release
+manager/release-*
+release
+flora-desktop
+edit0-desktop
+chrome-extension
+docs
+.codexpro
+*.log
+*.tgz
