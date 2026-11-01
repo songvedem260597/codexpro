@@ -334,11 +334,13 @@ async function checkLocalMcpHealth() {
       signal: controller.signal
     });
     clearTimeout(timer);
-    if (!res.ok) return { ok: false, latencyMs: Date.now() - started, error: `HTTP ${res.status}` };
+    const latency = Date.now() - started;
+    if (!res.ok) return { ok: false, status: res.status, latency, latencyMs: latency, error: `HTTP ${res.status}` };
     const data = await res.json();
-    return { ok: Boolean(data?.ok), latencyMs: Date.now() - started, data };
+    return { ok: Boolean(data?.ok), status: res.status, latency, latencyMs: latency, data };
   } catch (error) {
-    return { ok: false, latencyMs: Date.now() - started, error: String(error?.message || error) };
+    const latency = Date.now() - started;
+    return { ok: false, status: 0, latency, latencyMs: latency, error: String(error?.message || error) };
   }
 }
 
@@ -386,7 +388,7 @@ async function ensureLocalMcpServer() {
   return await checkLocalMcpHealth();
 }
 
-async function collectWebRuntimeStatus() {
+async function collectWebRuntimeStatus(reqOrigin = "") {
   const local = await checkLocalMcpHealth();
   const workerStatus = await workerPluginRegistry.list({ browserProfiles: [] });
   let workerJobs = [];
@@ -399,8 +401,16 @@ async function collectWebRuntimeStatus() {
       if (Array.isArray(res?.jobs)) workerJobs = res.jobs;
     } catch {}
   }
-  const publicBase = PUBLIC_URL || `http://127.0.0.1:${WEB_PORT}`;
+  const publicBase = (PUBLIC_URL || reqOrigin || `http://127.0.0.1:${WEB_PORT}`).replace(/\/+$/, "");
+  let publicHostname = "";
+  try {
+    publicHostname = new URL(publicBase).hostname;
+  } catch {}
   const mcpLink = `${publicBase}/mcp?codexpro_token=${encodeURIComponent(mcpToken)}`;
+  const processes = [
+    { pid: process.pid, name: "node" },
+    ...(mcpChildProcess?.pid ? [{ pid: mcpChildProcess.pid, name: "node" }] : [])
+  ];
   return {
     checkedAt: new Date().toISOString(),
     task: {
@@ -409,21 +419,22 @@ async function collectWebRuntimeStatus() {
       state: local.ok ? "Running" : "Stopped",
       lastTaskResult: 0
     },
-    config: mcpRuntimeConfig,
+    config: {
+      ...mcpRuntimeConfig,
+      hostname: publicHostname
+    },
     local,
     tunnel: {
-      configured: Boolean(PUBLIC_URL),
-      hostname: PUBLIC_URL ? new URL(PUBLIC_URL).hostname : "",
-      url: PUBLIC_URL ? `${PUBLIC_URL}/health` : "",
+      configured: Boolean(publicHostname),
+      hostname: publicHostname,
+      url: `${publicBase}/health`,
       ok: local.ok,
       status: local.ok ? 200 : 0,
+      latency: local.latency,
       latencyMs: local.latencyMs,
       data: local.data
     },
-    processes: {
-      node: [{ Id: process.pid }],
-      cloudflared: []
-    },
+    processes,
     browserProfiles: [],
     workerExtensionVersion: "0.5.137",
     workers: workerStatus.workers,
@@ -431,6 +442,8 @@ async function collectWebRuntimeStatus() {
     workerJobs,
     taskHangIncidents: [],
     taskHangSummary: { active_count: 0, total_count: 0 },
+    workerSnapshotAvailable: true,
+    workerJobsAvailable: true,
     mcpLink,
     tokenConfigured: true,
     autoStart: true
@@ -450,12 +463,12 @@ if (PUBLIC_URL) {
   }, 5 * 60 * 1000).unref();
 }
 
-async function handleWebRpc(method, args = []) {
+async function handleWebRpc(method, args = [], reqOrigin = "") {
   switch (method) {
     case "codexpro:status":
-      return await collectWebRuntimeStatus();
+      return await collectWebRuntimeStatus(reqOrigin);
     case "codexpro:workers": {
-      const status = await collectWebRuntimeStatus();
+      const status = await collectWebRuntimeStatus(reqOrigin);
       return { workers: status.workers, sources: status.workerSources };
     }
     case "codexpro:worker-send": {
@@ -936,8 +949,11 @@ const server = http.createServer(async (req, res) => {
         chunks.push(chunk);
       }
       const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+      const proto = String(req.headers["x-forwarded-proto"] || "http").split(",")[0].trim();
+      const host = String(req.headers["x-forwarded-host"] || req.headers.host || `127.0.0.1:${WEB_PORT}`).split(",")[0].trim();
+      const reqOrigin = `${proto}://${host}`;
       try {
-        const result = await handleWebRpc(String(body.method || ""), Array.isArray(body.args) ? body.args : []);
+        const result = await handleWebRpc(String(body.method || ""), Array.isArray(body.args) ? body.args : [], reqOrigin);
         res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
         res.end(JSON.stringify({ ok: true, result }));
       } catch (err) {

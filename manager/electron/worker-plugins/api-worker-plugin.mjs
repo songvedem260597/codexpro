@@ -239,7 +239,11 @@ export function createApiWorkerPlugin(options = {}) {
       }).then((result) => {
         state.title = clean(result?.task_title || state.title, 56);
         state.result = result;
-        state.history = [...history, { role: "user", content: request }, { role: "assistant", content: clean(result?.text, 20_000) }].slice(-12);
+        state.history = [...history, { role: "user", content: request }, { role: "assistant", content: clean(result?.text, 20_000) }].slice(cloudChat ? -CLOUD_CHAT_MESSAGE_LIMIT : -12);
+        if (cloudChat) {
+          try { options.chatHistoryStore?.save(workerConfigId, scope, root, state.history); }
+          catch { /* Keep successful task status independent from history storage. */ }
+        }
         state.activity = "idle";
         state.streamText = String(result?.text || "");
         state.streamPhase = "complete";
@@ -264,7 +268,11 @@ export function createApiWorkerPlugin(options = {}) {
     },
 
     async read(payload) {
-      return publicRun(runs.get(localWorkerId(payload.local_worker_id))) || { activity: "idle" };
+      const id = localWorkerId(payload.local_worker_id);
+      return publicRun(runs.get(id)) || {
+        activity: "idle",
+        ...(id === CLOUD_CHAT_WORKER_ID ? { chat_history: options.chatHistoryStore?.read(id)?.messages || [] } : {})
+      };
     },
 
     async stop(payload) {
