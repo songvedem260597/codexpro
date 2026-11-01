@@ -305,6 +305,9 @@ workerPluginRegistry.register(createApiWorkerPlugin({
 
 const mcpCausalTelemetry = createMcpCausalTelemetry();
 const {
+  openLocalMcpSession,
+  closeLocalMcpSession,
+  localMcpToolInSession,
   localMcpTool
 } = createManagerMcpClient({
   managerVersion: MANAGER_VERSION,
@@ -313,6 +316,43 @@ const {
   causalTelemetry: mcpCausalTelemetry,
   emitCausalTelemetry() {}
 });
+
+async function inspectThroughMcp(root) {
+  let session;
+  try {
+    session = await openLocalMcpSession(mcpRuntimeConfig, mcpToken);
+    const openedContent = await localMcpToolInSession(session, "open_workspace", {
+      root,
+      include_tree: true,
+      max_depth: 2,
+      max_files: 300
+    }, 30000);
+    const workspaceId = openedContent?.workspace_id;
+    if (!workspaceId) throw new Error("CodexPro không trả về workspace_id khi mở dự án.");
+    const graphContent = await localMcpToolInSession(session, "code_graph", {
+      workspace_id: workspaceId,
+      max_nodes: 15000,
+      max_edges: 40000
+    }, 30000);
+    return {
+      ...openedContent,
+      codexgraph: {
+        schema_version: graphContent?.schema_version,
+        source: graphContent?.source || "CodexGraph",
+        nodes: graphContent?.nodes || [],
+        edges: graphContent?.edges || [],
+        coverage: graphContent?.coverage || {},
+        warnings: graphContent?.warnings || [],
+        output_limited: Boolean(graphContent?.output_limited),
+        returned: graphContent?.returned || {},
+        limits: graphContent?.limits || {},
+        cache: graphContent?.cache || {}
+      }
+    };
+  } finally {
+    await closeLocalMcpSession(session);
+  }
+}
 
 const managerChatCache = createManagerChatCache({ home: codexProHome });
 const appPluginRegistry = createAppPluginRegistry({ home: codexProHome });
@@ -617,12 +657,21 @@ async function handleWebRpc(method, args = [], reqOrigin = "") {
     }
     case "codexpro:inspect-project": {
       const root = path.resolve(String(args[0] || ""));
-      return await localMcpTool(mcpRuntimeConfig, mcpToken, "workspace_guide", { root }, 15_000);
+      return await inspectThroughMcp(root);
     }
-    case "codexpro:get-repo-task-status":
-      return await localMcpTool(mcpRuntimeConfig, mcpToken, "repo_task_status", args[0] || {}, 10_000);
-    case "codexpro:get-workspace-coordination":
-      return await localMcpTool(mcpRuntimeConfig, mcpToken, "workspace_coordination_status", { root: args[0], task_id: args[1] || "" }, 10_000);
+    case "codexpro:get-repo-task-status": {
+      const payload = args[0] || {};
+      const taskId = String(payload?.taskId || payload?.task_id || "").trim();
+      return await localMcpTool(mcpRuntimeConfig, mcpToken, "repo_task_status", { ...payload, ...(taskId ? { task_id: taskId } : {}) }, 15_000);
+    }
+    case "codexpro:get-workspace-coordination": {
+      const workspaceRoot = String(args[0] || "").trim();
+      const normalizedTaskId = String(args[1] || "").trim();
+      return await localMcpTool(mcpRuntimeConfig, mcpToken, "workspace_coordination_status", {
+        root: workspaceRoot,
+        ...(normalizedTaskId ? { task_id: normalizedTaskId } : {})
+      }, 15_000);
+    }
     case "codexpro:list-app-plugins":
       return appPluginRegistry.list().map((p) => p?.id && p?.url ? { ...p, url: `/api/app-plugins/${p.id}/` } : p);
     case "codexpro:list-app-plugin-catalog":
@@ -630,7 +679,7 @@ async function handleWebRpc(method, args = [], reqOrigin = "") {
     case "codexpro:analyze-app-plugin-repo": {
       const payload = args[0] || {};
       const root = path.resolve(String(payload?.root || ""));
-      const inspection = await localMcpTool(mcpRuntimeConfig, mcpToken, "workspace_guide", { root }, 15_000);
+      const inspection = await inspectThroughMcp(root);
       return buildGitDiagramArchitecture({ ...inspection, root });
     }
     case "codexpro:prepare-app-plugin-task": {
