@@ -8,6 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { appendDiagnosticLog, clearDiagnosticLogs, pruneDiagnosticLogs, readDiagnosticLogs } from "../manager/electron/diagnostic-log.mjs";
+import { createMcpCausalTelemetry } from "../manager/electron/mcp-causal-telemetry.mjs";
 import { createSendTraceLogger, readSendTraceTimeline } from "../manager/electron/send-trace-log.mjs";
 import { readManagerHangWatchDiagnostics } from "../manager/electron/manager-hang-watch-diagnostics.mjs";
 import { collectOperationsPerformance } from "../manager/electron/operations-metrics.mjs";
@@ -302,26 +303,26 @@ workerPluginRegistry.register(createApiWorkerPlugin({
   }
 }));
 
+const mcpCausalTelemetry = createMcpCausalTelemetry();
 const {
   localMcpTool
 } = createManagerMcpClient({
   managerVersion: MANAGER_VERSION,
   diagnostic,
   diagnosticAllowed,
-  causalTelemetry: {
-    openStarted() {},
-    initialized() {},
-    toolCompleted() {},
-    closeStarted() {},
-    closeCompleted() {},
-    failed() {}
-  },
+  causalTelemetry: mcpCausalTelemetry,
   emitCausalTelemetry() {}
 });
 
 const managerChatCache = createManagerChatCache({ home: codexProHome });
 const appPluginRegistry = createAppPluginRegistry({ home: codexProHome });
-const managedAppPluginInstaller = createManagedAppPluginInstaller({ home: codexProHome, registry: appPluginRegistry });
+const electronTemplatesRoot = path.join(projectRoot, "manager", "electron", "app-plugins", "templates");
+const managedAppPluginInstaller = createManagedAppPluginInstaller({
+  home: codexProHome,
+  registry: appPluginRegistry,
+  templateRoot: path.join(electronTemplatesRoot, "taste-skill"),
+  gitDiagramTemplateRoot: path.join(electronTemplatesRoot, "gitdiagram")
+});
 
 let mcpChildProcess = null;
 async function checkLocalMcpHealth() {
@@ -623,7 +624,7 @@ async function handleWebRpc(method, args = [], reqOrigin = "") {
     case "codexpro:get-workspace-coordination":
       return await localMcpTool(mcpRuntimeConfig, mcpToken, "workspace_coordination_status", { root: args[0], task_id: args[1] || "" }, 10_000);
     case "codexpro:list-app-plugins":
-      return appPluginRegistry.list();
+      return appPluginRegistry.list().map((p) => p?.id && p?.url ? { ...p, url: `/api/app-plugins/${p.id}/` } : p);
     case "codexpro:list-app-plugin-catalog":
       return managedAppPluginInstaller.listCatalog();
     case "codexpro:analyze-app-plugin-repo": {
@@ -644,19 +645,24 @@ async function handleWebRpc(method, args = [], reqOrigin = "") {
     }
     case "codexpro:install-catalog-app-plugin": {
       const result = await managedAppPluginInstaller.install(args[0]);
-      return { ...result, plugins: appPluginRegistry.list(), catalog: managedAppPluginInstaller.listCatalog() };
+      const plugins = appPluginRegistry.list().map((p) => p?.id && p?.url ? { ...p, url: `/api/app-plugins/${p.id}/` } : p);
+      return { ...result, plugins, catalog: managedAppPluginInstaller.listCatalog() };
     }
     case "codexpro:update-catalog-app-plugin": {
       const result = await managedAppPluginInstaller.update(args[0]);
-      return { ...result, plugins: appPluginRegistry.list(), catalog: managedAppPluginInstaller.listCatalog() };
+      const plugins = appPluginRegistry.list().map((p) => p?.id && p?.url ? { ...p, url: `/api/app-plugins/${p.id}/` } : p);
+      return { ...result, plugins, catalog: managedAppPluginInstaller.listCatalog() };
     }
     case "codexpro:reload-app-plugin": {
-      const plugin = appPluginRegistry.reload(args[0]);
-      return { plugin, plugins: appPluginRegistry.list() };
+      const rawPlugin = appPluginRegistry.reload(args[0]);
+      const plugin = rawPlugin?.id && rawPlugin?.url ? { ...rawPlugin, url: `/api/app-plugins/${rawPlugin.id}/` } : rawPlugin;
+      const plugins = appPluginRegistry.list().map((p) => p?.id && p?.url ? { ...p, url: `/api/app-plugins/${p.id}/` } : p);
+      return { plugin, plugins };
     }
     case "codexpro:uninstall-app-plugin": {
       const plugin = appPluginRegistry.uninstall(args[0]);
-      return { plugin, plugins: appPluginRegistry.list() };
+      const plugins = appPluginRegistry.list().map((p) => p?.id && p?.url ? { ...p, url: `/api/app-plugins/${p.id}/` } : p);
+      return { plugin, plugins };
     }
     case "codexpro:reload-profiles":
       return await collectWebRuntimeStatus();
@@ -912,6 +918,28 @@ const server = http.createServer(async (req, res) => {
     if (pathname === "/web-bridge.js") {
       res.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" });
       res.end(WEB_BRIDGE_JS);
+      return;
+    }
+
+    // 2b. App Plugin static resources (/api/app-plugins/:id/*)
+    if (pathname.startsWith("/api/app-plugins/")) {
+      const rest = pathname.slice("/api/app-plugins/".length);
+      const slashIdx = rest.indexOf("/");
+      const pluginId = slashIdx >= 0 ? rest.slice(0, slashIdx) : rest;
+      const resourcePath = slashIdx >= 0 ? rest.slice(slashIdx) : "/";
+      try {
+        const resource = appPluginRegistry.resolveResource(pluginId, resourcePath);
+        const body = await fs.promises.readFile(resource.path);
+        res.writeHead(200, {
+          "Content-Type": resource.mime_type,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff"
+        });
+        res.end(body);
+      } catch (err) {
+        res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(`Không tải được plugin: ${err?.message || err}`);
+      }
       return;
     }
 
