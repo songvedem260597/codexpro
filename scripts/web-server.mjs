@@ -201,9 +201,9 @@ const {
   pathInside
 });
 
-// Seed projectRoot if no projects are registered yet
-if (managerProjects().length === 0 && fs.existsSync(path.join(projectRoot, "package.json"))) {
-  saveManagerProjects([projectRoot]);
+// Seed workspacesRoot if no projects are registered yet
+if (managerProjects().length === 0) {
+  saveManagerProjects([workspacesRoot]);
 }
 
 const safeStorage = createHeadlessSafeStorage(codexProHome);
@@ -317,40 +317,49 @@ const {
   emitCausalTelemetry() {}
 });
 
+let inspectInFlight = null;
 async function inspectThroughMcp(root) {
-  let session;
+  if (inspectInFlight) return await inspectInFlight;
+  inspectInFlight = (async () => {
+    let session;
+    try {
+      session = await openLocalMcpSession(mcpRuntimeConfig, mcpToken);
+      const openedContent = await localMcpToolInSession(session, "open_workspace", {
+        root,
+        include_tree: true,
+        max_depth: 2,
+        max_files: 120
+      }, 20000);
+      const workspaceId = openedContent?.workspace_id;
+      if (!workspaceId) throw new Error("CodexPro không trả về workspace_id khi mở dự án.");
+      const graphContent = await localMcpToolInSession(session, "code_graph", {
+        workspace_id: workspaceId,
+        max_nodes: 1500,
+        max_edges: 4000
+      }, 20000);
+      return {
+        ...openedContent,
+        codexgraph: {
+          schema_version: graphContent?.schema_version,
+          source: graphContent?.source || "CodexGraph",
+          nodes: graphContent?.nodes || [],
+          edges: graphContent?.edges || [],
+          coverage: graphContent?.coverage || {},
+          warnings: graphContent?.warnings || [],
+          output_limited: Boolean(graphContent?.output_limited),
+          returned: graphContent?.returned || {},
+          limits: graphContent?.limits || {},
+          cache: graphContent?.cache || {}
+        }
+      };
+    } finally {
+      await closeLocalMcpSession(session);
+    }
+  })();
   try {
-    session = await openLocalMcpSession(mcpRuntimeConfig, mcpToken);
-    const openedContent = await localMcpToolInSession(session, "open_workspace", {
-      root,
-      include_tree: true,
-      max_depth: 2,
-      max_files: 300
-    }, 30000);
-    const workspaceId = openedContent?.workspace_id;
-    if (!workspaceId) throw new Error("CodexPro không trả về workspace_id khi mở dự án.");
-    const graphContent = await localMcpToolInSession(session, "code_graph", {
-      workspace_id: workspaceId,
-      max_nodes: 15000,
-      max_edges: 40000
-    }, 30000);
-    return {
-      ...openedContent,
-      codexgraph: {
-        schema_version: graphContent?.schema_version,
-        source: graphContent?.source || "CodexGraph",
-        nodes: graphContent?.nodes || [],
-        edges: graphContent?.edges || [],
-        coverage: graphContent?.coverage || {},
-        warnings: graphContent?.warnings || [],
-        output_limited: Boolean(graphContent?.output_limited),
-        returned: graphContent?.returned || {},
-        limits: graphContent?.limits || {},
-        cache: graphContent?.cache || {}
-      }
-    };
+    return await inspectInFlight;
   } finally {
-    await closeLocalMcpSession(session);
+    inspectInFlight = null;
   }
 }
 
