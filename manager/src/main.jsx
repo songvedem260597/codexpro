@@ -123,6 +123,7 @@ function App() {
   } = useManagerDiagnostics({ api, activePage, status, notify, setError });
   const [workerUpdateConfirmOpen, setWorkerUpdateConfirmOpen] = useState(false);
   const [apiJobWorker, setApiJobWorker] = useState(null);
+  const [busyModelWorkerId, setBusyModelWorkerId] = useState("");
   const [taskProfileId, setTaskProfileId] = useState("");
   const [resumeBusyTaskId, setResumeBusyTaskId] = useState("");
   const [inspection, setInspection] = useState(null);
@@ -738,6 +739,27 @@ function App() {
             try { await api.stopWorkerTask({ workerId }); await refresh(false); notify("Đã dừng API worker"); }
             catch (workerError) { reportApiWorkerError(workerError); }
           }}
+          onApiChangeModel={async (worker, nextModel) => {
+            const chosenModel = String(nextModel || "").trim();
+            const localWorkerId = String(worker?.local_worker_id || worker?.worker_id || "").replace(/^api:/i, "").trim();
+            if (!chosenModel || !localWorkerId) return;
+            setBusyModelWorkerId(worker.worker_id || `api:${localWorkerId}`);
+            try {
+              await api.saveApiWorker({
+                id: localWorkerId,
+                local_worker_id: localWorkerId,
+                provider: worker?.provider || "openrouter",
+                model: chosenModel
+              });
+              await refresh(false);
+              notify(`Đã đổi model cho ${worker?.label || localWorkerId}: ${chosenModel}`);
+            } catch (workerError) {
+              reportApiWorkerError(workerError);
+            } finally {
+              setBusyModelWorkerId("");
+            }
+          }}
+          busyModelWorkerId={busyModelWorkerId}
           onOpenTask={setTaskProfileId}
           onOpenChat={openChat}
           onRecoverProfile={(profile) => recoverProfileTab(profile)}
@@ -875,6 +897,7 @@ function App() {
         />
         <ApiWorkerJobModal
           worker={(status?.workers || []).find((worker) => worker.worker_id === apiJobWorker?.worker_id) || apiJobWorker}
+          allWorkers={status?.workers || []}
           projects={projects}
           customImages={managerSettings.workerImageDataUrls}
           attachments={requestFiles[apiJobWorker?.worker_id] || []}
@@ -884,6 +907,23 @@ function App() {
           onClearAttachments={() => setRequestFiles((current) => ({ ...current, [apiJobWorker?.worker_id]: [] }))}
           onPaste={(event) => void pasteRequestImage(apiJobWorker?.worker_id, event)}
           onCopyResponse={async (text) => { await api.copyText(text); notify("Đã copy phản hồi"); }}
+          onChangeModel={async (worker, nextModel) => {
+            const chosenModel = String(nextModel || "").trim();
+            const localWorkerId = String(worker?.local_worker_id || worker?.worker_id || "").replace(/^api:/i, "").trim();
+            if (!chosenModel || !localWorkerId) return;
+            try {
+              await api.saveApiWorker({
+                id: localWorkerId,
+                local_worker_id: localWorkerId,
+                provider: worker?.provider || "openrouter",
+                model: chosenModel
+              });
+              await refresh(false);
+              notify(`Đã đổi model cho ${worker?.label || localWorkerId}: ${chosenModel}`);
+            } catch (workerError) {
+              reportApiWorkerError(workerError);
+            }
+          }}
           onClose={() => setApiJobWorker(null)}
           onError={reportApiWorkerError}
           onStarted={() => { void refresh(false); window.setTimeout(() => void refreshStatus(), 500); notify("API worker đã nhận job"); }}

@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { listTaskWorkflows } from "../electron/task-workflow-registry.mjs";
 import { AppDropdown } from "./app-dropdown.jsx";
+import { buildWorkerModelOptions, createCustomWorkerModelOption } from "./api-worker-form.js";
 import { ALL_ALLOWED_WORKSPACES, ProjectDropdown } from "./project-dropdown.jsx";
 import { deriveTaskWorkflowProgress } from "./task-workflow-progress.js";
 import "./task-workflow-center.css";
@@ -28,24 +29,58 @@ function responseEvidence(value) {
 function workerOptions(status) {
   const apiWorkers = (status?.workers || [])
     .filter((worker) => worker.worker_type === "api")
-    .map((worker) => ({
-      key: `api|${worker.worker_id}`,
-      type: "api",
-      id: worker.worker_id,
-      label: `${worker.label || worker.worker_id} · API`,
-      ready: Boolean(worker.connected) && worker.activity !== "working",
-      reason: !worker.connected ? "thiếu kết nối" : worker.activity === "working" ? "đang làm việc" : "sẵn sàng"
-    }));
+    .map((worker) => {
+      const reason = !worker.connected ? "thiếu kết nối" : worker.activity === "working" ? "đang làm việc" : "sẵn sàng";
+      return {
+        key: `api|${worker.worker_id}`,
+        type: "api",
+        id: worker.worker_id,
+        localWorkerId: worker.local_worker_id || String(worker.worker_id || "").replace(/^api:/i, ""),
+        provider: worker.provider || "openrouter",
+        model: worker.model || "",
+        worker,
+        label: `${worker.label || worker.worker_id} · API`,
+        ready: Boolean(worker.connected) && worker.activity !== "working",
+        reason: `${worker.provider || "API"} · ${worker.model || "model"} · ${reason}`
+      };
+    });
   const chromeWorkers = (status?.browserProfiles || [])
-    .map((profile) => ({
-      key: `chrome|${profile.profile_id}`,
-      type: "chrome",
-      id: profile.profile_id,
-      label: `${profile.email || profile.label || profile.profile_id} · Chrome`,
-      ready: Boolean(profile.connected && profile.connector_installed && profile.connector_profile_bound !== false && profile.activity !== "working" && profile.activity !== "settling"),
-      reason: !profile.connected ? "mất kết nối" : !profile.connector_installed ? "chưa có CodexPro" : profile.activity === "working" || profile.activity === "settling" ? "đang làm việc" : "sẵn sàng"
-    }));
+    .map((profile) => {
+      const reason = !profile.connected ? "mất kết nối" : !profile.connector_installed ? "chưa có CodexPro" : profile.activity === "working" || profile.activity === "settling" ? "đang làm việc" : "sẵn sàng";
+      return {
+        key: `chrome|${profile.profile_id}`,
+        type: "chrome",
+        id: profile.profile_id,
+        label: `${profile.email || profile.label || profile.profile_id} · Chrome`,
+        ready: Boolean(profile.connected && profile.connector_installed && profile.connector_profile_bound !== false && profile.activity !== "working" && profile.activity !== "settling"),
+        reason: `ChatGPT Web · ${reason}`
+      };
+    });
   return [...apiWorkers, ...chromeWorkers];
+}
+
+function renderWorkflowTriggerValue(option) {
+  return (
+    <>
+      <span className="app-dropdown-mark" aria-hidden="true">{option?.mark || "◈"}</span>
+      <span className="app-dropdown-value-copy">
+        <strong>{option?.label || ""}</strong>
+        <small>{option?.hint || "Sẵn sàng thực thi"}</small>
+      </span>
+    </>
+  );
+}
+
+function renderWorkflowOptionItem(option) {
+  return (
+    <>
+      <span className="app-dropdown-mark" aria-hidden="true">{option?.mark || "◈"}</span>
+      <span className="app-dropdown-option-copy">
+        <strong>{option?.label || ""}</strong>
+        {option?.hint && <small>{option.hint}</small>}
+      </span>
+    </>
+  );
 }
 
 async function readChromeProgress(api, run) {
@@ -76,6 +111,8 @@ export function TaskWorkflowCenter({ api, status, projects, notify, onError, onR
   const workers = useMemo(() => workerOptions(status), [status]);
   const [workflowId, setWorkflowId] = useState(workflows[0]?.id || "");
   const [workerKey, setWorkerKey] = useState("");
+  const [workerModelsByKey, setWorkerModelsByKey] = useState({});
+  const [savingModelKey, setSavingModelKey] = useState("");
   const [workspaceRoot, setWorkspaceRoot] = useState(projects[0]?.root || ALL_ALLOWED_WORKSPACES);
   const [details, setDetails] = useState("");
   const [launching, setLaunching] = useState(false);
@@ -83,7 +120,7 @@ export function TaskWorkflowCenter({ api, status, projects, notify, onError, onR
 
   useEffect(() => {
     if (!workers.some((worker) => worker.key === workerKey && worker.ready)) {
-      setWorkerKey(workers.find((worker) => worker.ready)?.key || "");
+      setWorkerKey(workers.find((worker) => worker.ready)?.key || workers[0]?.key || "");
     }
   }, [workerKey, workers]);
   useEffect(() => {
@@ -93,7 +130,47 @@ export function TaskWorkflowCenter({ api, status, projects, notify, onError, onR
   }, [projects, workspaceRoot]);
 
   const selectedWorkflow = workflows.find((workflow) => workflow.id === workflowId) || workflows[0];
-  const selectedWorker = workers.find((worker) => worker.key === workerKey);
+  const selectedWorker = workers.find((worker) => worker.key === workerKey) || workers[0];
+  const selectedWorkerModel = useMemo(() => {
+    if (!selectedWorker) return "";
+    if (selectedWorker.type !== "api") return "chatgpt-web";
+    return String(workerModelsByKey[selectedWorker.key] || selectedWorker.model || "").trim();
+  }, [selectedWorker, workerModelsByKey]);
+  const modelOptions = useMemo(() => {
+    if (!selectedWorker || selectedWorker.type !== "api") {
+      return [{
+        value: "chatgpt-web",
+        label: "Theo phiên ChatGPT Web",
+        hint: "Model điều khiển trực tiếp trên tab Chrome",
+        mark: "🌐",
+        searchText: "chatgpt web chrome"
+      }];
+    }
+    return buildWorkerModelOptions(selectedWorker.worker, status?.workers, [], selectedWorkerModel);
+  }, [selectedWorker, selectedWorkerModel, status?.workers]);
+
+  const changeSelectedWorkerModel = useCallback(async (nextValue, option) => {
+    const chosenModel = String(option?.customModel || nextValue || "").trim();
+    if (!chosenModel || !selectedWorker || selectedWorker.type !== "api") return;
+    setWorkerModelsByKey((current) => ({ ...current, [selectedWorker.key]: chosenModel }));
+    const localWorkerId = String(selectedWorker.localWorkerId || selectedWorker.id || "").replace(/^api:/i, "").trim();
+    if (!api?.saveApiWorker || !localWorkerId) return;
+    setSavingModelKey(selectedWorker.key);
+    try {
+      await api.saveApiWorker({
+        id: localWorkerId,
+        local_worker_id: localWorkerId,
+        provider: selectedWorker.provider || "openrouter",
+        model: chosenModel
+      });
+      onRefresh?.();
+      notify?.(`Đã đổi model cho ${selectedWorker.worker?.label || localWorkerId}: ${chosenModel}`);
+    } catch (error) {
+      onError?.(error);
+    } finally {
+      setSavingModelKey("");
+    }
+  }, [api, notify, onError, onRefresh, selectedWorker]);
   const activeWorkflow = workflows.find((workflow) => workflow.id === run?.workflowId) || selectedWorkflow;
   const progress = deriveTaskWorkflowProgress(activeWorkflow, run?.evidence || "", { running: run?.status === "running" });
   const finishedCount = progress.completed + progress.issues + progress.skipped;
@@ -148,6 +225,8 @@ export function TaskWorkflowCenter({ api, status, projects, notify, onError, onR
       if (selectedWorker.type === "api") {
         result = unwrap(await api.sendWorkerRequest({
           workerId: selectedWorker.id,
+          local_worker_id: selectedWorker.localWorkerId,
+          model: selectedWorkerModel || selectedWorker.model,
           task_id: nextTaskId,
           task_kind: "code",
           scope: allAllowed ? "all_allowed" : "workspace",
@@ -207,9 +286,18 @@ export function TaskWorkflowCenter({ api, status, projects, notify, onError, onR
           <label className="task-workflow-field">
             <span>Chọn quy trình</span>
             <AppDropdown
+              className="is-project is-workflow-control"
               value={workflowId}
-              options={workflows.map((workflow) => ({ value: workflow.id, label: workflow.label }))}
+              options={workflows.map((workflow) => ({
+                value: workflow.id,
+                label: workflow.label,
+                hint: `${workflow.steps?.length || 0} bước · ${workflow.description || workflow.summary || workflow.version || "Checklist chuẩn"}`,
+                mark: "✓",
+                searchText: `${workflow.label} ${workflow.id} ${workflow.description || ""}`
+              }))}
               onChange={setWorkflowId}
+              renderValue={renderWorkflowTriggerValue}
+              renderOption={renderWorkflowOptionItem}
               disabled={launching || run?.status === "running"}
               ariaLabel="Chọn quy trình"
               searchable={workflows.length > 6}
@@ -218,12 +306,42 @@ export function TaskWorkflowCenter({ api, status, projects, notify, onError, onR
           <label className="task-workflow-field">
             <span>Chọn worker</span>
             <AppDropdown
+              className="is-project is-workflow-control"
               value={workerKey}
-              options={[{ value: "", label: "Chưa có worker rảnh", disabled: true }, ...workers.map((worker) => ({ value: worker.key, label: worker.label, hint: worker.reason, disabled: !worker.ready }))]}
+              options={[
+                { value: "", label: "Chưa có worker rảnh", hint: "Kiểm tra kết nối hoặc đợi worker hoàn thành task", mark: "!", disabled: true },
+                ...workers.map((worker) => ({
+                  value: worker.key,
+                  label: worker.label,
+                  hint: worker.reason,
+                  mark: worker.type === "api" ? "⚡" : "🌐",
+                  disabled: !worker.ready,
+                  searchText: `${worker.label} ${worker.reason}`
+                }))
+              ]}
               onChange={setWorkerKey}
+              renderValue={renderWorkflowTriggerValue}
+              renderOption={renderWorkflowOptionItem}
               disabled={launching || run?.status === "running"}
               ariaLabel="Chọn worker"
               searchable={workers.length > 6}
+            />
+          </label>
+          <label className="task-workflow-field">
+            <span>Chọn model cho worker</span>
+            <AppDropdown
+              className="is-project is-workflow-control"
+              value={selectedWorkerModel}
+              options={modelOptions}
+              onChange={changeSelectedWorkerModel}
+              createOption={(query) => createCustomWorkerModelOption(query, modelOptions)}
+              renderValue={renderWorkflowTriggerValue}
+              renderOption={renderWorkflowOptionItem}
+              disabled={launching || run?.status === "running" || !selectedWorker || selectedWorker.type !== "api" || savingModelKey === selectedWorker.key}
+              ariaLabel="Chọn model cho worker"
+              placeholder="Chọn hoặc nhập model…"
+              searchable={selectedWorker?.type === "api"}
+              searchPlaceholder="Tìm hoặc nhập model ID rồi nhấn Enter…"
             />
           </label>
           <label className="task-workflow-field">

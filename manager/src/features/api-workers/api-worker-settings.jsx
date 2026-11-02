@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { AppDropdown } from "../../app-dropdown.jsx";
-import { createApiWorkerDraft, normalizeApiWorkerModels, switchApiWorkerProvider, validateApiWorkerDraft } from "../../api-worker-form.js";
+import { buildWorkerModelOptions, createApiWorkerDraft, createCustomWorkerModelOption, normalizeApiWorkerModels, switchApiWorkerProvider, validateApiWorkerDraft } from "../../api-worker-form.js";
 
 const api = window.codexpro;
 
@@ -118,6 +118,19 @@ export function ApiWorkerSettings({ onChanged, notify, onError }) {
     } catch (error) { onError(error); }
     finally { setBusy(""); }
   };
+  const changeConfigModel = async (config, nextModel, option) => {
+    const chosenModel = String(option?.customModel || nextModel || "").trim();
+    if (!chosenModel || chosenModel === config.model) return;
+    setBusy(`model:${config.id}`);
+    try {
+      await api.saveApiWorker({ ...config, model: chosenModel, api_key: "" });
+      await load();
+      if (editingId === config.id) setDraft((current) => ({ ...current, model: chosenModel }));
+      await onChanged?.();
+      notify(`Đã đổi model cho ${config.label || config.id}: ${chosenModel}`);
+    } catch (error) { onError(error); }
+    finally { setBusy(""); }
+  };
   const remove = async (id) => {
     setBusy(`delete:${id}`);
     try {
@@ -144,7 +157,7 @@ export function ApiWorkerSettings({ onChanged, notify, onError }) {
       <div className="api-worker-form">
         <label><span>ID worker · bắt buộc</span><input value={draft.id} disabled={Boolean(editingId)} placeholder="9router-main" onChange={(event) => update("id", event.target.value)} /></label>
         <label><span>Tên hiển thị</span><input value={draft.label} placeholder="9Router" onChange={(event) => update("label", event.target.value)} /></label>
-        <label><span>Bước 1 · Chọn provider</span><AppDropdown className="is-form" value={draft.provider} options={[{ value: "9router", label: "9Router", hint: "OpenAI-compatible tại localhost:20128" }, { value: "openai-compatible", label: "OpenAI-compatible", hint: "Endpoint API tùy chỉnh" }]} onChange={changeProvider} ariaLabel="Chọn API provider" searchable={false} /></label>
+        <label><span>Bước 1 · Chọn provider</span><AppDropdown className="is-form" value={draft.provider} options={[{ value: "9router", label: "9Router", hint: "OpenAI-compatible tại localhost:20128" }, { value: "openrouter", label: "OpenRouter", hint: "OpenRouter Cloud API tại openrouter.ai/api/v1" }, { value: "openai-compatible", label: "OpenAI-compatible", hint: "Endpoint API tùy chỉnh" }]} onChange={changeProvider} ariaLabel="Chọn API provider" searchable={false} /></label>
         <label><span>Base URL · bắt buộc</span><input value={draft.base_url} placeholder="http://localhost:20128/v1" onChange={(event) => changeBaseUrl(event.target.value)} /></label>
         <label className="api-worker-wide"><span>API key · {credentialAvailable ? "để trống để giữ key hiện tại" : "bắt buộc"}</span><input type="password" autoComplete="new-password" value={draft.api_key} placeholder="Được mã hóa bằng kho bí mật của hệ điều hành" onChange={(event) => update("api_key", event.target.value)} /></label>
         <label className="api-worker-wide"><span>Bước 2 · Chọn model · bắt buộc</span><div className="api-worker-model-picker"><AppDropdown className="is-form" value={manualModel ? "__manual__" : modelConfirmed && models.some((item) => item.id === draft.model) ? draft.model : ""} options={[...models.map((item) => ({ value: item.id, label: item.name === item.id ? item.id : item.name, hint: `${item.name === item.id ? "" : `${item.id} · `}${item.context_length ? `${Math.round(item.context_length / 1000)}k context` : "Provider model"}`, searchText: `${item.id} ${item.name}` })), { value: "__manual__", label: manualModel && draft.model.trim() ? draft.model.trim() : "Nhập model thủ công…", hint: manualModel && draft.model.trim() ? "Model ID nhập thủ công" : "Dùng khi provider không hỗ trợ /models" }]} onChange={selectModel} createOption={(query) => models.some((item) => item.id.toLocaleLowerCase() === query.toLocaleLowerCase()) ? null : { key: "__custom_model__", value: query, label: `Dùng “${query}” làm model ID`, hint: "Nhấn Enter hoặc bấm để chọn model thủ công", searchText: query, customModel: query, className: "is-create" }} ariaLabel="Chọn model từ provider" placeholder={models.length ? "Chọn một model từ provider" : "Tải danh sách model trước"} searchable searchPlaceholder="Tìm hoặc nhập model ID rồi nhấn Enter…" /><button className="button secondary api-worker-load-models" type="button" onClick={() => void discoverModels()} disabled={Boolean(busy) || !modelDiscoveryReady}>{busy === "models" ? "Đang tải…" : "Tải danh sách model"}</button></div>{!modelDiscoveryReady && <small>Nhập API key và kiểm tra Base URL để tải model.</small>}{manualModel && <input value={draft.model} autoFocus placeholder="Nhập model ID" onChange={(event) => { update("model", event.target.value); setModelConfirmed(Boolean(event.target.value.trim())); }} />}</label>
@@ -152,7 +165,38 @@ export function ApiWorkerSettings({ onChanged, notify, onError }) {
       <div className="api-worker-form-actions"><span className={`api-worker-save-status ${validation.valid ? "is-ready" : "is-blocked"}`}>{validation.message}</span><button className="button ghost" type="button" onClick={createNew} disabled={Boolean(busy)}>Tạo mới</button><button className="button primary" type="button" onClick={() => void save()} disabled={Boolean(busy) || !validation.valid}>{busy === "save" ? "Đang mã hóa…" : editingId ? "Lưu thay đổi" : "Lưu worker"}</button></div>
       <div className="api-worker-config-list">
         {!configs.length && <div className="empty">Chưa cấu hình API worker. Feature vẫn tắt cho đến khi có cấu hình và API key.</div>}
-        {configs.map((config) => <article key={config.id} className={`api-worker-config ${config.enabled === false ? "is-disabled" : ""}`}><div><strong>{config.label}</strong><code>api:{config.id}</code><small>{config.provider} · {config.model}{config.enabled === false ? " · ĐÃ TẮT" : ""}</small></div><span className={`badge api-worker-key-status ${config.credential_available ? "connected" : "profile-missing"}`}>{config.credential_available ? "KEY ĐÃ MÃ HÓA" : "THIẾU KEY"}</span><div><button className={`button ${config.enabled === false ? "primary" : "ghost"}`} type="button" onClick={() => void toggleEnabled(config)} disabled={Boolean(busy)}>{busy === `toggle:${config.id}` ? "Đang lưu…" : config.enabled === false ? "Bật" : "Tắt"}</button><button className="button ghost" type="button" onClick={() => edit(config)} disabled={Boolean(busy)}>Sửa</button><button className="button secondary" type="button" onClick={() => void test(config.id)} disabled={Boolean(busy) || !config.credential_available}>{busy === `test:${config.id}` ? "Đang test…" : "Test"}</button><button className="button danger-quiet" type="button" onClick={() => void remove(config.id)} disabled={Boolean(busy)}>{busy === `delete:${config.id}` ? "Đang xóa…" : "Xóa"}</button></div></article>)}
+        {configs.map((config) => {
+          const rowModelOptions = buildWorkerModelOptions(config, configs);
+          return (
+            <article key={config.id} className={`api-worker-config ${config.enabled === false ? "is-disabled" : ""}`}>
+              <div>
+                <strong>{config.label}</strong>
+                <code>api:{config.id}</code>
+                <small>{config.provider} · {config.model}{config.enabled === false ? " · ĐÃ TẮT" : ""}</small>
+                <div className="api-worker-config-model-picker">
+                  <AppDropdown
+                    className="is-compact"
+                    value={config.model}
+                    options={rowModelOptions}
+                    onChange={(value, option) => void changeConfigModel(config, value, option)}
+                    createOption={(query) => createCustomWorkerModelOption(query, rowModelOptions)}
+                    disabled={Boolean(busy)}
+                    ariaLabel={`Chọn model cho ${config.label}`}
+                    searchable
+                    searchPlaceholder="Tìm hoặc nhập model ID rồi nhấn Enter…"
+                  />
+                </div>
+              </div>
+              <span className={`badge api-worker-key-status ${config.credential_available ? "connected" : "profile-missing"}`}>{config.credential_available ? "KEY ĐÃ MÃ HÓA" : "THIẾU KEY"}</span>
+              <div>
+                <button className={`button ${config.enabled === false ? "primary" : "ghost"}`} type="button" onClick={() => void toggleEnabled(config)} disabled={Boolean(busy)}>{busy === `toggle:${config.id}` ? "Đang lưu…" : config.enabled === false ? "Bật" : "Tắt"}</button>
+                <button className="button ghost" type="button" onClick={() => edit(config)} disabled={Boolean(busy)}>Sửa</button>
+                <button className="button secondary" type="button" onClick={() => void test(config.id)} disabled={Boolean(busy) || !config.credential_available}>{busy === `test:${config.id}` ? "Đang test…" : "Test"}</button>
+                <button className="button danger-quiet" type="button" onClick={() => void remove(config.id)} disabled={Boolean(busy)}>{busy === `delete:${config.id}` ? "Đang xóa…" : "Xóa"}</button>
+              </div>
+            </article>
+          );
+        })}
       </div>
     </section>
   );

@@ -48,8 +48,12 @@ const apiPlugin = fs.readFileSync(new URL("../electron/worker-plugins/api-worker
 assert.match(app, /activePage === "workflows"/, "Manager must expose a dedicated workflow tab");
 assert.match(app, />Quy trình<\/button>/, "the sidebar must have a workflow navigation button");
 assert.match(app, /<TaskWorkflowCenter/, "the dedicated page must render the reusable workflow center");
-assert.match(center, /Chọn quy trình[\s\S]*Chọn worker[\s\S]*Chọn workspace/, "the page must let the user select a template, worker, and workspace");
+assert.match(center, /Chọn quy trình[\s\S]*Chọn worker[\s\S]*Chọn model cho worker[\s\S]*Chọn workspace/, "the page must let the user select a template, worker, per-worker model, and workspace");
 assert.match(center, /import \{ AppDropdown \} from "\.\/app-dropdown\.jsx";/, "the workflow page must import the dropdown component it renders");
+assert.match(center, /buildWorkerModelOptions/, "the workflow page must build model options for the selected worker");
+assert.match(center, /saveApiWorker/, "changing a worker model in the workflow center must persist for that worker");
+assert.match(styles, /\.task-workflow-field \.app-dropdown-trigger,\s*\.task-workflow-field \.project-dropdown-trigger \{[^}]*height: 58px;[^}]*min-height: 58px;[^}]*max-height: 58px;/, "all workflow launcher dropdown triggers must share an identical 58px height");
+assert.match(styles, /@media \(max-width: 1480px\)/, "workflow launcher grid must switch to a 2-column responsive layout on medium screens");
 assert.match(center, /Giao checklist/, "the page must provide a one-click dispatch action");
 assert.match(center, /sendWorkerRequest[\s\S]*workflow:/, "API workers must receive the selected workflow id");
 assert.match(center, /sendProfileRequest[\s\S]*workflow:/, "Chrome workers must receive the selected workflow id");

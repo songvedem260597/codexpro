@@ -82,10 +82,25 @@ export function createApiWorkerStore(options = {}) {
   }
 
   function save(value) {
-    const config = normalizeConfig(value);
+    const rawId = clean(value?.id || value?.local_worker_id || value?.worker_id, 95).replace(/^api:/i, "");
+    const current = list();
+    const existing = rawId ? current.find((item) => item.id === rawId) : null;
+    const merged = existing
+      ? {
+          ...existing,
+          ...value,
+          id: rawId,
+          label: clean(value?.label, 100) || existing.label,
+          provider: clean(value?.provider, 40) || existing.provider,
+          base_url: clean(value?.base_url || value?.baseUrl, 1000) || existing.base_url,
+          model: clean(value?.model, 240) || existing.model,
+          enabled: value?.enabled !== undefined ? value.enabled !== false : existing.enabled
+        }
+      : value;
+    const config = normalizeConfig(merged);
     const apiKey = typeof value?.api_key === "string" ? value.api_key.trim() : typeof value?.apiKey === "string" ? value.apiKey.trim() : "";
     const clearCredential = value?.clear_credential === true || value?.clearCredential === true;
-    const workers = list().filter((item) => item.id !== config.id).map(({ credential_available, credential_ref, ...item }) => item);
+    const workers = current.filter((item) => item.id !== config.id).map(({ credential_available, credential_ref, ...item }) => item);
     workers.push(config);
     workers.sort((left, right) => left.id.localeCompare(right.id));
     let nextSecrets;

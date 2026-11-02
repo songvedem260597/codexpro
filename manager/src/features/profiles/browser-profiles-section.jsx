@@ -162,6 +162,8 @@ export function BrowserProfilesSection({
   checkingProfiles,
   onApiRun,
   onApiStop,
+  onApiChangeModel,
+  busyModelWorkerId,
   onOpenTask,
   onOpenChat,
   onRecoverProfile,
@@ -183,7 +185,7 @@ export function BrowserProfilesSection({
       )}
       <div className={`profile-list is-${settings.profileLayout === "cards" ? "card" : "row"}-layout working-border-${settings.workingBorderStyle}`}>
         {!apiWorkers.length && !visibleProfiles.length && <div className="empty">Chưa có worker nào kết nối. Hãy lưu API worker hoặc Load unpacked extension CodexPro trong Chrome profile cần dùng.</div>}
-        <ApiWorkerCards workers={apiWorkers} customImages={settings.workerImageDataUrls} onRun={onApiRun} onStop={onApiStop} />
+        <ApiWorkerCards workers={apiWorkers} customImages={settings.workerImageDataUrls} onRun={onApiRun} onStop={onApiStop} onChangeModel={onApiChangeModel} busyModelWorkerId={busyModelWorkerId} />
         {sortedProfiles.map((profile) => (
           <BrowserProfileCard
             key={profile.profile_id}

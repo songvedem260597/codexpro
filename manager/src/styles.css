@@ -1367,6 +1367,15 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
 .api-worker-card .profile-main { display: block; }
 .api-worker-card .profile-actions .button { width: 100%; }
 .api-worker-card code, .api-worker-config code { color: #8fa7cc; overflow-wrap: anywhere; }
+.browser-profile:has(.app-dropdown.is-open),
+.api-worker-card:has(.app-dropdown.is-open) { contain: none; overflow: visible; z-index: 60; }
+.api-worker-card-model-picker { margin-top: 9px; max-width: 420px; display: flex; align-items: center; gap: 8px; }
+.api-worker-card-model-label { flex: 0 0 auto; color: #8b98ac; font-size: var(--font-micro); font-weight: var(--weight-semibold); text-transform: uppercase; letter-spacing: .04em; }
+.api-worker-card-model-dropdown { flex: 1; min-width: 0; }
+.api-worker-card-model-dropdown .app-dropdown-trigger { min-height: 36px; padding: 5px 10px; border-radius: var(--radius-control); }
+.profile-list.is-card-layout .api-worker-card-model-picker { max-width: 100%; width: 100%; flex-direction: column; align-items: stretch; gap: 4px; }
+.profile-list.is-card-layout .api-worker-card-model-label { text-align: left; }
+.api-job-model-dropdown { margin-bottom: 12px; }
 .api-worker-settings { grid-column: 1 / -1; }
 .api-worker-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; row-gap: 14px; }
 .api-worker-form label { min-width: 0; display: grid; gap: 7px; color: #9ba8ba; }
@@ -1384,7 +1393,9 @@ button.diagnostic-entry.is-error.is-selected, button.diagnostic-entry.is-warn.is
 .api-worker-save-status { min-width: 0; margin-right: auto; color: #8996a8; font-size: var(--font-description); line-height: 1.4; }
 .api-worker-save-status.is-ready { color: #78c99a; }
 .api-worker-save-status.is-blocked { color: #e5b875; }
-.api-worker-config { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid #283241; border-radius: var(--radius-control); background: #0e131a; }
+.api-worker-config { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid #283241; border-radius: var(--radius-control); background: #0e131a; position: relative; }
+.api-worker-config:has(.app-dropdown.is-open) { z-index: 60; }
+.api-worker-config-model-picker { margin-top: 6px; max-width: 360px; }
 .api-worker-config > div:first-child { min-width: 0; display: grid; gap: 3px; }
 .api-worker-config > div:last-child { display: flex; align-items: stretch; gap: 7px; }
 .api-worker-config .api-worker-key-status { display: inline-flex; align-items: center; justify-content: center; justify-self: start; padding: 10px 14px; border-radius: var(--radius-control); font-size: var(--font-base); line-height: 1.35; font-weight: var(--weight-semibold); white-space: nowrap; }

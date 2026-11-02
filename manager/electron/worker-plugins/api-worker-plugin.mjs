@@ -125,7 +125,9 @@ export function createApiWorkerPlugin(options = {}) {
 
     async send(payload) {
       const workerConfigId = localWorkerId(payload.local_worker_id);
-      const config = await configuration(workerConfigId);
+      const rawConfig = await configuration(workerConfigId);
+      const requestedModel = clean(payload.model, 240);
+      const config = requestedModel ? { ...rawConfig, model: requestedModel } : rawConfig;
       const existing = runs.get(workerConfigId);
       if (existing?.activity === "working") throw new Error(`API worker ${workerConfigId} is already running a job.`);
       if (typeof options.createProvider !== "function" || typeof options.createMcpClients !== "function") {

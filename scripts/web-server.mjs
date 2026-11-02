@@ -349,13 +349,30 @@ const apiWorkerStore = {
   },
   save(payload) {
     const current = rawApiWorkerStore.list();
-    const id = String(payload?.id || "").trim();
-    const isExisting = current.some((item) => item.id === id);
-    if (!isExisting && current.length >= MAX_API_WORKERS) {
+    const id = String(payload?.id || payload?.local_worker_id || payload?.worker_id || "").replace(/^api:/i, "").trim();
+    const existing = current.find((item) => item.id === id);
+    if (!existing && current.length >= MAX_API_WORKERS) {
       throw new Error(`Bản Server giới hạn tối đa ${MAX_API_WORKERS} API Worker để tối ưu RAM.`);
     }
-    const saved = rawApiWorkerStore.save(payload);
-    if (payload?.provider === "openrouter" && payload?.api_key) {
+    const nextModel = String(payload?.model || existing?.model || "").trim();
+    let nextLabel = String(payload?.label || existing?.label || id).trim();
+    if (existing && !payload?.label && existing.provider === "openrouter" && existing.label.startsWith("OpenRouter · ") && nextModel && nextModel !== existing.model) {
+      const shortModel = nextModel.split("/").pop().replace(/:free$/i, "").replace(/[-_]+/g, " ").trim();
+      if (shortModel) nextLabel = `OpenRouter · ${shortModel}`;
+    }
+    const merged = existing
+      ? {
+          ...existing,
+          ...payload,
+          id,
+          label: nextLabel,
+          provider: payload?.provider || existing.provider,
+          base_url: payload?.base_url || existing.base_url,
+          model: nextModel
+        }
+      : { ...payload, id, label: nextLabel, model: nextModel };
+    const saved = rawApiWorkerStore.save(merged);
+    if (merged?.provider === "openrouter" && payload?.api_key) {
       saveCloudCredentials({ openrouterApiKey: String(payload.api_key).trim() });
     }
     return saved;
@@ -994,6 +1011,7 @@ function createWebGithubApiWorkerPlugin() {
           label: String(config.label || id),
           provider: String(config.provider || "openrouter"),
           model: String(config.model || ""),
+          available_models: FREE_OPENROUTER_FALLBACK_MODELS,
           connected: config.credential_available !== false,
           activity: run?.activity || "idle",
           current_task_id: run?.activity === "working" ? run.jobId : "",
@@ -1020,10 +1038,20 @@ function createWebGithubApiWorkerPlugin() {
     },
     async send(payload) {
       const workerConfigId = String(payload.local_worker_id || "").trim();
-      const config = apiWorkerStore.list().find((item) => item.id === workerConfigId && item.enabled !== false);
+      let config = apiWorkerStore.list().find((item) => item.id === workerConfigId && item.enabled !== false);
       if (!config) throw new Error(`API worker ${workerConfigId} chưa được cấu hình.`);
       const existing = runs.get(workerConfigId);
       if (existing?.activity === "working") throw new Error(`Worker ${config.label} đang bận xử lý task khác.`);
+      const requestedModel = String(payload.model || "").trim();
+      if (requestedModel && requestedModel !== config.model) {
+        try {
+          const updated = apiWorkerStore.save({ id: workerConfigId, model: requestedModel });
+          if (updated) config = { ...config, ...updated };
+          else config = { ...config, model: requestedModel };
+        } catch {
+          config = { ...config, model: requestedModel };
+        }
+      }
       if ((payload.attachments?.length || 0) > 0) {
         throw new Error("Worker trên Cloud Server chỉ thao tác trực tiếp trên GitHub và test bằng Runner; không nhận file local.");
       }

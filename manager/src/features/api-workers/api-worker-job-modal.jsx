@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from "react";
+import { AppDropdown } from "../../app-dropdown.jsx";
+import { buildWorkerModelOptions, createCustomWorkerModelOption } from "../../api-worker-form.js";
 import { WorkerIcon, WorkingBadge } from "../../components/worker-ui.jsx";
 import { formatFileSize } from "../../file-size.js";
 import { LatestMessagePanel } from "../../latest-message-panel.jsx";
@@ -12,13 +14,18 @@ function apiJobId() {
   return `cpt_${[...bytes].map((value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
-export function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChooseAttachments, onOpenAttachmentPreview, onRemoveAttachment, onClearAttachments, onPaste, onCopyResponse, onClose, onStarted, onError }) {
+export function ApiWorkerJobModal({ worker, allWorkers, projects, customImages, attachments, onChooseAttachments, onOpenAttachmentPreview, onRemoveAttachment, onClearAttachments, onPaste, onCopyResponse, onChangeModel, onClose, onStarted, onError }) {
   const isWebServer = Boolean(api?.isWebServer);
   const [root, setRoot] = useState(projects[0]?.root || "");
   const [selectedGithubRepo, setSelectedGithubRepo] = useState("songvedem260597/codexpro");
+  const [selectedModel, setSelectedModel] = useState("");
   const [request, setRequest] = useState("");
   const [lastRequest, setLastRequest] = useState("");
   const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    setSelectedModel(worker?.model || "");
+  }, [worker?.worker_id, worker?.model]);
 
   useEffect(() => {
     if (!root && projects[0]?.root) setRoot(projects[0].root);
@@ -45,20 +52,33 @@ export function ApiWorkerJobModal({ worker, projects, customImages, attachments,
   const valid = isCloud ? Boolean(request.trim() && request.length <= 4000 && attachments.length === 0 && worker.connected && !working)
     : Boolean(root && (request.trim() || attachments.length) && worker.connected && !working);
 
+  const activeModel = selectedModel || worker.model || "";
+  const modelOptions = buildWorkerModelOptions(worker, allWorkers, [], activeModel);
+
+  const handleSelectModel = (nextValue, option) => {
+    const chosen = String(option?.customModel || nextValue || "").trim();
+    if (!chosen) return;
+    setSelectedModel(chosen);
+    void onChangeModel?.(worker, chosen);
+  };
+
   const submit = async () => {
     if (!valid) return;
     setSending(true);
     try {
-      await api.sendWorkerRequest({
+      const basePayload = {
         workerId: worker.worker_id,
+        local_worker_id: worker.local_worker_id,
+        model: activeModel,
         task_id: apiJobId(),
         task_kind: "code",
-        scope: isCloud ? "github" : allAllowedScope ? "all_allowed" : "workspace",
-        root: isCloud ? "" : allAllowedScope ? "" : root,
-        ...(isCloud ? { github_repo: cloudRepo } : { workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [] }),
+        scope: allAllowedScope ? "all_allowed" : "workspace",
+        root: allAllowedScope ? "" : root,
+        workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [],
         text: request.trim(),
         attachments: isCloud ? [] : attachments
-      });
+      };
+      await api.sendWorkerRequest(isCloud ? { ...basePayload, scope: "github", root: "", github_repo: cloudRepo, workspaceCandidates: [] } : basePayload);
       setLastRequest(request.trim() || `Đã gửi ${attachments.length} file`);
       setRequest("");
       onClearAttachments();
@@ -86,12 +106,31 @@ export function ApiWorkerJobModal({ worker, projects, customImages, attachments,
         </div>
 
         <article className={`request-card chat-popup-card ${worker.connected ? "is-online" : "is-offline"}`}>
+          <label className="request-label">Chọn model cho worker</label>
+          <AppDropdown
+            className="is-form api-job-model-dropdown"
+            value={activeModel}
+            options={modelOptions}
+            onChange={handleSelectModel}
+            createOption={(query) => createCustomWorkerModelOption(query, modelOptions)}
+            disabled={working}
+            ariaLabel={`Chọn model cho ${worker.label}`}
+            placeholder="Chọn hoặc nhập model…"
+            searchable
+            searchPlaceholder="Tìm hoặc nhập model ID rồi nhấn Enter…"
+          />
           {isCloud ? <>
             <label className="request-label">GitHub repository — thao tác trực tiếp trên Git & test bằng Actions Runner</label>
             {isWebServer ? (
-              <select className="input" value={cloudRepo} onChange={(event) => setSelectedGithubRepo(event.target.value)} disabled={working} aria-label="GitHub repository">
-                {githubRepoOptions.map((repoName) => <option key={repoName} value={repoName}>{repoName}</option>)}
-              </select>
+              <AppDropdown
+                className="is-form"
+                value={cloudRepo}
+                options={githubRepoOptions.map((repoName) => ({ value: repoName, label: repoName, hint: "GitHub Repository · Actions Runner", searchText: repoName }))}
+                onChange={setSelectedGithubRepo}
+                disabled={working}
+                ariaLabel="GitHub repository"
+                searchable={githubRepoOptions.length > 4}
+              />
             ) : (
               <input className="input" value={cloudRepo} readOnly aria-label="GitHub repository" />
             )}
