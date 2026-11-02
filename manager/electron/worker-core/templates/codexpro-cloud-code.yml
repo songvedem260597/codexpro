@@ -1,0 +1,175 @@
+name: CodexPro Worker Cloud
+run-name: Worker Cloud ${{ inputs.task_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'Controller task identifier'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: codexpro-cloud-${{ inputs.task_id }}
+  cancel-in-progress: false
+
+jobs:
+  claim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      accepted: ${{ steps.claim.outputs.accepted }}
+    steps:
+      - id: claim
+        name: Verify GitHub-signed identity and claim task from Render
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TASK_ID" =~ ^[0-9a-f-]{36}$ ]] || { echo "::error::Invalid task ID"; exit 1; }
+          endpoint="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=codexpro-cloud-agent-worker"
+          oidc=$(curl -fsS --max-time 15 -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "$endpoint" | jq -r '.value')
+          curl --fail-with-body -fsS --max-time 25 \
+            -H "Authorization: Bearer $oidc" -H 'content-type: application/json' \
+            --data "{\"taskId\":\"$TASK_ID\"}" \
+            https://codexpro-agent-controller.onrender.com/v1/code/oidc-claim > /dev/null
+          echo 'accepted=true' >> "$GITHUB_OUTPUT"
+
+  windows_code:
+    needs: claim
+    if: ${{ needs.claim.outputs.accepted == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout selected GitHub repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Edit GitHub code inside the ephemeral Windows checkout
+        env:
+          CLOUD_TASK_ID: ${{ inputs.task_id }}
+        run: node .github/codexpro-cloud/agent.mjs
+      - name: Run available project checks on GitHub Windows Runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Whitespace check failed' }
+          $projectChecks = 0
+          if (Test-Path 'package.json') {
+            $manifest = Get-Content 'package.json' -Raw | ConvertFrom-Json
+            if (Test-Path 'package-lock.json') {
+              npm ci --ignore-scripts --no-audit --no-fund
+              if ($LASTEXITCODE -ne 0) { throw 'npm ci failed' }
+            } else {
+              npm install --ignore-scripts --no-audit --no-fund --package-lock=false
+              if ($LASTEXITCODE -ne 0) { throw 'npm install failed' }
+            }
+            foreach ($check in @('check', 'test', 'build')) {
+              if ($manifest.scripts.PSObject.Properties.Name -contains $check) {
+                npm run $check
+                if ($LASTEXITCODE -ne 0) { throw ("npm " + $check + " failed") }
+                $projectChecks++
+              }
+            }
+          }
+          if (Test-Path 'go.mod') {
+            go test ./...
+            if ($LASTEXITCODE -ne 0) { throw 'Go tests failed' }
+            $projectChecks++
+          }
+          if (Test-Path 'Cargo.toml') {
+            cargo test
+            if ($LASTEXITCODE -ne 0) { throw 'Cargo tests failed' }
+            $projectChecks++
+          }
+          if (Test-Path 'requirements.txt') {
+            python -m compileall -q .
+            if ($LASTEXITCODE -ne 0) { throw 'Python compile check failed' }
+            $projectChecks++
+          }
+          if ($projectChecks -eq 0) {
+            Write-Warning 'No project-specific test command detected; only git diff --check was run'
+          }
+      - name: Publish reviewed changes to a new branch
+        id: publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TASK_ID: ${{ inputs.task_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(git status --porcelain --untracked-files=all | ForEach-Object { $_.Substring(3) })
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot read checkout status' }
+          $files = @($files | Where-Object { $_ -notmatch '^(package-lock.json|node_modules/)' })
+          if ($files.Count -gt 12) { throw 'More than 12 changed files' }
+          foreach ($file in $files) {
+            if ($file -notmatch '^(src|test|tests|docs|scripts|app|lib|client|server|packages|components|backend|frontend|internal|cmd|pkg)/[^.].*|^(README\.md|package\.json|pyproject\.toml|requirements\.txt|go\.mod|Cargo\.toml|Makefile|tsconfig\.json)$' -or
+                $file -match '(?i)(secret|credential|password|token|private|\.env|\.pem|\.key)' -or
+                $file -like '.github/*') { throw ('Forbidden cloud change: ' + $file) }
+          }
+          if ($files.Count -eq 0) {
+            "files_changed=0" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $branch = 'codexpro/cloud-' + $env:TASK_ID
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config user.name 'github-actions[bot]'
+          git checkout -b $branch
+          if ($LASTEXITCODE -ne 0) { throw 'Branch creation failed' }
+          foreach ($file in $files) {
+            git add -- $file
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to stage source file' }
+          }
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { throw 'No source changes to commit' }
+          git commit -m ('feat: Worker Cloud task ' + $env:TASK_ID)
+          if ($LASTEXITCODE -ne 0) { throw 'Commit failed' }
+          gh auth setup-git
+          if ($LASTEXITCODE -ne 0) { throw 'Git authentication unavailable' }
+          git push origin ('HEAD:refs/heads/' + $branch)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot push task branch' }
+          $url = gh pr create --base $env:GITHUB_REF_NAME --head $branch --title ('Worker Cloud ' + $env:TASK_ID) --body 'Generated on GitHub Windows Runner. Please review the diff and test output before merging.'
+          if ($LASTEXITCODE -eq 0) {
+            ('pr_url=' + ($url | Select-Object -Last 1)) >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Warning 'GitHub did not permit the Actions bot to create a PR. Branch was pushed.'
+            ('branch_url=https://github.com/' + $env:GITHUB_REPOSITORY + '/tree/' + $branch) >> $env:GITHUB_OUTPUT
+          }
+          ('files_changed=' + $files.Count) >> $env:GITHUB_OUTPUT
+      - name: Return runner result to Render
+        if: always()
+        shell: pwsh
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+          CONCLUSION: ${{ job.status }}
+          PR_URL: ${{ steps.publish.outputs.pr_url }}
+          BRANCH_URL: ${{ steps.publish.outputs.branch_url }}
+          FILES_CHANGED: ${{ steps.publish.outputs.files_changed }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $endpoint = $env:ACTIONS_ID_TOKEN_REQUEST_URL + '&audience=codexpro-cloud-agent-worker'
+          $identity = Invoke-RestMethod -Method Get -Uri $endpoint -Headers @{Authorization='Bearer ' + $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN} -TimeoutSec 20
+          if (-not $identity.value) { throw 'GitHub OIDC not available' }
+          $body = @{
+            taskId = $env:TASK_ID
+            conclusion = $env:CONCLUSION
+            pullRequestUrl = $env:PR_URL
+            branchUrl = $env:BRANCH_URL
+            filesChanged = if ($env:FILES_CHANGED) { [int]$env:FILES_CHANGED } else { 0 }
+          } | ConvertTo-Json -Compress
+          Invoke-RestMethod -Uri 'https://codexpro-agent-controller.onrender.com/v1/code/oidc-callback' -Method Post `
+            -Headers @{Authorization='Bearer ' + $identity.value} -ContentType 'application/json' -Body $body -TimeoutSec 45 | Out-Null

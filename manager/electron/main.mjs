@@ -34,6 +34,7 @@ import { reconcileRunningTaskGates } from "./task-gate-recovery.mjs";
 import { collectOperationsPerformance } from "./operations-metrics.mjs";
 import { WorkerPluginRegistry } from "./worker-core/plugin-registry.mjs";
 import { createApiWorkerStore } from "./worker-core/api-worker-store.mjs";
+import { createApiWorkerChatHistoryStore } from "./worker-core/api-worker-chat-history.mjs";
 import { discoverApiWorkerModels } from "./worker-core/api-worker-model-discovery.mjs";
 import { createWorkerMcpClients } from "./mcp/http-client.mjs";
 import { createManagerMcpClient } from "./mcp/manager-mcp-client.mjs";
@@ -335,8 +336,10 @@ let managerChatCacheQuitFlushStarted = false;
 let managerChatCacheQuitFlushComplete = false;
 const { appendManagerChatLayoutLog, appendManagerChatResponseAuditLog, recordChatResponseAuditDiagnostic } = createManagerChatDiagnostics({ home: codexProHome, diagnostic });
 const apiWorkerStore = createApiWorkerStore({ home: codexProHome, safeStorage });
+const apiWorkerChatHistoryStore = createApiWorkerChatHistoryStore({ home: codexProHome, safeStorage });
 workerPluginRegistry.register(createApiWorkerPlugin({
   listConfigurations: () => apiWorkerStore.list(),
+  chatHistoryStore: apiWorkerChatHistoryStore,
   onUpdate: queueWorkerUpdate,
   createProvider: async ({ config }) => createProviderForApiWorker(config),
   createMcpClients: async ({ workerId, signal }) => {

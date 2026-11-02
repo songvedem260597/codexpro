@@ -1,3 +1,5 @@
+import { listGithubCloudRepositories, validGithubRepo } from "../worker-core/github-repository-list.mjs";
+
 export function registerWorkerIpcHandlers({
   diagnosticIpcHandle,
   runtimeStatus,
@@ -15,6 +17,7 @@ export function registerWorkerIpcHandlers({
     const status = await runtimeStatus();
     return { workers: status.workers, sources: status.workerSources };
   });
+  diagnosticIpcHandle("codexpro:github-cloud-repositories", { category: "worker", action: "list-github-cloud-repositories", slowMs: 30_000 }, () => listGithubCloudRepositories());
   diagnosticIpcHandle("codexpro:worker-send", {
     category: "worker",
     action: "worker-send",
@@ -23,6 +26,21 @@ export function registerWorkerIpcHandlers({
     failureMessage: "Không gửi được job tới worker",
     details: (payload) => ({ worker_id: String(payload?.workerId || payload?.worker_id || ""), task_id: String(payload?.task_id || payload?.taskId || ""), task_kind: String(payload?.task_kind || payload?.taskKind || ""), workflow_id: String(payload?.workflow || "") })
   }, async (_event, payload) => {
+    const workerId = String(payload?.workerId || payload?.worker_id || "");
+    if (workerId === "api:render-deepseek") {
+      // Fail CLOSED before materialization: never inspect, preview or upload local user files.
+      if (payload?.scope !== "github" || !validGithubRepo(payload?.github_repo) ||
+          payload?.root || (Array.isArray(payload?.attachments) && payload.attachments.length > 0) ||
+          (Array.isArray(payload?.workspaceCandidates) && payload.workspaceCandidates.length > 0) ||
+          (Array.isArray(payload?.attachment_names) && payload.attachment_names.length > 0)) {
+        throw new Error("Worker Cloud chỉ cho phép GitHub repository, không nhận dữ liệu từ máy local.");
+      }
+      return workerPluginRegistry.invoke("send", workerId, {
+        workerId, scope:"github", github_repo:String(payload.github_repo),
+        task_id:payload?.task_id || payload?.taskId, text:String(payload?.text || "").slice(0,4001),
+        attachments:[], root:"", workspaceCandidates:[]
+      });
+    }
     const prepared = await materializeApiWorkerRequest(payload);
     recordUserReportedError(prepared, { request_channel: "worker_job" });
     return await workerPluginRegistry.invoke("send", String(prepared?.workerId || prepared?.worker_id || ""), prepared);

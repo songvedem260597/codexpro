@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld("codexpro", {
   getStatus: () => invoke("codexpro:status"),
   listWorkers: () => invoke("codexpro:workers"),
   sendWorkerRequest: (payload) => invoke("codexpro:worker-send", payload),
+  listGithubCloudRepositories: () => invoke("codexpro:github-cloud-repositories"),
   readWorkerResponse: (payload) => invoke("codexpro:worker-read", payload),
   stopWorkerTask: (payload) => invoke("codexpro:worker-stop", payload),
   listApiWorkers: () => invoke("codexpro:api-worker-configs"),
