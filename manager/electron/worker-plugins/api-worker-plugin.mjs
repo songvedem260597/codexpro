@@ -1,5 +1,8 @@
 import { runMcpAgentJob } from "../worker-core/mcp-agent-loop.mjs";
 import { resolveTaskWorkflow } from "../task-workflow-registry.mjs";
+import { CLOUD_CHAT_WORKER_ID, CLOUD_CHAT_MESSAGE_LIMIT } from "../worker-core/api-worker-chat-history.mjs";
+import { runGithubOnlyCloudTask } from "../worker-core/github-cloud-worker.mjs";
+import { validGithubRepo } from "../worker-core/github-repository-list.mjs";
 
 function clean(value, maxLength = 1000) {
   return String(value ?? "").trim().slice(0, maxLength);
@@ -38,7 +41,8 @@ function publicRun(state) {
     workflow_id: state.workflow?.id || "",
     workflow_version: state.workflow?.version || "",
     workflow_evidence: state.workflowEvidence,
-    events: state.events.slice(-50)
+    events: state.events.slice(-50),
+    ...(state.cloudChat ? { chat_history: state.history.slice(-CLOUD_CHAT_MESSAGE_LIMIT) } : {})
   };
 }
 
@@ -88,6 +92,10 @@ export function createApiWorkerPlugin(options = {}) {
       return configs.filter((config) => config?.enabled !== false).map((config) => {
         const id = localWorkerId(config?.id);
         const run = runs.get(id);
+        const saved = id === CLOUD_CHAT_WORKER_ID ? options.chatHistoryStore?.read(id) : null;
+        const messages = run?.cloudChat ? run.history : saved?.messages || [];
+        const latestUser = [...messages].reverse().find((entry) => entry.role === "user")?.content || "";
+        const latestAssistant = messages.at(-1)?.role === "assistant" ? messages.at(-1).content : "";
         return {
           local_worker_id: id,
           label: clean(config?.label || id, 160),
@@ -101,7 +109,8 @@ export function createApiWorkerPlugin(options = {}) {
           current_workspace_root: run?.activity === "working" ? run.root : "",
           run_id: run?.jobId || "",
           last_task_id: run?.jobId || "",
-          last_result: run?.result?.text || "",
+          last_result: run?.result?.text || latestAssistant,
+          ...(id === CLOUD_CHAT_WORKER_ID ? { chat_history: messages.slice(-CLOUD_CHAT_MESSAGE_LIMIT), last_request: run?.request || latestUser } : {}),
           stream_text: run?.streamText || "",
           stream_revision: run?.streamRevision || 0,
           stream_phase: run?.streamPhase || "idle",
@@ -121,6 +130,60 @@ export function createApiWorkerPlugin(options = {}) {
       const config = await configuration(workerConfigId);
       const existing = runs.get(workerConfigId);
       if (existing?.activity === "working") throw new Error(`API worker ${workerConfigId} is already running a job.`);
+      if (workerConfigId === CLOUD_CHAT_WORKER_ID) {
+        // Dedicated GitHub-only path. It must NEVER create local CodexPro MCP clients.
+        if (payload.scope !== "github" || !validGithubRepo(payload.github_repo) ||
+            payload.root || (payload.attachments?.length || 0) > 0 ||
+            (payload.workspaceCandidates?.length || 0) > 0) {
+          throw new Error("Worker Cloud chỉ nhận repository GitHub; cấm đường dẫn và file local.");
+        }
+        const request = clean(payload.text || payload.request, 4000);
+        if (!request) throw new Error("Cloud task cannot be empty.");
+        const jobId = clean(payload.task_id || payload.taskId, 40);
+        if (!/^cpt_[a-f0-9]{24}$/.test(jobId)) throw new Error("Cloud task ID invalid.");
+        const root = "github:" + payload.github_repo;
+        const history = options.chatHistoryStore?.read(workerConfigId, "workspace", root)?.messages || [];
+        const controller = new AbortController();
+        const state = {
+          jobId, title:"GitHub Cloud Code", scope:"workspace", root, request,
+          history:[...history, { role:"user", content:request }].slice(-CLOUD_CHAT_MESSAGE_LIMIT),
+          cloudChat:true, activity:"working", startedAt:new Date().toISOString(),
+          finishedAt:"", result:undefined, error:"", streamText:"", streamRevision:0,
+          streamPhase:"queued", streamUpdatedAt:new Date().toISOString(),
+          streamToolStatus:"GitHub-only", events:[], controller
+        };
+        runs.set(workerConfigId, state);
+        try { options.chatHistoryStore?.save(workerConfigId, "workspace", root, state.history); } catch {}
+        publish(workerConfigId, state);
+        state.promise = (options.runGithubOnlyCloudTask || runGithubOnlyCloudTask)({
+          idempotencyKey:jobId, prompt:request, repo:payload.github_repo, signal:controller.signal,
+          onStatus:({message,phase,runUrl}) => {
+            state.streamPhase = clean(phase, 40) || "working";
+            state.streamToolStatus = clean(message, 300);
+            if (runUrl) state.events.push({type:"github_run",url:runUrl});
+            state.streamRevision++;
+            publish(workerConfigId, state);
+          }
+        }).then(result => {
+          state.result = result;
+          state.history = [...history, {role:"user",content:request}, {role:"assistant",content:clean(result.text,20000)}].slice(-CLOUD_CHAT_MESSAGE_LIMIT);
+          try { options.chatHistoryStore?.save(workerConfigId, "workspace", root, state.history); } catch {}
+          state.activity = "idle";
+          state.streamText = result.text || "";
+          state.streamPhase = "complete";
+          state.finishedAt = new Date().toISOString();
+          state.streamRevision++;
+          publish(workerConfigId, state);
+        }).catch(error => {
+          state.error = clean(error?.message || error, 1000);
+          state.activity = controller.signal.aborted ? "idle" : "failed";
+          state.streamPhase = controller.signal.aborted ? "cancelled" : "error";
+          state.finishedAt = new Date().toISOString();
+          state.streamRevision++;
+          publish(workerConfigId, state);
+        });
+        return { accepted:true, worker_id:"api:" + workerConfigId, job_id:jobId };
+      }
       if (typeof options.createProvider !== "function" || typeof options.createMcpClients !== "function") {
         throw new Error("API worker runtime dependencies are unavailable.");
       }
@@ -128,7 +191,11 @@ export function createApiWorkerPlugin(options = {}) {
       const scope = payload.scope === "all_allowed" ? "all_allowed" : "workspace";
       const root = clean(payload.root, 2048);
       const sameWorkspace = Boolean(existing?.scope === scope && (scope === "all_allowed" || (existing?.root && root && existing.root.toLowerCase() === root.toLowerCase())));
-      const history = sameWorkspace && Array.isArray(existing?.history) ? existing.history.slice(-12) : [];
+      const cloudChat = workerConfigId === CLOUD_CHAT_WORKER_ID;
+      const stored = cloudChat ? options.chatHistoryStore?.read(workerConfigId, scope, root)?.messages || [] : [];
+      const history = sameWorkspace && Array.isArray(existing?.history)
+        ? existing.history.slice(cloudChat ? -CLOUD_CHAT_MESSAGE_LIMIT : -12)
+        : stored;
       const attachmentNames = Array.isArray(payload.attachment_names) ? payload.attachment_names.map((name) => clean(name, 260)).filter(Boolean) : [];
       const request = clean(payload.text || payload.request, 20_000) || `Đã gửi ${attachmentNames.length} file: ${attachmentNames.join(", ")}`;
       const workflow = resolveTaskWorkflow(payload.workflow, request);
@@ -138,7 +205,8 @@ export function createApiWorkerPlugin(options = {}) {
         scope,
         root,
         request,
-        history,
+        history: cloudChat ? [...history, { role: "user", content: request }].slice(-CLOUD_CHAT_MESSAGE_LIMIT) : history,
+        cloudChat,
         activity: "working",
         startedAt: new Date().toISOString(),
         finishedAt: "",
@@ -155,6 +223,10 @@ export function createApiWorkerPlugin(options = {}) {
         controller
       };
       runs.set(workerConfigId, state);
+      if (cloudChat) {
+        try { options.chatHistoryStore?.save(workerConfigId, scope, root, state.history); }
+        catch { /* History storage must not prevent task execution. */ }
+      }
       publish(workerConfigId, state);
       const workerId = `api:${workerConfigId}`;
       let clients;
@@ -187,7 +259,7 @@ export function createApiWorkerPlugin(options = {}) {
           workspaceCandidates: payload.workspaceCandidates || payload.workspace_candidates
         },
         request: payload.text || payload.request,
-        messages: [...history, ...(Array.isArray(payload.messages) ? payload.messages : [])],
+        messages: [...history, ...(Array.isArray(payload.messages) && payload.messages.length ? payload.messages : [{ role: "user", content: request }])],
         limits: payload.limits,
         signal: controller.signal,
         onPhase: (phase, details = {}) => updateStream(workerConfigId, state, {
@@ -223,7 +295,11 @@ export function createApiWorkerPlugin(options = {}) {
       }).then((result) => {
         state.title = clean(result?.task_title || state.title, 56);
         state.result = result;
-        state.history = [...history, { role: "user", content: request }, { role: "assistant", content: clean(result?.text, 20_000) }].slice(-12);
+        state.history = [...history, { role: "user", content: request }, { role: "assistant", content: clean(result?.text, 20_000) }].slice(cloudChat ? -CLOUD_CHAT_MESSAGE_LIMIT : -12);
+        if (cloudChat) {
+          try { options.chatHistoryStore?.save(workerConfigId, scope, root, state.history); }
+          catch { /* Keep successful task status independent from history storage. */ }
+        }
         state.activity = "idle";
         state.streamText = String(result?.text || "");
         state.streamPhase = "complete";
@@ -248,7 +324,11 @@ export function createApiWorkerPlugin(options = {}) {
     },
 
     async read(payload) {
-      return publicRun(runs.get(localWorkerId(payload.local_worker_id))) || { activity: "idle" };
+      const id = localWorkerId(payload.local_worker_id);
+      return publicRun(runs.get(id)) || {
+        activity: "idle",
+        ...(id === CLOUD_CHAT_WORKER_ID ? { chat_history: options.chatHistoryStore?.read(id)?.messages || [] } : {})
+      };
     },
 
     async stop(payload) {

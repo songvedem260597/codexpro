@@ -17,7 +17,7 @@ export function formatRepoActivity(project) {
   return `${label} ${new Date(timestamp).toLocaleDateString("vi-VN")}`;
 }
 
-export function ProjectDropdown({ value, projects = [], disabled, onChange, includeAllAllowed = true, ariaLabel = "Chọn dự án hoặc đường dẫn cần làm" }) {
+export function ProjectDropdown({ value, projects = [], disabled, onChange, includeAllAllowed = true, ariaLabel = "Chọn dự án hoặc đường dẫn cần làm", searchPlaceholder = "Tìm dự án, thư mục hoặc đường dẫn…" }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const root = useRef(null);
@@ -70,7 +70,7 @@ export function ProjectDropdown({ value, projects = [], disabled, onChange, incl
         <div className="project-dropdown-menu" role="listbox" aria-label={ariaLabel}>
           <div className="project-dropdown-search">
             <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" /></svg>
-            <input autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm dự án, thư mục hoặc đường dẫn…" aria-label="Tìm dự án hoặc đường dẫn" />
+            <input autoFocus type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={searchPlaceholder} aria-label={ariaLabel} />
             {query && <button type="button" aria-label="Xóa từ khóa" onClick={() => setQuery("")}>×</button>}
           </div>
           {includeAllAllowed && <button type="button" role="option" aria-selected={allAllowed} className={`project-dropdown-option project-dropdown-option-all ${allAllowed ? "is-selected" : ""}`} onClick={() => choose(ALL_ALLOWED_WORKSPACES)}>

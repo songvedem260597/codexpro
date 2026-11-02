@@ -16,9 +16,16 @@ assert.match(modalSource, /modal-backdrop chat-modal-backdrop/, "API job must re
 assert.match(modalSource, /modal chat-modal api-job-modal/, "API job must reuse the Chat modal geometry");
 assert.match(modalSource, /modal-head chat-modal-head[\s\S]*?chat-modal-profile[\s\S]*?<WorkerIcon/, "API job must reuse the Chat worker header and animated icon");
 assert.match(modalSource, /request-card chat-popup-card[\s\S]*?request-composer[\s\S]*?request-card-foot[\s\S]*?request-card-actions/, "API job must reuse the Chat card, composer, and footer");
-assert.doesNotMatch(modalSource, /includeAllAllowed=\{false\}/, "API workers must offer all allowed workspaces like profile Chat");
+assert.match(modalSource, /<ProjectDropdown value=\{root\} projects=\{projects\}/, "Local API workers must retain the all-allowed workspace picker");
+assert.match(modalSource, /<ProjectDropdown[\s\S]*?value=\{cloudRepo\}[\s\S]*?projects=\{githubRepoProjects\}[\s\S]*?includeAllAllowed=\{false\}/, "Worker Cloud must use the shared searchable GitHub repository picker without local workspace options");
+assert.doesNotMatch(modalSource, /<select\b[^>]*value=\{cloudRepo\}/, "Worker Cloud must not use a native select");
+assert.match(modalSource, /const githubRepoProjects = githubRepos\.map/, "Cloud repository picker must derive choices only from the GitHub write-authorized list");
+assert.match(modalSource, /searchPlaceholder="Tìm GitHub repository…"/, "Cloud search input must mention GitHub rather than local folders");
+assert.match(modalSource, /createPortal\([\s\S]*?document\.querySelector\("\.app-shell"\)/, "Cloud modal must portal outside the main stacking context so the sidebar cannot cover the picker");
 assert.doesNotMatch(modalSource, /Job title|api-job-title|task_title:|titleWords|Loại job|Đoạn chat|ChatDropdown/, "the user must not choose the title, job kind, or conversation");
-assert.match(modalSource, /const allAllowedScope = root === ALL_ALLOWED_WORKSPACES[\s\S]*?task_kind: "code"[\s\S]*?scope: allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?root: allAllowedScope \? "" : root[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "API requests must support either a selected repository or all allowed workspaces");
+assert.match(modalSource, /const allAllowedScope = root === ALL_ALLOWED_WORKSPACES[\s\S]*?task_kind: "code"[\s\S]*?scope: isCloud \? "github" : allAllowedScope \? "all_allowed" : "workspace"[\s\S]*?root: isCloud \? "" : allAllowedScope \? "" : root[\s\S]*?workspaceCandidates: allAllowedScope \? projects\.map/, "Local API workers retain workspace choices while Worker Cloud uses GitHub-only scope");
+assert.match(modalSource, /isCloud \? \{ github_repo: cloudRepo \}/, "Worker Cloud must target its approved GitHub repository");
+assert.match(modalSource, /attachments: isCloud \? \[\] : attachments/, "Cloud worker must not submit local attachments");
 assert.match(modalSource, /Tin nhắn gần nhất[\s\S]*?<LatestMessagePanel[\s\S]*?Nhắn tiếp/, "the API popup must keep the shared latest-message and continue-message sections");
 assert.match(latestMessagePanel, /chat-response is-inline[\s\S]*?latest-response chat-transcript/, "the shared latest-message surface must preserve the fixed Chat response geometry");
 assert.match(modalSource, /<LatestMessagePanel[\s\S]*?worker\.stream_text[\s\S]*?worker\.last_result/, "API workers must render live stream text through the shared latest-message surface before falling back to the settled result");

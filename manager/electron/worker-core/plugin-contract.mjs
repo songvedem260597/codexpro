@@ -86,6 +86,12 @@ export function normalizeWorkerSummary(manifest, value) {
     run_id: clean(source.run_id ?? source.runId ?? source.conversation_id ?? source.conversationId, 200),
     last_task_id: clean(source.last_task_id ?? source.lastTaskId, 160),
     last_result: clean(source.last_result ?? source.lastResult, 200_000),
+    ...(manifest.id === "api" && localWorkerId === "render-deepseek" ? {
+      last_request: clean(source.last_request, 20_000),
+      chat_history: (Array.isArray(source.chat_history) ? source.chat_history : [])
+        .filter((item) => ["user", "assistant"].includes(item?.role) && typeof item.content === "string")
+        .slice(-5).map((item) => ({ role: item.role, content: clean(item.content, 20_000) }))
+    } : {}),
     stream_text: clean(source.stream_text ?? source.streamText, 200_000),
     stream_revision: Math.max(0, Number(source.stream_revision ?? source.streamRevision) || 0),
     stream_phase: clean(source.stream_phase ?? source.streamPhase, 40),
