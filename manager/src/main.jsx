@@ -673,7 +673,7 @@ function App() {
           <button type="button" className={activePage === "settings" ? "active" : ""} onClick={() => setActivePage("settings")}><Icon>⚙</Icon>Cài đặt</button>
         </nav>
         <div className="sidebar-foot">
-          <span className="autostart"><Dot ok={status?.autoStart} />{api?.isWebServer ? "Chạy 24/7 trên Cloud Server" : (status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài")}</span>
+          <span className="autostart"><Dot ok={status?.autoStart} />{status?.autoStart ? "Tự chạy cùng Windows" : "Autostart sau khi cài"}</span>
           <small>CodexPro Manager {managerPackage.version}</small>
         </div>
       </aside>
@@ -681,7 +681,7 @@ function App() {
       <main className={activePage === "settings" ? "page-settings" : activePage === "logs" ? "page-logs" : activePage === "plugins" ? "page-plugins" : activePage === "workflows" ? "page-workflows" : activePage === "control" ? "page-control" : "page-overview"}>
         <header>
           <div>
-            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : activePage === "plugins" ? "APP PLUGINS" : activePage === "workflows" ? "TASK WORKFLOWS" : activePage === "control" ? "AGENT OPERATIONS" : (api?.isWebServer ? "CLOUD SERVER CONTROL" : "WINDOWS CONTROL CENTER")}</p>
+            <p className="eyebrow">{activePage === "settings" ? "SETTINGS" : activePage === "logs" ? "DIAGNOSTIC LOGS" : activePage === "plugins" ? "APP PLUGINS" : activePage === "workflows" ? "TASK WORKFLOWS" : activePage === "control" ? "AGENT OPERATIONS" : "WINDOWS CONTROL CENTER"}</p>
             <h1>{activePage === "settings" ? "Cài đặt CodexPro" : activePage === "logs" ? "Nhật ký CodexPro" : activePage === "plugins" ? "Plugin" : activePage === "workflows" ? "Trung tâm quy trình" : activePage === "control" ? "Trung tâm điều phối" : <>CodexPro <TitleGalaxyAccent /> Agent</>}</h1>
             <p className="subtitle">{activePage === "settings" ? "Quản lý kết nối MCP, popup chat, ảnh worker và font chữ theo thành phần." : activePage === "logs" ? "Theo dõi lỗi, cảnh báo và hoạt động MCP trong 24 giờ gần nhất." : activePage === "plugins" ? "Tích hợp giao diện từ repo khác mà không đóng Manager hay gián đoạn worker." : activePage === "workflows" ? "Giao task theo checklist có sẵn và theo dõi từng bước bằng bằng chứng của worker." : activePage === "control" ? "Theo dõi task, hiệu suất, tự phục hồi, phiên bản và an toàn repo trong một màn hình." : "Một chỗ để xem server, profile và kiểm tra repo."}</p>
           </div>
@@ -691,11 +691,11 @@ function App() {
                 <ProfileSummaryItem state="working" count={profileSummary.working} label="làm việc" />
                 <ProfileSummaryItem state="idle" count={profileSummary.idle} label="rảnh" />
                 <ProfileSummaryItem state="hung" count={profileSummary.hung} label="mất kết nối" />
-                {!api?.isWebServer && <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />}
+                <ProfileSummaryItem state="hung" count={profileSummary.missing} label="chưa cài" missing />
                 {profileSummary.reload > 0 && <span className="profile-summary-update">{profileSummary.reload} cần update worker</span>}
                 {profileSummary.deferredUpdate > 0 && <span className="profile-summary-update">{profileSummary.deferredUpdate} chờ rảnh để update</span>}
               </div>
-              {!api?.isWebServer && <button
+              <button
                 className={`button ${profileSummary.reload ? "primary" : "secondary"} reload-all`}
                 onClick={() => setWorkerUpdateConfirmOpen(true)}
                 disabled={Boolean(busy) || profileSummary.reload === 0}
@@ -706,7 +706,7 @@ function App() {
                     : `Tất cả profile đã dùng worker ${workerExtensionVersion}`}
               >
                 {busy === "reload-profiles" ? "Đang update extension…" : "Update extension"}
-              </button>}
+              </button>
             </div>
           )}
         </header>
@@ -717,10 +717,10 @@ function App() {
         <section id="overview">
           <div className="section-head"><div><p className="eyebrow">LIVE STATUS</p><h2>Trạng thái hệ thống</h2></div><span className="last-check">{status ? `Cập nhật ${new Date(status.checkedAt).toLocaleTimeString("vi-VN")}` : "Đang kiểm tra..."}</span></div>
           <div className="status-grid">
-            <StatusCard label={api?.isWebServer ? "Cloud Server" : "Scheduled Task"} ok={status?.task?.state === "Running"} value={status?.task?.state || "..."} detail={api?.isWebServer ? "Northflank Container · 24/7" : (status?.task?.lastRunTime ? `Lần chạy: ${new Date(status.task.lastRunTime).toLocaleString("vi-VN")}` : "Windows Task Scheduler")} />
-            <StatusCard label={api?.isWebServer ? "Internal MCP" : "Local MCP"} ok={status?.local?.ok} value={status?.local?.ok ? "Online" : "Offline"} detail={status?.local?.ok ? `127.0.0.1:${status.config.port} · ${status.local.latency} ms` : status?.local?.error || "Đang kiểm tra"} />
-            <StatusCard label={api?.isWebServer ? "Public Endpoint" : "Public tunnel"} ok={status?.tunnel?.ok} value={status?.tunnel?.ok ? "Online" : "Offline"} detail={status?.tunnel?.ok ? `${status.config.hostname} · ${status.tunnel.latency} ms` : status?.tunnel?.error || status?.config?.hostname || "Chưa cấu hình"} />
-            <StatusCard label="Processes" ok={api?.isWebServer ? status?.processes?.length >= 1 : status?.processes?.length >= 3} value={`${status?.processes?.length ?? 0} tiến trình`} detail={status?.processes?.length ? status.processes.map((p) => `${p.name} ${p.pid}`).join(" · ") : "Không tìm thấy process"} />
+            <StatusCard label="Scheduled Task" ok={status?.task?.state === "Running"} value={status?.task?.state || "..."} detail={status?.task?.lastRunTime ? `Lần chạy: ${new Date(status.task.lastRunTime).toLocaleString("vi-VN")}` : "Windows Task Scheduler"} />
+            <StatusCard label="Local MCP" ok={status?.local?.ok} value={status?.local?.ok ? "Online" : "Offline"} detail={status?.local?.ok ? `127.0.0.1:${status.config.port} · ${status.local.latency} ms` : status?.local?.error || "Đang kiểm tra"} />
+            <StatusCard label="Public tunnel" ok={status?.tunnel?.ok} value={status?.tunnel?.ok ? "Online" : "Offline"} detail={status?.tunnel?.ok ? `${status.config.hostname} · ${status.tunnel.latency} ms` : status?.tunnel?.error || status?.config?.hostname || "Chưa cấu hình"} />
+            <StatusCard label="Processes" ok={status?.processes?.length >= 3} value={`${status?.processes?.length ?? 0} tiến trình`} detail={status?.processes?.length ? status.processes.map((p) => `${p.name} ${p.pid}`).join(" · ") : "Không tìm thấy process"} />
           </div>
         </section>
 
