@@ -14,10 +14,11 @@ export function ProjectsSection({
   onRemove,
   onPageChange
 }) {
+  const isWebServer = Boolean(window.codexpro?.isWebServer);
   return (
     <section id="projects">
       <div className="section-head">
-        <div><p className="eyebrow">WORKSPACES</p><h2>Repo và dự án</h2><p className="section-note">Tự quét Git repo trên Desktop, Documents, Downloads và toàn bộ ổ/thư mục đã cấp quyền cho CodexPro.</p></div>
+        <div><p className="eyebrow">WORKSPACES</p><h2>Repo và dự án</h2><p className="section-note">{isWebServer ? "Quản lý workspace trên Cloud Server (bấm + Thêm dự án để nhập đường dẫn hoặc dán URL GitHub repo để clone tự động)." : "Tự quét Git repo trên Desktop, Documents, Downloads và toàn bộ ổ/thư mục đã cấp quyền cho CodexPro."}</p></div>
         <button className="button secondary" onClick={onAdd} disabled={Boolean(busy)}>+ Thêm dự án</button>
       </div>
       <div className="project-list">
@@ -42,7 +43,7 @@ export function ProjectsSection({
             </div>
             <div className="project-actions">
               <button onClick={() => onInspect(project)} disabled={Boolean(busy)}>{busy === project.root ? "Đang kiểm tra..." : "Kiểm tra qua MCP"}</button>
-              <button onClick={() => onOpenFolder(project.root)}>Mở thư mục</button>
+              {!isWebServer && <button onClick={() => onOpenFolder(project.root)}>Mở thư mục</button>}
               {!project.active && project.source === "Đã thêm" && <button className="remove" title="Bỏ khỏi danh sách" onClick={() => onRemove(project.root)}>×</button>}
             </div>
           </article>

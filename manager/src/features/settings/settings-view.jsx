@@ -46,6 +46,7 @@ export function SettingsView({
   restoreWorkerImage,
   restoreManagerSettings
 }) {
+  const isWebServer = Boolean(api?.isWebServer);
   const selectedFont = FONT_OPTIONS.find((option) => option.value === managerSettings.fontFamily) || FONT_OPTIONS[0];
   const selectedHeadingFont = FONT_OPTIONS.find((option) => option.value === managerSettings.headingFontFamily);
   const selectedMonoFont = FONT_OPTIONS.find((option) => option.value === managerSettings.monoFontFamily);
@@ -146,7 +147,7 @@ export function SettingsView({
             </div>
           </section>
 
-          <section className="settings-panel subagent-limit-panel">
+          {!isWebServer && <section className="settings-panel subagent-limit-panel">
             <div className="settings-panel-head">
               <div>
                 <p className="eyebrow">AGENT EXECUTION</p>
@@ -170,9 +171,9 @@ export function SettingsView({
               <i />
               <span className="is-locked"><b>2+</b><small>Đang khóa</small></span>
             </div>
-          </section>
+          </section>}
 
-          <section className="settings-panel">
+          {!isWebServer && <section className="settings-panel">
             <div className="settings-panel-head">
               <div>
                 <p className="eyebrow">CHAT POPUP</p>
@@ -238,9 +239,9 @@ export function SettingsView({
             </div>
             <div className="width-scale"><span>720px</span><span>Mặc định 940px</span><span>1600px</span></div>
             <div className="chat-width-preview"><div style={{ width: `${Math.max(42, Math.min(100, managerSettings.chatWidth / 16))}%` }}><span>Chat popup</span><small>{managerSettings.chatWidth}px</small></div></div>
-          </section>
+          </section>}
 
-          <section className="settings-panel">
+          {!isWebServer && <section className="settings-panel">
             <div className="settings-panel-head">
               <div>
                 <p className="eyebrow">CHAT CONTENT</p>
@@ -303,7 +304,7 @@ export function SettingsView({
                 <span>Tin nhắn gần nhất</span><small>{managerSettings.chatHeight}px</small>
               </div>
             </div>
-          </section>
+          </section>}
 
           <section className="settings-panel">
             <div className="settings-panel-head profile-layout-setting-head">
@@ -558,7 +559,7 @@ export function SettingsView({
           </section>
 
           <div className="settings-footer">
-            <span>Cài đặt được lưu trong dữ liệu CodexPro trên máy này.</span>
+            <span>{isWebServer ? "Cài đặt được lưu trực tiếp trên Cloud Server." : "Cài đặt được lưu trong dữ liệu CodexPro trên máy này."}</span>
             <button type="button" className="button danger-quiet" onClick={() => void restoreManagerSettings()} disabled={Boolean(settingsBusy)}>{settingsBusy === "reset" ? "Đang khôi phục…" : "Khôi phục tất cả mặc định"}</button>
           </div>
         </div>

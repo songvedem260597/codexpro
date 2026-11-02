@@ -168,13 +168,14 @@ export function BrowserProfilesSection({
   onOpenProfile,
   onSetupProfile
 }) {
+  const isWebServer = Boolean(window.codexpro?.isWebServer);
   const apiWorkers = (status?.workers || []).filter((worker) => worker.worker_type === "api");
-  const sortedProfiles = [...visibleProfiles].sort((left, right) => profileSortRank(left) - profileSortRank(right) || String(left.profile_id || "").localeCompare(String(right.profile_id || "")));
+  const sortedProfiles = isWebServer ? [] : [...visibleProfiles].sort((left, right) => profileSortRank(left) - profileSortRank(right) || String(left.profile_id || "").localeCompare(String(right.profile_id || "")));
 
   return (
     <section id="profiles">
       <div className="section-head">
-        <div><p className="eyebrow">CONNECTED WORKERS</p><h2>Worker đã kết nối</h2><p className="section-note">Hãy kết nối API worker và Chrome profile của bạn</p></div>
+        <div><p className="eyebrow">{isWebServer ? "API WORKERS" : "CONNECTED WORKERS"}</p><h2>{isWebServer ? "API Worker đã kết nối" : "Worker đã kết nối"}</h2><p className="section-note">{isWebServer ? "Quản lý và giao việc cho tối đa 4 API Worker trực tiếp trên Cloud Server" : "Hãy kết nối API worker và Chrome profile của bạn"}</p></div>
       </div>
       {status?.workerSnapshotStale && (
         <div className="worker-snapshot-warning" role="status">
@@ -182,7 +183,7 @@ export function BrowserProfilesSection({
         </div>
       )}
       <div className={`profile-list is-${settings.profileLayout === "cards" ? "card" : "row"}-layout working-border-${settings.workingBorderStyle}`}>
-        {!apiWorkers.length && !visibleProfiles.length && <div className="empty">Chưa có worker nào kết nối. Hãy lưu API worker hoặc Load unpacked extension CodexPro trong Chrome profile cần dùng.</div>}
+        {!apiWorkers.length && !sortedProfiles.length && <div className="empty">{isWebServer ? "Chưa có API Worker nào. Hãy mở tab Cài đặt để thêm API Worker (9Router, OpenRouter hoặc OpenAI-compatible)." : "Chưa có worker nào kết nối. Hãy lưu API worker hoặc Load unpacked extension CodexPro trong Chrome profile cần dùng."}</div>}
         <ApiWorkerCards workers={apiWorkers} customImages={settings.workerImageDataUrls} onRun={onApiRun} onStop={onApiStop} />
         {sortedProfiles.map((profile) => (
           <BrowserProfileCard
