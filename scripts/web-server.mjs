@@ -184,7 +184,7 @@ const mcpRuntimeConfig = {
   write: "workspace",
   bash: "full",
   tokenFile,
-  allowedRoots: [workspacesRoot, projectRoot]
+  allowedRoots: [workspacesRoot]
 };
 
 const {
@@ -201,9 +201,13 @@ const {
   pathInside
 });
 
-// Seed workspacesRoot if no projects are registered yet
-if (managerProjects().length === 0) {
-  saveManagerProjects([workspacesRoot]);
+// Clean up projectRoot (/app) if previously seeded, and leave only user workspaces
+{
+  const filtered = managerProjects().filter((p) => {
+    const resolved = path.resolve(p);
+    return resolved !== path.resolve(projectRoot) && resolved !== path.resolve(workspacesRoot);
+  });
+  saveManagerProjects(filtered);
 }
 
 const safeStorage = createHeadlessSafeStorage(codexProHome);
@@ -405,10 +409,10 @@ async function ensureLocalMcpServer() {
     return health;
   }
 
-  const allowedRoots = [...new Set([workspacesRoot, projectRoot, ...managerProjects()])].filter((p) => fs.existsSync(p));
+  const allowedRoots = [...new Set([workspacesRoot, ...managerProjects()])].filter((p) => fs.existsSync(p));
   console.error(`[CodexPro Web] Starting internal MCP server on 127.0.0.1:${MCP_PORT}...`);
   mcpChildProcess = spawn(process.execPath, [httpEntry], {
-    cwd: projectRoot,
+    cwd: workspacesRoot,
     env: {
       ...process.env,
       CODEXPRO_HOME: codexProHome,
@@ -421,7 +425,7 @@ async function ensureLocalMcpServer() {
       CODEXPRO_MODE: "agent",
       CODEXPRO_WRITE_MODE: "workspace",
       CODEXPRO_BASH_MODE: "full",
-      CODEXPRO_ALLOW_HOME: "1"
+      CODEXPRO_ALLOW_HOME: "0"
     },
     stdio: ["ignore", "inherit", "inherit"]
   });
@@ -989,9 +993,9 @@ const server = http.createServer(async (req, res) => {
 
     // 1. Public Health & MCP endpoints
     if (pathname === "/health" || pathname === "/healthz") {
-      const health = await checkLocalMcpHealth();
-      res.writeHead(health.ok ? 200 : 503, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(JSON.stringify({ ok: health.ok, latencyMs: health.latencyMs, maxApiWorkers: MAX_API_WORKERS }));
+      const mcpRunning = Boolean(mcpChildProcess && mcpChildProcess.exitCode === null);
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ ok: true, mcpRunning, maxApiWorkers: MAX_API_WORKERS }));
       return;
     }
     if (pathname === "/mcp") {
