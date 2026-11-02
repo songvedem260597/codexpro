@@ -27,6 +27,8 @@ export function ApiWorkerJobModal({ worker, projects, customImages, attachments,
   const working = sending || processing;
   const allAllowedScope = root === ALL_ALLOWED_WORKSPACES;
   const displayedRequest = lastRequest || worker.last_request || "";
+  const cloudHistory = worker.worker_id === "api:render-deepseek" && Array.isArray(worker.chat_history) ? worker.chat_history : null;
+  const earlierMessages = cloudHistory?.slice(0, cloudHistory.at(-1)?.role === "assistant" ? -2 : -1).slice(-3) || [];
   const valid = Boolean(root && (request.trim() || attachments.length) && worker.connected && !working);
 
   const submit = async () => {
@@ -74,9 +76,9 @@ export function ApiWorkerJobModal({ worker, projects, customImages, attachments,
           <ProjectDropdown value={root} projects={projects} onChange={setRoot} disabled={working} />
           {!projects.length && !allAllowedScope && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
 
-          <label className="request-label request-section-label">Tin nhắn gần nhất</label>
+          <label className="request-label request-section-label">{cloudHistory ? "5 tin nhắn gần nhất" : "Tin nhắn gần nhất"}</label>
           <LatestMessagePanel
-            working={processing}
+            recentMessages={earlierMessages} working={processing}
             headline={sending ? "Đang gửi tin nhắn…" : processing ? "CodexPro đang xử lý…" : ""}
             title={worker.current_task_title || worker.last_task_title || ""}
             requestText={displayedRequest}

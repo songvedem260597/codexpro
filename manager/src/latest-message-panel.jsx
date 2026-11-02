@@ -59,6 +59,7 @@ export function LatestMessagePanel({
   headline,
   title = "",
   requestText = "",
+  recentMessages = [],
   responseText = "",
   error = "",
   emptyText = "Chưa có tin nhắn.",
@@ -70,7 +71,8 @@ export function LatestMessagePanel({
 }) {
   const visualResponseText = useFrameCoalescedValue(responseText, working, turnId);
   const scroll = useReaderOwnedScroll(revision, working);
-  const hasContent = Boolean(requestText || visualResponseText || working);
+  const visiblePrevious = Array.isArray(recentMessages) ? recentMessages.slice(-3) : [];
+  const hasContent = Boolean(requestText || visualResponseText || working || visiblePrevious.length);
   const status = headline || (working ? "CodexPro đang xử lý…" : error ? "Job kết thúc với lỗi" : responseText ? "AI đã phản hồi xong" : "Chưa có tin nhắn");
   const waitingText = phase === "tool" && toolStatus
     ? `Đang dùng MCP: ${toolStatus}`
@@ -84,6 +86,13 @@ export function LatestMessagePanel({
         <div><span className="response-status-dot" /><strong>{status}</strong>{title && <small>{title}</small>}</div>
       </div>
       {hasContent ? <div className="latest-response chat-transcript" ref={scroll.scrollerRef} onWheel={scroll.onWheel} onTouchMove={scroll.onTouchMove} onScroll={scroll.onScroll}><div className="latest-message-scroll-content" ref={scroll.contentRef}>
+        {visiblePrevious.map((message, index) => <div className={`chat-transcript-message ${message.role === "assistant" ? "is-assistant" : "is-user"}`} key={`previous-${index}`}>
+          <div className="chat-message-avatar">{message.role === "assistant" ? "✦" : "B"}</div>
+          <div className="latest-response-content">
+            <span className="chat-message-role">{message.role === "assistant" ? "AI" : "Bạn"}</span>
+            {message.role === "assistant" ? <React.Suspense fallback={<div className="chat-message-text response-rich-text">{message.content}</div>}><ResponseText text={message.content} streaming={false} /></React.Suspense> : <div className="chat-message-text user-message-text">{message.content}</div>}
+          </div>
+        </div>)}
         {requestText && <div className="chat-transcript-message is-user"><div className="chat-message-avatar">B</div><div className="latest-response-content"><span className="chat-message-role">Bạn</span><div className="chat-message-text user-message-text">{requestText}</div></div></div>}
         {(visualResponseText || working) && <div className="chat-transcript-message is-assistant is-response-runway">
           <div className="chat-message-avatar">✦</div>

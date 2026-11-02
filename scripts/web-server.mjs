@@ -438,19 +438,27 @@ async function ensureLocalMcpServer() {
   return await checkLocalMcpHealth();
 }
 
+let cachedWorkerJobs = [];
+let cachedWorkerJobsAt = 0;
+let statusInFlight = null;
+
 async function collectWebRuntimeStatus(reqOrigin = "") {
-  const local = await checkLocalMcpHealth();
-  const workerStatus = await workerPluginRegistry.list({ browserProfiles: [] });
-  let workerJobs = [];
-  if (local.ok) {
-    try {
-      const res = await localMcpTool(mcpRuntimeConfig, mcpToken, "worker_job_history", {
-        statuses: ["prepared", "running", "completed", "failed", "cancelled", "blocked"],
-        limit: 100
-      }, 8000);
-      if (Array.isArray(res?.jobs)) workerJobs = res.jobs;
-    } catch {}
-  }
+  if (statusInFlight) return await statusInFlight;
+  statusInFlight = (async () => {
+    const local = await checkLocalMcpHealth();
+    const workerStatus = await workerPluginRegistry.list({ browserProfiles: [] });
+    const now = Date.now();
+    if (local.ok && now - cachedWorkerJobsAt >= 15_000) {
+      cachedWorkerJobsAt = now;
+      try {
+        const res = await localMcpTool(mcpRuntimeConfig, mcpToken, "worker_job_history", {
+          statuses: ["prepared", "running", "completed", "failed", "cancelled", "blocked"],
+          limit: 50
+        }, 6000);
+        if (Array.isArray(res?.jobs)) cachedWorkerJobs = res.jobs;
+      } catch {}
+    }
+    const workerJobs = cachedWorkerJobs;
   const publicBase = (PUBLIC_URL || reqOrigin || `http://127.0.0.1:${WEB_PORT}`).replace(/\/+$/, "");
   let publicHostname = "";
   try {
@@ -498,6 +506,12 @@ async function collectWebRuntimeStatus(reqOrigin = "") {
     tokenConfigured: true,
     autoStart: true
   };
+  })();
+  try {
+    return await statusInFlight;
+  } finally {
+    statusInFlight = null;
+  }
 }
 
 // Keep-awake self-ping while any API worker is actively working
@@ -757,18 +771,32 @@ const WEB_BRIDGE_JS = `(() => {
   }
 
   async function rpc(method, ...args) {
-    const res = await fetch("/api/manager/rpc", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ method, args })
-    });
-    const data = await res.json();
-    if (!res.ok || data?.ok === false) {
-      const err = new Error(data?.error?.message || data?.message || "CodexPro Web RPC failed.");
-      err.code = data?.error?.code || "WEB_RPC_FAILED";
-      throw err;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch("/api/manager/rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method, args })
+      });
+      const rawText = await res.text();
+      let data = null;
+      try {
+        data = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        const err = new Error("Server đang khởi động lại hoặc quá tải tạm thời, vui lòng đợi vài giây rồi thử lại.");
+        err.code = "WEB_UPSTREAM_UNAVAILABLE";
+        throw err;
+      }
+      if (!res.ok || data?.ok === false) {
+        const err = new Error(data?.error?.message || data?.message || "CodexPro Web RPC failed.");
+        err.code = data?.error?.code || "WEB_RPC_FAILED";
+        throw err;
+      }
+      return data.result;
     }
-    return data.result;
   }
 
   function pickFiles({ accept = "*/*", multiple = false } = {}) {
@@ -800,6 +828,7 @@ const WEB_BRIDGE_JS = `(() => {
   }
 
   window.codexpro = {
+    isWebServer: true,
     getStatus: () => rpc("codexpro:status"),
     listWorkers: () => rpc("codexpro:workers"),
     sendWorkerRequest: (p) => rpc("codexpro:worker-send", p),
