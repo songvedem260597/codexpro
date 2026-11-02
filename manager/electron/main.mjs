@@ -2371,6 +2371,18 @@ async function checkChatGptProfile(profileId) {
   if (!status.local.ok) throw new Error("Local MCP chưa sẵn sàng.");
   const profile = status.browserProfiles.find((item) => item.profile_id === id);
   if (!profile?.connected) throw new Error("Chrome profile này đang offline.");
+  if (!workerExtensionCurrent(profile)) {
+    const installed = Boolean(profile.connector_installed);
+    return {
+      action: "check_chatgpt",
+      ok: true,
+      installed,
+      message: String(profile.connector_message || (installed ? "CodexPro READY" : "Profile này chưa thêm CodexPro.")),
+      checked_at: String(profile.connector_checked_at || new Date().toISOString()),
+      passive: true,
+      diagnostic: { passive: true, skipped_stale_worker: true }
+    };
+  }
   const token = readToken(status.config.tokenFile);
   return await localMcpTool(status.config, token, "browser_control", {
     action: "check_chatgpt",

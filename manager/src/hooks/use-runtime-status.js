@@ -270,6 +270,7 @@ export function useRuntimeStatus({
   }, [api, conversationTitleOverridesRef, networkStreamPushTimes, refresh, refreshProjects, refreshStatus, requestTargetsRef, setRequestResponses, setStatus]);
 
   useEffect(() => {
+    if (status?.autoCheckProfiles !== true) return;
     const profiles = status?.browserProfiles || [];
     for (const profile of profiles) {
       const lastCheck = profileCheckTimes.current.get(profile.profile_id) || 0;
@@ -298,6 +299,7 @@ export function useRuntimeStatus({
     const candidate = (status?.browserProfiles || []).find((profile) => {
       if (!profile?.connected || profile.connector_update_required !== true || !extensionReady(profile.extension_version)) return false;
       if (!profileSafeForWorkerUpdate(profile) || profileChecksInFlight.current.has(profile.profile_id) || checkingProfiles.includes(profile.profile_id)) return false;
+      if (status?.autoMigrateConnector !== true) return false;
       const lastAttempt = connectorAutoMigrationAttempts.current.get(profile.profile_id) || 0;
       return now - lastAttempt >= CONNECTOR_AUTO_MIGRATION_RETRY_MS;
     });

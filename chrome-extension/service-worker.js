@@ -1180,6 +1180,9 @@ async function tabList(options={}) {
         await reconcileChatNetworkCompletion(tab.id,conversationId,domActivity.image_response_ready?'dom_image':'dom_response');
         networkState=await chatRequestState(tab.id,conversationId);
       }
+    }else if(networkState.network_state==='failed'&&domActivity.available&&!domActivity.busy&&canonicalActivity.busy){
+      canonicalActivity={...canonicalActivity,busy:false,busy_since:0,last_checked_at:Date.now()};
+      chatCanonicalActivityByTab.set(tab.id,canonicalActivity);
     }
     const networkStream=conversationId&&networkState.network_state!=='idle'?await chatNetworkStreamCapture(tab.id,conversationId):{};
     const realtimeStream=realtimeNetworkStreamsByTab.get(tab.id);
@@ -2474,7 +2477,7 @@ async function probeCanonicalActivity(tabId,conversationId,force=false) {
       const canonical=await readCanonicalConversationForTab(tabId,conversationId,CANONICAL_READ_TIMEOUT_MS);
       if(canonical?.ok)return rememberCanonicalActivity(tabId,conversationId,canonical);
       const previous=canonicalActivityState(tabId,conversationId);
-      const next={...previous,canonical_rate_limited:Boolean(canonical?.rate_limited),canonical_rate_limit_count:Number(canonical?.canonical_rate_limit_count)||0,canonical_retry_at:String(canonical?.retry_at||''),canonical_error:String(canonical?.error||'')};
+      const next={...previous,last_checked_at:Date.now(),canonical_rate_limited:Boolean(canonical?.rate_limited),canonical_rate_limit_count:Number(canonical?.canonical_rate_limit_count)||0,canonical_retry_at:String(canonical?.retry_at||''),canonical_error:String(canonical?.error||'')};
       if(previous.conversation_id)chatCanonicalActivityByTab.set(tabId,next);
       return next;
     }catch(error){
@@ -2659,13 +2662,25 @@ async function execute(command) {
   if(commandExpiresAt&&Date.now()>=commandExpiresAt)throw new Error('COMMAND_EXPIRED: Lệnh đã hết hạn trong bridge và bị hủy trước khi chạm vào ChatGPT.');
   if(action==='reload_extension'){
     const tabs=await tabList();
-    const busyTabs=tabs.filter(tab=>tab?.busy||tab?.settling||String(tab?.network_state||'')==='generating');
+    const busyTabs=args?.force===true?[]:tabs.filter(tab=>tab?.busy||tab?.settling||String(tab?.network_state||'')==='generating');
     if(busyTabs.length)throw new Error(`WORKER_BUSY: ${busyTabs.length} ChatGPT tab đang xử lý; hoãn reload extension để không gián đoạn task.`);
     await chrome.alarms.create('codexpro-reconnect',{when:Date.now()+3000});
     setTimeout(()=>chrome.runtime.reload(),1200);
     return {action,ok:true,reloading:true,version:chrome.runtime.getManifest().version,runtime_build_id:WORKER_RUNTIME_BUILD_ID};
   }
-  if(action==='check_chatgpt')return {action,...await checkConnectorInstalled()};
+  if(action==='check_chatgpt'){
+    if(!args?.force_ui){
+      const profile=await profileInfo();
+      const existing=profile?.connector_install&&typeof profile.connector_install==='object'?profile.connector_install:null;
+      const installed=Boolean(existing?.ok);
+      const message=String(existing?.message||(installed?'CodexPro READY':'Profile này chưa thêm CodexPro.'));
+      const checkedAt=new Date().toISOString();
+      await chrome.storage.local.set({connectorInstall:{ok:installed,message,at:checkedAt}});
+      scheduleRealtimeProfilePush(0);
+      return {action,ok:true,installed,message,checked_at:checkedAt,passive:true,diagnostic:{passive:true}};
+    }
+    return {action,...await checkConnectorInstalled()};
+  }
   if(action==='setup_chatgpt')return {action,...await installConnector()};
   if(action==='register_watchdog_tab'){const registered=await registerVisualWatchdogTab(Number(args.target_id),String(args.conversation_id||''));return {action,ok:true,...registered};}
   if(action==='list_tabs'){
