@@ -13,23 +13,37 @@ function apiJobId() {
 }
 
 export function ApiWorkerJobModal({ worker, projects, customImages, attachments, onChooseAttachments, onOpenAttachmentPreview, onRemoveAttachment, onClearAttachments, onPaste, onCopyResponse, onClose, onStarted, onError }) {
+  const isWebServer = Boolean(api?.isWebServer);
   const [root, setRoot] = useState(projects[0]?.root || "");
+  const [selectedGithubRepo, setSelectedGithubRepo] = useState("songvedem260597/codexpro");
   const [request, setRequest] = useState("");
   const [lastRequest, setLastRequest] = useState("");
   const [sending, setSending] = useState(false);
 
   useEffect(() => {
     if (!root && projects[0]?.root) setRoot(projects[0].root);
-  }, [projects, root]);
+    if (isWebServer && projects.length > 0 && !selectedGithubRepo) {
+      const firstRepo = projects[0]?.repoFullName || projects[0]?.githubRepo || projects[0]?.root || "songvedem260597/codexpro";
+      setSelectedGithubRepo(firstRepo);
+    }
+  }, [projects, root, isWebServer, selectedGithubRepo]);
 
   if (!worker) return null;
+  const isCloud = isWebServer || worker.worker_id === "api:render-deepseek";
+  const githubRepoOptions = Array.from(new Set([
+    ...projects.map((p) => p?.repoFullName || p?.githubRepo || (String(p?.root || "").includes("/") && !String(p?.root || "").startsWith("/") ? p.root : "")).filter(Boolean),
+    "songvedem260597/codexpro",
+    "songvedem260597/codexpro-cloud-agent"
+  ]));
+  const cloudRepo = isWebServer ? (selectedGithubRepo || githubRepoOptions[0] || "songvedem260597/codexpro") : "songvedem260597/codexpro-cloud-agent";
   const processing = worker.activity === "working";
   const working = sending || processing;
   const allAllowedScope = root === ALL_ALLOWED_WORKSPACES;
   const displayedRequest = lastRequest || worker.last_request || "";
-  const cloudHistory = worker.worker_id === "api:render-deepseek" && Array.isArray(worker.chat_history) ? worker.chat_history : null;
+  const cloudHistory = isCloud && Array.isArray(worker.chat_history) ? worker.chat_history : null;
   const earlierMessages = cloudHistory?.slice(0, cloudHistory.at(-1)?.role === "assistant" ? -2 : -1).slice(-3) || [];
-  const valid = Boolean(root && (request.trim() || attachments.length) && worker.connected && !working);
+  const valid = isCloud ? Boolean(request.trim() && request.length <= 4000 && attachments.length === 0 && worker.connected && !working)
+    : Boolean(root && (request.trim() || attachments.length) && worker.connected && !working);
 
   const submit = async () => {
     if (!valid) return;
@@ -39,11 +53,11 @@ export function ApiWorkerJobModal({ worker, projects, customImages, attachments,
         workerId: worker.worker_id,
         task_id: apiJobId(),
         task_kind: "code",
-        scope: allAllowedScope ? "all_allowed" : "workspace",
-        root: allAllowedScope ? "" : root,
-        workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [],
+        scope: isCloud ? "github" : allAllowedScope ? "all_allowed" : "workspace",
+        root: isCloud ? "" : allAllowedScope ? "" : root,
+        ...(isCloud ? { github_repo: cloudRepo } : { workspaceCandidates: allAllowedScope ? projects.map((project) => project.root) : [] }),
         text: request.trim(),
-        attachments
+        attachments: isCloud ? [] : attachments
       });
       setLastRequest(request.trim() || `Đã gửi ${attachments.length} file`);
       setRequest("");
@@ -72,9 +86,21 @@ export function ApiWorkerJobModal({ worker, projects, customImages, attachments,
         </div>
 
         <article className={`request-card chat-popup-card ${worker.connected ? "is-online" : "is-offline"}`}>
-          <label className="request-label">Chọn repo và đường dẫn</label>
+          {isCloud ? <>
+            <label className="request-label">GitHub repository — thao tác trực tiếp trên Git & test bằng Actions Runner</label>
+            {isWebServer ? (
+              <select className="input" value={cloudRepo} onChange={(event) => setSelectedGithubRepo(event.target.value)} disabled={working} aria-label="GitHub repository">
+                {githubRepoOptions.map((repoName) => <option key={repoName} value={repoName}>{repoName}</option>)}
+              </select>
+            ) : (
+              <input className="input" value={cloudRepo} readOnly aria-label="GitHub repository" />
+            )}
+            <div className="request-send-error" style={isWebServer ? { background: "rgba(56, 189, 248, 0.12)", borderColor: "rgba(56, 189, 248, 0.35)", color: "#bae6fd" } : undefined}>{isWebServer ? "Chế độ GitHub + Runner (0 MB RAM/Disk): Worker chỉ đọc/ghi qua GitHub API trên nhánh riêng và chạy test bằng GitHub Actions Runner của repo." : "Repository đang ở chế độ PRIVATE. AI miễn phí Token Harbor có thể ghi lại mã nguồn được gửi trong quá trình xử lý. Chỉ gửi khi mày đồng ý điều này."}</div>
+          </> : <>
+            <label className="request-label">Chọn repo và đường dẫn</label>
           <ProjectDropdown value={root} projects={projects} onChange={setRoot} disabled={working} />
           {!projects.length && !allAllowedScope && <div className="request-send-error">Chưa có workspace đã lưu. Chọn “Tất cả vùng được cấp quyền” để CodexPro tự tìm.</div>}
+          </>}
 
           <label className="request-label request-section-label">{cloudHistory ? "5 tin nhắn gần nhất" : "Tin nhắn gần nhất"}</label>
           <LatestMessagePanel
@@ -97,9 +123,9 @@ export function ApiWorkerJobModal({ worker, projects, customImages, attachments,
             <textarea
               id="api-job-request"
               value={request}
-              maxLength={20000}
-              placeholder="Nhập file hoặc tin nhắn"
-              onPaste={onPaste}
+              maxLength={isCloud ? 4000 : 20000}
+              placeholder={isCloud ? "Yêu cầu sửa code trên GitHub và test Windows Runner" : "Nhập file hoặc tin nhắn"}
+              onPaste={isCloud ? undefined : onPaste}
               onChange={(event) => setRequest(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || event.nativeEvent?.isComposing || event.repeat || !valid || sending) return;
@@ -110,16 +136,16 @@ export function ApiWorkerJobModal({ worker, projects, customImages, attachments,
             />
             {attachments.length > 0 && <div className="request-files">{attachments.map((file) => <div className="request-file" key={file.path} title={file.path} role="button" tabIndex={0} aria-label={`Xem trước ${file.name}`} onClick={() => void onOpenAttachmentPreview(file)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void onOpenAttachmentPreview(file); } }}>{file.previewDataUrl ? <img className="request-file-image" src={file.previewDataUrl} alt="" /> : <span className="request-file-icon">▤</span>}<span className="request-file-copy"><strong>{file.name}</strong><small>{formatFileSize(file.size)}</small></span><button type="button" aria-label={`Bỏ ${file.name}`} onClick={(event) => { event.stopPropagation(); onRemoveAttachment(file.path); }} disabled={working}>×</button></div>)}</div>}
             <div className="request-composer-toolbar">
-              <button type="button" className="attach-button" aria-label="Thêm file" title="Thêm file" onClick={onChooseAttachments} disabled={working || attachments.length >= 4}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20.5 11.5 11 21a6 6 0 0 1-8.5-8.5l10-10a4 4 0 0 1 5.7 5.6l-10 10a2 2 0 1 1-2.9-2.8l9.6-9.6" /></svg></button>
-              <span>{attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${request.length.toLocaleString("vi-VN")}/20.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
+              {!isCloud && <button type="button" className="attach-button" aria-label="Thêm file" title="Thêm file" onClick={onChooseAttachments} disabled={working || attachments.length >= 4}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20.5 11.5 11 21a6 6 0 0 1-8.5-8.5l10-10a4 4 0 0 1 5.7 5.6l-10 10a2 2 0 1 1-2.9-2.8l9.6-9.6" /></svg></button>}
+              <span>{isCloud ? `${request.length.toLocaleString("vi-VN")}/4.000 · GitHub-only` : attachments.length ? `${attachments.length}/4 file · ${formatFileSize(attachments.reduce((total, file) => total + file.size, 0))}` : `${request.length.toLocaleString("vi-VN")}/20.000 · TXT, PDF, mã nguồn, Office, ảnh…`}</span>
             </div>
           </div>
 
           <div className="request-card-foot">
-            <span>AI tự đặt title 4–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP.</span>
+            <span>{isCloud ? "Worker Cloud chỉ dùng GitHub checkout trên Actions Runner, tạo PR sau khi Windows tests PASS. Không truy cập file máy." : "AI tự đặt title 4–6 từ; Rules, AGENTS, CodexGraph và tool call đều đi qua MCP."}</span>
             <div className="request-card-actions">
               <button type="button" className="button secondary" onClick={onClose}>Đóng</button>
-              <button type="button" className="button primary" disabled={!valid} onClick={() => void submit()}>{working ? "Đang xử lý…" : attachments.length ? "Tải file + gửi" : "Gửi yêu cầu"}</button>
+              <button type="button" className="button primary" disabled={!valid} onClick={() => void submit()}>{working ? "Đang xử lý…" : isCloud ? "Gửi lên GitHub Runner" : attachments.length ? "Tải file + gửi" : "Gửi yêu cầu"}</button>
             </div>
           </div>
         </article>

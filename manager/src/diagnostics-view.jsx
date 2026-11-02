@@ -15,15 +15,14 @@ export function DiagnosticsView({
   onSelect,
   onCopy
 }) {
-  const isWebServer = Boolean(api?.isWebServer);
   const [tab, setTab] = useState("logs");
   return (
     <div className="diagnostics-view">
-      {!isWebServer && <div className="diagnostics-tabs" role="tablist" aria-label="Diagnostics">
+      <div className="diagnostics-tabs" role="tablist" aria-label="Diagnostics">
         <button type="button" role="tab" aria-selected={tab === "logs"} className={tab === "logs" ? "is-active" : ""} onClick={() => setTab("logs")}>Logs</button>
         <button type="button" role="tab" aria-selected={tab === "hang-watch"} className={tab === "hang-watch" ? "is-active" : ""} onClick={() => setTab("hang-watch")}>Hang Watch</button>
-      </div>}
-      {(isWebServer || tab === "logs") ? (
+      </div>
+      {tab === "logs" ? (
         <DiagnosticLogView
           data={data}
           filters={filters}

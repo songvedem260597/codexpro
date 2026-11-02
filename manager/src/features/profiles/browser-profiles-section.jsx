@@ -175,7 +175,7 @@ export function BrowserProfilesSection({
   return (
     <section id="profiles">
       <div className="section-head">
-        <div><p className="eyebrow">{isWebServer ? "API WORKERS" : "CONNECTED WORKERS"}</p><h2>{isWebServer ? "API Worker đã kết nối" : "Worker đã kết nối"}</h2><p className="section-note">{isWebServer ? "Quản lý và giao việc cho tối đa 4 API Worker trực tiếp trên Cloud Server" : "Hãy kết nối API worker và Chrome profile của bạn"}</p></div>
+        <div><p className="eyebrow">{isWebServer ? "OPENROUTER GIT WORKERS" : "CONNECTED WORKERS"}</p><h2>{isWebServer ? "4 OpenRouter Worker (GitHub + Runner)" : "Worker đã kết nối"}</h2><p className="section-note">{isWebServer ? "4 worker miễn phí trên OpenRouter chỉ thao tác trực tiếp trên GitHub của bạn và chạy test bằng GitHub Actions Runner (0 MB disk local)" : "Hãy kết nối API worker và Chrome profile của bạn"}</p></div>
       </div>
       {status?.workerSnapshotStale && (
         <div className="worker-snapshot-warning" role="status">

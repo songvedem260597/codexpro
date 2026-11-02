@@ -214,9 +214,126 @@ const safeStorage = createHeadlessSafeStorage(codexProHome);
 const rawApiWorkerStore = createApiWorkerStore({ home: codexProHome, safeStorage });
 const apiWorkerChatHistoryStore = createApiWorkerChatHistoryStore({ home: codexProHome, safeStorage });
 
+const cloudCredsFile = path.join(codexProHome, "cloud-credentials.json");
+function readCloudCredentials() {
+  try {
+    if (!fs.existsSync(cloudCredsFile)) return {};
+    const parsed = JSON.parse(fs.readFileSync(cloudCredsFile, "utf8"));
+    return {
+      openrouterApiKey: parsed?.openrouterCipher ? safeStorage.decryptString(Buffer.from(parsed.openrouterCipher, "base64")) : "",
+      githubToken: parsed?.githubCipher ? safeStorage.decryptString(Buffer.from(parsed.githubCipher, "base64")) : ""
+    };
+  } catch {
+    return {};
+  }
+}
+function saveCloudCredentials({ openrouterApiKey, githubToken } = {}) {
+  const current = readCloudCredentials();
+  const nextOpenrouter = typeof openrouterApiKey === "string" && openrouterApiKey.trim() ? openrouterApiKey.trim() : current.openrouterApiKey || "";
+  const nextGithub = typeof githubToken === "string" && githubToken.trim() ? githubToken.trim() : current.githubToken || "";
+  const payload = {
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    openrouterCipher: nextOpenrouter ? safeStorage.encryptString(nextOpenrouter).toString("base64") : "",
+    githubCipher: nextGithub ? safeStorage.encryptString(nextGithub).toString("base64") : ""
+  };
+  fs.writeFileSync(cloudCredsFile, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  if (nextOpenrouter) {
+    for (const item of rawApiWorkerStore.list()) {
+      if (item.provider === "openrouter") {
+        try {
+          rawApiWorkerStore.save({ ...item, api_key: nextOpenrouter });
+        } catch {}
+      }
+    }
+  }
+  cachedGithubProjectsAt = 0;
+  return {
+    openrouterConfigured: Boolean(nextOpenrouter),
+    githubConfigured: Boolean(nextGithub)
+  };
+}
+function resolveOpenRouterKey(workerId = "") {
+  if (workerId) {
+    try {
+      const cred = rawApiWorkerStore.credential(workerId);
+      if (cred) return cred;
+    } catch {}
+  }
+  const envKey = String(process.env.OPENROUTER_API_KEY || "").trim();
+  if (envKey) return envKey;
+  const saved = readCloudCredentials().openrouterApiKey;
+  if (saved) return saved;
+  for (const w of rawApiWorkerStore.list()) {
+    if (w.provider === "openrouter") {
+      try {
+        const c = rawApiWorkerStore.credential(w.id);
+        if (c) return c;
+      } catch {}
+    }
+  }
+  return "";
+}
+function resolveGithubToken() {
+  const envToken = String(process.env.GITHUB_TOKEN || process.env.GH_TOKEN || "").trim();
+  if (envToken) return envToken;
+  return readCloudCredentials().githubToken || "";
+}
+
+const DEFAULT_OPENROUTER_WORKERS = [
+  {
+    id: "openrouter-north-code",
+    label: "OpenRouter · North Mini Code",
+    provider: "openrouter",
+    base_url: "https://openrouter.ai/api/v1",
+    model: "cohere/north-mini-code:free",
+    enabled: true,
+    app_name: "CodexPro",
+    app_url: ""
+  },
+  {
+    id: "openrouter-nemotron-ultra",
+    label: "OpenRouter · Nemotron 3 Ultra",
+    provider: "openrouter",
+    base_url: "https://openrouter.ai/api/v1",
+    model: "nvidia/nemotron-3-ultra-550b-a55b:free",
+    enabled: true,
+    app_name: "CodexPro",
+    app_url: ""
+  },
+  {
+    id: "openrouter-nemotron-lightning",
+    label: "OpenRouter · Nemotron 3.5 Lightning",
+    provider: "openrouter",
+    base_url: "https://openrouter.ai/api/v1",
+    model: "nvidia/nemotron-3.5-lightning:free",
+    enabled: true,
+    app_name: "CodexPro",
+    app_url: ""
+  },
+  {
+    id: "openrouter-nemotron-super",
+    label: "OpenRouter · Nemotron 3.5 Super",
+    provider: "openrouter",
+    base_url: "https://openrouter.ai/api/v1",
+    model: "nvidia/nemotron-3.5-super-vl:free",
+    enabled: true,
+    app_name: "CodexPro",
+    app_url: ""
+  }
+];
+
 const apiWorkerStore = {
   ...rawApiWorkerStore,
+  credential(id) {
+    try {
+      const c = rawApiWorkerStore.credential(id);
+      if (c) return c;
+    } catch {}
+    return resolveOpenRouterKey(id);
+  },
   list() {
+    const fallbackKey = resolveOpenRouterKey();
     return rawApiWorkerStore.list().map((item) => {
       let ok = false;
       if (item.credential_available) {
@@ -226,6 +343,7 @@ const apiWorkerStore = {
           ok = false;
         }
       }
+      if (!ok && item.provider === "openrouter" && fallbackKey) ok = true;
       return { ...item, credential_available: ok };
     });
   },
@@ -236,27 +354,44 @@ const apiWorkerStore = {
     if (!isExisting && current.length >= MAX_API_WORKERS) {
       throw new Error(`Bản Server giới hạn tối đa ${MAX_API_WORKERS} API Worker để tối ưu RAM.`);
     }
-    return rawApiWorkerStore.save(payload);
+    const saved = rawApiWorkerStore.save(payload);
+    if (payload?.provider === "openrouter" && payload?.api_key) {
+      saveCloudCredentials({ openrouterApiKey: String(payload.api_key).trim() });
+    }
+    return saved;
   }
 };
 
 function seedApiWorkersFromEnv() {
   const rawJson = String(process.env.CODEXPRO_API_WORKERS_JSON || "").trim();
-  if (!rawJson) return;
-  try {
-    const items = JSON.parse(rawJson);
-    if (!Array.isArray(items)) return;
-    for (const item of items.slice(0, MAX_API_WORKERS)) {
-      if (item && typeof item === "object" && item.id && item.model) {
-        try {
-          rawApiWorkerStore.save(item);
-        } catch (err) {
-          console.error(`[CodexPro Web] Failed to seed API worker ${item.id}:`, err?.message || err);
+  const seedKey = resolveOpenRouterKey();
+  if (rawJson) {
+    try {
+      const items = JSON.parse(rawJson);
+      if (Array.isArray(items)) {
+        for (const item of items.slice(0, MAX_API_WORKERS)) {
+          if (item && typeof item === "object" && item.id && item.model) {
+            try {
+              rawApiWorkerStore.save({ ...item, ...(seedKey && !item.api_key ? { api_key: seedKey } : {}) });
+            } catch (err) {
+              console.error(`[CodexPro Web] Failed to seed API worker ${item.id}:`, err?.message || err);
+            }
+          }
         }
       }
+    } catch (err) {
+      console.error("[CodexPro Web] Invalid CODEXPRO_API_WORKERS_JSON:", err?.message || err);
     }
-  } catch (err) {
-    console.error("[CodexPro Web] Invalid CODEXPRO_API_WORKERS_JSON:", err?.message || err);
+  }
+  const existing = rawApiWorkerStore.list();
+  if (existing.length === 0) {
+    for (const item of DEFAULT_OPENROUTER_WORKERS.slice(0, MAX_API_WORKERS)) {
+      try {
+        rawApiWorkerStore.save({ ...item, ...(seedKey ? { api_key: seedKey } : {}) });
+      } catch (err) {
+        console.error(`[CodexPro Web] Failed to seed default OpenRouter worker ${item.id}:`, err?.message || err);
+      }
+    }
   }
 }
 seedApiWorkersFromEnv();
@@ -286,26 +421,749 @@ function createProviderForApiWorker(config, overrides = {}) {
   return createOpenAICompatibleProvider(options);
 }
 
-const workerPluginRegistry = new WorkerPluginRegistry();
-workerPluginRegistry.register(createApiWorkerPlugin({
-  listConfigurations: () => apiWorkerStore.list(),
-  chatHistoryStore: apiWorkerChatHistoryStore,
-  onUpdate: (update) => {
-    broadcastSse("codexpro:worker-update", update);
-  },
-  createProvider: async ({ config }) => createProviderForApiWorker(config),
-  createMcpClients: async ({ workerId, signal }) => {
-    signal?.throwIfAborted?.();
-    const health = await checkLocalMcpHealth();
-    if (!health.ok) throw new Error("Local CodexPro MCP is offline; API worker cannot start.");
-    return await createWorkerMcpClients({
-      url: `http://127.0.0.1:${MCP_PORT}/mcp`,
-      token: mcpToken,
-      workerId,
-      signal
+const ALLOWED_GITHUB_OWNER = "songvedem260597";
+const DEFAULT_GITHUB_REPOS = [
+  { full_name: "songvedem260597/codexpro-cloud-agent", name: "codexpro-cloud-agent", default_branch: "main" },
+  { full_name: "songvedem260597/codexpro", name: "codexpro", default_branch: "win" },
+  { full_name: "songvedem260597/edit0-desktop-generator", name: "edit0-desktop-generator", default_branch: "main" },
+  { full_name: "songvedem260597/flora-desktop-generator", name: "flora-desktop-generator", default_branch: "main" }
+];
+let cachedGithubProjects = null;
+let cachedGithubProjectsAt = 0;
+
+async function githubApi(pathname, init = {}, signal) {
+  const token = resolveGithubToken();
+  if (!token) throw new Error("Chưa cấu hình GitHub Token trên Cloud Server.");
+  const res = await fetch(`https://api.github.com${pathname}`, {
+    ...init,
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(25_000)]) : AbortSignal.timeout(25_000),
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "user-agent": "CodexPro-Cloud-WebServer/1.0",
+      "x-github-api-version": "2022-11-28",
+      ...(init.headers || {})
+    }
+  });
+  return res;
+}
+
+async function listWebGithubProjects() {
+  const now = Date.now();
+  if (cachedGithubProjects && now - cachedGithubProjectsAt < 60_000) return cachedGithubProjects;
+  let repos = [...DEFAULT_GITHUB_REPOS];
+  if (resolveGithubToken()) {
+    try {
+      const res = await githubApi("/user/repos?per_page=30&sort=updated&affiliation=owner");
+      if (res.ok) {
+        const data = await res.json();
+        const owned = (Array.isArray(data) ? data : []).filter((r) => String(r?.owner?.login || "").toLowerCase() === ALLOWED_GITHUB_OWNER.toLowerCase());
+        if (owned.length) repos = owned;
+      }
+    } catch {}
+  }
+  const seen = new Set();
+  const result = [];
+  for (const r of [...repos, ...DEFAULT_GITHUB_REPOS]) {
+    const fullName = String(r.full_name || "").trim();
+    if (!fullName || seen.has(fullName.toLowerCase())) continue;
+    seen.add(fullName.toLowerCase());
+    const name = String(r.name || fullName.split("/")[1] || fullName);
+    result.push({
+      root: `github:${fullName}`,
+      name,
+      localName: name,
+      repoFullName: fullName,
+      githubRepo: fullName,
+      branch: String(r.default_branch || "main"),
+      isGit: true,
+      clean: true,
+      changes: 0,
+      modified: 0,
+      untracked: 0,
+      ahead: 0,
+      behind: 0,
+      conflicted: 0
     });
   }
-}));
+  cachedGithubProjects = result;
+  cachedGithubProjectsAt = now;
+  return result;
+}
+
+async function inspectGithubRepo(repoInput) {
+  const raw = String(repoInput || "").replace(/^github:/i, "").trim();
+  const repoFullName = raw.includes("/") ? raw : `${ALLOWED_GITHUB_OWNER}/${raw || "codexpro-cloud-agent"}`;
+  if (!repoFullName.toLowerCase().startsWith(`${ALLOWED_GITHUB_OWNER.toLowerCase()}/`)) {
+    throw new Error(`Chỉ cho phép truy cập GitHub repository của ${ALLOWED_GITHUB_OWNER}.`);
+  }
+  let defaultBranch = "main";
+  let treeEntries = [];
+  if (resolveGithubToken()) {
+    const repoRes = await githubApi(`/repos/${repoFullName}`);
+    if (repoRes.ok) {
+      const repoData = await repoRes.json();
+      defaultBranch = String(repoData.default_branch || "main");
+    }
+    const treeRes = await githubApi(`/repos/${repoFullName}/git/trees/${encodeURIComponent(defaultBranch)}?recursive=1`);
+    if (treeRes.ok) {
+      const treeData = await treeRes.json();
+      treeEntries = (Array.isArray(treeData.tree) ? treeData.tree : []).slice(0, 150);
+    }
+  }
+  const files = treeEntries.filter((t) => t.type === "blob").map((t) => t.path);
+  const nodes = files.slice(0, 80).map((f) => ({
+    id: `file:${f}`,
+    kind: "file",
+    name: path.posix.basename(f),
+    file: f
+  }));
+  return {
+    workspace_id: `github:${repoFullName}`,
+    root: `github:${repoFullName}`,
+    name: repoFullName.split("/")[1],
+    branch: defaultBranch,
+    files,
+    tree: treeEntries.slice(0, 120).map((t) => ({ path: t.path, type: t.type === "tree" ? "directory" : "file" })),
+    codexgraph: {
+      schema_version: "1.0",
+      source: "GitHub REST Tree (0 MB RAM)",
+      nodes,
+      edges: [],
+      coverage: { parsed_files: files.length, total_files: files.length },
+      warnings: [],
+      output_limited: treeEntries.length >= 150,
+      returned: { nodes: nodes.length, edges: 0 },
+      limits: { max_nodes: 80, max_edges: 0 },
+      cache: { hit: true }
+    }
+  };
+}
+
+const FREE_OPENROUTER_FALLBACK_MODELS = [
+  "cohere/north-mini-code:free",
+  "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "nvidia/nemotron-3.5-lightning:free",
+  "nvidia/nemotron-3.5-super-vl:free",
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "dots-studio/dots-3-note-preview:free",
+  "openrouter/free"
+];
+
+const webChatHistoryFile = path.join(codexProHome, "web-github-worker-history.json");
+function readWebWorkerHistory(workerId) {
+  try {
+    if (!fs.existsSync(webChatHistoryFile)) return [];
+    const all = JSON.parse(fs.readFileSync(webChatHistoryFile, "utf8"));
+    const list = all?.[workerId];
+    return Array.isArray(list) ? list.slice(-5) : [];
+  } catch {
+    return [];
+  }
+}
+function saveWebWorkerHistory(workerId, messages) {
+  try {
+    const all = fs.existsSync(webChatHistoryFile) ? JSON.parse(fs.readFileSync(webChatHistoryFile, "utf8")) : {};
+    all[workerId] = (Array.isArray(messages) ? messages : []).slice(-5);
+    fs.writeFileSync(webChatHistoryFile, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
+  } catch {}
+}
+
+async function callOpenRouterWithFallback({ primaryModel, apiKey, messages, tools, signal }) {
+  const models = [primaryModel, ...FREE_OPENROUTER_FALLBACK_MODELS.filter((m) => m !== primaryModel)];
+  let lastError = null;
+  for (const model of models) {
+    signal?.throwIfAborted?.();
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+          "http-referer": PUBLIC_URL || "https://codexpro.local",
+          "x-title": "CodexPro GitHub Cloud Worker"
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
+          max_tokens: 2048,
+          temperature: 0.2
+        }),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(45_000)])
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        lastError = new Error(`OpenRouter (${model}) HTTP ${res.status}: ${data?.error?.message || "upstream error"}`);
+        if ([429, 500, 502, 503, 504, 404].includes(res.status)) continue;
+        throw lastError;
+      }
+      const msg = data?.choices?.[0]?.message;
+      if (!msg) {
+        lastError = new Error(`OpenRouter (${model}) trả về phản hồi rỗng.`);
+        continue;
+      }
+      return { message: msg, modelUsed: model, usage: data?.usage };
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      lastError = err;
+    }
+  }
+  throw lastError || new Error("Không gọi được model OpenRouter free nào.");
+}
+
+async function runGithubRunnerTask({ workerId, config, repoFullName, jobId, prompt, signal, onStatus }) {
+  const normalizedRepo = String(repoFullName || "").replace(/^github:/i, "").trim() || "songvedem260597/codexpro-cloud-agent";
+  if (!/^songvedem260597\/[A-Za-z0-9._-]+$/i.test(normalizedRepo)) {
+    throw new Error(`Worker chỉ được phép thao tác trên GitHub của ${ALLOWED_GITHUB_OWNER}.`);
+  }
+  const apiKey = apiWorkerStore.credential(workerId);
+  if (!apiKey) throw new Error("Chưa có OpenRouter API Key cho worker này.");
+  if (!resolveGithubToken()) throw new Error("Chưa cấu hình GitHub Token để thao tác Git & Actions Runner.");
+
+  onStatus?.({ phase: "preparing", message: `Đang kết nối GitHub ${normalizedRepo}...` });
+  const repoRes = await githubApi(`/repos/${normalizedRepo}`, {}, signal);
+  if (!repoRes.ok) throw new Error(`Không đọc được repo ${normalizedRepo} (HTTP ${repoRes.status}).`);
+  const repoInfo = await repoRes.json();
+  const defaultBranch = String(repoInfo.default_branch || "main");
+  let activeBranch = defaultBranch;
+  let workingBranchCreated = false;
+  const changedFiles = new Set();
+  let runnerExecution = null;
+
+  async function ensureWorkingBranch() {
+    if (workingBranchCreated) return activeBranch;
+    const refRes = await githubApi(`/repos/${normalizedRepo}/git/ref/heads/${encodeURIComponent(defaultBranch)}`, {}, signal);
+    if (!refRes.ok) throw new Error(`Không lấy được SHA nhánh ${defaultBranch} (HTTP ${refRes.status}).`);
+    const refData = await refRes.json();
+    const baseSha = refData?.object?.sha;
+    const branchName = `codexpro/${workerId.replace(/[^a-z0-9-]/gi, "")}-${jobId.slice(4, 12)}`;
+    const createRes = await githubApi(`/repos/${normalizedRepo}/git/refs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: baseSha })
+    }, signal);
+    if (!createRes.ok && createRes.status !== 422) {
+      throw new Error(`Không tạo được nhánh làm việc ${branchName} (HTTP ${createRes.status}).`);
+    }
+    activeBranch = branchName;
+    workingBranchCreated = true;
+    return activeBranch;
+  }
+
+  async function toolListFiles({ directory = "" } = {}) {
+    const cleanDir = String(directory || "").replace(/^\/+|\/+$/g, "");
+    onStatus?.({ phase: "tool", message: `github_list_files(${cleanDir || "/"}) trên ${normalizedRepo}@${activeBranch}` });
+    const treeRes = await githubApi(`/repos/${normalizedRepo}/git/trees/${encodeURIComponent(activeBranch)}?recursive=1`, {}, signal);
+    if (!treeRes.ok) throw new Error(`GitHub tree HTTP ${treeRes.status}`);
+    const treeData = await treeRes.json();
+    const all = (Array.isArray(treeData.tree) ? treeData.tree : [])
+      .filter((item) => item.type === "blob" && (!cleanDir || item.path.startsWith(`${cleanDir}/`) || item.path === cleanDir))
+      .map((item) => item.path)
+      .slice(0, 120);
+    return { repository: normalizedRepo, branch: activeBranch, files: all };
+  }
+
+  async function toolReadFile({ path: filePath = "" } = {}) {
+    const cleanPath = String(filePath || "").replace(/^\/+/g, "").trim();
+    if (!cleanPath || cleanPath.includes("..")) throw new Error("Đường dẫn file không hợp lệ.");
+    onStatus?.({ phase: "tool", message: `github_read_file(${cleanPath})` });
+    const encodedPath = cleanPath.split("/").map(encodeURIComponent).join("/");
+    const fileRes = await githubApi(`/repos/${normalizedRepo}/contents/${encodedPath}?ref=${encodeURIComponent(activeBranch)}`, {}, signal);
+    if (!fileRes.ok) throw new Error(`Không đọc được file ${cleanPath} (HTTP ${fileRes.status})`);
+    const fileData = await fileRes.json();
+    const content = Buffer.from(String(fileData.content || ""), "base64").toString("utf8").slice(0, 32_000);
+    return { path: cleanPath, branch: activeBranch, sha: fileData.sha, content };
+  }
+
+  async function toolWriteFile({ path: filePath = "", content = "", commit_message = "" } = {}) {
+    const cleanPath = String(filePath || "").replace(/^\/+/g, "").trim();
+    if (!cleanPath || cleanPath.includes("..") || cleanPath.startsWith(".github/") || /(?:secret|token|password|\.env|\.key)/i.test(cleanPath)) {
+      throw new Error(`Không cho phép ghi vào đường dẫn nhạy cảm: ${cleanPath}`);
+    }
+    if (changedFiles.size >= 10 && !changedFiles.has(cleanPath)) throw new Error("Vượt quá giới hạn 10 file thay đổi mỗi task.");
+    const branch = await ensureWorkingBranch();
+    onStatus?.({ phase: "tool", message: `github_write_file(${cleanPath}) → nhánh ${branch}` });
+    const encodedPath = cleanPath.split("/").map(encodeURIComponent).join("/");
+    let existingSha = "";
+    const curRes = await githubApi(`/repos/${normalizedRepo}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`, {}, signal);
+    if (curRes.ok) {
+      const curData = await curRes.json();
+      existingSha = curData?.sha || "";
+    }
+    const putRes = await githubApi(`/repos/${normalizedRepo}/contents/${encodedPath}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: String(commit_message || `chore(${workerId}): update ${cleanPath}`).slice(0, 140),
+        content: Buffer.from(String(content || ""), "utf8").toString("base64"),
+        branch,
+        ...(existingSha ? { sha: existingSha } : {})
+      })
+    }, signal);
+    if (!putRes.ok) throw new Error(`Ghi file ${cleanPath} lên GitHub thất bại (HTTP ${putRes.status}).`);
+    changedFiles.add(cleanPath);
+    return { ok: true, path: cleanPath, branch, changed_files_count: changedFiles.size };
+  }
+
+  async function toolRunRunnerTests({ workflow = "" } = {}) {
+    onStatus?.({ phase: "running_ci_cloud", message: `Đang kích hoạt GitHub Actions Runner trên ${normalizedRepo}...` });
+    const wfRes = await githubApi(`/repos/${normalizedRepo}/actions/workflows`, {}, signal);
+    if (!wfRes.ok) throw new Error(`Không đọc được danh sách GitHub Actions workflows (HTTP ${wfRes.status}).`);
+    const wfData = await wfRes.json();
+    const workflows = Array.isArray(wfData.workflows) ? wfData.workflows.filter((w) => w.state === "active") : [];
+    if (!workflows.length) throw new Error(`Repo ${normalizedRepo} chưa có GitHub Actions workflow nào.`);
+    const preferred = workflows.find((w) => workflow && (w.path.endsWith(workflow) || w.name === workflow))
+      || workflows.find((w) => /windows-ci\.yml|ci\.yml/i.test(w.path))
+      || workflows[0];
+
+    let dispatchRef = activeBranch;
+    const startedBefore = Date.now() - 5000;
+    let dispatchRes = await githubApi(`/repos/${normalizedRepo}/actions/workflows/${preferred.id}/dispatches`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ref: dispatchRef })
+    }, signal);
+    if (!dispatchRes.ok && dispatchRef !== defaultBranch) {
+      dispatchRef = defaultBranch;
+      dispatchRes = await githubApi(`/repos/${normalizedRepo}/actions/workflows/${preferred.id}/dispatches`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ref: dispatchRef })
+      }, signal);
+    }
+    if (!dispatchRes.ok) {
+      throw new Error(`Không dispatch được workflow ${preferred.name} trên GitHub Runner (HTTP ${dispatchRes.status}).`);
+    }
+
+    onStatus?.({ phase: "running_ci_cloud", message: `Đã gửi lệnh chạy ${preferred.name} (${dispatchRef}). Đang đợi GitHub Runner nhận job...` });
+    let matchedRun = null;
+    for (let attempt = 0; attempt < 36; attempt++) {
+      await new Promise((r) => setTimeout(r, 4500));
+      signal?.throwIfAborted?.();
+      const runsRes = await githubApi(`/repos/${normalizedRepo}/actions/workflows/${preferred.id}/runs?per_page=5`, {}, signal);
+      if (!runsRes.ok) continue;
+      const runsData = await runsRes.json();
+      const candidate = (runsData.workflow_runs || []).find((r) => Date.parse(r.created_at) >= startedBefore);
+      if (!candidate) continue;
+      matchedRun = candidate;
+      onStatus?.({
+        phase: "running_ci_cloud",
+        message: `GitHub Runner (${preferred.name}): ${candidate.status}${candidate.conclusion ? ` · ${candidate.conclusion}` : ""}`,
+        runUrl: candidate.html_url
+      });
+      if (candidate.status === "completed") {
+        runnerExecution = {
+          workflow: preferred.name,
+          ref: dispatchRef,
+          status: candidate.status,
+          conclusion: candidate.conclusion,
+          runId: candidate.id,
+          runUrl: candidate.html_url
+        };
+        return runnerExecution;
+      }
+    }
+    if (matchedRun) {
+      runnerExecution = {
+        workflow: preferred.name,
+        ref: dispatchRef,
+        status: matchedRun.status,
+        conclusion: matchedRun.conclusion || "in_progress",
+        runId: matchedRun.id,
+        runUrl: matchedRun.html_url
+      };
+      return runnerExecution;
+    }
+    throw new Error("Đã gửi workflow_dispatch nhưng chưa tìm thấy run phản hồi trong thời gian chờ.");
+  }
+
+  const tools = [
+    {
+      type: "function",
+      function: {
+        name: "github_list_files",
+        description: "List files in the GitHub repository via GitHub API (no local disk).",
+        parameters: {
+          type: "object",
+          properties: { directory: { type: "string", description: "Optional subdirectory prefix, e.g. 'src' or 'test'" } }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "github_read_file",
+        description: "Read a file from the GitHub repository via GitHub API.",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string", description: "Relative file path in the repo" } },
+          required: ["path"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "github_write_file",
+        description: "Create or update a file on an isolated GitHub branch (never touches local disk).",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string" },
+            content: { type: "string" },
+            commit_message: { type: "string" }
+          },
+          required: ["path", "content"]
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "github_run_runner_tests",
+        description: "Trigger and wait for GitHub Actions Runner CI tests on the repository.",
+        parameters: {
+          type: "object",
+          properties: {
+            workflow: { type: "string", description: "Optional workflow filename such as windows-ci.yml or ci.yml" }
+          }
+        }
+      }
+    }
+  ];
+
+  const messages = [
+    {
+      role: "system",
+      content: [
+        `Bạn là GitHub Cloud Worker (${config.label}) chạy trên CodexPro Cloud Server (512 MB RAM).`,
+        `Quy tắc bắt buộc: Bạn CHỈ thao tác trực tiếp trên GitHub repository '${normalizedRepo}' (nhánh mặc định '${defaultBranch}') thông qua 4 công cụ GitHub API: github_list_files, github_read_file, github_write_file, github_run_runner_tests.`,
+        "Tuyệt đối KHÔNG dùng ổ đĩa local hay shell local. Khi sửa code hoặc khi người dùng yêu cầu kiểm thử, hãy gọi github_run_runner_tests để chạy test bằng GitHub Actions Runner. Trả lời ngắn gọn bằng tiếng Việt."
+      ].join(" ")
+    },
+    { role: "user", content: prompt }
+  ];
+
+  let finalAnswer = "";
+  let modelUsed = config.model;
+  let totalUsage = null;
+
+  for (let turn = 0; turn < 8; turn++) {
+    onStatus?.({ phase: "streaming", message: `Đang gọi OpenRouter (${modelUsed})...` });
+    const { message: assistant, modelUsed: actualModel, usage } = await callOpenRouterWithFallback({
+      primaryModel: config.model,
+      apiKey,
+      messages,
+      tools,
+      signal
+    });
+    modelUsed = actualModel;
+    if (usage) totalUsage = usage;
+    const toolCalls = Array.isArray(assistant.tool_calls) ? assistant.tool_calls : [];
+    messages.push({
+      role: "assistant",
+      content: typeof assistant.content === "string" ? assistant.content : "",
+      ...(toolCalls.length ? { tool_calls: toolCalls } : {})
+    });
+    if (typeof assistant.content === "string" && assistant.content.trim()) {
+      finalAnswer = assistant.content.trim();
+    }
+    if (!toolCalls.length) break;
+
+    for (const tc of toolCalls.slice(0, 4)) {
+      let toolResult;
+      try {
+        const args = JSON.parse(tc.function?.arguments || "{}");
+        const fn = tc.function?.name;
+        if (fn === "github_list_files") toolResult = await toolListFiles(args);
+        else if (fn === "github_read_file") toolResult = await toolReadFile(args);
+        else if (fn === "github_write_file") toolResult = await toolWriteFile(args);
+        else if (fn === "github_run_runner_tests") toolResult = await toolRunRunnerTests(args);
+        else throw new Error(`Tool không được hỗ trợ: ${fn}`);
+      } catch (err) {
+        toolResult = { error: String(err?.message || err).slice(0, 240) };
+      }
+      messages.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: JSON.stringify(toolResult).slice(0, 34_000)
+      });
+    }
+  }
+
+  if ((changedFiles.size > 0 || /\b(test|runner|ci|kiểm thử|chạy thử)\b/i.test(prompt)) && !runnerExecution) {
+    try {
+      await toolRunRunnerTests({});
+    } catch (err) {
+      runnerExecution = { error: String(err?.message || err) };
+    }
+  }
+
+  let prUrl = "";
+  if (changedFiles.size > 0 && workingBranchCreated && (!runnerExecution || runnerExecution.conclusion === "success")) {
+    try {
+      const prRes = await githubApi(`/repos/${normalizedRepo}/pulls`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          title: `[${config.label}] ${prompt.slice(0, 64)}`,
+          head: activeBranch,
+          base: defaultBranch,
+          body: `Tạo tự động bởi **${config.label}** (\`${modelUsed}\`) trên CodexPro Cloud Server.\n\n- Task ID: \`${jobId}\`\n- Files thay đổi: ${[...changedFiles].map((f) => `\`${f}\``).join(", ")}\n- GitHub Runner: ${runnerExecution?.runUrl || "Đã kiểm tra"}`
+        })
+      }, signal);
+      if (prRes.ok) {
+        const prData = await prRes.json();
+        prUrl = String(prData.html_url || "");
+      }
+    } catch {}
+  }
+
+  const summaryLines = [
+    finalAnswer || `Đã thực thi xong trên GitHub repository \`${normalizedRepo}\`.`,
+    "",
+    "---",
+    `- **Model thực thi**: \`${modelUsed}\``,
+    `- **GitHub Repo**: \`${normalizedRepo}\` (nhánh \`${activeBranch}\`)`,
+    ...(changedFiles.size ? [`- **File đã sửa trên GitHub (${changedFiles.size})**: ${[...changedFiles].map((f) => `\`${f}\``).join(", ")}`] : []),
+    ...(runnerExecution?.runUrl
+      ? [`- **GitHub Actions Runner**: [${runnerExecution.workflow} #${runnerExecution.runId}](${runnerExecution.runUrl}) — Trạng thái: **${runnerExecution.conclusion || runnerExecution.status}**`]
+      : runnerExecution?.error
+        ? [`- **GitHub Actions Runner**: ${runnerExecution.error}`]
+        : []),
+    ...(prUrl ? [`- **Pull Request**: ${prUrl}`] : [])
+  ];
+
+  return {
+    text: summaryLines.join("\n"),
+    task_title: `GitHub · ${normalizedRepo.split("/")[1]}`,
+    usage: totalUsage,
+    runUrl: runnerExecution?.runUrl || "",
+    pullRequestUrl: prUrl
+  };
+}
+
+function createWebGithubApiWorkerPlugin() {
+  const runs = new Map();
+  const publish = (workerConfigId, state) => {
+    if (runs.get(workerConfigId) !== state) return;
+    try {
+      broadcastSse("codexpro:worker-update", {
+        local_worker_id: workerConfigId,
+        job_id: state.jobId,
+        task_title: state.title,
+        current_workspace_root: state.root,
+        last_request: state.request,
+        activity: state.activity,
+        started_at: state.startedAt,
+        finished_at: state.finishedAt,
+        result: state.result,
+        error: state.error,
+        stream_text: state.streamText,
+        stream_revision: state.streamRevision,
+        stream_phase: state.streamPhase,
+        stream_updated_at: state.streamUpdatedAt,
+        stream_tool_status: state.streamToolStatus,
+        events: state.events.slice(-30),
+        chat_history: state.history.slice(-5)
+      });
+    } catch {}
+  };
+
+  return {
+    manifest: {
+      id: "api",
+      name: "GitHub Cloud API Workers",
+      version: "1",
+      worker_type: "api",
+      protocol: "codexpro-github-runner-v1",
+      credential_type: "secret-reference",
+      capabilities: ["send", "read", "stop", "github-runner"]
+    },
+    async list() {
+      const configs = apiWorkerStore.list().filter((c) => c?.enabled !== false);
+      return configs.map((config) => {
+        const id = String(config.id);
+        const run = runs.get(id);
+        const history = run?.history || readWebWorkerHistory(id);
+        const latestUser = [...history].reverse().find((m) => m.role === "user")?.content || "";
+        const latestAssistant = history.at(-1)?.role === "assistant" ? history.at(-1).content : "";
+        return {
+          local_worker_id: id,
+          label: String(config.label || id),
+          provider: String(config.provider || "openrouter"),
+          model: String(config.model || ""),
+          connected: config.credential_available !== false,
+          activity: run?.activity || "idle",
+          current_task_id: run?.activity === "working" ? run.jobId : "",
+          current_task_title: run?.activity === "working" ? run.title : "",
+          last_task_title: run?.title || "",
+          current_workspace_root: run?.activity === "working" ? run.root : "",
+          run_id: run?.jobId || "",
+          last_task_id: run?.jobId || "",
+          last_result: run?.result?.text || latestAssistant,
+          last_request: run?.request || latestUser,
+          chat_history: history.slice(-5),
+          stream_text: run?.streamText || "",
+          stream_revision: run?.streamRevision || 0,
+          stream_phase: run?.streamPhase || "idle",
+          stream_updated_at: run?.streamUpdatedAt || "",
+          stream_tool_status: run?.streamToolStatus || "",
+          started_at: run?.startedAt || "",
+          finished_at: run?.finishedAt || "",
+          capabilities: ["send", "read", "stop", "tool-calling", "github-runner"],
+          last_error: run?.error || "",
+          usage: run?.result?.usage
+        };
+      });
+    },
+    async send(payload) {
+      const workerConfigId = String(payload.local_worker_id || "").trim();
+      const config = apiWorkerStore.list().find((item) => item.id === workerConfigId && item.enabled !== false);
+      if (!config) throw new Error(`API worker ${workerConfigId} chưa được cấu hình.`);
+      const existing = runs.get(workerConfigId);
+      if (existing?.activity === "working") throw new Error(`Worker ${config.label} đang bận xử lý task khác.`);
+      if ((payload.attachments?.length || 0) > 0) {
+        throw new Error("Worker trên Cloud Server chỉ thao tác trực tiếp trên GitHub và test bằng Runner; không nhận file local.");
+      }
+      const request = String(payload.text || payload.request || "").trim().slice(0, 4000);
+      if (!request) throw new Error("Nội dung yêu cầu không được để trống.");
+      const rawRepo = String(payload.github_repo || payload.root || "songvedem260597/codexpro-cloud-agent").replace(/^github:/i, "").trim();
+      const repoFullName = rawRepo.includes("/") ? rawRepo : `${ALLOWED_GITHUB_OWNER}/${rawRepo}`;
+      if (!repoFullName.toLowerCase().startsWith(`${ALLOWED_GITHUB_OWNER.toLowerCase()}/`)) {
+        throw new Error(`Worker chỉ thao tác trên GitHub của ${ALLOWED_GITHUB_OWNER}.`);
+      }
+      const jobId = String(payload.task_id || payload.taskId || `cpt_${randomBytes(12).toString("hex")}`).trim();
+      const root = `github:${repoFullName}`;
+      const prevHistory = readWebWorkerHistory(workerConfigId);
+      const controller = new AbortController();
+      const title = `GitHub · ${repoFullName.split("/")[1]}`;
+      const state = {
+        jobId,
+        title,
+        scope: "github",
+        root,
+        request,
+        history: [...prevHistory, { role: "user", content: request }].slice(-5),
+        activity: "working",
+        startedAt: new Date().toISOString(),
+        finishedAt: "",
+        result: undefined,
+        error: "",
+        streamText: "",
+        streamRevision: 1,
+        streamPhase: "preparing",
+        streamUpdatedAt: new Date().toISOString(),
+        streamToolStatus: `GitHub ${repoFullName}`,
+        events: [],
+        controller
+      };
+      runs.set(workerConfigId, state);
+      saveWebWorkerHistory(workerConfigId, state.history);
+      publish(workerConfigId, state);
+
+      cachedWorkerJobsAt = 0;
+      localMcpTool(mcpRuntimeConfig, mcpToken, "worker_job_prepare", {
+        job_id: jobId,
+        worker_id: `api:${workerConfigId}`,
+        kind: "code",
+        scope: "workspace",
+        root,
+        request,
+        title
+      }, 5000).catch(() => {});
+
+      state.promise = runGithubRunnerTask({
+        workerId: workerConfigId,
+        config,
+        repoFullName,
+        jobId,
+        prompt: request,
+        signal: controller.signal,
+        onStatus: ({ phase, message, runUrl }) => {
+          state.streamPhase = String(phase || "working");
+          state.streamToolStatus = String(message || "");
+          if (runUrl) state.events.push({ type: "github_run", url: runUrl });
+          state.streamRevision += 1;
+          state.streamUpdatedAt = new Date().toISOString();
+          publish(workerConfigId, state);
+        }
+      }).then((result) => {
+        state.result = result;
+        state.title = result.task_title || title;
+        state.history = [...prevHistory, { role: "user", content: request }, { role: "assistant", content: result.text }].slice(-5);
+        saveWebWorkerHistory(workerConfigId, state.history);
+        state.activity = "idle";
+        state.streamText = result.text;
+        state.streamPhase = "complete";
+        state.streamToolStatus = "";
+        state.finishedAt = new Date().toISOString();
+        state.streamRevision += 1;
+        state.streamUpdatedAt = new Date().toISOString();
+        publish(workerConfigId, state);
+        cachedWorkerJobsAt = 0;
+        localMcpTool(mcpRuntimeConfig, mcpToken, "worker_job_complete", {
+          job_id: jobId,
+          worker_id: `api:${workerConfigId}`,
+          title: state.title,
+          summary: result.text.slice(0, 500)
+        }, 5000).catch(() => {});
+      }).catch((error) => {
+        const msg = String(error?.message || error).slice(0, 1000);
+        state.error = msg;
+        state.activity = controller.signal.aborted ? "idle" : "failed";
+        state.streamPhase = controller.signal.aborted ? "cancelled" : "error";
+        state.finishedAt = new Date().toISOString();
+        state.streamRevision += 1;
+        state.streamUpdatedAt = new Date().toISOString();
+        publish(workerConfigId, state);
+        cachedWorkerJobsAt = 0;
+        localMcpTool(mcpRuntimeConfig, mcpToken, "worker_job_fail", {
+          job_id: jobId,
+          worker_id: `api:${workerConfigId}`,
+          error: msg
+        }, 5000).catch(() => {});
+      });
+
+      return { accepted: true, worker_id: `api:${workerConfigId}`, job_id: jobId };
+    },
+    async read(payload) {
+      const id = String(payload.local_worker_id || "").trim();
+      const state = runs.get(id);
+      if (!state) return { activity: "idle", chat_history: readWebWorkerHistory(id) };
+      return {
+        job_id: state.jobId,
+        task_title: state.title,
+        current_workspace_root: state.root,
+        last_request: state.request,
+        activity: state.activity,
+        started_at: state.startedAt,
+        finished_at: state.finishedAt,
+        result: state.result,
+        error: state.error,
+        stream_text: state.streamText,
+        stream_revision: state.streamRevision,
+        stream_phase: state.streamPhase,
+        stream_updated_at: state.streamUpdatedAt,
+        stream_tool_status: state.streamToolStatus,
+        events: state.events.slice(-30),
+        chat_history: state.history.slice(-5)
+      };
+    },
+    async stop(payload) {
+      const id = String(payload.local_worker_id || "").trim();
+      const state = runs.get(id);
+      if (!state || state.activity !== "working") return { stopped: false, reason: "not_running" };
+      state.controller.abort(new Error("Đã dừng GitHub Runner task."));
+      await state.promise?.catch(() => {});
+      return { stopped: true, job_id: state.jobId };
+    }
+  };
+}
+
+const workerPluginRegistry = new WorkerPluginRegistry();
+workerPluginRegistry.register(createWebGithubApiWorkerPlugin());
 
 const mcpCausalTelemetry = createMcpCausalTelemetry();
 const {
@@ -469,10 +1327,7 @@ async function collectWebRuntimeStatus(reqOrigin = "") {
     publicHostname = new URL(publicBase).hostname;
   } catch {}
   const mcpLink = `${publicBase}/mcp?codexpro_token=${encodeURIComponent(mcpToken)}`;
-  const processes = [
-    { pid: process.pid, name: "node" },
-    ...(mcpChildProcess?.pid ? [{ pid: mcpChildProcess.pid, name: "node" }] : [])
-  ];
+  const processes = mcpChildProcess?.pid ? [{ pid: mcpChildProcess.pid, name: "node" }] : [];
   return {
     checkedAt: new Date().toISOString(),
     task: {
@@ -541,8 +1396,12 @@ async function handleWebRpc(method, args = [], reqOrigin = "") {
     }
     case "codexpro:worker-send": {
       const payload = args[0] || {};
-      const prepared = await materializeApiWorkerRequest(payload);
-      return await workerPluginRegistry.invoke("send", String(prepared?.workerId || prepared?.worker_id || ""), prepared);
+      const workerId = String(payload?.workerId || payload?.worker_id || "");
+      return await workerPluginRegistry.invoke("send", workerId, {
+        ...payload,
+        workerId,
+        worker_id: workerId
+      });
     }
     case "codexpro:worker-read": {
       const payload = args[0] || {};
@@ -551,6 +1410,25 @@ async function handleWebRpc(method, args = [], reqOrigin = "") {
     case "codexpro:worker-stop": {
       const payload = args[0] || {};
       return await workerPluginRegistry.invoke("stop", String(payload?.workerId || payload?.worker_id || ""), payload);
+    }
+    case "codexpro:set-cloud-credentials": {
+      const res = saveCloudCredentials(args[0] || {});
+      seedApiWorkersFromEnv();
+      return {
+        ...res,
+        workers: apiWorkerStore.list(),
+        projects: await listWebGithubProjects()
+      };
+    }
+    case "codexpro:reset-openrouter-workers": {
+      const seedKey = resolveOpenRouterKey();
+      for (const old of rawApiWorkerStore.list()) {
+        try { rawApiWorkerStore.remove(old.id); } catch {}
+      }
+      for (const item of DEFAULT_OPENROUTER_WORKERS.slice(0, MAX_API_WORKERS)) {
+        rawApiWorkerStore.save({ ...item, ...(seedKey ? { api_key: seedKey } : {}) });
+      }
+      return apiWorkerStore.list();
     }
     case "codexpro:api-worker-configs":
       return apiWorkerStore.list();
@@ -649,42 +1527,36 @@ async function handleWebRpc(method, args = [], reqOrigin = "") {
       return await clearDiagnosticLogs(codexProHome);
     case "codexpro:prune-diagnostic-logs":
       return await pruneDiagnosticLogs(codexProHome);
-    case "codexpro:operations-performance":
-      return await collectOperationsPerformance(Array.isArray(args[0]) ? args[0] : [process.pid]);
+    case "codexpro:operations-performance": {
+      const requested = Array.isArray(args[0]) ? args[0] : [];
+      return await collectOperationsPerformance([process.pid, mcpChildProcess?.pid, ...requested].filter(Boolean));
+    }
     case "codexpro:projects":
-      return await listProjects();
+      return { projects: await listWebGithubProjects() };
     case "codexpro:add-project": {
       const input = String(args[0] || "").trim();
-      if (!input) throw new Error("Hãy nhập đường dẫn thư mục hoặc URL GitHub repo.");
-      let resolved = input;
-      if (/^https?:\/\/github\.com\/[^/]+\/[^/]+/i.test(input)) {
-        const repoName = input.replace(/\.git$/i, "").split("/").filter(Boolean).slice(-1)[0].replace(/[^A-Za-z0-9._-]/g, "-");
-        const targetDir = path.join(workspacesRoot, repoName);
-        if (!fs.existsSync(targetDir)) {
-          const clone = spawnSync("git", ["clone", "--depth", "1", input, targetDir], { encoding: "utf8", timeout: 120_000 });
-          if (clone.status !== 0) {
-            throw new Error(`Clone repo thất bại: ${clone.stderr || clone.stdout || "git clone error"}`);
-          }
-        }
-        resolved = targetDir;
-      } else {
-        resolved = path.resolve(input);
+      const match = input.match(/(?:github\.com\/|^)(songvedem260597\/[A-Za-z0-9._-]+)/i);
+      if (!match) {
+        throw new Error("Bản Cloud Server chỉ thêm được GitHub repository của songvedem260597 (không clone ổ đĩa local).");
       }
-      if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
-        throw new Error(`Thư mục dự án không tồn tại trên server: ${resolved}`);
+      const fullName = match[1].replace(/\.git$/i, "");
+      const name = fullName.split("/")[1];
+      if (!DEFAULT_GITHUB_REPOS.some((r) => r.full_name.toLowerCase() === fullName.toLowerCase())) {
+        DEFAULT_GITHUB_REPOS.unshift({ full_name: fullName, name, default_branch: "main" });
       }
-      const roots = [...new Set([...managerProjects(), resolved])];
-      saveManagerProjects(roots);
-      return await listProjects();
+      cachedGithubProjectsAt = 0;
+      return { projects: await listWebGithubProjects() };
     }
     case "codexpro:remove-project": {
-      const target = path.resolve(String(args[0] || "")).toLowerCase();
-      saveManagerProjects(managerProjects().filter((item) => path.resolve(item).toLowerCase() !== target));
-      return await listProjects();
+      const target = String(args[0] || "").replace(/^github:/i, "").trim().toLowerCase();
+      const idx = DEFAULT_GITHUB_REPOS.findIndex((r) => r.full_name.toLowerCase() === target);
+      if (idx >= 0) DEFAULT_GITHUB_REPOS.splice(idx, 1);
+      cachedGithubProjectsAt = 0;
+      return { projects: await listWebGithubProjects() };
     }
     case "codexpro:inspect-project": {
-      const root = path.resolve(String(args[0] || ""));
-      return await inspectThroughMcp(root);
+      const raw = String(args[0] || "").trim();
+      return await inspectGithubRepo(raw);
     }
     case "codexpro:get-repo-task-status": {
       const payload = args[0] || {};

@@ -227,7 +227,6 @@ export function ControlCenter({
   onUpdateWorkers,
   onRestartServer
 }) {
-  const isWebServer = Boolean(api?.isWebServer);
   const [taskSearch, setTaskSearch] = useState("");
   const normalizedTaskSearch = useMemo(() => normalizeTaskName(taskSearch), [taskSearch]);
   const profiles = Array.isArray(status?.browserProfiles) ? status.browserProfiles : [];
@@ -307,13 +306,13 @@ export function ControlCenter({
           <div><p className="eyebrow">UPDATE CENTER</p><h2>Phiên bản</h2></div>
           <div className="control-section-actions">
             <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={onRestartServer}>Restart MCP</button>
-            {!isWebServer && <button className="button secondary" type="button" disabled={Boolean(busy) || !profileSummary?.reload} onClick={onUpdateWorkers}>Update worker</button>}
+            <button className="button secondary" type="button" disabled={Boolean(busy) || !profileSummary?.reload} onClick={onUpdateWorkers}>Update worker</button>
           </div>
         </div>
         <div className="update-center-list">
-          <div><span>CodexPro {isWebServer ? "Server" : "Manager"}</span><strong>v{managerVersion}</strong><small>{isWebServer ? "Cloud Web Server" : "Desktop app"}</small></div>
+          <div><span>CodexPro Manager</span><strong>v{managerVersion}</strong><small>Desktop app</small></div>
           <div><span>MCP runtime</span><strong>{status?.local?.ok ? "Online" : "Offline"}</strong><small>{String(status?.local?.data?.runtimeBuildId || "build chưa xác định").slice(0, 26)}</small></div>
-          {!isWebServer && <div><span>Worker extension</span><strong>Target v{workerVersion}</strong><small>{profileSummary?.reload || 0} cần update · {profileSummary?.deferredUpdate || 0} đang bận</small></div>}
+          <div><span>Worker extension</span><strong>Target v{workerVersion}</strong><small>{profileSummary?.reload || 0} cần update · {profileSummary?.deferredUpdate || 0} đang bận</small></div>
         </div>
       </section>
 
@@ -377,7 +376,7 @@ export function ControlCenter({
         )}
       </section>
 
-      {!isWebServer && <section className="control-section control-hang-section">
+      <section className="control-section control-hang-section">
         <div className="control-section-head">
           <div><p className="eyebrow">HANG INCIDENTS</p><h2>Lỗi mạng / OpenAI làm treo task</h2></div>
           <span className={`control-section-count ${Number(taskHangSummary.active_count || 0) > 0 ? "is-danger" : ""}`}>{taskHangSummary.active_count || 0} đang treo · {taskHangSummary.total_count || 0} lần</span>
@@ -417,7 +416,7 @@ export function ControlCenter({
             </article>;
           })}
         </div>}
-      </section>}
+      </section>
 
       <WorkspaceCoordinationPanel api={api} roots={coordinationRoots} projects={projects} onOpenRepo={onOpenRepo} />
 
@@ -433,7 +432,7 @@ export function ControlCenter({
           <div className="performance-grid">
             <div><span>Manager</span><strong>{managerProcess?.cpuPercent ?? 0}% CPU</strong><small>{bytes(managerProcess?.memoryBytes || 0)} RAM</small></div>
             <div><span>MCP runtime</span><strong>{mcpCpu.toFixed(1)}% CPU</strong><small>{bytes(mcpRam)} RAM</small></div>
-            {!isWebServer && <div><span>Chrome tổng</span><strong>{chromeCpu.toFixed(1)}% CPU</strong><small>{chromeProcesses.length} process · {bytes(chromeRam)}</small></div>}
+            <div><span>Chrome tổng</span><strong>{chromeCpu.toFixed(1)}% CPU</strong><small>{chromeProcesses.length} process · {bytes(chromeRam)}</small></div>
             <div><span>UI thread</span><strong>{Math.round(uiPerformance?.fps || 0)} FPS</strong><small>{uiPerformance?.longTasks || 0} long task / 10s</small></div>
             <div><span>Request chậm</span><strong>{slowRequests.length}</strong><small>{slowestRequestMs ? `chậm nhất ${(slowestRequestMs / 1000).toFixed(1)}s` : "không có trong mẫu gần đây"}</small></div>
             <div><span>System RAM</span><strong>{bytes((performance?.totalMemoryBytes || 0) - (performance?.freeMemoryBytes || 0))}</strong><small>{bytes(performance?.totalMemoryBytes || 0)} tổng</small></div>
@@ -441,17 +440,17 @@ export function ControlCenter({
           {(uiPerformance?.maxLongTaskMs || 0) >= 200 && <div className="control-warning">UI main thread vừa bị block {Math.round(uiPerformance.maxLongTaskMs)} ms.</div>}
         </section>
 
-        {!isWebServer && <section className="control-section">
+        <section className="control-section">
           <div className="control-section-head"><div><p className="eyebrow">AUTOMATION</p><h2>Auto Recovery</h2></div></div>
           <div className="control-toggle-list">
             <Toggle checked={settings?.autoRecovery === true} onChange={(value) => onToggleSetting("autoRecovery", value)} title="Tự khôi phục profile treo" hint="Chỉ chạy khi phát hiện renderer/network bất thường rõ ràng." />
             <Toggle checked={settings?.autoUpdateWorkers === true} onChange={(value) => onToggleSetting("autoUpdateWorkers", value)} title="Update worker khi rảnh" hint="Bỏ qua task đang chạy và tự update sau khi worker rảnh." />
             <Toggle checked={settings?.taskNotifications !== false} onChange={(value) => onToggleSetting("taskNotifications", value)} title="Thông báo Windows" hint="Báo khi task hoàn tất, lỗi hoặc profile bị treo." />
           </div>
-        </section>}
+        </section>
       </div>
 
-      {!isWebServer && <section className="control-section">
+      <section className="control-section">
         <div className="control-section-head"><div><p className="eyebrow">PROFILE HEALTH</p><h2>Health Score</h2></div><span className="control-section-count">{profiles.length} profile</span></div>
         <div className="health-list">
           {health.map(({ profile, score, issues, state }) => (
@@ -462,7 +461,7 @@ export function ControlCenter({
             </div>
           ))}
         </div>
-      </section>}
+      </section>
 
       <div className="control-two-column control-lower-grid">
         <section className="control-section">

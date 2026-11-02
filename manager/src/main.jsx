@@ -55,7 +55,7 @@ const ControlCenter = React.lazy(() => import("./control-center.jsx").then((modu
 const api = window.codexpro;
 const PROJECTS_PER_PAGE = 8;
 const DEEP_UI_DIAGNOSTICS_ENABLED = new URLSearchParams(window.location.search).get("debugUi") === "1";
-const WORKER_EXTENSION_VERSION = "0.5.137";
+const WORKER_EXTENSION_VERSION = "0.5.135";
 const WORKER_EXTENSION_BUILD_ID = "send-button-ack-v13";
 
 function extensionReady(profile, targetVersion = WORKER_EXTENSION_VERSION) {

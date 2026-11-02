@@ -123,12 +123,20 @@ export async function collectOperationsPerformance(requestedPids = []) {
   }
 
   const { totalMemoryBytes, freeMemoryBytes } = resolveMemoryBounds(processes);
+  const usedMemoryBytes = Math.max(0, totalMemoryBytes - freeMemoryBytes);
+  const memoryUsagePercent = totalMemoryBytes > 0 ? Math.min(100, Math.round((usedMemoryBytes / totalMemoryBytes) * 1000) / 10) : 0;
+  const mem = process.memoryUsage();
   return {
     checkedAt: new Date(now).toISOString(),
     managerPid: process.pid,
     logicalCpuCount,
     totalMemoryBytes,
     freeMemoryBytes,
+    usedMemoryBytes,
+    memoryUsagePercent,
+    serverRssBytes: Number(mem.rss) || 0,
+    serverHeapUsedBytes: Number(mem.heapUsed) || 0,
+    serverHeapTotalBytes: Number(mem.heapTotal) || 0,
     processes
   };
 }
